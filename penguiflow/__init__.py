@@ -10,6 +10,8 @@ from .core import (
     create,
 )
 from .node import Node, NodePolicy
+from .registry import ModelRegistry
+from .types import Headers, Message
 
 __all__ = [
     "__version__",
@@ -19,6 +21,9 @@ __all__ = [
     "DEFAULT_QUEUE_MAXSIZE",
     "Node",
     "NodePolicy",
+    "ModelRegistry",
+    "Headers",
+    "Message",
     "create",
 ]
 

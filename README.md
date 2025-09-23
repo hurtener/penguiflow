@@ -156,41 +156,65 @@ examples/           # minimal “hello flow”
 
 ```python
 from pydantic import BaseModel
-from penguiflow.node import Node
-from penguiflow.core import create
-from penguiflow.registry import ModelRegistry
-from penguiflow.types import Message, Headers
+from penguiflow import Headers, Message, ModelRegistry, Node, NodePolicy, create
 
-# Models
-class TriageIn(BaseModel): text: str
-class TriageOut(BaseModel): text: str; topic: str
-class PackOut(BaseModel): prompt: str
 
-# Node funcs
-async def triage(m: TriageIn) -> TriageOut:
-    return TriageOut(text=m.text, topic="metrics")
+class TriageIn(BaseModel):
+    text: str
 
-async def packer(m: TriageOut) -> PackOut:
-    return PackOut(prompt=f"[{m.topic}] :: {m.text}")
 
-# Nodes
-triage_node = Node(triage, name="triage")
-packer_node = Node(packer, name="packer")
+class TriageOut(BaseModel):
+    text: str
+    topic: str
 
-# Registry
+
+class RetrieveOut(BaseModel):
+    topic: str
+    docs: list[str]
+
+
+class PackOut(BaseModel):
+    prompt: str
+
+
+async def triage(msg: TriageIn, ctx) -> TriageOut:
+    topic = "metrics" if "metric" in msg.text else "general"
+    return TriageOut(text=msg.text, topic=topic)
+
+
+async def retrieve(msg: TriageOut, ctx) -> RetrieveOut:
+    docs = [f"doc_{i}_{msg.topic}" for i in range(2)]
+    return RetrieveOut(topic=msg.topic, docs=docs)
+
+
+async def pack(msg: RetrieveOut, ctx) -> PackOut:
+    prompt = f"[{msg.topic}] summarize {len(msg.docs)} docs"
+    return PackOut(prompt=prompt)
+
+
+triage_node = Node(triage, name="triage", policy=NodePolicy(validate="both"))
+retrieve_node = Node(retrieve, name="retrieve", policy=NodePolicy(validate="both"))
+pack_node = Node(pack, name="pack", policy=NodePolicy(validate="both"))
+
 registry = ModelRegistry()
 registry.register("triage", TriageIn, TriageOut)
-registry.register("packer", TriageOut, PackOut)
+registry.register("retrieve", TriageOut, RetrieveOut)
+registry.register("pack", RetrieveOut, PackOut)
 
-# Flow
-flow = create(triage_node.to(packer_node))
+flow = create(
+    triage_node.to(retrieve_node),
+    retrieve_node.to(pack_node),
+)
 flow.run(registry=registry)
 
-# Emit / Fetch
-msg = Message(payload=TriageIn(text="unique reach"), headers=Headers(tenant="acme"))
-await flow.emit(msg)
+message = Message(
+    payload=TriageIn(text="show marketing metrics"),
+    headers=Headers(tenant="acme"),
+)
+
+await flow.emit(message)
 out = await flow.fetch()
-print(out.payload)   # PackOut(prompt='[metrics] :: unique reach')
+print(out.prompt)  # PackOut(prompt='[metrics] summarize 2 docs')
 
 await flow.stop()
 ```

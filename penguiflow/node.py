@@ -10,19 +10,26 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from pydantic.type_adapter import TypeAdapter
+
     from .core import Context
+    from .registry import ModelRegistry
 
 
 @dataclass(slots=True)
 class NodePolicy:
     """Execution policy configuration placeholder."""
 
-    validate: str = "none"
+    validate: str = "both"
     timeout_s: float | None = None
     max_retries: int = 0
     backoff_base: float = 0.5
     backoff_mult: float = 2.0
     max_backoff: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.validate not in {"both", "in", "out", "none"}:
+            raise ValueError("validate must be one of 'both', 'in', 'out', 'none'")
 
 
 @dataclass(slots=True)
@@ -40,6 +47,7 @@ class Node:
             raise TypeError("Node function must be declared with async def")
 
         self.name = self.name or self.func.__name__
+        assert self.name is not None  # narrow for type-checkers
         self.node_id = uuid.uuid4().hex
 
         signature = inspect.signature(self.func)
@@ -57,10 +65,44 @@ class Node:
         ):
             raise ValueError("Context parameter must be positional")
 
-    async def invoke(self, message: Any, ctx: Context, *, registry: Any | None) -> Any:
-        """Invoke the underlying coroutine, returning its result."""
+    def _maybe_validate(
+        self,
+        adapter: TypeAdapter[Any] | None,
+        value: Any,
+        *,
+        enforce: bool,
+    ) -> Any:
+        if not enforce or adapter is None:
+            return value
+        return adapter.validate_python(value)
 
-        return await self.func(message, ctx)
+    async def invoke(
+        self,
+        message: Any,
+        ctx: Context,
+        *,
+        registry: ModelRegistry | None,
+    ) -> Any:
+        """Invoke the underlying coroutine, applying optional validation."""
+
+        adapter_in: TypeAdapter[Any] | None = None
+        adapter_out: TypeAdapter[Any] | None = None
+
+        if registry is not None and self.policy.validate != "none":
+            node_name = self.name
+            assert node_name is not None
+            adapter_in, adapter_out = registry.adapters(node_name)
+
+        enforce_in = self.policy.validate in {"in", "both"}
+        enforce_out = self.policy.validate in {"out", "both"}
+
+        validated_msg = self._maybe_validate(adapter_in, message, enforce=enforce_in)
+        result = await self.func(validated_msg, ctx)
+
+        if result is None:
+            return None
+
+        return self._maybe_validate(adapter_out, result, enforce=enforce_out)
 
     def to(self, *nodes: Node) -> tuple[Node, tuple[Node, ...]]:
         return self, nodes

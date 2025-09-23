@@ -1,27 +1,26 @@
-"""Typed message models for PenguiFlow.
-
-Real models land in Phase 2.
-"""
+"""Typed message models for PenguiFlow."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+import uuid
 from typing import Any
 
+from pydantic import BaseModel, Field
 
-@dataclass(slots=True)
-class Headers:
-    """Placeholder headers structure."""
 
+class Headers(BaseModel):
     tenant: str
+    topic: str | None = None
+    priority: int = 0
 
 
-@dataclass(slots=True)
-class Message:
-    """Placeholder message envelope."""
-
+class Message(BaseModel):
     payload: Any
     headers: Headers
+    trace_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    ts: float = Field(default_factory=time.time)
+    deadline_s: float | None = None
 
 
 __all__ = ["Headers", "Message"]

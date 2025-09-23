@@ -1,24 +1,71 @@
-"""Simple pass-through example for PenguiFlow."""
+"""Typed quickstart example for PenguiFlow."""
 
 from __future__ import annotations
 
 import asyncio
 
-from penguiflow import Node, create
+from pydantic import BaseModel
+
+from penguiflow import Headers, Message, ModelRegistry, Node, NodePolicy, create
 
 
-async def shout(msg: str, ctx) -> str:
-    return msg.upper()
+class TriageIn(BaseModel):
+    text: str
+
+
+class TriageOut(BaseModel):
+    text: str
+    topic: str
+
+
+class RetrieveOut(BaseModel):
+    topic: str
+    docs: list[str]
+
+
+class PackOut(BaseModel):
+    prompt: str
+
+
+async def triage(msg: TriageIn, ctx) -> TriageOut:
+    topic = "metrics" if "metric" in msg.text else "general"
+    return TriageOut(text=msg.text, topic=topic)
+
+
+async def retrieve(msg: TriageOut, ctx) -> RetrieveOut:
+    docs = [f"doc_{i}_{msg.topic}" for i in range(2)]
+    return RetrieveOut(topic=msg.topic, docs=docs)
+
+
+async def pack(msg: RetrieveOut, ctx) -> PackOut:
+    prompt = f"[{msg.topic}] summarize {len(msg.docs)} docs"
+    return PackOut(prompt=prompt)
 
 
 async def main() -> None:
-    shout_node = Node(shout, name="shout")
-    flow = create(shout_node.to())
-    flow.run()
+    triage_node = Node(triage, name="triage", policy=NodePolicy(validate="both"))
+    retrieve_node = Node(retrieve, name="retrieve", policy=NodePolicy(validate="both"))
+    pack_node = Node(pack, name="pack", policy=NodePolicy(validate="both"))
 
-    await flow.emit("hello penguins")
+    registry = ModelRegistry()
+    registry.register("triage", TriageIn, TriageOut)
+    registry.register("retrieve", TriageOut, RetrieveOut)
+    registry.register("pack", RetrieveOut, PackOut)
+
+    flow = create(
+        triage_node.to(retrieve_node),
+        retrieve_node.to(pack_node),
+    )
+    flow.run(registry=registry)
+
+    message = Message(
+        payload=TriageIn(text="show marketing metrics"),
+        headers=Headers(tenant="acme"),
+    )
+
+    await flow.emit(message)
     result = await flow.fetch()
-    print(result)
+    print(result.prompt)
 
     await flow.stop()
 
