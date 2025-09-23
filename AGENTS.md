@@ -20,7 +20,7 @@ Build **penguiflow**: a small, repo-agnostic Python library that orchestrates as
 ```
 penguiflow/
   __init__.py
-  core.py          # IceContext, Floe, PenguiFlow (runtime)
+  core.py          # Context, Floe, PenguiFlow (runtime)
   node.py          # Node, NodePolicy
   types.py         # Message, Headers (Pydantic models)
   registry.py      # ModelRegistry (TypeAdapters per node)
@@ -51,8 +51,8 @@ pyproject.toml
 **Goal:** Create package structure + tooling.
 
 * Scaffolding per layout above.
-* `pyproject.toml` (pydantic>=2, python>=3.10).
-* CI: run `pytest -q`, `ruff` (or flake8), and `mypy` (loose mode).
+* `pyproject.toml` (pydantic>=2, python>=3.12).
+* CI: run `pytest -q`, `ruff`, and `mypy` (loose mode).
 
 **Acceptance:** installable `pip install -e .`; CI green with empty tests.
 
@@ -60,12 +60,12 @@ pyproject.toml
 
 ### Phase 1 — Safe Core Runtime (OoFlow → PenguiFlow)
 
-**Renames:** Context→**IceContext**, Edge→**Floe**, OoFlow→**PenguiFlow**, Yang→**OpenSea**, Yin→**Rookery**.
+**Renames:** Context→**Context**, Edge→**Floe**, OoFlow→**PenguiFlow**, Yang→**OpenSea**, Yin→**Rookery**.
 
 **Features**
 
 * `Floe.queue = asyncio.Queue(maxsize=DEFAULT_MAXSIZE)` (configurable).
-* `IceContext.fetch_any()` uses `asyncio.wait` (no busy-wait).
+* `Context.fetch_any()` uses `asyncio.wait` (no busy-wait).
 * `PenguiFlow.stop()` cancels **and awaits** tasks (graceful).
 * Error boundaries around each node task (structured logs).
 * Stable `node_id` (uuid) + human `name`.

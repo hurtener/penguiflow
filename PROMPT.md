@@ -8,26 +8,21 @@ You can paste this into a new chat with Codex:
 You are implementing a small Python library called "penguiflow" for async agent orchestration.
 
 ## Context files to read (EDIT ME)
-- penguiflow/README.md
-- penguiflow/core.py
-- penguiflow/node.py
-- penguiflow/types.py
-- penguiflow/registry.py
-- penguiflow/patterns.py
-- penguiflow/middlewares.py
-- tests/* (start with test_core.py, test_types.py)
-- examples/*
+- penguiflow/AGENTS.md
+- penguiflow/plan.md
+- penguiflow/README.md (target idea of the library)
+- penguiflow/ooflow.py (is the base codebase that we will be using to generate our source files. The version we are franching from)
 
-If some files don’t exist yet, create them following README and the plan below.
+If some files don’t exist yet, create them following plan.md, README.md and the plan below.
 
 ## High-level goals (do not change)
 - In-process asyncio orchestrator with: typed messages (Pydantic v2), backpressure, retries, timeouts, graceful stop, routing, fan-out/fan-in, dynamic controller loops, and callable subflows.
 - Core must be repo-agnostic: product repos register their Pydantic models at startup via ModelRegistry.
 
 ## Work plan (execute phase by phase; run tests after each)
-1) Phase 0: scaffold repo as per README. Add pyproject, CI stubs, empty tests. Ensure `pip install -e .` works.
+1) Phase 0: scaffold repo as per README. Add pyproject, CI stubs, empty tests, UV env initialization. Ensure `pip install -e .` works.
 2) Phase 1: implement core runtime:
-   - IceContext, Floe, PenguiFlow (OpenSea/Rookery).
+   - Context, Floe, PenguiFlow (OpenSea/Rookery).
    - fetch_any(), queue maxsize, graceful stop, error boundaries, cycle detection (with opt-in flag placeholder).
    - Add tests in test_core.py and simple examples.
 3) Phase 2: types + registry + node validation:

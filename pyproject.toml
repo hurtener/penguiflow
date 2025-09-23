@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "penguiflow"
+version = "0.0.0"
+description = "Async agent orchestration primitives."
+readme = "README.md"
+requires-python = ">=3.12"
+license = {file = "LICENSE"}
+authors = [
+    {name = "PenguiFlow Team"},
+]
+dependencies = [
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.8",
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/penguiflow/penguiflow"
+
+[tool.setuptools]
+packages = ["penguiflow"]
+
+[tool.uv]
+package = true
+managed = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+extend-exclude = ["ooflow.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["penguiflow"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = []
+disallow_untyped_defs = false
+ignore_missing_imports = true
+warn_unused_ignores = true
+show_error_codes = true
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
