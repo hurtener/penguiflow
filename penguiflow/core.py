@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .node import Node
+from .middlewares import Middleware
+from .node import Node, NodePolicy
 
 logger = logging.getLogger("penguiflow.core")
 
@@ -155,6 +157,9 @@ class Context:
     def outgoing_count(self) -> int:
         return len(self._outgoing)
 
+    def queue_depth_in(self) -> int:
+        return sum(floe.queue.qsize() for floe in self._incoming.values())
+
 
 class PenguiFlow:
     """Coordinates node execution and message routing."""
@@ -164,6 +169,7 @@ class PenguiFlow:
         *adjacencies: tuple[Node, Sequence[Node]],
         queue_maxsize: int = DEFAULT_QUEUE_MAXSIZE,
         allow_cycles: bool = False,
+        middlewares: Sequence[Middleware] | None = None,
     ) -> None:
         self._queue_maxsize = queue_maxsize
         self._allow_cycles = allow_cycles
@@ -174,12 +180,16 @@ class PenguiFlow:
         self._tasks: list[asyncio.Task[Any]] = []
         self._running = False
         self._registry: Any | None = None
+        self._middlewares: list[Middleware] = list(middlewares or [])
 
         self._build_graph(adjacencies)
 
     @property
     def registry(self) -> Any | None:
         return self._registry
+
+    def add_middleware(self, middleware: Middleware) -> None:
+        self._middlewares.append(middleware)
 
     def _build_graph(self, adjacencies: Sequence[tuple[Node, Sequence[Node]]]) -> None:
         for start, successors in adjacencies:
@@ -266,25 +276,18 @@ class PenguiFlow:
         while True:
             try:
                 message = await context.fetch()
-                result = await node.invoke(message, context, registry=self._registry)
-                if result is not None:
-                    await context.emit(result)
+                await self._execute_with_reliability(node, context, message)
             except asyncio.CancelledError:
-                logger.debug(
-                    "node_cancelled",
-                    extra={"node_name": node.name, "node_id": node.node_id},
+                await self._emit_event(
+                    event="node_cancelled",
+                    node=node,
+                    context=context,
+                    trace_id=None,
+                    attempt=0,
+                    latency_ms=None,
+                    level=logging.DEBUG,
                 )
                 raise
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "node_error",
-                    extra={
-                        "event": "node_error",
-                        "node_name": node.name,
-                        "node_id": node.node_id,
-                        "exception": exc,
-                    },
-                )
 
     async def stop(self) -> None:
         if not self._running:
@@ -306,6 +309,174 @@ class PenguiFlow:
 
     async def fetch_any(self, from_: Node | Sequence[Node] | None = None) -> Any:
         return await self._contexts[ROOKERY].fetch_any(from_)
+
+    async def _execute_with_reliability(
+        self,
+        node: Node,
+        context: Context,
+        message: Any,
+    ) -> None:
+        trace_id = getattr(message, "trace_id", None)
+        attempt = 0
+
+        while True:
+            start = time.perf_counter()
+            await self._emit_event(
+                event="node_start",
+                node=node,
+                context=context,
+                trace_id=trace_id,
+                attempt=attempt,
+                latency_ms=0.0,
+                level=logging.DEBUG,
+            )
+
+            try:
+                invocation = node.invoke(message, context, registry=self._registry)
+                if node.policy.timeout_s is not None:
+                    result = await asyncio.wait_for(invocation, node.policy.timeout_s)
+                else:
+                    result = await invocation
+
+                if result is not None:
+                    await context.emit(result)
+
+                latency = (time.perf_counter() - start) * 1000
+                await self._emit_event(
+                    event="node_success",
+                    node=node,
+                    context=context,
+                    trace_id=trace_id,
+                    attempt=attempt,
+                    latency_ms=latency,
+                    level=logging.INFO,
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except TimeoutError as exc:
+                latency = (time.perf_counter() - start) * 1000
+                await self._emit_event(
+                    event="node_timeout",
+                    node=node,
+                    context=context,
+                    trace_id=trace_id,
+                    attempt=attempt,
+                    latency_ms=latency,
+                    level=logging.WARNING,
+                    extra={"exception": repr(exc)},
+                )
+                if attempt >= node.policy.max_retries:
+                    await self._emit_event(
+                        event="node_failed",
+                        node=node,
+                        context=context,
+                        trace_id=trace_id,
+                        attempt=attempt,
+                        latency_ms=latency,
+                        level=logging.ERROR,
+                        extra={"exception": repr(exc)},
+                    )
+                    return
+                attempt += 1
+                delay = self._backoff_delay(node.policy, attempt)
+                await self._emit_event(
+                    event="node_retry",
+                    node=node,
+                    context=context,
+                    trace_id=trace_id,
+                    attempt=attempt,
+                    latency_ms=None,
+                    level=logging.INFO,
+                    extra={"sleep_s": delay, "exception": repr(exc)},
+                )
+                await asyncio.sleep(delay)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                latency = (time.perf_counter() - start) * 1000
+                await self._emit_event(
+                    event="node_error",
+                    node=node,
+                    context=context,
+                    trace_id=trace_id,
+                    attempt=attempt,
+                    latency_ms=latency,
+                    level=logging.ERROR,
+                    extra={"exception": repr(exc)},
+                )
+                if attempt >= node.policy.max_retries:
+                    await self._emit_event(
+                        event="node_failed",
+                        node=node,
+                        context=context,
+                        trace_id=trace_id,
+                        attempt=attempt,
+                        latency_ms=latency,
+                        level=logging.ERROR,
+                        extra={"exception": repr(exc)},
+                    )
+                    return
+                attempt += 1
+                delay = self._backoff_delay(node.policy, attempt)
+                await self._emit_event(
+                    event="node_retry",
+                    node=node,
+                    context=context,
+                    trace_id=trace_id,
+                    attempt=attempt,
+                    latency_ms=None,
+                    level=logging.INFO,
+                    extra={"sleep_s": delay, "exception": repr(exc)},
+                )
+                await asyncio.sleep(delay)
+
+    def _backoff_delay(self, policy: NodePolicy, attempt: int) -> float:
+        exponent = max(attempt - 1, 0)
+        delay = policy.backoff_base * (policy.backoff_mult ** exponent)
+        if policy.max_backoff is not None:
+            delay = min(delay, policy.max_backoff)
+        return delay
+
+    async def _emit_event(
+        self,
+        *,
+        event: str,
+        node: Node,
+        context: Context,
+        trace_id: str | None,
+        attempt: int,
+        latency_ms: float | None,
+        level: int,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "ts": time.time(),
+            "event": event,
+            "node_name": node.name,
+            "node_id": node.node_id,
+            "trace_id": trace_id,
+            "latency_ms": latency_ms,
+            "q_depth_in": context.queue_depth_in(),
+            "attempt": attempt,
+        }
+        if extra:
+            payload.update(extra)
+
+        logger.log(level, event, extra=payload)
+
+        for middleware in list(self._middlewares):
+            try:
+                await middleware(event, payload)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.exception(
+                    "middleware_error",
+                    extra={
+                        "event": "middleware_error",
+                        "node_name": node.name,
+                        "node_id": node.node_id,
+                        "exception": exc,
+                    },
+                )
 
 
 def create(*adjacencies: tuple[Node, Sequence[Node]], **kwargs: Any) -> PenguiFlow:

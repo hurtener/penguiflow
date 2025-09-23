@@ -223,9 +223,9 @@ await flow.stop()
 
 ## 🛡️ Reliability & Observability
 
-* **NodePolicy**: configure per-node timeout, retries, backoff.
-* **Structured logs**: JSON logs with `{trace_id, node_name, event, latency_ms, q_depth_in}`.
-* **Metrics hooks**: plug custom callbacks for Prometheus/MLflow.
+* **NodePolicy**: set validation scope plus per-node timeout, retries, and backoff curves.
+* **Structured logs**: enrich every node event with `{ts, trace_id, node_name, event, latency_ms, q_depth_in, attempt}`.
+* **Middleware hooks**: subscribe observers (e.g., MLflow) to the structured event stream.
 
 ---
 

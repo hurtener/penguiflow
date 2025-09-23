@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
 from penguiflow.core import CycleError, PenguiFlow, create
-from penguiflow.node import Node
+from penguiflow.node import Node, NodePolicy
 
 
 @pytest.mark.asyncio
@@ -127,3 +128,124 @@ def test_cycle_detection() -> None:
             node_a.to(node_b),
             node_b.to(node_a),
         )
+
+
+@pytest.mark.asyncio
+async def test_retry_on_failure_logs_and_succeeds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    attempts = 0
+
+    async def flaky(msg: str, ctx) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 2:
+            raise ValueError("boom")
+        return msg
+
+    node = Node(
+        flaky,
+        name="flaky",
+        policy=NodePolicy(
+            validate="none",
+            max_retries=2,
+            backoff_base=0.01,
+            backoff_mult=1.0,
+        ),
+    )
+    flow = create(node.to())
+    flow.run()
+
+    caplog.set_level(logging.INFO, logger="penguiflow.core")
+
+    await flow.emit("hello")
+    result = await flow.fetch()
+
+    assert result == "hello"
+    assert attempts == 2
+
+    retry_events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "") == "node_retry"
+    ]
+    assert retry_events, "expected node_retry log record"
+
+    await flow.stop()
+
+
+@pytest.mark.asyncio
+async def test_timeout_retries_and_drops_after_max(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    attempts = 0
+
+    async def sleepy(msg: str, ctx) -> str:
+        nonlocal attempts
+        attempts += 1
+        await asyncio.sleep(0.1)
+        return msg
+
+    node = Node(
+        sleepy,
+        name="sleepy",
+        policy=NodePolicy(
+            validate="none",
+            timeout_s=0.05,
+            max_retries=1,
+            backoff_base=0.01,
+            backoff_mult=1.0,
+        ),
+    )
+    flow = create(node.to())
+    flow.run()
+
+    caplog.set_level(logging.WARNING, logger="penguiflow.core")
+
+    await flow.emit("payload")
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(flow.fetch(), timeout=0.2)
+
+    assert attempts == 2
+
+    timeout_events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "") == "node_timeout"
+    ]
+    failed_events = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "") == "node_failed"
+    ]
+    assert timeout_events, "expected timeout log"
+    assert failed_events, "expected failure log"
+
+    await flow.stop()
+
+
+@pytest.mark.asyncio
+async def test_middlewares_receive_events() -> None:
+    events: list[tuple[str, int]] = []
+
+    class Collector:
+        async def __call__(self, event: str, payload: dict[str, object]) -> None:
+            events.append((event, int(payload.get("attempt", -1))))
+
+    async def echo(msg: str, ctx) -> str:
+        return msg
+
+    node = Node(echo, name="echo", policy=NodePolicy(validate="none"))
+    collector = Collector()
+    flow = create(node.to(), middlewares=[collector])
+    flow.run()
+
+    await flow.emit("ping")
+    out = await flow.fetch()
+    assert out == "ping"
+
+    await flow.stop()
+
+    events_names = [name for name, _ in events]
+    assert "node_success" in events_names

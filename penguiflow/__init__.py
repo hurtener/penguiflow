@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
-from .core import (
-    DEFAULT_QUEUE_MAXSIZE,
-    Context,
-    CycleError,
-    PenguiFlow,
-    create,
-)
+from .core import DEFAULT_QUEUE_MAXSIZE, Context, CycleError, PenguiFlow, create
+from .middlewares import Middleware
 from .node import Node, NodePolicy
 from .registry import ModelRegistry
 from .types import Headers, Message
@@ -22,6 +17,7 @@ __all__ = [
     "Node",
     "NodePolicy",
     "ModelRegistry",
+    "Middleware",
     "Headers",
     "Message",
     "create",
