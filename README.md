@@ -58,7 +58,7 @@ class QueryOut(BaseModel):
 async def triage(m: QueryIn) -> QueryOut:
     return QueryOut(topic="metrics")
 
-triage_node = Node("triage", triage)
+triage_node = Node(triage, name="triage")
 ```
 
 ### Flow
@@ -174,8 +174,8 @@ async def packer(m: TriageOut) -> PackOut:
     return PackOut(prompt=f"[{m.topic}] :: {m.text}")
 
 # Nodes
-triage_node = Node("triage", triage)
-packer_node = Node("packer", packer)
+triage_node = Node(triage, name="triage")
+packer_node = Node(packer, name="packer")
 
 # Registry
 registry = ModelRegistry()

@@ -1,13 +1,10 @@
 # penguiflow
 
-Phase 0 placeholder developer guide. Detailed docs will grow with each phase.
+Phase 1 runtime is now available:
 
-* `core.py` — runtime primitives.
-* `node.py` — node wrapper and policies.
-* `types.py` — message data structures.
-* `registry.py` — model adapters.
-* `patterns.py` — concurrency helpers.
-* `middlewares.py` — observability hooks.
-* `viz.py` — visualization helpers.
+* `Context` with `emit`, `fetch`, and `fetch_any` helpers backed by `asyncio` queues.
+* `Floe` edges enforce backpressure via configurable `maxsize`.
+* `PenguiFlow` orchestrates nodes, detects cycles, and gracefully stops workers.
+* `Node` wrappers carry stable ids and provide the `(message, ctx)` execution contract.
 
-Examples live under `../examples/`.
+Run `examples/quickstart/flow.py` for a minimal pass-through demonstration.
