@@ -219,6 +219,15 @@ print(out.prompt)  # PackOut(prompt='[metrics] summarize 2 docs')
 await flow.stop()
 ```
 
+### Patterns Toolkit
+
+PenguiFlow ships optional helpers to keep orchestration code tidy:
+
+- `map_concurrent` – semaphore-bound fan-out over in-memory collections.
+- `predicate_router` – route messages to successor nodes via lightweight predicates.
+- `union_router` – wire Pydantic discriminated unions to typed successor nodes.
+- `join_k` – aggregate `k` messages per `trace_id` before resuming downstream work.
+
 ---
 
 ## 🛡️ Reliability & Observability
@@ -281,5 +290,4 @@ pytest -q
 ## License
 
 MIT
-
 

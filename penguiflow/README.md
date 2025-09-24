@@ -7,6 +7,7 @@ Phase 1 runtime is now available:
 * `PenguiFlow` orchestrates nodes, detects cycles, and gracefully stops workers.
 * `ModelRegistry` caches Pydantic adapters for in/out validation.
 * Structured logging + middleware hooks capture retries, timeouts, and queue depth stats.
+* `patterns.py` bundles `map_concurrent`, `predicate_router`, `union_router`, and `join_k` helpers.
 * `Node` wrappers carry stable ids and provide the `(message, ctx)` execution contract.
 
 Run `examples/quickstart/flow.py` for a minimal pass-through demonstration.
