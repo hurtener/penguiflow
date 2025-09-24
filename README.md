@@ -228,6 +228,14 @@ PenguiFlow ships optional helpers to keep orchestration code tidy:
 - `union_router` – wire Pydantic discriminated unions to typed successor nodes.
 - `join_k` – aggregate `k` messages per `trace_id` before resuming downstream work.
 
+### Dynamic Controller Loops
+
+Use the `WM`, `Thought`, and `FinalAnswer` models to drive multi-hop controllers.
+A controller node can `allow_cycle=True` and wire itself via `controller.to(controller)`;
+when it emits a `WM`, PenguiFlow increments the hop count (respecting `budget_hops`
+and deadlines). Emitting a `FinalAnswer` breaks the loop and ships the result to the
+Rookery for collection.
+
 ---
 
 ## 🛡️ Reliability & Observability

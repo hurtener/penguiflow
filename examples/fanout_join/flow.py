@@ -28,7 +28,11 @@ async def main() -> None:
     worker_a = Node(work_a, name="work_a", policy=NodePolicy(validate="none"))
     worker_b = Node(work_b, name="work_b", policy=NodePolicy(validate="none"))
     join_node = join_k("join", 2)
-    summarize_node = Node(summarize, name="summarize", policy=NodePolicy(validate="none"))
+    summarize_node = Node(
+        summarize,
+        name="summarize",
+        policy=NodePolicy(validate="none"),
+    )
 
     flow = create(
         fan_node.to(worker_a, worker_b),

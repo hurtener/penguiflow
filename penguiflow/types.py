@@ -1,10 +1,10 @@
-"""Typed message models for PenguiFlow."""
+"""Typed message and controller models for PenguiFlow."""
 
 from __future__ import annotations
 
 import time
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -23,4 +23,36 @@ class Message(BaseModel):
     deadline_s: float | None = None
 
 
-__all__ = ["Headers", "Message"]
+class PlanStep(BaseModel):
+    kind: Literal["retrieve", "web", "sql", "summarize", "route", "stop"]
+    args: dict[str, Any] = Field(default_factory=dict)
+    max_concurrency: int = 1
+
+
+class Thought(BaseModel):
+    steps: list[PlanStep]
+    rationale: str
+    done: bool = False
+
+
+class WM(BaseModel):
+    query: str
+    facts: list[Any] = Field(default_factory=list)
+    hops: int = 0
+    budget_hops: int = 8
+    confidence: float = 0.0
+
+
+class FinalAnswer(BaseModel):
+    text: str
+    citations: list[str] = Field(default_factory=list)
+
+
+__all__ = [
+    "Headers",
+    "Message",
+    "PlanStep",
+    "Thought",
+    "WM",
+    "FinalAnswer",
+]

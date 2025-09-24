@@ -7,7 +7,7 @@ from .middlewares import Middleware
 from .node import Node, NodePolicy
 from .patterns import join_k, map_concurrent, predicate_router, union_router
 from .registry import ModelRegistry
-from .types import Headers, Message
+from .types import WM, FinalAnswer, Headers, Message, PlanStep, Thought
 
 __all__ = [
     "__version__",
@@ -21,6 +21,10 @@ __all__ = [
     "Middleware",
     "Headers",
     "Message",
+    "PlanStep",
+    "Thought",
+    "WM",
+    "FinalAnswer",
     "map_concurrent",
     "join_k",
     "predicate_router",

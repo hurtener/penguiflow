@@ -16,8 +16,12 @@ from typing import Any
 
 from .middlewares import Middleware
 from .node import Node, NodePolicy
+from .types import WM, FinalAnswer, Message
 
 logger = logging.getLogger("penguiflow.core")
+
+BUDGET_EXCEEDED_TEXT = "Hop budget exhausted"
+DEADLINE_EXCEEDED_TEXT = "Deadline exceeded"
 
 DEFAULT_QUEUE_MAXSIZE = 64
 
@@ -103,15 +107,21 @@ class Context:
             resolved.append(floe)
         return resolved
 
-    async def emit(self, msg: Any, to: Node | Sequence[Node] | None = None) -> None:
+    async def emit(
+        self, msg: Any, to: Node | Endpoint | Sequence[Node | Endpoint] | None = None
+    ) -> None:
         for floe in self._resolve_targets(to, self._outgoing):
             await floe.queue.put(msg)
 
-    def emit_nowait(self, msg: Any, to: Node | Sequence[Node] | None = None) -> None:
+    def emit_nowait(
+        self, msg: Any, to: Node | Endpoint | Sequence[Node | Endpoint] | None = None
+    ) -> None:
         for floe in self._resolve_targets(to, self._outgoing):
             floe.queue.put_nowait(msg)
 
-    def fetch_nowait(self, from_: Node | Sequence[Node] | None = None) -> Any:
+    def fetch_nowait(
+        self, from_: Node | Endpoint | Sequence[Node | Endpoint] | None = None
+    ) -> Any:
         if self._buffer:
             return self._buffer.popleft()
         for floe in self._resolve_targets(from_, self._incoming):
@@ -121,7 +131,9 @@ class Context:
                 continue
         raise asyncio.QueueEmpty("no messages available")
 
-    async def fetch(self, from_: Node | Sequence[Node] | None = None) -> Any:
+    async def fetch(
+        self, from_: Node | Endpoint | Sequence[Node | Endpoint] | None = None
+    ) -> Any:
         if self._buffer:
             return self._buffer.popleft()
 
@@ -132,7 +144,9 @@ class Context:
             return await floes[0].queue.get()
         return await self.fetch_any(from_)
 
-    async def fetch_any(self, from_: Node | Sequence[Node] | None = None) -> Any:
+    async def fetch_any(
+        self, from_: Node | Endpoint | Sequence[Node | Endpoint] | None = None
+    ) -> Any:
         if self._buffer:
             return self._buffer.popleft()
 
@@ -213,7 +227,8 @@ class PenguiFlow:
         }
         for parent, children in self._adjacency.items():
             for child in children:
-                incoming[child].add(parent)
+                if not (parent is child and parent.allow_cycle):
+                    incoming[child].add(parent)
                 floe = Floe(parent, child, maxsize=self._queue_maxsize)
                 self._floes.add(floe)
                 self._contexts[parent].add_outgoing_floe(floe)
@@ -229,7 +244,8 @@ class PenguiFlow:
 
         # Link egress nodes (no outgoing successors) to Rookery
         for node in self._nodes:
-            if not self._adjacency.get(node):
+            successors_set = self._adjacency.get(node, set())
+            if not successors_set or successors_set == {node}:
                 egress_floe = Floe(node, ROOKERY, maxsize=self._queue_maxsize)
                 self._floes.add(egress_floe)
                 self._contexts[node].add_outgoing_floe(egress_floe)
@@ -239,8 +255,16 @@ class PenguiFlow:
         if self._allow_cycles:
             return
 
+        adjacency: dict[Node, set[Node]] = {
+            node: set(children) for node, children in self._adjacency.items()
+        }
+
+        for node, children in adjacency.items():
+            if node.allow_cycle:
+                children.discard(node)
+
         indegree: dict[Node, int] = {node: 0 for node in self._nodes}
-        for _parent, children in self._adjacency.items():
+        for _parent, children in adjacency.items():
             for child in children:
                 indegree[child] += 1
 
@@ -250,7 +274,7 @@ class PenguiFlow:
         while queue:
             node = queue.pop()
             visited += 1
-            for succ in self._adjacency.get(node, set()):
+            for succ in adjacency.get(node, set()):
                 indegree[succ] -= 1
                 if indegree[succ] == 0:
                     queue.append(succ)
@@ -339,7 +363,16 @@ class PenguiFlow:
                     result = await invocation
 
                 if result is not None:
-                    await context.emit(result)
+                    destination, prepared, targets = self._controller_postprocess(
+                        node, context, message, result
+                    )
+
+                    if destination == "skip":
+                        continue
+                    if destination == "rookery":
+                        await context.emit(prepared, to=[ROOKERY])
+                        continue
+                    await context.emit(prepared, to=targets)
 
                 latency = (time.perf_counter() - start) * 1000
                 await self._emit_event(
@@ -436,6 +469,36 @@ class PenguiFlow:
         if policy.max_backoff is not None:
             delay = min(delay, policy.max_backoff)
         return delay
+
+    def _controller_postprocess(
+        self,
+        node: Node,
+        context: Context,
+        incoming: Any,
+        result: Any,
+    ) -> tuple[str, Any, list[Node] | None]:
+        if isinstance(result, Message):
+            payload = result.payload
+            if isinstance(payload, WM):
+                now = time.time()
+                if result.deadline_s is not None and now > result.deadline_s:
+                    final = FinalAnswer(text=DEADLINE_EXCEEDED_TEXT)
+                    final_msg = result.model_copy(update={"payload": final})
+                    return "rookery", final_msg, None
+
+                if payload.hops + 1 >= payload.budget_hops:
+                    final = FinalAnswer(text=BUDGET_EXCEEDED_TEXT)
+                    final_msg = result.model_copy(update={"payload": final})
+                    return "rookery", final_msg, None
+
+                updated_payload = payload.model_copy(update={"hops": payload.hops + 1})
+                updated_msg = result.model_copy(update={"payload": updated_payload})
+                return "context", updated_msg, [node]
+
+            if isinstance(payload, FinalAnswer):
+                return "rookery", result, None
+
+        return "context", result, None
 
     async def _emit_event(
         self,

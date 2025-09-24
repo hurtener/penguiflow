@@ -20,8 +20,16 @@ async def main() -> None:
         "router",
         lambda msg: ["metrics"] if msg.payload.startswith("metric") else ["general"],
     )
-    metrics_node = Node(metrics_sink, name="metrics", policy=NodePolicy(validate="none"))
-    general_node = Node(general_sink, name="general", policy=NodePolicy(validate="none"))
+    metrics_node = Node(
+        metrics_sink,
+        name="metrics",
+        policy=NodePolicy(validate="none"),
+    )
+    general_node = Node(
+        general_sink,
+        name="general",
+        policy=NodePolicy(validate="none"),
+    )
 
     flow = create(
         router.to(metrics_node, general_node),
