@@ -49,6 +49,7 @@ known-first-party = ["penguiflow"]
 [tool.mypy]
 python_version = "3.12"
 plugins = []
+files = ["penguiflow"]
 disallow_untyped_defs = false
 ignore_missing_imports = true
 warn_unused_ignores = true
