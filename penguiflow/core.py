@@ -10,9 +10,9 @@ import asyncio
 import logging
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from .middlewares import Middleware
 from .node import Node, NodePolicy
@@ -95,7 +95,7 @@ class Context:
         if targets is None:
             return list(mapping.values())
 
-        if isinstance(targets, (Node, Endpoint)):
+        if isinstance(targets, Node | Endpoint):
             targets = [targets]
 
         resolved: list[Floe] = []

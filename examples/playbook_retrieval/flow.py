@@ -41,7 +41,11 @@ async def controller(msg: Message, ctx) -> Message:
 
 
 async def main() -> None:
-    controller_node = Node(controller, name="controller", policy=NodePolicy(validate="none"))
+    controller_node = Node(
+        controller,
+        name="controller",
+        policy=NodePolicy(validate="none"),
+    )
     flow = create(controller_node.to())
     flow.run()
 
