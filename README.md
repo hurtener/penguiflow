@@ -226,29 +226,52 @@ await flow.stop()
 
 ### Patterns Toolkit
 
-PenguiFlow ships optional helpers to keep orchestration code tidy:
+PenguiFlow ships a handful of **composable patterns** to keep orchestration code tidy
+without forcing you into a one-size-fits-all DSL. Each helper is opt-in and can be
+stitched directly into a flow adjacency list:
 
-- `map_concurrent` – semaphore-bound fan-out over in-memory collections.
-- `predicate_router` – route messages to successor nodes via lightweight predicates.
-- `union_router` – wire Pydantic discriminated unions to typed successor nodes.
-- `join_k` – aggregate `k` messages per `trace_id` before resuming downstream work.
+- `map_concurrent(items, worker, max_concurrency=8)` — fan a single message out into
+  many in-memory tasks (e.g., batch document enrichment) while respecting a semaphore.
+- `predicate_router(name, mapping)` — route messages to successor nodes based on simple
+  boolean functions over payload or headers. Perfect for guardrails or conditional
+  tool invocation without building a full controller.
+- `union_router(name, discriminated_model)` — accept a Pydantic discriminated union and
+  forward each variant to the matching typed successor node. Keeps type-safety even when
+  multiple schema branches exist.
+- `join_k(name, k)` — aggregate `k` messages per `trace_id` before resuming downstream
+  work. Useful for fan-out/fan-in batching, map-reduce style summarization, or consensus.
+
+All helpers are regular `Node` instances under the hood, so they inherit retries,
+timeouts, and validation just like hand-written nodes.
 
 ### Dynamic Controller Loops
 
-Use the `WM`, `Thought`, and `FinalAnswer` models to drive multi-hop controllers.
-A controller node can `allow_cycle=True` and wire itself via `controller.to(controller)`;
-when it emits a `WM`, PenguiFlow increments the hop count (respecting `budget_hops`
-and deadlines). Emitting a `FinalAnswer` breaks the loop and ships the result to the
-Rookery for collection.
+Long-running agents often need to **think, plan, and act over multiple hops**. PenguiFlow
+models this with a controller node that loops on itself:
+
+1. Define a controller `Node` with `allow_cycle=True` and wire `controller.to(controller)`.
+2. Emit a `Message` whose payload is a `WM` (working memory). PenguiFlow increments the
+   `hops` counter automatically and enforces `budget_hops` + `deadline_s` so controllers
+   cannot loop forever.
+3. The controller can attach intermediate `Thought` artifacts or emit `PlanStep`s for
+   transparency/debugging. When it is ready to finish, it returns a `FinalAnswer` which
+   is immediately forwarded to Rookery.
+
+Deadlines and hop budgets turn into automated `FinalAnswer` error messages, making it
+easy to surface guardrails to downstream consumers.
 
 ---
 
 ### Playbooks & Subflows
 
-`call_playbook` lets a node spin up an ad-hoc subflow ("playbook") that inherits the
-parent message's `trace_id` and headers. Subflows run in-process, honor timeouts, and
-return the first payload emitted to their Rookery — perfect for short-lived retrieval
-pipelines or toolchains that should stay isolated from the main flow.
+Sometimes a controller or router needs to execute a **mini flow** — for example,
+retrieval → rerank → compress — without polluting the global topology. `call_playbook`
+spawns a brand-new `PenguiFlow` on demand and wires it into the parent message context:
+
+- Trace IDs and headers are reused so observability stays intact.
+- The helper respects optional timeouts and always stops the subflow (even on cancel).
+- The first payload emitted to the playbook's Rookery is returned to the caller,
+  allowing you to treat subflows as normal async functions.
 
 ```python
 from penguiflow import call_playbook
@@ -258,6 +281,9 @@ async def controller(msg: Message, ctx) -> Message:
     playbook_result = await call_playbook(build_retrieval_playbook, msg)
     return msg.model_copy(update={"payload": playbook_result})
 ```
+
+Playbooks are ideal for deploying frequently reused toolchains while keeping the main
+flow focused on high-level orchestration logic.
 
 ---
 
@@ -303,7 +329,9 @@ pytest -q
 * `examples/routing_predicate/`: branching with predicates.
 * `examples/routing_union/`: discriminated unions with typed branches.
 * `examples/fanout_join/`: split work and join with `join_k`.
+* `examples/map_concurrent/`: bounded fan-out work inside a node.
 * `examples/controller_multihop/`: dynamic multi-hop agent loop.
+* `examples/reliability_middleware/`: retries, timeouts, and middleware hooks.
 * `examples/playbook_retrieval/`: retrieval → rerank → compress playbook.
 
 ---

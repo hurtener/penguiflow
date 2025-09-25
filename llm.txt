@@ -1,0 +1,91 @@
+PenguiFlow quick facts (v1, phases 0–6 complete)
+===============================================
+
+Runtime overview
+----------------
+- In-process asyncio orchestrator with bounded queues (`asyncio.Queue`) per edge.
+- Graph endpoints: `OPEN_SEA` (ingress) and `ROOKERY` (egress); both use `Context` APIs.
+- `PenguiFlow.create(*adjacencies, queue_maxsize=64, allow_cycles=False, middlewares=None)` builds the graph.
+- Call `flow.run(registry=...)` once to start worker tasks, `flow.stop()` to cancel/await them.
+- Messages travel as Pydantic `Message` objects (payload + headers + trace metadata).
+
+Nodes & policies
+----------------
+- Define nodes with `Node(async_fn, name?, policy?, allow_cycle=False)`; async function must accept `(message, ctx)`.
+- `NodePolicy` fields: `validate` (`"both"|"in"|"out"|"none"`), `timeout_s`, `max_retries`, `backoff_base`, `backoff_mult`, `max_backoff`.
+- Retries wrap exceptions *and* timeouts; backoff is exponential with optional cap.
+
+Type safety
+-----------
+- Register models via `ModelRegistry.register(node_name, InModel, OutModel)`.
+- Pass registry to `flow.run(registry)`; `Node.invoke` validates according to policy.
+- `Message` payload can be any type; `Headers` include `tenant`, optional `topic`, `priority`, plus auto `trace_id`, `ts`, optional `deadline_s`.
+
+Contexts & helpers
+------------------
+- Each node gets a `Context` with `.emit()`/`.emit_nowait()` (selective or broadcast) and `.fetch()`/`.fetch_any()` for incoming queues.
+- Cycle detection: default topological check; per-node opt-in self cycles (`allow_cycle=True`) or global `allow_cycles=True`.
+- Structured logs emitted per node event: `{ts, event, node_name, node_id, trace_id, latency_ms, q_depth_in, attempt, ...}`.
+- Middleware hook: async callables added via `flow.add_middleware(fn)`; receive the event payload.
+
+Patterns (`penguiflow.patterns`)
+--------------------------------
+- `map_concurrent(items, worker, max_concurrency=8)` — semaphore-bounded async fan-out helper.
+- `predicate_router(name, predicate)` — route to successors based on payload/headers; predicate may return nodes, names, sequences, or None.
+- `union_router(name, DiscriminatedModel)` — validates discriminated unions and forwards to named successor nodes.
+- `join_k(name, k)` — buffer `k` messages per `trace_id`; emits aggregated payload (list payload or list of messages).
+
+Controller loop models (`penguiflow.types`)
+-------------------------------------------
+- `WM`: working memory (`query`, `facts`, `hops`, `budget_hops`, `confidence`).
+- `Thought`: optional planning artifact (`steps`, `rationale`, `done`).
+- `PlanStep`: enumerated tool/action descriptions.
+- `FinalAnswer`: terminal payload (`text`, `citations`).
+- Runtime auto-increments `WM.hops`, enforces `budget_hops` and `deadline_s`, converts violations to `FinalAnswer` with predefined text.
+
+Playbooks
+---------
+- `call_playbook(factory, parent_msg, timeout=None)` expects `factory -> (PenguiFlow, ModelRegistry|None)`.
+- Subflow receives the original message (headers + trace id preserved).
+- Returns the first payload emitted to playbook’s Rookery; always stops the subflow (shielded).
+
+Middlewares & observability
+---------------------------
+- Middleware signature: `async def middleware(event: str, payload: dict[str, Any]): ...`.
+- Typical events: `node_start`, `node_success`, `node_timeout`, `node_error`, `node_retry`, `node_failed`, `node_cancelled`.
+
+Examples reference map
+----------------------
+- `examples/quickstart/` — typed pipeline (registry + validation).
+- `examples/routing_predicate/` — predicate router with branching.
+- `examples/routing_union/` — discriminated union routing.
+- `examples/fanout_join/` — fan-out to workers + `join_k` aggregation.
+- `examples/map_concurrent/` — map helper inside a node.
+- `examples/controller_multihop/` — controller loop producing `FinalAnswer`.
+- `examples/reliability_middleware/` — timeout/retry/middleware logging.
+- `examples/playbook_retrieval/` — controller invoking a subflow playbook.
+
+Testing & tooling
+-----------------
+- Run tests with `pytest -q` (or `uv run pytest -q` in CI).
+- Lint with `ruff check .`; type-check package via `mypy penguiflow` (CI uses `uv run` commands).
+- Python 3.12+, Pydantic v2.
+- No external brokers—everything uses asyncio queues in-process.
+
+Usage checklist for new integrations
+------------------------------------
+1. Model contracts in Pydantic; register with `ModelRegistry`.
+2. Wrap async node functions with `Node`, set `NodePolicy` (timeouts/retries optional).
+3. Wire nodes with `create(node_a.to(node_b, node_c), ...)`.
+4. `flow.run(registry)` → `await flow.emit(message)` → `result = await flow.fetch()` → `await flow.stop()`.
+5. Use patterns/routers/playbooks as needed for branching, fan-out, or subflows.
+6. Attach middlewares if you need structured logging/metrics.
+
+Gotchas & reminders
+-------------------
+- Node callables **must** be declared with `async def` and accept exactly two positional
+  parameters `(message, ctx)`; otherwise `Node` will raise at construction time.
+- Helpers like `map_concurrent` expect an async worker that returns an awaitable result.
+- Always call `flow.run(...)` before emitting messages, and `await flow.stop()` during
+  teardown to ensure worker tasks are cancelled and awaited.
+
