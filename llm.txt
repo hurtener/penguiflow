@@ -28,6 +28,7 @@ Contexts & helpers
 - Cycle detection: default topological check; per-node opt-in self cycles (`allow_cycle=True`) or global `allow_cycles=True`.
 - Structured logs emitted per node event: `{ts, event, node_name, node_id, trace_id, latency_ms, q_depth_in, attempt, ...}`.
 - Middleware hook: async callables added via `flow.add_middleware(fn)`; receive the event payload.
+- Visualization helper: `flow_to_mermaid(flow, direction="TD")` produces a Mermaid diagram string of the current graph.
 
 Patterns (`penguiflow.patterns`)
 --------------------------------
@@ -65,6 +66,7 @@ Examples reference map
 - `examples/controller_multihop/` — controller loop producing `FinalAnswer`.
 - `examples/reliability_middleware/` — timeout/retry/middleware logging.
 - `examples/playbook_retrieval/` — controller invoking a subflow playbook.
+- `benchmarks/` — microbenchmarks for throughput, retry/timeout, and controller playbook latency.
 
 Testing & tooling
 -----------------
