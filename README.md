@@ -60,7 +60,7 @@ from penguiflow.node import Node
 class QueryOut(BaseModel):
     topic: str
 
-async def triage(m: QueryIn) -> QueryOut:
+async def triage(msg: QueryIn, ctx) -> QueryOut:
     return QueryOut(topic="metrics")
 
 triage_node = Node(triage, name="triage")
@@ -289,6 +289,19 @@ flow focused on high-level orchestration logic.
 
 ---
 
+### Visualization
+
+Need a quick view of the flow topology? Call `flow_to_mermaid(flow)` to render the graph
+as a Mermaid diagram ready for Markdown or docs tools:
+
+```python
+from penguiflow import flow_to_mermaid
+
+print(flow_to_mermaid(flow, direction="LR"))
+```
+
+---
+
 ## 🛡️ Reliability & Observability
 
 * **NodePolicy**: set validation scope plus per-node timeout, retries, and backoff curves.
@@ -304,6 +317,14 @@ flow focused on high-level orchestration logic.
 - **Registry-driven typing**: nodes default to validation. Provide a `ModelRegistry` when calling `flow.run(...)` or set `validate="none"` explicitly for untyped hops.
 - **Observability**: structured logs + middleware hooks are available, but integrations with third-party stacks (OTel, Prometheus) are DIY for now.
 - **Roadmap**: v2 targets streaming, distributed backends, richer observability, and test harnesses. Contributions and proposals are welcome!
+
+---
+
+## 📊 Benchmarks
+
+Lightweight benchmarks live under `benchmarks/`. Run them via `uv run python benchmarks/<name>.py`
+to capture baselines for fan-out throughput, retry/timeout overhead, and controller
+playbook latency. Copy them into product repos to watch for regressions over time.
 
 ---
 

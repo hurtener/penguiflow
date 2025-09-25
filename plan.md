@@ -382,6 +382,24 @@ router = Node("router", lambda q: q)  # passes through; successor nodes typed pe
 * No flake8/mypy errors (basic typing; we tolerate dynamic where needed).
 * Benchmarks (simple): throughput with 1k messages, memory growth bounded.
 
+## Benchmark Story (Post-v1 Follow-up)
+
+**Goals**
+
+* Provide repeatable measurements for queue throughput, retry latency, and controller-playbook overhead.
+
+**Deliverables**
+
+* `benchmarks/` directory with asyncio microbenchmarks covering:
+  * Fan-out/fan-in throughput at various queue sizes and concurrency limits.
+  * Retry + timeout scenarios to quantify backoff impact.
+  * Controller loop latency with and without playbook invocations.
+* Simple invocation docs (`uv run python benchmarks/<name>.py`) and guidance on interpreting results.
+
+**Acceptance**
+
+* Benchmarks run locally without external dependencies and produce baseline metrics for regression tracking.
+
 
 
 # Risk & Mitigation
@@ -392,5 +410,4 @@ router = Node("router", lambda q: q)  # passes through; successor nodes typed pe
   **Mitigation**: sugar `register_nodes([ (node, In, Out), ... ])` and clear examples.
 * **Risk**: Loop misuse → infinite hops.
   **Mitigation**: default hop budget & deadline in `WM`; enforce in controller helper.
-
 
