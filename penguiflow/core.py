@@ -12,10 +12,11 @@ import time
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .middlewares import Middleware
 from .node import Node, NodePolicy
+from .registry import ModelRegistry
 from .types import WM, FinalAnswer, Message
 
 logger = logging.getLogger("penguiflow.core")
@@ -542,6 +543,33 @@ class PenguiFlow:
                 )
 
 
+PlaybookFactory = Callable[[], tuple["PenguiFlow", ModelRegistry | None]]
+
+
+async def call_playbook(
+    playbook: PlaybookFactory,
+    parent_msg: Message,
+    timeout: float | None = None,
+) -> Any:
+    """Execute a subflow playbook and return the first Rookery payload."""
+
+    flow, registry = playbook()
+    flow.run(registry=registry)
+
+    try:
+        await flow.emit(parent_msg)
+        fetch_coro = flow.fetch()
+        if timeout is not None:
+            result_msg = await asyncio.wait_for(fetch_coro, timeout)
+        else:
+            result_msg = await fetch_coro
+        if isinstance(result_msg, Message):
+            return result_msg.payload
+        return result_msg
+    finally:
+        await asyncio.shield(flow.stop())
+
+
 def create(*adjacencies: tuple[Node, Sequence[Node]], **kwargs: Any) -> PenguiFlow:
     """Convenience helper to instantiate a PenguiFlow."""
 
@@ -553,6 +581,7 @@ __all__ = [
     "Floe",
     "PenguiFlow",
     "CycleError",
+    "call_playbook",
     "create",
     "DEFAULT_QUEUE_MAXSIZE",
 ]

@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from .core import DEFAULT_QUEUE_MAXSIZE, Context, CycleError, PenguiFlow, create
+from .core import (
+    DEFAULT_QUEUE_MAXSIZE,
+    Context,
+    CycleError,
+    PenguiFlow,
+    call_playbook,
+    create,
+)
 from .middlewares import Middleware
 from .node import Node, NodePolicy
 from .patterns import join_k, map_concurrent, predicate_router, union_router
@@ -19,6 +26,7 @@ __all__ = [
     "NodePolicy",
     "ModelRegistry",
     "Middleware",
+    "call_playbook",
     "Headers",
     "Message",
     "PlanStep",

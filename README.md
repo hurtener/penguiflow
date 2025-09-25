@@ -1,5 +1,9 @@
 # PenguiFlow 🐧❄️
 
+<p align="center">
+  <img src="asset/Penguiflow.png" alt="PenguiFlow logo" width="220">
+</p>
+
 **Async-first orchestration library for multi-agent and data pipelines**
 
 PenguiFlow is a **lightweight Python library** to orchestrate agent flows.
@@ -10,6 +14,7 @@ It provides:
 * **Routing & decision points**
 * **Retries, timeouts, backpressure**
 * **Dynamic loops** (controller nodes)
+* **Runtime playbooks** (callable subflows with shared metadata)
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
@@ -138,7 +143,7 @@ Requires **Python 3.12+**.
 
 penguiflow/
   __init__.py
-  core.py          # runtime types + barebones Flow class (temporary placeholder)
+  core.py          # runtime orchestrator, retries, controller helpers, playbooks
   node.py
   types.py
   registry.py
@@ -147,8 +152,8 @@ penguiflow/
   viz.py
   README.md
 pyproject.toml      # build metadata
-tests/              # pytest scaffolding
-examples/           # minimal “hello flow”
+tests/              # pytest suite
+examples/           # runnable flows (fan-out, routing, controller, playbooks)
 
 ---
 
@@ -238,6 +243,24 @@ Rookery for collection.
 
 ---
 
+### Playbooks & Subflows
+
+`call_playbook` lets a node spin up an ad-hoc subflow ("playbook") that inherits the
+parent message's `trace_id` and headers. Subflows run in-process, honor timeouts, and
+return the first payload emitted to their Rookery — perfect for short-lived retrieval
+pipelines or toolchains that should stay isolated from the main flow.
+
+```python
+from penguiflow import call_playbook
+from penguiflow.types import Message
+
+async def controller(msg: Message, ctx) -> Message:
+    playbook_result = await call_playbook(build_retrieval_playbook, msg)
+    return msg.model_copy(update={"payload": playbook_result})
+```
+
+---
+
 ## 🛡️ Reliability & Observability
 
 * **NodePolicy**: set validation scope plus per-node timeout, retries, and backoff curves.
@@ -274,12 +297,14 @@ pytest -q
 
 ---
 
-## 📖 Examples (To be developed)
+## 📖 Examples
 
 * `examples/quickstart/`: hello world pipeline.
 * `examples/routing_predicate/`: branching with predicates.
+* `examples/routing_union/`: discriminated unions with typed branches.
+* `examples/fanout_join/`: split work and join with `join_k`.
 * `examples/controller_multihop/`: dynamic multi-hop agent loop.
-* `examples/playbook_retrieval/`: retrieval → rerank → compress (demo).
+* `examples/playbook_retrieval/`: retrieval → rerank → compress playbook.
 
 ---
 
@@ -298,4 +323,3 @@ pytest -q
 ## License
 
 MIT
-
