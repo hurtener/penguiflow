@@ -20,6 +20,7 @@ Type safety
 - Register models via `ModelRegistry.register(node_name, InModel, OutModel)`.
 - Pass registry to `flow.run(registry)`; `Node.invoke` validates according to policy.
 - `Message` payload can be any type; `Headers` include `tenant`, optional `topic`, `priority`, plus auto `trace_id`, `ts`, optional `deadline_s`.
+- Runtime verifies that any node with validation enabled is registered when `flow.run(registry=...)` is called.
 
 Contexts & helpers
 ------------------
@@ -88,4 +89,3 @@ Gotchas & reminders
 - Helpers like `map_concurrent` expect an async worker that returns an awaitable result.
 - Always call `flow.run(...)` before emitting messages, and `await flow.stop()` during
   teardown to ensure worker tasks are cancelled and awaited.
-

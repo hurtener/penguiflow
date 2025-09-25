@@ -29,6 +29,9 @@ contributors understand how the pieces fit together.
 * **Reliability envelope**: each message dispatch goes through `_execute_with_reliability`
   which applies validation, timeout, retry with exponential backoff, structured logging,
   and middleware hooks.
+* **Registry guardrails**: when `flow.run(registry=...)` is used, the runtime asserts that
+  every validating node has a corresponding entry in the registry so configuration issues
+  surface immediately.
 * **Controller loops**: when a node emits a `Message` whose payload is a `WM`, the runtime
   increments hop counters, enforces budgets, and re-enqueues the message back to the
   controller. Returning a `FinalAnswer` short-circuits to Rookery.

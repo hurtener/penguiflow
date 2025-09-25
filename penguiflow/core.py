@@ -288,6 +288,8 @@ class PenguiFlow:
             raise RuntimeError("PenguiFlow already running")
         self._running = True
         self._registry = registry
+        if registry is not None:
+            self._ensure_registry_covers_nodes(registry)
         loop = asyncio.get_running_loop()
 
         for node in self._nodes:
@@ -541,6 +543,26 @@ class PenguiFlow:
                         "exception": exc,
                     },
                 )
+
+    def _ensure_registry_covers_nodes(self, registry: ModelRegistry) -> None:
+        missing: list[str] = []
+        for node in self._nodes:
+            if node.policy.validate == "none":
+                continue
+            node_name = node.name
+            if node_name is None:
+                continue
+            try:
+                registry.adapters(node_name)
+            except KeyError:
+                missing.append(node_name)
+
+        if missing:
+            formatted = ", ".join(sorted(missing))
+            raise RuntimeError(
+                "ModelRegistry is missing entries for nodes requiring validation: "
+                f"{formatted}"
+            )
 
 
 PlaybookFactory = Callable[[], tuple["PenguiFlow", ModelRegistry | None]]

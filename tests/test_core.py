@@ -6,9 +6,11 @@ import asyncio
 import logging
 
 import pytest
+from pydantic import BaseModel
 
 from penguiflow.core import CycleError, PenguiFlow, create
 from penguiflow.node import Node, NodePolicy
+from penguiflow.registry import ModelRegistry
 
 
 @pytest.mark.asyncio
@@ -249,3 +251,44 @@ async def test_middlewares_receive_events() -> None:
 
     events_names = [name for name, _ in events]
     assert "node_success" in events_names
+
+
+@pytest.mark.asyncio
+async def test_run_with_registry_requires_registered_nodes() -> None:
+    async def handler(msg: str, ctx) -> str:
+        return msg
+
+    node = Node(handler, name="handler")
+    flow = create(node.to())
+    registry = ModelRegistry()
+
+    with pytest.raises(RuntimeError) as exc:
+        flow.run(registry=registry)
+
+    assert "handler" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_run_with_registry_accepts_registered_nodes() -> None:
+    class EchoModel(BaseModel):
+        text: str
+
+    async def handler(msg: EchoModel, ctx) -> EchoModel:
+        return msg
+
+    node = Node(handler, name="echo")
+    flow = create(node.to())
+
+    registry = ModelRegistry()
+    registry.register("echo", EchoModel, EchoModel)
+
+    flow.run(registry=registry)
+
+    message = EchoModel(text="hi")
+    await flow.emit(message)
+    result = await flow.fetch()
+
+    assert isinstance(result, EchoModel)
+    assert result.text == "hi"
+
+    await flow.stop()

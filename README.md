@@ -108,11 +108,13 @@ await flow.stop()
    * Flows are orchestrators, mostly I/O-bound.
    * Async tasks are cheap, predictable, and cancellable.
    * Heavy CPU work should be offloaded inside a node (process pool, Ray, etc.), not in PenguiFlow itself.
+   * v1 intentionally stays in-process; scaling out or persisting state will arrive with future pluggable backends.
 
 2. **Typed contracts.**
 
    * In/out models per node are defined with Pydantic.
    * Validated at runtime via cached `TypeAdapter`s.
+   * `flow.run(registry=...)` verifies every validating node is registered so misconfigurations fail fast.
 
 3. **Reliability first.**
 
@@ -292,6 +294,16 @@ flow focused on high-level orchestration logic.
 * **NodePolicy**: set validation scope plus per-node timeout, retries, and backoff curves.
 * **Structured logs**: enrich every node event with `{ts, trace_id, node_name, event, latency_ms, q_depth_in, attempt}`.
 * **Middleware hooks**: subscribe observers (e.g., MLflow) to the structured event stream.
+* See `examples/reliability_middleware/` for a concrete timeout + retry walkthrough.
+
+---
+
+## ⚠️ Current Constraints
+
+- **In-process runtime**: there is no built-in distribution layer yet. Long-running CPU work should be delegated to your own pools or services.
+- **Registry-driven typing**: nodes default to validation. Provide a `ModelRegistry` when calling `flow.run(...)` or set `validate="none"` explicitly for untyped hops.
+- **Observability**: structured logs + middleware hooks are available, but integrations with third-party stacks (OTel, Prometheus) are DIY for now.
+- **Roadmap**: v2 targets streaming, distributed backends, richer observability, and test harnesses. Contributions and proposals are welcome!
 
 ---
 
