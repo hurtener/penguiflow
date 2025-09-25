@@ -15,6 +15,7 @@ from .node import Node, NodePolicy
 from .patterns import join_k, map_concurrent, predicate_router, union_router
 from .registry import ModelRegistry
 from .types import WM, FinalAnswer, Headers, Message, PlanStep, Thought
+from .viz import flow_to_mermaid
 
 __all__ = [
     "__version__",
@@ -37,7 +38,8 @@ __all__ = [
     "join_k",
     "predicate_router",
     "union_router",
+    "flow_to_mermaid",
     "create",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.0.2"

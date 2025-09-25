@@ -60,7 +60,7 @@ from penguiflow.node import Node
 class QueryOut(BaseModel):
     topic: str
 
-async def triage(m: QueryIn) -> QueryOut:
+async def triage(msg: QueryIn, ctx) -> QueryOut:
     return QueryOut(topic="metrics")
 
 triage_node = Node(triage, name="triage")
