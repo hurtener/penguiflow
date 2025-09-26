@@ -238,8 +238,65 @@ pyproject.toml
 
 ---
 
-### Acceptance (v2 overall)
+### Acceptance
 
 * All phases green in CI; examples runnable.
 * No breaking changes to v1 public API (only additive).
 * README updated with what’s new + quickstart links.
+
+## Developer Workflow
+
+### Setup
+
+uv sync
+uv run ruff check penguiflow
+uv run mypy penguiflow
+uv run pytest --cov=penguiflow --cov-report=term-missing
+
+## Local Testing Tips
+
+Run a single test: uv run pytest tests/test_core.py -k "test_name"
+Stop on first failure: uv run pytest -x
+Async tests: handled automatically by pytest-asyncio
+Lint fix: uv run ruff check penguiflow --fix
+
+### Coverage Policy
+Target: ≥85% line coverage (hard minimum in CI).
+Every new feature must include at least one negative/error-path test.
+Blind spots to prioritize:
+- middlewares.py → add direct hook tests
+- viz.py → cover DOT/Mermaid outputs
+- types.py → expand beyond StreamChunk
+
+Coverage reports generated in CI (--cov-report=xml) and uploaded to Codecov/Coveralls.
+Badges in README track trends over time.
+
+### CI/CD Policy
+Matrix:
+- Python: 3.11, 3.12, 3.13
+- OS: Ubuntu 
+
+Checks enforced before merge:
+- Ruff (lint)
+- Mypy (types)
+- Pytest with coverage (≥85%)
+
+Artifacts:
+- Store .coverage.xml
+- Badges: Add CI status + coverage badge in README.
+
+Optional:
+- Performance benchmarks (pytest-benchmark)
+- Upload coverage to Codecov/Coveralls
+
+## Examples Policy
+
+- Each example must be runnable directly:
+
+    uv run python examples/<name>/flow.py
+
+- Include a short README.md inside the example folder.
+- Example must cover at least one integration test scenario.
+- Examples should demonstrate real usage but remain domain-agnostic.
+
+

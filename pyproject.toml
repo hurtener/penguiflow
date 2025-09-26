@@ -21,6 +21,8 @@ dev = [
     "mypy>=1.8",
     "pytest>=7.4",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=4.0",
+    "coverage[toml]>=7.0",
     "ruff>=0.2",
 ]
 
@@ -58,3 +60,24 @@ show_error_codes = true
 [tool.pytest.ini_options]
 addopts = "-q"
 asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["penguiflow"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/.venv/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "def __repr__",
+    "def __str__",
+]
+precision = 1
+show_missing = true
+skip_covered = false

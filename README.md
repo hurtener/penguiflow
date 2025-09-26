@@ -4,6 +4,21 @@
   <img src="asset/Penguiflow.png" alt="PenguiFlow logo" width="220">
 </p>
 
+<p align="center">
+  <a href="https://github.com/penguiflow/penguiflow/actions/workflows/ci.yml">
+    <img src="https://github.com/penguiflow/penguiflow/actions/workflows/ci.yml/badge.svg" alt="CI Status">
+  </a>
+  <a href="https://github.com/penguiflow/penguiflow">
+    <img src="https://img.shields.io/badge/coverage-85%25-brightgreen" alt="Coverage">
+  </a>
+  <a href="https://pypi.org/project/penguiflow/">
+    <img src="https://img.shields.io/pypi/v/penguiflow.svg" alt="PyPI version">
+  </a>
+  <a href="https://github.com/penguiflow/penguiflow/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
+  </a>
+</p>
+
 **Async-first orchestration library for multi-agent and data pipelines**
 
 PenguiFlow is a **lightweight Python library** to orchestrate agent flows.
