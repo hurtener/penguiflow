@@ -14,7 +14,13 @@ from .middlewares import Middleware
 from .node import Node, NodePolicy
 from .patterns import join_k, map_concurrent, predicate_router, union_router
 from .registry import ModelRegistry
-from .types import WM, FinalAnswer, Headers, Message, PlanStep, Thought
+from .streaming import (
+    chunk_to_ws_json,
+    emit_stream_events,
+    format_sse_event,
+    stream_flow,
+)
+from .types import WM, FinalAnswer, Headers, Message, PlanStep, StreamChunk, Thought
 from .viz import flow_to_mermaid
 
 __all__ = [
@@ -30,6 +36,7 @@ __all__ = [
     "call_playbook",
     "Headers",
     "Message",
+    "StreamChunk",
     "PlanStep",
     "Thought",
     "WM",
@@ -38,6 +45,10 @@ __all__ = [
     "join_k",
     "predicate_router",
     "union_router",
+    "format_sse_event",
+    "chunk_to_ws_json",
+    "stream_flow",
+    "emit_stream_events",
     "flow_to_mermaid",
     "create",
 ]

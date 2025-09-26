@@ -1,5 +1,5 @@
-PenguiFlow quick facts (v1, phases 0–6 complete)
-===============================================
+PenguiFlow quick facts (v1 shipped, v2 Phase 1 streaming in progress)
+====================================================================
 
 Runtime overview
 ----------------
@@ -14,17 +14,19 @@ Nodes & policies
 - Define nodes with `Node(async_fn, name?, policy?, allow_cycle=False)`; async function must accept `(message, ctx)`.
 - `NodePolicy` fields: `validate` (`"both"|"in"|"out"|"none"`), `timeout_s`, `max_retries`, `backoff_base`, `backoff_mult`, `max_backoff`.
 - Retries wrap exceptions *and* timeouts; backoff is exponential with optional cap.
+- If you do not need the `Context`, name it `_ctx` but keep the argument—the runtime passes it every time.
 
 Type safety
 -----------
 - Register models via `ModelRegistry.register(node_name, InModel, OutModel)`.
 - Pass registry to `flow.run(registry)`; `Node.invoke` validates according to policy.
-- `Message` payload can be any type; `Headers` include `tenant`, optional `topic`, `priority`, plus auto `trace_id`, `ts`, optional `deadline_s`.
+- `Message` payload can be any type; `StreamChunk` is a first-class payload for streaming paths.
+- `Headers` include `tenant`, optional `topic`, `priority`, plus auto `trace_id`, `ts`, optional `deadline_s`.
 - Runtime verifies that any node with validation enabled is registered when `flow.run(registry=...)` is called.
 
 Contexts & helpers
 ------------------
-- Each node gets a `Context` with `.emit()`/`.emit_nowait()` (selective or broadcast) and `.fetch()`/`.fetch_any()` for incoming queues.
+- Each node gets a `Context` with `.emit()`/`.emit_nowait()` (selective or broadcast), `.emit_chunk()` for streaming replies, and `.fetch()`/`.fetch_any()` for incoming queues. `PenguiFlow.emit_chunk(...)` mirrors the helper for callers outside a node (e.g., SSE responders).
 - Cycle detection: default topological check; per-node opt-in self cycles (`allow_cycle=True`) or global `allow_cycles=True`.
 - Structured logs emitted per node event: `{ts, event, node_name, node_id, trace_id, latency_ms, q_depth_in, attempt, ...}`.
 - Middleware hook: async callables added via `flow.add_middleware(fn)`; receive the event payload.
@@ -36,6 +38,19 @@ Patterns (`penguiflow.patterns`)
 - `predicate_router(name, predicate)` — route to successors based on payload/headers; predicate may return nodes, names, sequences, or None.
 - `union_router(name, DiscriminatedModel)` — validates discriminated unions and forwards to named successor nodes.
 - `join_k(name, k)` — buffer `k` messages per `trace_id`; emits aggregated payload (list payload or list of messages).
+
+Streaming
+---------
+- `StreamChunk` model fields: `stream_id`, `seq`, `text`, `done`, and `meta` (dict).
+- `Context.emit_chunk(parent, text, stream_id=None, seq=None, done=False, meta=None, to=None)`
+  (and `PenguiFlow.emit_chunk(...)`) wrap the chunk in a `Message`, reuse the parent's
+  headers + trace, and respect queue backpressure just like `.emit()`.
+- Sequence numbers auto-increment per stream when `seq` is omitted; calling with
+  `done=True` clears the counter so future streams restart at 0.
+- Use downstream sink nodes to collect chunks, print SSE/WebSocket payloads, or fan
+  them out further. Helpers `format_sse_event(chunk, ...)` and `chunk_to_ws_json(chunk, ...)`
+  produce ready-to-send text for HTTP streaming or WebSocket broadcasts. See
+  `examples/streaming_llm/`.
 
 Controller loop models (`penguiflow.types`)
 -------------------------------------------
@@ -66,6 +81,7 @@ Examples reference map
 - `examples/controller_multihop/` — controller loop producing `FinalAnswer`.
 - `examples/reliability_middleware/` — timeout/retry/middleware logging.
 - `examples/playbook_retrieval/` — controller invoking a subflow playbook.
+- `examples/streaming_llm/` — mock LLM emitting `StreamChunk`s to an SSE-style sink.
 - `benchmarks/` — microbenchmarks for throughput, retry/timeout, and controller playbook latency.
 
 Testing & tooling

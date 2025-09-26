@@ -17,7 +17,7 @@ from typing import Any
 from .middlewares import Middleware
 from .node import Node, NodePolicy
 from .registry import ModelRegistry
-from .types import WM, FinalAnswer, Message
+from .types import WM, FinalAnswer, Message, StreamChunk
 
 logger = logging.getLogger("penguiflow.core")
 
@@ -62,13 +62,14 @@ class Floe:
 class Context:
     """Provides fetch/emit helpers for a node within a flow."""
 
-    __slots__ = ("_owner", "_incoming", "_outgoing", "_buffer")
+    __slots__ = ("_owner", "_incoming", "_outgoing", "_buffer", "_stream_seq")
 
     def __init__(self, owner: Node | Endpoint) -> None:
         self._owner = owner
         self._incoming: dict[Node | Endpoint, Floe] = {}
         self._outgoing: dict[Node | Endpoint, Floe] = {}
         self._buffer: deque[Any] = deque()
+        self._stream_seq: dict[str, int] = {}
 
     @property
     def owner(self) -> Node | Endpoint:
@@ -119,6 +120,56 @@ class Context:
     ) -> None:
         for floe in self._resolve_targets(to, self._outgoing):
             floe.queue.put_nowait(msg)
+
+    async def emit_chunk(
+        self,
+        *,
+        parent: Message,
+        text: str,
+        stream_id: str | None = None,
+        seq: int | None = None,
+        done: bool = False,
+        meta: dict[str, Any] | None = None,
+        to: Node | Endpoint | Sequence[Node | Endpoint] | None = None,
+    ) -> StreamChunk:
+        """Emit a streaming chunk that inherits routing metadata from ``parent``.
+
+        The helper manages monotonically increasing sequence numbers per
+        ``stream_id`` (defaulting to the parent's trace id) unless an explicit
+        ``seq`` is provided. It returns the emitted ``StreamChunk`` for
+        introspection in tests or downstream logic.
+        """
+
+        sid = stream_id or parent.trace_id
+        if seq is None:
+            next_seq = self._stream_seq.get(sid, -1) + 1
+        else:
+            next_seq = seq
+        self._stream_seq[sid] = next_seq
+
+        meta_dict = dict(meta) if meta else {}
+
+        chunk = StreamChunk(
+            stream_id=sid,
+            seq=next_seq,
+            text=text,
+            done=done,
+            meta=meta_dict,
+        )
+
+        message = Message(
+            payload=chunk,
+            headers=parent.headers,
+            trace_id=parent.trace_id,
+            deadline_s=parent.deadline_s,
+        )
+
+        await self.emit(message, to=to)
+
+        if done:
+            self._stream_seq.pop(sid, None)
+
+        return chunk
 
     def fetch_nowait(
         self, from_: Node | Endpoint | Sequence[Node | Endpoint] | None = None
@@ -330,6 +381,29 @@ class PenguiFlow:
 
     def emit_nowait(self, msg: Any, to: Node | Sequence[Node] | None = None) -> None:
         self._contexts[OPEN_SEA].emit_nowait(msg, to)
+
+    async def emit_chunk(
+        self,
+        *,
+        parent: Message,
+        text: str,
+        stream_id: str | None = None,
+        seq: int | None = None,
+        done: bool = False,
+        meta: dict[str, Any] | None = None,
+        to: Node | Sequence[Node] | None = None,
+    ) -> StreamChunk:
+        """Emit a streaming chunk from outside a node via OpenSea context."""
+
+        return await self._contexts[OPEN_SEA].emit_chunk(
+            parent=parent,
+            text=text,
+            stream_id=stream_id,
+            seq=seq,
+            done=done,
+            meta=meta,
+            to=to,
+        )
 
     async def fetch(self, from_: Node | Sequence[Node] | None = None) -> Any:
         return await self._contexts[ROOKERY].fetch(from_)

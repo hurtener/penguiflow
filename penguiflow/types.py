@@ -23,6 +23,16 @@ class Message(BaseModel):
     deadline_s: float | None = None
 
 
+class StreamChunk(BaseModel):
+    """Represents a chunk of streamed output."""
+
+    stream_id: str
+    seq: int
+    text: str
+    done: bool = False
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
 class PlanStep(BaseModel):
     kind: Literal["retrieve", "web", "sql", "summarize", "route", "stop"]
     args: dict[str, Any] = Field(default_factory=dict)
@@ -51,6 +61,7 @@ class FinalAnswer(BaseModel):
 __all__ = [
     "Headers",
     "Message",
+    "StreamChunk",
     "PlanStep",
     "Thought",
     "WM",

@@ -13,6 +13,7 @@ It provides:
 * **Concurrent fan-out / fan-in patterns**
 * **Routing & decision points**
 * **Retries, timeouts, backpressure**
+* **Streaming chunks** (LLM-style token emission with `Context.emit_chunk`)
 * **Dynamic loops** (controller nodes)
 * **Runtime playbooks** (callable subflows with shared metadata)
 
@@ -65,6 +66,12 @@ async def triage(msg: QueryIn, ctx) -> QueryOut:
 
 triage_node = Node(triage, name="triage")
 ```
+
+Node functions must always accept **two positional parameters**: the incoming payload and
+the `Context` object. If a node does not use the context, name it `_` or `_ctx`, but keep
+the parameter so the runtime can still inject it. Registering the node with
+`ModelRegistry` ensures the payload is validated/cast to the expected Pydantic model;
+setting `NodePolicy(validate="none")` skips that validation for hot paths.
 
 ### Flow
 
@@ -246,6 +253,30 @@ stitched directly into a flow adjacency list:
 All helpers are regular `Node` instances under the hood, so they inherit retries,
 timeouts, and validation just like hand-written nodes.
 
+### Streaming Responses
+
+PenguiFlow now supports **LLM-style streaming** with the `StreamChunk` model. Each
+chunk carries `stream_id`, `seq`, `text`, optional `meta`, and a `done` flag. Use
+`Context.emit_chunk(parent=message, text=..., done=...)` inside a node (or the
+convenience wrapper `await flow.emit_chunk(...)` from outside a node) to push
+chunks downstream without manually crafting `Message` envelopes:
+
+```python
+await ctx.emit_chunk(parent=msg, text=token, done=done)
+```
+
+- Sequence numbers auto-increment per `stream_id` (defaults to the parent trace).
+- Backpressure is preserved; if the downstream queue is full the helper awaits just
+  like `Context.emit`.
+- When `done=True`, the sequence counter resets so a new stream can reuse the same id.
+
+Pair the producer with a sink node that consumes `StreamChunk` payloads and assembles
+the final result when `done` is observed. See `examples/streaming_llm/` for a complete
+mock LLM → SSE pipeline. For presentation layers, utilities like
+`format_sse_event(chunk)` and `chunk_to_ws_json(chunk)` (both exported from the
+package) will convert a `StreamChunk` into SSE-compatible text or WebSocket JSON payloads
+without boilerplate.
+
 ### Dynamic Controller Loops
 
 Long-running agents often need to **think, plan, and act over multiple hops**. PenguiFlow
@@ -331,7 +362,8 @@ playbook latency. Copy them into product repos to watch for regressions over tim
 ## 🔮 Roadmap
 
 * **v1 (current)**: safe core runtime, type-safety, retries, timeouts, routing, controller loops, playbooks via examples.
-* **v2 (future)**: streaming support, per-trace cancel, deadlines/budgets, observability hooks, visualizer, testing harness.
+* **v2 (in progress)**: streaming support (Phase 1 shipped), upcoming per-trace cancel,
+  deadlines/budgets, observability hooks, visualizer, and testing harness.
 
 ---
 
@@ -366,6 +398,7 @@ pytest -q
 * `examples/controller_multihop/`: dynamic multi-hop agent loop.
 * `examples/reliability_middleware/`: retries, timeouts, and middleware hooks.
 * `examples/playbook_retrieval/`: retrieval → rerank → compress playbook.
+* `examples/streaming_llm/`: mock LLM emitting streaming chunks to an SSE sink.
 
 ---
 
