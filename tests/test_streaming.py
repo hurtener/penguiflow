@@ -239,22 +239,22 @@ async def test_stream_flow_yields_chunks_and_final() -> None:
     async def producer(message: Message, ctx) -> None:
         words = str(message.payload).split()
         for idx, word in enumerate(words):
+            # emit_chunk already sends to the default destination (Rookery in this case)
             await ctx.emit_chunk(
                 parent=message,
                 text=word,
                 done=idx == len(words) - 1,
             )
-
-    async def sink(message: Message, _ctx) -> str | None:
-        chunk = message.payload
-        assert isinstance(chunk, StreamChunk)
-        if chunk.done:
-            return "final"
-        return None
+        # After all chunks, emit a final non-chunk message
+        if words:
+            await ctx.emit(Message(
+                payload="final",
+                headers=message.headers,
+                trace_id=message.trace_id,
+            ))
 
     producer_node = Node(producer, name="producer", policy=NodePolicy(validate="none"))
-    sink_node = Node(sink, name="sink", policy=NodePolicy(validate="none"))
-    flow = create(producer_node.to(sink_node))
+    flow = create(producer_node.to())  # Producer goes directly to Rookery
     flow.run()
 
     parent = Message(payload="hello penguins", headers=Headers(tenant="demo"))
