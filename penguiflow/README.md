@@ -36,10 +36,10 @@ contributors understand how the pieces fit together.
   every validating node has a corresponding entry in the registry so configuration issues
   surface immediately.
 * **Controller loops**: when a node emits a `Message` whose payload is a `WM`, the runtime
-  increments hop counters, enforces hop/token budgets (`budget_hops` / `budget_tokens`),
-  checks deadlines, and re-enqueues the message back to the controller. Returning a
-  `FinalAnswer` short-circuits to Rookery or, if guardrails fire, the runtime creates a
-  `FinalAnswer` with the appropriate exhaustion message.
+  increments hop counters, enforces hop/token budgets (`budget_hops` / `budget_tokens`) when
+  they are set, checks deadlines, and re-enqueues the message back to the controller.
+  Returning a `FinalAnswer` short-circuits to Rookery or, if guardrails fire, the runtime
+  creates a `FinalAnswer` with the appropriate exhaustion message.
 * **Playbooks**: `Context.call_playbook` accepts a factory that returns a `(PenguiFlow,
   registry)` pair, runs it, emits the parent message (preserving headers + trace ID),
   mirrors cancellation signals to the subflow, and returns the first payload produced by

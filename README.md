@@ -32,7 +32,7 @@ It provides:
 * **Dynamic loops** (controller nodes)
 * **Runtime playbooks** (callable subflows with shared metadata)
 * **Per-trace cancellation** (`PenguiFlow.cancel` with `TraceCancelled` surfacing in nodes)
-* **Deadlines & budgets** (`Message.deadline_s`, `WM.budget_hops`, and optional `WM.budget_tokens` guardrails)
+* **Deadlines & budgets** (`Message.deadline_s`, `WM.budget_hops`, and `WM.budget_tokens` guardrails that you can leave unset/`None`)
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
@@ -197,6 +197,7 @@ Phase 3 adds wall-clock and logical guardrails so long-running traces shut down 
 
 * Set `Message.deadline_s` to cap wall-clock time for a trace. The runtime now checks deadlines before invoking each node and short-circuits to Rookery with `FinalAnswer("Deadline exceeded")` when the clock has expired.
 * Controllers can increment `WM.tokens_used` alongside `WM.hops`. When `WM.budget_tokens` is configured, PenguiFlow automatically emits `FinalAnswer("Token budget exhausted")` once the total meets or exceeds the budget, similar to the existing hop budget.
+* Leave `deadline_s` unset or configure `WM.budget_hops=None` / `WM.budget_tokens=None` to keep the behaviour unbounded—guardrails are entirely opt-in.
 * Tests in `tests/test_budgets.py` cover both deadline short-circuiting and token budget enforcement, complementing the hop and deadline checks exercised in `tests/test_controller.py`.
 * Example: `examples/controller_multihop/` demonstrates configuring deadlines, hop limits, and token budgets together in a looping controller.
 

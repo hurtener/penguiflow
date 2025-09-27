@@ -10,7 +10,7 @@ Runtime overview
 - Per-trace cancellation: `await flow.cancel(trace_id)` requests cancellation and raises `TraceCancelled` inside the affected
   nodes/subflows. Cancellation is idempotent and only impacts the matching trace.
 - `Message.deadline_s` guards wall-clock execution; the runtime checks deadlines before invoking nodes and sends
-  `FinalAnswer("Deadline exceeded")` to Rookery when expired.
+  `FinalAnswer("Deadline exceeded")` to Rookery when expired. Leave it unset when no wall-clock limit is needed.
 - Messages travel as Pydantic `Message` objects (payload + headers + trace metadata).
 
 Nodes & policies
@@ -44,6 +44,7 @@ Deadlines & budgets
 - Controller payload `WM` now tracks `tokens_used` and optional `budget_tokens` in addition to `hops`/`budget_hops`.
 - When `WM.tokens_used >= WM.budget_tokens` (if configured) or the hop budget is reached, PenguiFlow emits a terminal
   `FinalAnswer` (`"Token budget exhausted"` / `"Hop budget exhausted"`) to Rookery without another controller invocation.
+- Set `WM.budget_hops=None` / `WM.budget_tokens=None` to disable those guardrails for an unbounded loop.
 
 Patterns (`penguiflow.patterns`)
 --------------------------------
@@ -71,8 +72,8 @@ Controller loop models (`penguiflow.types`)
 - `Thought`: optional planning artifact (`steps`, `rationale`, `done`).
 - `PlanStep`: enumerated tool/action descriptions.
 - `FinalAnswer`: terminal payload (`text`, `citations`).
-- Runtime auto-increments `WM.hops`, enforces hop/token budgets, and checks deadlines before re-enqueueing controller messages;
-  violations automatically become `FinalAnswer` messages with the exhaustion reason.
+- Runtime auto-increments `WM.hops`, enforces hop/token budgets when present, and checks deadlines before re-enqueueing
+  controller messages; violations automatically become `FinalAnswer` messages with the exhaustion reason.
 
 Playbooks
 ---------

@@ -74,3 +74,35 @@ async def test_controller_enforces_token_budget() -> None:
     assert final.text == "Token budget exhausted"
 
     await flow.stop()
+
+
+@pytest.mark.asyncio
+async def test_controller_allows_unbounded_when_budget_disabled() -> None:
+    async def controller(msg: Message, ctx) -> Message:
+        wm = msg.payload
+        assert isinstance(wm, WM)
+        updated = wm.model_copy(update={"hops": wm.hops + 1})
+        return msg.model_copy(update={"payload": updated})
+
+    controller_node = Node(
+        controller,
+        name="controller",
+        allow_cycle=True,
+        policy=NodePolicy(validate="none"),
+    )
+
+    flow = create(controller_node.to(controller_node))
+    flow.run()
+
+    wm = WM(query="q", budget_hops=None)
+    message = Message(payload=wm, headers=Headers(tenant="acme"))
+
+    for expected_hops in range(1, 6):
+        await flow.emit(message)
+        message = await flow.fetch()
+        assert isinstance(message, Message)
+        payload = message.payload
+        assert isinstance(payload, WM)
+        assert payload.hops == expected_hops
+
+    await flow.stop()

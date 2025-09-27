@@ -922,7 +922,10 @@ class PenguiFlow:
                     final_msg = result.model_copy(update={"payload": final})
                     return "rookery", final_msg, None
 
-                if payload.hops + 1 >= payload.budget_hops:
+                if (
+                    payload.budget_hops is not None
+                    and payload.hops + 1 >= payload.budget_hops
+                ):
                     final = FinalAnswer(text=BUDGET_EXCEEDED_TEXT)
                     final_msg = result.model_copy(update={"payload": final})
                     return "rookery", final_msg, None

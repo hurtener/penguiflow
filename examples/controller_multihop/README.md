@@ -17,6 +17,8 @@ models shipped with PenguiFlow.
 The runtime increments `WM.hops`, tracks `WM.tokens_used`, and checks the configured
 `budget_hops`, `budget_tokens`, and `Message.deadline_s`. If any limit is exceeded,
 PenguiFlow returns a `FinalAnswer` with an exhaustion message instead of looping forever.
+Leave any of these fields unset/`None` when you want the loop to run without that
+particular guardrail.
 
 ## Run it
 
@@ -31,4 +33,5 @@ Token budget exhausted
 ```
 
 Try changing `budget_hops`, `budget_tokens`, or adding simulated latency in the controller
-to see how the runtime enforces deadlines and budgets.
+to see how the runtime enforces deadlines and budgets—or set them to `None` to observe the
+unbounded behaviour.
