@@ -35,9 +35,10 @@ contributors understand how the pieces fit together.
 * **Controller loops**: when a node emits a `Message` whose payload is a `WM`, the runtime
   increments hop counters, enforces budgets, and re-enqueues the message back to the
   controller. Returning a `FinalAnswer` short-circuits to Rookery.
-* **Playbooks**: `call_playbook` accepts a factory that returns a `(PenguiFlow, registry)`
-  pair, runs it, emits the parent message (preserving headers + trace ID), and returns the
-  first payload produced by the subflow.
+* **Playbooks**: `Context.call_playbook` accepts a factory that returns a `(PenguiFlow,
+  registry)` pair, runs it, emits the parent message (preserving headers + trace ID),
+  mirrors cancellation signals to the subflow, and returns the first payload produced by
+  the subflow.
 
 ## Validation & typing
 
@@ -57,10 +58,11 @@ Each helper is a regular node and can be combined with hand-authored nodes seaml
 
 ## Middleware & logging
 
-`_emit_event` emits structured dictionaries with fields:
-`{ts, event, node_name, node_id, trace_id, latency_ms, q_depth_in, attempt, ...}`. Any
-middleware added via `flow.add_middleware` receives these events and can fan them out to
-logging frameworks, observability tools, or metrics backends.
+`_emit_event` emits structured dictionaries with fields such as
+`{ts, event, node_name, node_id, trace_id, latency_ms, q_depth_in, q_depth_out, outgoing,
+trace_pending, trace_inflight, ...}`. Any middleware added via `flow.add_middleware`
+receives these events and can fan them out to logging frameworks, observability tools, or
+metrics backends.
 
 ## Testing & examples
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from penguiflow import Headers, Message, Node, NodePolicy, call_playbook, create
+from penguiflow import Headers, Message, Node, NodePolicy, create
 
 
 def build_retrieval_playbook() -> tuple[Any, Any]:
@@ -36,7 +36,7 @@ def build_retrieval_playbook() -> tuple[Any, Any]:
 
 async def controller(msg: Message, ctx) -> Message:
     request = msg.model_copy(update={"payload": {"query": msg.payload}})
-    summary = await call_playbook(build_retrieval_playbook, request)
+    summary = await ctx.call_playbook(build_retrieval_playbook, request)
     return msg.model_copy(update={"payload": summary})
 
 

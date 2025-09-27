@@ -11,6 +11,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -92,6 +93,12 @@ class Context:
     @property
     def owner(self) -> Node | Endpoint:
         return self._owner
+
+    @property
+    def runtime(self) -> PenguiFlow | None:
+        """Return the runtime this context is attached to, if any."""
+
+        return self._runtime
 
     def add_incoming_floe(self, floe: Floe) -> None:
         if floe.source is None:
@@ -257,6 +264,25 @@ class Context:
 
     def queue_depth_in(self) -> int:
         return sum(floe.queue.qsize() for floe in self._incoming.values())
+
+    def queue_depth_out(self) -> int:
+        return sum(floe.queue.qsize() for floe in self._outgoing.values())
+
+    async def call_playbook(
+        self,
+        playbook: PlaybookFactory,
+        parent_msg: Message,
+        *,
+        timeout: float | None = None,
+    ) -> Any:
+        """Launch a subflow playbook using the current runtime for propagation."""
+
+        return await call_playbook(
+            playbook,
+            parent_msg,
+            timeout=timeout,
+            runtime=self._runtime,
+        )
 
 
 class PenguiFlow:
@@ -908,10 +934,20 @@ class PenguiFlow:
             "trace_id": trace_id,
             "latency_ms": latency_ms,
             "q_depth_in": context.queue_depth_in(),
+            "q_depth_out": context.queue_depth_out(),
             "attempt": attempt,
+            "outgoing": context.outgoing_count(),
+            "queue_maxsize": self._queue_maxsize,
         }
         if extra:
             payload.update(extra)
+
+        if trace_id is not None:
+            payload["trace_pending"] = self._trace_counts.get(trace_id, 0)
+            payload["trace_inflight"] = len(
+                self._trace_invocations.get(trace_id, set())
+            )
+            payload["trace_cancelled"] = self._is_trace_cancelled(trace_id)
 
         logger.log(level, event, extra=payload)
 
@@ -957,11 +993,34 @@ async def call_playbook(
     playbook: PlaybookFactory,
     parent_msg: Message,
     timeout: float | None = None,
+    *,
+    runtime: PenguiFlow | None = None,
 ) -> Any:
     """Execute a subflow playbook and return the first Rookery payload."""
 
     flow, registry = playbook()
     flow.run(registry=registry)
+
+    trace_id = getattr(parent_msg, "trace_id", None)
+    cancel_watch: asyncio.Task[None] | None = None
+
+    if runtime is not None and trace_id is not None:
+        parent_event = runtime._trace_events.setdefault(trace_id, asyncio.Event())
+
+        if parent_event.is_set():
+            with suppress(Exception):
+                await flow.cancel(trace_id)
+        else:
+
+            async def _mirror_cancel() -> None:
+                try:
+                    await parent_event.wait()
+                except asyncio.CancelledError:
+                    return
+                with suppress(Exception):
+                    await flow.cancel(trace_id)
+
+            cancel_watch = asyncio.create_task(_mirror_cancel())
 
     try:
         await flow.emit(parent_msg)
@@ -973,7 +1032,20 @@ async def call_playbook(
         if isinstance(result_msg, Message):
             return result_msg.payload
         return result_msg
+    except TraceCancelled:
+        if trace_id is not None:
+            with suppress(Exception):
+                await flow.cancel(trace_id)
+        raise
+    except asyncio.CancelledError:
+        if trace_id is not None:
+            with suppress(Exception):
+                await flow.cancel(trace_id)
+        raise
     finally:
+        if cancel_watch is not None:
+            cancel_watch.cancel()
+            await asyncio.gather(cancel_watch, return_exceptions=True)
         await asyncio.shield(flow.stop())
 
 
