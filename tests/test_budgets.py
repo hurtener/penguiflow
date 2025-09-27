@@ -45,6 +45,47 @@ async def test_deadline_prevents_node_execution() -> None:
 
 
 @pytest.mark.asyncio
+async def test_deadline_finalizes_when_first_node_has_successors() -> None:
+    ingress_calls = 0
+
+    async def ingress(msg: Message, ctx) -> Message:
+        nonlocal ingress_calls
+        ingress_calls += 1
+        return msg
+
+    async def downstream(msg: Message, ctx) -> Message:  # pragma: no cover - skipped
+        raise AssertionError("downstream should not execute when deadline is expired")
+
+    ingress_node = Node(ingress, name="ingress", policy=NodePolicy(validate="none"))
+    downstream_node = Node(
+        downstream, name="downstream", policy=NodePolicy(validate="none")
+    )
+
+    flow = create(
+        ingress_node.to(downstream_node),
+        downstream_node.to(),
+    )
+    flow.run()
+
+    expired = Message(
+        payload=WM(query="q"),
+        headers=Headers(tenant="acme"),
+        deadline_s=time.time() - 1,
+    )
+
+    await flow.emit(expired)
+    result = await flow.fetch()
+
+    assert isinstance(result, Message)
+    final = result.payload
+    assert isinstance(final, FinalAnswer)
+    assert final.text == "Deadline exceeded"
+    assert ingress_calls == 0
+
+    await flow.stop()
+
+
+@pytest.mark.asyncio
 async def test_controller_enforces_token_budget() -> None:
     async def controller(msg: Message, ctx) -> Message:
         wm = msg.payload
