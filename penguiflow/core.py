@@ -955,19 +955,38 @@ class PenguiFlow:
                     final_msg = result.model_copy(update={"payload": final})
                     return "rookery", final_msg, None, False
 
+                incoming_hops: int | None = None
+                if (
+                    isinstance(incoming, Message)
+                    and isinstance(incoming.payload, WM)
+                ):
+                    incoming_hops = incoming.payload.hops
+
+                current_hops = payload.hops
+                if incoming_hops is not None and current_hops <= incoming_hops:
+                    next_hops = incoming_hops + 1
+                else:
+                    next_hops = current_hops
+
                 if (
                     payload.budget_hops is not None
-                    and payload.hops >= payload.budget_hops
+                    and next_hops >= payload.budget_hops
                 ):
                     final = FinalAnswer(text=BUDGET_EXCEEDED_TEXT)
                     final_msg = result.model_copy(update={"payload": final})
                     return "rookery", final_msg, None, False
 
+                if next_hops != current_hops:
+                    updated_payload = payload.model_copy(update={"hops": next_hops})
+                    prepared = result.model_copy(update={"payload": updated_payload})
+                else:
+                    prepared = result
+
                 stream_updates = (
                     payload.budget_hops is None
                     and payload.budget_tokens is None
                 )
-                return "context", result, [node], stream_updates
+                return "context", prepared, [node], stream_updates
 
             if isinstance(payload, FinalAnswer):
                 return "rookery", result, None, False
