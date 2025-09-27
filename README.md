@@ -31,6 +31,7 @@ It provides:
 * **Streaming chunks** (LLM-style token emission with `Context.emit_chunk`)
 * **Dynamic loops** (controller nodes)
 * **Runtime playbooks** (callable subflows with shared metadata)
+* **Per-trace cancellation** (`PenguiFlow.cancel` with `TraceCancelled` surfacing in nodes)
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
@@ -161,7 +162,33 @@ await flow.stop()
 pip install -e ./penguiflow
 ```
 
-Requires **Python 3.12+**.
+Requires **Python 3.11+**.
+
+---
+
+## 🆕 Implemented v2 Features
+
+### Streaming chunks
+
+Phase 1 delivered token-level streaming without sacrificing backpressure or ordering guarantees.
+Use `Context.emit_chunk` to fan streaming tokens to downstream nodes. The helper automatically:
+
+* Builds `StreamChunk` payloads with the parent message's routing headers and trace metadata.
+* Manages monotonically increasing sequence numbers per `stream_id` (defaulting to the parent trace).
+* Awaits per-trace capacity via the runtime before delivering follow-up chunks so slow consumers don't starve other traces.
+
+See `tests/test_streaming.py` for coverage and `examples/streaming_llm/` for an end-to-end mock that feeds an SSE/WebSocket sink.
+
+### Per-trace cancellation
+
+Phase 2 introduces cancellation scoped to a single trace:
+
+* Call `PenguiFlow.cancel(trace_id)` to request cancellation; the method is idempotent and resolves immediately when nothing is running.
+* In-flight node invocations for that trace raise `TraceCancelled`, letting node authors clean up resources or abort retries.
+* Streaming emitters and regular messages honor per-trace queue capacity, so cancellation drains outstanding work and unblocks producers safely.
+* Lifecycle hooks emit `trace_cancel_start` and `trace_cancel_finish` events so observability backends can track latency to abort.
+
+The behaviour is enforced by `tests/test_cancel.py`, ensuring other traces continue unaffected while the cancelled trace unwinds cleanly.
 
 ## 🧭 Repo Structure
 
