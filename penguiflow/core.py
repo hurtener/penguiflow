@@ -24,6 +24,7 @@ logger = logging.getLogger("penguiflow.core")
 
 BUDGET_EXCEEDED_TEXT = "Hop budget exhausted"
 DEADLINE_EXCEEDED_TEXT = "Deadline exceeded"
+TOKEN_BUDGET_EXCEEDED_TEXT = "Token budget exhausted"
 
 DEFAULT_QUEUE_MAXSIZE = 64
 
@@ -417,6 +418,21 @@ class PenguiFlow:
             try:
                 message = await context.fetch()
                 trace_id = self._get_trace_id(message)
+                if self._deadline_expired(message):
+                    await self._emit_event(
+                        event="deadline_skip",
+                        node=node,
+                        context=context,
+                        trace_id=trace_id,
+                        attempt=0,
+                        latency_ms=None,
+                        level=logging.INFO,
+                        extra={"deadline_s": getattr(message, "deadline_s", None)},
+                    )
+                    if isinstance(message, Message):
+                        await self._handle_deadline_expired(context, message)
+                    await self._finalize_message(message)
+                    continue
                 if trace_id is not None and self._is_trace_cancelled(trace_id):
                     await self._emit_event(
                         event="trace_cancel_drop",
@@ -898,6 +914,14 @@ class PenguiFlow:
                     final_msg = result.model_copy(update={"payload": final})
                     return "rookery", final_msg, None
 
+                if (
+                    payload.budget_tokens is not None
+                    and payload.tokens_used >= payload.budget_tokens
+                ):
+                    final = FinalAnswer(text=TOKEN_BUDGET_EXCEEDED_TEXT)
+                    final_msg = result.model_copy(update={"payload": final})
+                    return "rookery", final_msg, None
+
                 if payload.hops + 1 >= payload.budget_hops:
                     final = FinalAnswer(text=BUDGET_EXCEEDED_TEXT)
                     final_msg = result.model_copy(update={"payload": final})
@@ -911,6 +935,20 @@ class PenguiFlow:
                 return "rookery", result, None
 
         return "context", result, None
+
+    def _deadline_expired(self, message: Any) -> bool:
+        if isinstance(message, Message) and message.deadline_s is not None:
+            return time.time() > message.deadline_s
+        return False
+
+    async def _handle_deadline_expired(
+        self, context: Context, message: Message
+    ) -> None:
+        payload = message.payload
+        if not isinstance(payload, FinalAnswer):
+            payload = FinalAnswer(text=DEADLINE_EXCEEDED_TEXT)
+        final_msg = message.model_copy(update={"payload": payload})
+        await context.emit(final_msg, to=[ROOKERY])
 
     async def _emit_event(
         self,
