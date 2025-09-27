@@ -59,17 +59,35 @@ class Floe:
         self.queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=maxsize)
 
 
+class TraceCancelled(Exception):
+    """Raised when work for a specific trace_id is cancelled."""
+
+    def __init__(self, trace_id: str | None) -> None:
+        super().__init__(f"trace cancelled: {trace_id}")
+        self.trace_id = trace_id
+
+
 class Context:
     """Provides fetch/emit helpers for a node within a flow."""
 
-    __slots__ = ("_owner", "_incoming", "_outgoing", "_buffer", "_stream_seq")
+    __slots__ = (
+        "_owner",
+        "_incoming",
+        "_outgoing",
+        "_buffer",
+        "_stream_seq",
+        "_runtime",
+    )
 
-    def __init__(self, owner: Node | Endpoint) -> None:
+    def __init__(
+        self, owner: Node | Endpoint, runtime: "PenguiFlow" | None = None
+    ) -> None:
         self._owner = owner
         self._incoming: dict[Node | Endpoint, Floe] = {}
         self._outgoing: dict[Node | Endpoint, Floe] = {}
         self._buffer: deque[Any] = deque()
         self._stream_seq: dict[str, int] = {}
+        self._runtime = runtime
 
     @property
     def owner(self) -> Node | Endpoint:
@@ -112,13 +130,19 @@ class Context:
     async def emit(
         self, msg: Any, to: Node | Endpoint | Sequence[Node | Endpoint] | None = None
     ) -> None:
+        if self._runtime is None:
+            raise RuntimeError("Context is not attached to a running flow")
         for floe in self._resolve_targets(to, self._outgoing):
+            self._runtime._on_message_enqueued(msg)
             await floe.queue.put(msg)
 
     def emit_nowait(
         self, msg: Any, to: Node | Endpoint | Sequence[Node | Endpoint] | None = None
     ) -> None:
+        if self._runtime is None:
+            raise RuntimeError("Context is not attached to a running flow")
         for floe in self._resolve_targets(to, self._outgoing):
+            self._runtime._on_message_enqueued(msg)
             floe.queue.put_nowait(msg)
 
     async def emit_chunk(
@@ -141,6 +165,7 @@ class Context:
         """
 
         sid = stream_id or parent.trace_id
+        first_chunk = sid not in self._stream_seq
         if seq is None:
             next_seq = self._stream_seq.get(sid, -1) + 1
         else:
@@ -163,6 +188,13 @@ class Context:
             trace_id=parent.trace_id,
             deadline_s=parent.deadline_s,
         )
+
+        runtime = self._runtime
+        if runtime is None:
+            raise RuntimeError("Context is not attached to a running flow")
+
+        if not first_chunk:
+            await runtime._await_trace_capacity(sid, offset=1)
 
         await self.emit(message, to=to)
 
@@ -247,6 +279,10 @@ class PenguiFlow:
         self._running = False
         self._registry: Any | None = None
         self._middlewares: list[Middleware] = list(middlewares or [])
+        self._trace_counts: dict[str, int] = {}
+        self._trace_events: dict[str, asyncio.Event] = {}
+        self._trace_invocations: dict[str, set[asyncio.Task[Any]]] = {}
+        self._trace_capacity_waiters: dict[str, list[asyncio.Event]] = {}
 
         self._build_graph(adjacencies)
 
@@ -270,9 +306,9 @@ class PenguiFlow:
 
         # create contexts for nodes and endpoints
         for node in self._nodes:
-            self._contexts[node] = Context(node)
-        self._contexts[OPEN_SEA] = Context(OPEN_SEA)
-        self._contexts[ROOKERY] = Context(ROOKERY)
+            self._contexts[node] = Context(node, self)
+        self._contexts[OPEN_SEA] = Context(OPEN_SEA, self)
+        self._contexts[ROOKERY] = Context(ROOKERY, self)
 
         incoming: dict[Node, set[Node | Endpoint]] = {
             node: set() for node in self._nodes
@@ -354,7 +390,34 @@ class PenguiFlow:
         while True:
             try:
                 message = await context.fetch()
-                await self._execute_with_reliability(node, context, message)
+                trace_id = self._get_trace_id(message)
+                if trace_id is not None and self._is_trace_cancelled(trace_id):
+                    await self._emit_event(
+                        event="trace_cancel_drop",
+                        node=node,
+                        context=context,
+                        trace_id=trace_id,
+                        attempt=0,
+                        latency_ms=None,
+                        level=logging.INFO,
+                    )
+                    await self._finalize_message(message)
+                    continue
+
+                try:
+                    await self._execute_with_reliability(node, context, message)
+                except TraceCancelled:
+                    await self._emit_event(
+                        event="node_trace_cancelled",
+                        node=node,
+                        context=context,
+                        trace_id=trace_id,
+                        attempt=0,
+                        latency_ms=None,
+                        level=logging.INFO,
+                    )
+                finally:
+                    await self._finalize_message(message)
             except asyncio.CancelledError:
                 await self._emit_event(
                     event="node_cancelled",
@@ -374,6 +437,13 @@ class PenguiFlow:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        self._trace_counts.clear()
+        self._trace_events.clear()
+        self._trace_invocations.clear()
+        for waiters in self._trace_capacity_waiters.values():
+            for waiter in waiters:
+                waiter.set()
+        self._trace_capacity_waiters.clear()
         self._running = False
 
     async def emit(self, msg: Any, to: Node | Sequence[Node] | None = None) -> None:
@@ -406,10 +476,14 @@ class PenguiFlow:
         )
 
     async def fetch(self, from_: Node | Sequence[Node] | None = None) -> Any:
-        return await self._contexts[ROOKERY].fetch(from_)
+        result = await self._contexts[ROOKERY].fetch(from_)
+        await self._finalize_message(result)
+        return result
 
     async def fetch_any(self, from_: Node | Sequence[Node] | None = None) -> Any:
-        return await self._contexts[ROOKERY].fetch_any(from_)
+        result = await self._contexts[ROOKERY].fetch_any(from_)
+        await self._finalize_message(result)
+        return result
 
     async def _execute_with_reliability(
         self,
@@ -421,6 +495,9 @@ class PenguiFlow:
         attempt = 0
 
         while True:
+            if trace_id is not None and self._is_trace_cancelled(trace_id):
+                raise TraceCancelled(trace_id)
+
             start = time.perf_counter()
             await self._emit_event(
                 event="node_start",
@@ -433,11 +510,12 @@ class PenguiFlow:
             )
 
             try:
-                invocation = node.invoke(message, context, registry=self._registry)
-                if node.policy.timeout_s is not None:
-                    result = await asyncio.wait_for(invocation, node.policy.timeout_s)
-                else:
-                    result = await invocation
+                result = await self._invoke_node(
+                    node,
+                    context,
+                    message,
+                    trace_id,
+                )
 
                 if result is not None:
                     destination, prepared, targets = self._controller_postprocess(
@@ -462,6 +540,8 @@ class PenguiFlow:
                     level=logging.INFO,
                 )
                 return
+            except TraceCancelled:
+                raise
             except asyncio.CancelledError:
                 raise
             except TimeoutError as exc:
@@ -547,6 +627,233 @@ class PenguiFlow:
             delay = min(delay, policy.max_backoff)
         return delay
 
+    async def _invoke_node(
+        self,
+        node: Node,
+        context: Context,
+        message: Any,
+        trace_id: str | None,
+    ) -> Any:
+        invocation = node.invoke(message, context, registry=self._registry)
+        timeout = node.policy.timeout_s
+
+        if trace_id is None:
+            if timeout is None:
+                return await invocation
+            return await asyncio.wait_for(invocation, timeout)
+
+        return await self._await_invocation(node, invocation, trace_id, timeout)
+
+    def _register_invocation_task(self, trace_id: str, task: asyncio.Task[Any]) -> None:
+        tasks = self._trace_invocations.setdefault(trace_id, set())
+        tasks.add(task)
+
+        def _cleanup(finished: asyncio.Task[Any]) -> None:
+            remaining = self._trace_invocations.get(trace_id)
+            if remaining is None:
+                return
+            remaining.discard(finished)
+            if not remaining:
+                self._trace_invocations.pop(trace_id, None)
+
+        task.add_done_callback(_cleanup)
+
+    async def _await_invocation(
+        self,
+        node: Node,
+        invocation: Any,
+        trace_id: str,
+        timeout: float | None,
+    ) -> Any:
+        invocation_task = asyncio.create_task(invocation)
+        self._register_invocation_task(trace_id, invocation_task)
+
+        cancel_event = self._trace_events.get(trace_id)
+        cancel_waiter: asyncio.Task[None] | None = None
+        if cancel_event is not None:
+            cancel_waiter = asyncio.create_task(cancel_event.wait())
+
+        timeout_task: asyncio.Task[None] | None = None
+        if timeout is not None:
+            timeout_task = asyncio.create_task(asyncio.sleep(timeout))
+
+        wait_tasks: set[asyncio.Task[Any]] = {invocation_task}
+        if cancel_waiter is not None:
+            wait_tasks.add(cancel_waiter)
+        if timeout_task is not None:
+            wait_tasks.add(timeout_task)
+
+        pending: set[asyncio.Task[Any]] = set()
+        try:
+            done, pending = await asyncio.wait(
+                wait_tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+
+            if invocation_task in done:
+                if invocation_task.cancelled():
+                    raise TraceCancelled(trace_id)
+                return invocation_task.result()
+
+            if cancel_waiter is not None and cancel_waiter in done:
+                invocation_task.cancel()
+                await asyncio.gather(invocation_task, return_exceptions=True)
+                raise TraceCancelled(trace_id)
+
+            if timeout_task is not None and timeout_task in done:
+                invocation_task.cancel()
+                await asyncio.gather(invocation_task, return_exceptions=True)
+                raise asyncio.TimeoutError
+
+            raise RuntimeError("node invocation wait exited without result")
+        except asyncio.CancelledError:
+            invocation_task.cancel()
+            await asyncio.gather(invocation_task, return_exceptions=True)
+            if cancel_waiter is not None:
+                cancel_waiter.cancel()
+            if timeout_task is not None:
+                timeout_task.cancel()
+            await asyncio.gather(
+                *(task for task in (cancel_waiter, timeout_task) if task is not None),
+                return_exceptions=True,
+            )
+            raise
+        finally:
+            for task in pending:
+                task.cancel()
+            watchers = [
+                task for task in (cancel_waiter, timeout_task) if task is not None
+            ]
+            for watcher in watchers:
+                watcher.cancel()
+            if watchers:
+                await asyncio.gather(*watchers, return_exceptions=True)
+
+    def _get_trace_id(self, message: Any) -> str | None:
+        return getattr(message, "trace_id", None)
+
+    def _is_trace_cancelled(self, trace_id: str) -> bool:
+        event = self._trace_events.get(trace_id)
+        return event.is_set() if event is not None else False
+
+    def _on_message_enqueued(self, message: Any) -> None:
+        trace_id = self._get_trace_id(message)
+        if trace_id is None:
+            return
+        self._trace_counts[trace_id] = self._trace_counts.get(trace_id, 0) + 1
+        self._trace_events.setdefault(trace_id, asyncio.Event())
+
+    async def _finalize_message(self, message: Any) -> None:
+        trace_id = self._get_trace_id(message)
+        if trace_id is None:
+            return
+
+        remaining = self._trace_counts.get(trace_id)
+        if remaining is None:
+            return
+
+        remaining -= 1
+        if remaining <= 0:
+            self._trace_counts.pop(trace_id, None)
+            event = self._trace_events.pop(trace_id, None)
+            if event is not None and event.is_set():
+                await self._emit_event(
+                    event="trace_cancel_finish",
+                    node=ROOKERY,
+                    context=self._contexts[ROOKERY],
+                    trace_id=trace_id,
+                    attempt=0,
+                    latency_ms=None,
+                    level=logging.INFO,
+                )
+            self._notify_trace_capacity(trace_id)
+        else:
+            self._trace_counts[trace_id] = remaining
+            if self._queue_maxsize <= 0 or remaining <= self._queue_maxsize:
+                self._notify_trace_capacity(trace_id)
+
+    async def _drop_trace_from_floe(self, floe: Floe, trace_id: str) -> None:
+        queue = floe.queue
+        retained: list[Any] = []
+
+        while True:
+            try:
+                item = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            if self._get_trace_id(item) == trace_id:
+                await self._finalize_message(item)
+                continue
+
+            retained.append(item)
+
+        for item in retained:
+            queue.put_nowait(item)
+
+    async def cancel(self, trace_id: str) -> bool:
+        if not self._running:
+            raise RuntimeError("PenguiFlow is not running")
+
+        active = trace_id in self._trace_counts or trace_id in self._trace_invocations
+        if not active:
+            return False
+
+        event = self._trace_events.setdefault(trace_id, asyncio.Event())
+        if not event.is_set():
+            event.set()
+            await self._emit_event(
+                event="trace_cancel_start",
+                node=OPEN_SEA,
+                context=self._contexts[OPEN_SEA],
+                trace_id=trace_id,
+                attempt=0,
+                latency_ms=None,
+                level=logging.INFO,
+                extra={"pending": self._trace_counts.get(trace_id, 0)},
+            )
+        else:
+            event.set()
+
+        for floe in list(self._floes):
+            await self._drop_trace_from_floe(floe, trace_id)
+
+        tasks = list(self._trace_invocations.get(trace_id, set()))
+        for task in tasks:
+            task.cancel()
+
+        return True
+
+    async def _await_trace_capacity(self, trace_id: str, *, offset: int = 0) -> None:
+        if self._queue_maxsize <= 0:
+            return
+
+        while True:
+            pending = self._trace_counts.get(trace_id, 0)
+            effective = pending - offset if pending > offset else 0
+            if effective < self._queue_maxsize:
+                return
+            waiter = asyncio.Event()
+            waiters = self._trace_capacity_waiters.setdefault(trace_id, [])
+            waiters.append(waiter)
+            try:
+                await waiter.wait()
+            finally:
+                waiters = self._trace_capacity_waiters.get(trace_id)
+                if waiters is not None:
+                    try:
+                        waiters.remove(waiter)
+                    except ValueError:
+                        pass
+                    if not waiters:
+                        self._trace_capacity_waiters.pop(trace_id, None)
+
+    def _notify_trace_capacity(self, trace_id: str) -> None:
+        waiters = self._trace_capacity_waiters.pop(trace_id, None)
+        if not waiters:
+            return
+        for waiter in waiters:
+            waiter.set()
+
     def _controller_postprocess(
         self,
         node: Node,
@@ -581,7 +888,7 @@ class PenguiFlow:
         self,
         *,
         event: str,
-        node: Node,
+        node: Node | Endpoint,
         context: Context,
         trace_id: str | None,
         attempt: int,
@@ -589,11 +896,13 @@ class PenguiFlow:
         level: int,
         extra: dict[str, Any] | None = None,
     ) -> None:
+        node_name = getattr(node, "name", None)
+        node_id = getattr(node, "node_id", node_name)
         payload: dict[str, Any] = {
             "ts": time.time(),
             "event": event,
-            "node_name": node.name,
-            "node_id": node.node_id,
+            "node_name": node_name,
+            "node_id": node_id,
             "trace_id": trace_id,
             "latency_ms": latency_ms,
             "q_depth_in": context.queue_depth_in(),
@@ -612,8 +921,8 @@ class PenguiFlow:
                     "middleware_error",
                     extra={
                         "event": "middleware_error",
-                        "node_name": node.name,
-                        "node_id": node.node_id,
+                        "node_name": node_name,
+                        "node_id": node_id,
                         "exception": exc,
                     },
                 )
