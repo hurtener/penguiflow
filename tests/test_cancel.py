@@ -1,5 +1,6 @@
 import asyncio
 from collections import Counter
+from typing import Any
 
 import pytest
 
@@ -15,6 +16,7 @@ async def test_cancel_trace_stops_inflight_run_without_affecting_others() -> Non
     cancel_finished = asyncio.Event()
     processed: list[str] = []
     cancel_events: Counter[str] = Counter()
+    payloads: dict[str, dict[str, object]] = {}
 
     async def slow(message: Message, _ctx) -> Message:
         if message.payload == "cancel-me":
@@ -35,13 +37,14 @@ async def test_cancel_trace_stops_inflight_run_without_affecting_others() -> Non
 
     flow = create(slow_node.to(sink_node))
 
-    async def recorder(event: str, _payload: dict[str, object]) -> None:
+    async def recorder(event: str, payload: dict[str, object]) -> None:
         if event == "trace_cancel_start":
             cancel_started.set()
         if event == "trace_cancel_finish":
             cancel_finished.set()
         if event.startswith("trace_cancel"):
             cancel_events[event] += 1
+            payloads[event] = payload
 
     flow.add_middleware(recorder)
     flow.run()
@@ -69,7 +72,82 @@ async def test_cancel_trace_stops_inflight_run_without_affecting_others() -> Non
         {"trace_cancel_start": 1, "trace_cancel_finish": 1}
     )
 
+    start_payload = payloads["trace_cancel_start"]
+    finish_payload = payloads["trace_cancel_finish"]
+
+    assert start_payload["trace_pending"] >= 1
+    assert start_payload["trace_inflight"] >= 1
+    assert start_payload["trace_cancelled"] is True
+    assert start_payload["q_depth_out"] >= 0
+    assert start_payload["outgoing"] == 1
+
+    assert finish_payload["trace_pending"] == 0
+    assert finish_payload["trace_inflight"] == 0
+    assert finish_payload["trace_cancelled"] is False
+
     assert await flow.cancel(cancel_msg.trace_id) is False
+
+    await flow.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_propagates_to_subflow() -> None:
+    started = asyncio.Event()
+    sub_cancelled = asyncio.Event()
+    release = asyncio.Event()
+    processed: list[str] = []
+
+    async def sub_worker(message: Message, _ctx) -> Message:
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            sub_cancelled.set()
+            raise
+        return message
+
+    def build_subflow() -> tuple[Any, Any]:
+        node = Node(sub_worker, name="sub", policy=NodePolicy(validate="none"))
+        return create(node.to()), None
+
+    async def controller(message: Message, ctx) -> Message:
+        await ctx.call_playbook(build_subflow, message)
+        return message
+
+    async def sink(message: Message, _ctx) -> str:
+        processed.append(str(message.payload))
+        return str(message.payload)
+
+    controller_node = Node(
+        controller,
+        name="controller",
+        policy=NodePolicy(validate="none"),
+    )
+    sink_node = Node(
+        sink,
+        name="sink",
+        policy=NodePolicy(validate="none"),
+    )
+
+    flow = create(controller_node.to(sink_node))
+    flow.run()
+
+    cancel_msg = Message(payload="cancel-me", headers=Headers(tenant="demo"))
+    safe_msg = Message(payload="safe", headers=Headers(tenant="demo"))
+
+    await flow.emit(cancel_msg)
+    await started.wait()
+
+    assert await flow.cancel(cancel_msg.trace_id) is True
+    await sub_cancelled.wait()
+
+    release.set()
+
+    await flow.emit(safe_msg)
+    result = await flow.fetch()
+    assert result == "safe"
+
+    assert processed == ["safe"]
 
     await flow.stop()
 

@@ -340,20 +340,21 @@ easy to surface guardrails to downstream consumers.
 ### Playbooks & Subflows
 
 Sometimes a controller or router needs to execute a **mini flow** — for example,
-retrieval → rerank → compress — without polluting the global topology. `call_playbook`
-spawns a brand-new `PenguiFlow` on demand and wires it into the parent message context:
+retrieval → rerank → compress — without polluting the global topology.
+`Context.call_playbook` spawns a brand-new `PenguiFlow` on demand and wires it into
+the parent message context:
 
 - Trace IDs and headers are reused so observability stays intact.
-- The helper respects optional timeouts and always stops the subflow (even on cancel).
+- The helper respects optional timeouts, mirrors cancellation to the subflow, and always
+  stops it (even on cancel).
 - The first payload emitted to the playbook's Rookery is returned to the caller,
   allowing you to treat subflows as normal async functions.
 
 ```python
-from penguiflow import call_playbook
 from penguiflow.types import Message
 
 async def controller(msg: Message, ctx) -> Message:
-    playbook_result = await call_playbook(build_retrieval_playbook, msg)
+    playbook_result = await ctx.call_playbook(build_retrieval_playbook, msg)
     return msg.model_copy(update={"payload": playbook_result})
 ```
 
@@ -378,6 +379,9 @@ print(flow_to_mermaid(flow, direction="LR"))
 ## 🛡️ Reliability & Observability
 
 * **NodePolicy**: set validation scope plus per-node timeout, retries, and backoff curves.
+* **Per-trace metrics**: cancellation events now include `trace_pending`,
+  `trace_inflight`, `q_depth_in`, `q_depth_out`, and node fan-out counts for richer
+  observability.
 * **Structured logs**: enrich every node event with `{ts, trace_id, node_name, event, latency_ms, q_depth_in, attempt}`.
 * **Middleware hooks**: subscribe observers (e.g., MLflow) to the structured event stream.
 * See `examples/reliability_middleware/` for a concrete timeout + retry walkthrough.
@@ -440,6 +444,7 @@ pytest -q
 * `examples/controller_multihop/`: dynamic multi-hop agent loop.
 * `examples/reliability_middleware/`: retries, timeouts, and middleware hooks.
 * `examples/playbook_retrieval/`: retrieval → rerank → compress playbook.
+* `examples/trace_cancel/`: per-trace cancellation propagating into a playbook.
 * `examples/streaming_llm/`: mock LLM emitting streaming chunks to an SSE sink.
 
 ---
