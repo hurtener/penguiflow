@@ -24,6 +24,7 @@ logger = logging.getLogger("penguiflow.core")
 
 BUDGET_EXCEEDED_TEXT = "Hop budget exhausted"
 DEADLINE_EXCEEDED_TEXT = "Deadline exceeded"
+TOKEN_BUDGET_EXCEEDED_TEXT = "Token budget exhausted"
 
 DEFAULT_QUEUE_MAXSIZE = 64
 
@@ -309,6 +310,7 @@ class PenguiFlow:
         self._trace_events: dict[str, asyncio.Event] = {}
         self._trace_invocations: dict[str, set[asyncio.Future[Any]]] = {}
         self._trace_capacity_waiters: dict[str, list[asyncio.Event]] = {}
+        self._latest_wm_hops: dict[str, int] = {}
 
         self._build_graph(adjacencies)
 
@@ -417,6 +419,21 @@ class PenguiFlow:
             try:
                 message = await context.fetch()
                 trace_id = self._get_trace_id(message)
+                if self._deadline_expired(message):
+                    await self._emit_event(
+                        event="deadline_skip",
+                        node=node,
+                        context=context,
+                        trace_id=trace_id,
+                        attempt=0,
+                        latency_ms=None,
+                        level=logging.INFO,
+                        extra={"deadline_s": getattr(message, "deadline_s", None)},
+                    )
+                    if isinstance(message, Message):
+                        await self._handle_deadline_expired(context, message)
+                    await self._finalize_message(message)
+                    continue
                 if trace_id is not None and self._is_trace_cancelled(trace_id):
                     await self._emit_event(
                         event="trace_cancel_drop",
@@ -473,9 +490,21 @@ class PenguiFlow:
         self._running = False
 
     async def emit(self, msg: Any, to: Node | Sequence[Node] | None = None) -> None:
+        if isinstance(msg, Message):
+            payload = msg.payload
+            if isinstance(payload, WM):
+                last = self._latest_wm_hops.get(msg.trace_id)
+                if last is not None and payload.hops == last:
+                    return
         await self._contexts[OPEN_SEA].emit(msg, to)
 
     def emit_nowait(self, msg: Any, to: Node | Sequence[Node] | None = None) -> None:
+        if isinstance(msg, Message):
+            payload = msg.payload
+            if isinstance(payload, WM):
+                last = self._latest_wm_hops.get(msg.trace_id)
+                if last is not None and payload.hops == last:
+                    return
         self._contexts[OPEN_SEA].emit_nowait(msg, to)
 
     async def emit_chunk(
@@ -544,15 +573,34 @@ class PenguiFlow:
                 )
 
                 if result is not None:
-                    destination, prepared, targets = self._controller_postprocess(
+                    (
+                        destination,
+                        prepared,
+                        targets,
+                        deliver_rookery,
+                    ) = self._controller_postprocess(
                         node, context, message, result
                     )
 
+                    if deliver_rookery:
+                        rookery_msg = (
+                            prepared.model_copy(deep=True)
+                            if isinstance(prepared, Message)
+                            else prepared
+                        )
+                        await self._emit_to_rookery(
+                            rookery_msg, source=context.owner
+                        )
+
                     if destination == "skip":
                         continue
+
                     if destination == "rookery":
-                        await context.emit(prepared, to=[ROOKERY])
+                        await self._emit_to_rookery(
+                            prepared, source=context.owner
+                        )
                         continue
+
                     await context.emit(prepared, to=targets)
 
                 latency = (time.perf_counter() - start) * 1000
@@ -794,6 +842,7 @@ class PenguiFlow:
                     level=logging.INFO,
                 )
             self._notify_trace_capacity(trace_id)
+            self._latest_wm_hops.pop(trace_id, None)
         else:
             self._trace_counts[trace_id] = remaining
             if self._queue_maxsize <= 0 or remaining <= self._queue_maxsize:
@@ -888,7 +937,7 @@ class PenguiFlow:
         context: Context,
         incoming: Any,
         result: Any,
-    ) -> tuple[str, Any, list[Node] | None]:
+    ) -> tuple[str, Any, list[Node] | None, bool]:
         if isinstance(result, Message):
             payload = result.payload
             if isinstance(payload, WM):
@@ -896,21 +945,95 @@ class PenguiFlow:
                 if result.deadline_s is not None and now > result.deadline_s:
                     final = FinalAnswer(text=DEADLINE_EXCEEDED_TEXT)
                     final_msg = result.model_copy(update={"payload": final})
-                    return "rookery", final_msg, None
+                    return "rookery", final_msg, None, False
 
-                if payload.hops + 1 >= payload.budget_hops:
+                if (
+                    payload.budget_tokens is not None
+                    and payload.tokens_used >= payload.budget_tokens
+                ):
+                    final = FinalAnswer(text=TOKEN_BUDGET_EXCEEDED_TEXT)
+                    final_msg = result.model_copy(update={"payload": final})
+                    return "rookery", final_msg, None, False
+
+                incoming_hops: int | None = None
+                if (
+                    isinstance(incoming, Message)
+                    and isinstance(incoming.payload, WM)
+                ):
+                    incoming_hops = incoming.payload.hops
+
+                current_hops = payload.hops
+                if incoming_hops is not None and current_hops <= incoming_hops:
+                    next_hops = incoming_hops + 1
+                else:
+                    next_hops = current_hops
+
+                if (
+                    payload.budget_hops is not None
+                    and next_hops >= payload.budget_hops
+                ):
                     final = FinalAnswer(text=BUDGET_EXCEEDED_TEXT)
                     final_msg = result.model_copy(update={"payload": final})
-                    return "rookery", final_msg, None
+                    return "rookery", final_msg, None, False
 
-                updated_payload = payload.model_copy(update={"hops": payload.hops + 1})
-                updated_msg = result.model_copy(update={"payload": updated_payload})
-                return "context", updated_msg, [node]
+                if next_hops != current_hops:
+                    updated_payload = payload.model_copy(update={"hops": next_hops})
+                    prepared = result.model_copy(update={"payload": updated_payload})
+                else:
+                    prepared = result
+
+                stream_updates = (
+                    payload.budget_hops is None
+                    and payload.budget_tokens is None
+                )
+                return "context", prepared, [node], stream_updates
 
             if isinstance(payload, FinalAnswer):
-                return "rookery", result, None
+                return "rookery", result, None, False
 
-        return "context", result, None
+        return "context", result, None, False
+
+    def _deadline_expired(self, message: Any) -> bool:
+        if isinstance(message, Message) and message.deadline_s is not None:
+            return time.time() > message.deadline_s
+        return False
+
+    async def _handle_deadline_expired(
+        self, context: Context, message: Message
+    ) -> None:
+        payload = message.payload
+        if not isinstance(payload, FinalAnswer):
+            payload = FinalAnswer(text=DEADLINE_EXCEEDED_TEXT)
+        final_msg = message.model_copy(update={"payload": payload})
+        await self._emit_to_rookery(final_msg, source=context.owner)
+
+    async def _emit_to_rookery(
+        self, message: Any, *, source: Node | Endpoint | None = None
+    ) -> None:
+        """Route ``message`` to the Rookery sink regardless of graph edges."""
+
+        rookery_context = self._contexts[ROOKERY]
+        incoming = rookery_context._incoming
+
+        floe: Floe | None = None
+        if source is not None:
+            floe = incoming.get(source)
+        if floe is None and incoming:
+            floe = next(iter(incoming.values()))
+
+        self._on_message_enqueued(message)
+
+        if floe is not None:
+            await floe.queue.put(message)
+        else:
+            buffer = rookery_context._buffer
+            buffer.append(message)
+
+        if isinstance(message, Message):
+            payload = message.payload
+            if isinstance(payload, WM):
+                trace_id = message.trace_id
+                self._latest_wm_hops[trace_id] = payload.hops
 
     async def _emit_event(
         self,

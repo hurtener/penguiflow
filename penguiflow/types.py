@@ -49,7 +49,9 @@ class WM(BaseModel):
     query: str
     facts: list[Any] = Field(default_factory=list)
     hops: int = 0
-    budget_hops: int = 8
+    budget_hops: int | None = 8
+    tokens_used: int = 0
+    budget_tokens: int | None = None
     confidence: float = 0.0
 
 

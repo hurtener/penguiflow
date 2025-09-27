@@ -13,10 +13,16 @@ async def controller(msg: Message, ctx) -> Message:
     assert isinstance(wm, WM)
 
     if wm.hops >= 3:
-        final = FinalAnswer(text=f"answer after {wm.hops} hops")
+        final = FinalAnswer(text=f"answer after {wm.hops} hops: {wm.facts[-1]}")
         return msg.model_copy(update={"payload": final})
 
-    updated_wm = wm.model_copy(update={"facts": wm.facts + [f"fact-{wm.hops}"]})
+    token_cost = 5
+    updated_wm = wm.model_copy(
+        update={
+            "facts": wm.facts + [f"fact-{wm.hops}"],
+            "tokens_used": wm.tokens_used + token_cost,
+        }
+    )
     return msg.model_copy(update={"payload": updated_wm})
 
 
@@ -30,7 +36,7 @@ async def main() -> None:
     flow = create(controller_node.to(controller_node))
     flow.run()
 
-    wm = WM(query="latest metrics", budget_hops=5)
+    wm = WM(query="latest metrics", budget_hops=5, budget_tokens=12)
     message = Message(
         payload=wm,
         headers=Headers(tenant="acme"),

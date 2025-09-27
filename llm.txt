@@ -1,5 +1,5 @@
-PenguiFlow quick facts (v1 shipped, v2 Phase 1 streaming in progress)
-====================================================================
+PenguiFlow quick facts (v1 shipped, v2 streaming + cancellation + deadlines/budgets)
+===================================================================================
 
 Runtime overview
 ----------------
@@ -7,6 +7,10 @@ Runtime overview
 - Graph endpoints: `OPEN_SEA` (ingress) and `ROOKERY` (egress); both use `Context` APIs.
 - `PenguiFlow.create(*adjacencies, queue_maxsize=64, allow_cycles=False, middlewares=None)` builds the graph.
 - Call `flow.run(registry=...)` once to start worker tasks, `flow.stop()` to cancel/await them.
+- Per-trace cancellation: `await flow.cancel(trace_id)` requests cancellation and raises `TraceCancelled` inside the affected
+  nodes/subflows. Cancellation is idempotent and only impacts the matching trace.
+- `Message.deadline_s` guards wall-clock execution; the runtime checks deadlines before invoking nodes and sends
+  `FinalAnswer("Deadline exceeded")` to Rookery when expired. Leave it unset when no wall-clock limit is needed.
 - Messages travel as Pydantic `Message` objects (payload + headers + trace metadata).
 
 Nodes & policies
@@ -21,7 +25,8 @@ Type safety
 - Register models via `ModelRegistry.register(node_name, InModel, OutModel)`.
 - Pass registry to `flow.run(registry)`; `Node.invoke` validates according to policy.
 - `Message` payload can be any type; `StreamChunk` is a first-class payload for streaming paths.
-- `Headers` include `tenant`, optional `topic`, `priority`, plus auto `trace_id`, `ts`, optional `deadline_s`.
+- `Headers` include `tenant`, optional `topic`, `priority`; `Message` carries `trace_id`, `ts`, and optional `deadline_s` for
+  per-trace wall-clock guardrails.
 - Runtime verifies that any node with validation enabled is registered when `flow.run(registry=...)` is called.
 
 Contexts & helpers
@@ -31,6 +36,15 @@ Contexts & helpers
 - Structured logs emitted per node event: `{ts, event, node_name, node_id, trace_id, latency_ms, q_depth_in, attempt, ...}`.
 - Middleware hook: async callables added via `flow.add_middleware(fn)`; receive the event payload.
 - Visualization helper: `flow_to_mermaid(flow, direction="TD")` produces a Mermaid diagram string of the current graph.
+
+Deadlines & budgets
+-------------------
+- Runtime validates `Message.deadline_s` before any node executes; expired work is skipped and turned into
+  `FinalAnswer("Deadline exceeded")` automatically.
+- Controller payload `WM` now tracks `tokens_used` and optional `budget_tokens` in addition to `hops`/`budget_hops`.
+- When `WM.tokens_used >= WM.budget_tokens` (if configured) or the hop budget is reached, PenguiFlow emits a terminal
+  `FinalAnswer` (`"Token budget exhausted"` / `"Hop budget exhausted"`) to Rookery without another controller invocation.
+- Set `WM.budget_hops=None` / `WM.budget_tokens=None` to disable those guardrails for an unbounded loop.
 
 Patterns (`penguiflow.patterns`)
 --------------------------------
@@ -54,11 +68,12 @@ Streaming
 
 Controller loop models (`penguiflow.types`)
 -------------------------------------------
-- `WM`: working memory (`query`, `facts`, `hops`, `budget_hops`, `confidence`).
+- `WM`: working memory (`query`, `facts`, `hops`, `budget_hops`, `tokens_used`, `budget_tokens`, `confidence`).
 - `Thought`: optional planning artifact (`steps`, `rationale`, `done`).
 - `PlanStep`: enumerated tool/action descriptions.
 - `FinalAnswer`: terminal payload (`text`, `citations`).
-- Runtime auto-increments `WM.hops`, enforces `budget_hops` and `deadline_s`, converts violations to `FinalAnswer` with predefined text.
+- Runtime auto-increments `WM.hops`, enforces hop/token budgets when present, and checks deadlines before re-enqueueing
+  controller messages; violations automatically become `FinalAnswer` messages with the exhaustion reason.
 
 Playbooks
 ---------

@@ -29,12 +29,17 @@ contributors understand how the pieces fit together.
 * **Reliability envelope**: each message dispatch goes through `_execute_with_reliability`
   which applies validation, timeout, retry with exponential backoff, structured logging,
   and middleware hooks.
+* **Deadline enforcement**: nodes never start executing stale work; `Message.deadline_s`
+  is checked prior to invocation and expired traces are converted to
+  `FinalAnswer("Deadline exceeded")` without running the user coroutine.
 * **Registry guardrails**: when `flow.run(registry=...)` is used, the runtime asserts that
   every validating node has a corresponding entry in the registry so configuration issues
   surface immediately.
 * **Controller loops**: when a node emits a `Message` whose payload is a `WM`, the runtime
-  increments hop counters, enforces budgets, and re-enqueues the message back to the
-  controller. Returning a `FinalAnswer` short-circuits to Rookery.
+  increments hop counters, enforces hop/token budgets (`budget_hops` / `budget_tokens`) when
+  they are set, checks deadlines, and re-enqueues the message back to the controller.
+  Returning a `FinalAnswer` short-circuits to Rookery or, if guardrails fire, the runtime
+  creates a `FinalAnswer` with the appropriate exhaustion message.
 * **Playbooks**: `Context.call_playbook` accepts a factory that returns a `(PenguiFlow,
   registry)` pair, runs it, emits the parent message (preserving headers + trace ID),
   mirrors cancellation signals to the subflow, and returns the first payload produced by
