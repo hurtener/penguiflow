@@ -7,7 +7,7 @@ name = "penguiflow"
 version = "1.0.3"
 description = "Async agent orchestration primitives."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 license = {file = "LICENSE"}
 authors = [
     {name = "PenguiFlow Team"},
@@ -38,7 +38,7 @@ managed = true
 
 [tool.ruff]
 line-length = 88
-target-version = "py312"
+target-version = "py311"
 extend-exclude = ["ooflow.py"]
 
 [tool.ruff.lint]
@@ -49,7 +49,7 @@ ignore = []
 known-first-party = ["penguiflow"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.11"
 plugins = []
 files = ["penguiflow"]
 disallow_untyped_defs = false

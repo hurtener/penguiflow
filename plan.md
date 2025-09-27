@@ -81,6 +81,8 @@ Each phase is iterative, testable, and builds on v1.
 * Tests: flow stops mid-run when canceled, no stray tasks.
 * Subflows also canceled.
 
+_Status:_ Cancel API and runtime plumbing implemented with unit coverage; follow-up work will flesh out subflow propagation and richer metrics once Phase 2 expands.
+
 ---
 
 ## Phase 3 — Deadlines & Budgets
