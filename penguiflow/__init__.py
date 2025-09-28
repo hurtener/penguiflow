@@ -14,6 +14,7 @@ from .metrics import FlowEvent
 from .middlewares import Middleware
 from .node import Node, NodePolicy
 from .patterns import join_k, map_concurrent, predicate_router, union_router
+from .policies import DictRoutingPolicy, RoutingPolicy, RoutingRequest
 from .registry import ModelRegistry
 from .streaming import (
     chunk_to_ws_json,
@@ -47,6 +48,9 @@ __all__ = [
     "join_k",
     "predicate_router",
     "union_router",
+    "DictRoutingPolicy",
+    "RoutingPolicy",
+    "RoutingRequest",
     "format_sse_event",
     "chunk_to_ws_json",
     "stream_flow",

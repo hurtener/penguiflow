@@ -13,6 +13,7 @@ contributors understand how the pieces fit together.
 | `types.py` | Pydantic models for headers, messages (with `Message.meta` bag), and controller/state artifacts (`WM`, `Thought`, `FinalAnswer`). |
 | `registry.py` | `ModelRegistry` that caches `TypeAdapter`s for per-node validation. |
 | `patterns.py` | Batteries-included helpers: `map_concurrent`, routers, and `join_k` aggregator. |
+| `policies.py` | Policy protocol + helpers (e.g., `DictRoutingPolicy`) for config-driven routing decisions. |
 | `middlewares.py` | Async middleware hook contract consuming structured `FlowEvent` objects. |
 | `metrics.py` | `FlowEvent` model plus helpers for deriving metrics/tags. |
 | `viz.py` | Mermaid and DOT exporters with loop/subflow annotations. |
@@ -60,9 +61,13 @@ contributors understand how the pieces fit together.
 ## Patterns cheat sheet
 
 * `map_concurrent` — run an async worker over a list of inputs with bounded concurrency.
-* `predicate_router` — route to successor nodes based on simple boolean predicates.
-* `union_router` — enforce discriminated unions and send each variant to its matching node.
+* `predicate_router` — route to successor nodes based on simple boolean predicates; set
+  `policy=` to consult runtime routing policies.
+* `union_router` — enforce discriminated unions and send each variant to its matching node
+  (also accepts `policy=` overrides).
 * `join_k` — buffer `k` messages per trace id, then emit a combined batch downstream.
+* `DictRoutingPolicy` — load config-driven overrides (JSON/env) and attach them to router
+  helpers via `policy=`.
 
 Each helper is a regular node and can be combined with hand-authored nodes seamlessly.
 

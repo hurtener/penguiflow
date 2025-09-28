@@ -34,6 +34,7 @@ It provides:
 * **Per-trace cancellation** (`PenguiFlow.cancel` with `TraceCancelled` surfacing in nodes)
 * **Deadlines & budgets** (`Message.deadline_s`, `WM.budget_hops`, and `WM.budget_tokens` guardrails that you can leave unset/`None`)
 * **Observability hooks** (`FlowEvent` callbacks for logging, MLflow, or custom metrics sinks)
+* **Policy-driven routing** (optional policies steer routers without breaking existing flows)
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
@@ -219,6 +220,21 @@ the primary payload:
   streaming helpers, while `examples/metadata_propagation/` provides a runnable demo of
   enriching messages with retrieval costs and summarizer details.
 
+### Dynamic routing by policy
+
+Phase 7 keeps the existing routing APIs but adds **optional policies** so deployments
+can steer traffic from configuration instead of code changes:
+
+* `predicate_router` and `union_router` now accept a `policy=` callback or object.
+  When provided, PenguiFlow builds a `RoutingRequest` describing the message, current
+  node, and candidate successors so the policy can override, filter, or drop routes.
+* `penguiflow.policies.DictRoutingPolicy` is a ready-to-use helper that loads
+  JSON/YAML/env mappings. It returns node names or `Node` instances and can be swapped
+  at runtime via `update_mapping()`.
+* `tests/test_routing_policy.py` covers policy-driven routing (including dropping
+  messages) and the helper constructors, while `examples/routing_policy/` shows how to
+  reload a JSON mapping without touching the flow graph.
+
 ## 🧭 Repo Structure
 
 penguiflow/
@@ -312,14 +328,18 @@ stitched directly into a flow adjacency list:
 
 - `map_concurrent(items, worker, max_concurrency=8)` — fan a single message out into
   many in-memory tasks (e.g., batch document enrichment) while respecting a semaphore.
-- `predicate_router(name, mapping)` — route messages to successor nodes based on simple
-  boolean functions over payload or headers. Perfect for guardrails or conditional
-  tool invocation without building a full controller.
+- `predicate_router(name, predicate, policy=None)` — route messages to successor nodes
+  based on simple boolean functions over payload or headers, optionally consulting a
+  runtime `policy` to override or filter the computed targets. Perfect for guardrails or
+  conditional tool invocation without rebuilding the flow.
 - `union_router(name, discriminated_model)` — accept a Pydantic discriminated union and
   forward each variant to the matching typed successor node. Keeps type-safety even when
   multiple schema branches exist.
 - `join_k(name, k)` — aggregate `k` messages per `trace_id` before resuming downstream
   work. Useful for fan-out/fan-in batching, map-reduce style summarization, or consensus.
+- `DictRoutingPolicy(mapping, key_getter=None)` — load routing overrides from
+  configuration and pair it with the router helpers via `policy=...` to switch routing at
+  runtime without modifying the flow graph.
 
 All helpers are regular `Node` instances under the hood, so they inherit retries,
 timeouts, and validation just like hand-written nodes.
