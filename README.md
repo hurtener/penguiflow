@@ -171,84 +171,66 @@ Requires **Python 3.11+**.
 
 ---
 
-## 🆕 Implemented v2 Features
+## 🛠️ Key capabilities
 
-### Streaming chunks
+### Streaming & incremental delivery
 
-Phase 1 delivered token-level streaming without sacrificing backpressure or ordering guarantees.
-Use `Context.emit_chunk` to fan streaming tokens to downstream nodes. The helper automatically:
+`Context.emit_chunk` (and `PenguiFlow.emit_chunk`) provide token-level streaming without
+sacrificing backpressure or ordering guarantees.  The helper wraps the payload in a
+`StreamChunk`, mirrors routing metadata from the parent message, and automatically
+increments per-stream sequence numbers.  See `tests/test_streaming.py` and
+`examples/streaming_llm/` for an end-to-end walk-through.
 
-* Builds `StreamChunk` payloads with the parent message's routing headers and trace metadata.
-* Manages monotonically increasing sequence numbers per `stream_id` (defaulting to the parent trace).
-* Awaits per-trace capacity via the runtime before delivering follow-up chunks so slow consumers don't starve other traces.
+### Reliability & guardrails
 
-See `tests/test_streaming.py` for coverage and `examples/streaming_llm/` for an end-to-end mock that feeds an SSE/WebSocket sink.
+PenguiFlow enforces reliability boundaries out of the box:
 
-### Per-trace cancellation
+* **Per-trace cancellation** (`PenguiFlow.cancel(trace_id)`) unwinds a single run while
+  other traces keep executing.  Worker tasks observe `TraceCancelled` and clean up
+  resources; `tests/test_cancel.py` covers the behaviour.
+* **Deadlines & budgets** let you keep loops honest.  `Message.deadline_s` guards
+  wall-clock execution, while controller payloads (`WM`) track hop and token budgets.
+  Exhaustion short-circuits into terminal `FinalAnswer` messages as demonstrated in
+  `tests/test_budgets.py` and `examples/controller_multihop/`.
+* **Retries & timeouts** live in `NodePolicy`.  Exponential backoff, timeout enforcement,
+  and structured retry events are exercised heavily in the core test suite.
 
-Phase 2 introduces cancellation scoped to a single trace:
+### Metadata & observability
 
-* Call `PenguiFlow.cancel(trace_id)` to request cancellation; the method is idempotent and resolves immediately when nothing is running.
-* In-flight node invocations for that trace raise `TraceCancelled`, letting node authors clean up resources or abort retries.
-* Streaming emitters and regular messages honor per-trace queue capacity, so cancellation drains outstanding work and unblocks producers safely.
-* Lifecycle hooks emit `trace_cancel_start` and `trace_cancel_finish` events so observability backends can track latency to abort.
+Every `Message` carries a mutable `meta` dictionary so nodes can propagate debugging
+breadcrumbs, billing information, or routing hints without touching the payload.  The
+runtime clones metadata during streaming and playbook calls (`tests/test_metadata.py`).
+Structured runtime events surface through `FlowEvent` objects; attach middlewares for
+custom logging or metrics ingestion (`examples/mlflow_metrics/`).
 
-The behaviour is enforced by `tests/test_cancel.py`, ensuring other traces continue unaffected while the cancelled trace unwinds cleanly.
+### Routing & dynamic policies
 
-### Deadlines & budgets
-
-Phase 3 adds wall-clock and logical guardrails so long-running traces shut down gracefully:
-
-* Set `Message.deadline_s` to cap wall-clock time for a trace. The runtime now checks deadlines before invoking each node and short-circuits to Rookery with `FinalAnswer("Deadline exceeded")` when the clock has expired.
-* Controllers can increment `WM.tokens_used` alongside `WM.hops`. When `WM.budget_tokens` is configured, PenguiFlow automatically emits `FinalAnswer("Token budget exhausted")` once the total meets or exceeds the budget, similar to the existing hop budget.
-* Leave `deadline_s` unset or configure `WM.budget_hops=None` / `WM.budget_tokens=None` to keep the behaviour unbounded—guardrails are entirely opt-in.
-* Tests in `tests/test_budgets.py` cover both deadline short-circuiting and token budget enforcement, complementing the hop and deadline checks exercised in `tests/test_controller.py`.
-* Example: `examples/controller_multihop/` demonstrates configuring deadlines, hop limits, and token budgets together in a looping controller.
-
-### Message metadata propagation
-
-Phase 4 introduces a `meta: dict[str, Any]` bag on every `Message` so nodes can attach
-debugging breadcrumbs, pricing data, routing hints, or attribution without polluting
-the primary payload:
-
-* The runtime preserves `message.meta` across retries, controller loops, and
-  subflows. Helpers such as `Context.emit_chunk` and `PenguiFlow.emit_chunk` now clone
-  the parent's metadata when wrapping `StreamChunk` payloads so streaming sinks stay in
-  sync with upstream context.
-* Nodes can safely mutate `message.meta` in-place or return a new message via
-  `message.model_copy(update={"meta": {...}})` when they need to add or redact keys.
-* `tests/test_metadata.py` exercises round-tripping metadata through multiple nodes and
-  streaming helpers, while `examples/metadata_propagation/` provides a runnable demo of
-  enriching messages with retrieval costs and summarizer details.
-
-### Dynamic routing by policy
-
-Phase 7 keeps the existing routing APIs but adds **optional policies** so deployments
-can steer traffic from configuration instead of code changes:
-
-* `predicate_router` and `union_router` now accept a `policy=` callback or object.
-  When provided, PenguiFlow builds a `RoutingRequest` describing the message, current
-  node, and candidate successors so the policy can override, filter, or drop routes.
-* `penguiflow.policies.DictRoutingPolicy` is a ready-to-use helper that loads
-  JSON/YAML/env mappings. It returns node names or `Node` instances and can be swapped
-  at runtime via `update_mapping()`.
-* `tests/test_routing_policy.py` covers policy-driven routing (including dropping
-  messages) and the helper constructors, while `examples/routing_policy/` shows how to
-  reload a JSON mapping without touching the flow graph.
+Branching flows stay flexible thanks to routers and optional policies.  The
+`predicate_router` and `union_router` helpers can consult a `RoutingPolicy` at runtime to
+override or drop successors, while `DictRoutingPolicy` provides a config-driven
+implementation ready for JSON/YAML/env inputs (`tests/test_routing_policy.py`,
+`examples/routing_policy/`).
 
 ### Traceable exceptions
 
-Phase 8 introduces a uniform error surface so downstream systems can handle failures
-without scraping logs:
+When retries are exhausted or timeouts fire, PenguiFlow wraps the failure in a
+`FlowError` that preserves the trace id, node metadata, and a stable error code.
+Opt into `emit_errors_to_rookery=True` to receive these objects directly from
+`flow.fetch()`—see `tests/test_errors.py` and `examples/traceable_errors/` for usage.
 
-* Terminal node failures now build a `FlowError` that includes the trace id, node name,
-  node id, stable error code, and metadata such as the retry attempt and latency.
-* Setting `emit_errors_to_rookery=True` on `create(...)` surfaces the `FlowError` object
-  directly from `flow.fetch()`, preserving backwards compatibility by keeping the flag
-  opt-in.
-* `tests/test_errors.py` ensures retry exhaustion and timeout paths produce the correct
-  codes and metadata, while `examples/traceable_errors/` shows how to inspect the
-  payload in a real flow.
+### FlowTestKit
+
+The new `penguiflow.testkit` module keeps unit tests tiny:
+
+* `await testkit.run_one(flow, message)` boots a flow, emits a message, captures runtime
+  events, and returns the first Rookery payload.
+* `testkit.assert_node_sequence(trace_id, [...])` asserts the order in which nodes ran.
+* `testkit.simulate_error(...)` builds coroutine helpers that fail a configurable number
+  of times—perfect for retry scenarios.
+
+The harness is covered by `tests/test_testkit.py` and demonstrated in
+`examples/testkit_demo/`.
+
 
 ## 🧭 Repo Structure
 
@@ -468,7 +450,7 @@ docs or diagramming pipelines.
 - **Observability**: structured `FlowEvent` callbacks power logs/metrics; integrations with
   third-party stacks (OTel, Prometheus, Datadog) remain DIY. See the MLflow middleware
   example for a lightweight pattern.
-- **Roadmap**: v2 targets streaming, distributed backends, richer observability, and test harnesses. Contributions and proposals are welcome!
+- **Roadmap**: follow-up releases focus on optional distributed backends, deeper observability integrations, and additional playbook patterns. Contributions and proposals are welcome!
 
 ---
 
@@ -482,9 +464,8 @@ playbook latency. Copy them into product repos to watch for regressions over tim
 
 ## 🔮 Roadmap
 
-* **v1 (current)**: safe core runtime, type-safety, retries, timeouts, routing, controller loops, playbooks via examples.
-* **v2 (in progress)**: streaming support (Phase 1 shipped), upcoming per-trace cancel,
-  deadlines/budgets, observability hooks, visualizer, and testing harness.
+* **v2 (current)**: streaming, per-trace cancellation, deadlines/budgets, metadata propagation, observability hooks, visualizer, routing policies, traceable errors, and FlowTestKit.
+* **Future**: optional distributed runners, richer third-party observability adapters, and opinionated playbook templates.
 
 ---
 
