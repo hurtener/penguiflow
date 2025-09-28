@@ -21,6 +21,7 @@ class Message(BaseModel):
     trace_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     ts: float = Field(default_factory=time.time)
     deadline_s: float | None = None
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class StreamChunk(BaseModel):

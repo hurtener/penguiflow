@@ -11,7 +11,7 @@ Runtime overview
   nodes/subflows. Cancellation is idempotent and only impacts the matching trace.
 - `Message.deadline_s` guards wall-clock execution; the runtime checks deadlines before invoking nodes and sends
   `FinalAnswer("Deadline exceeded")` to Rookery when expired. Leave it unset when no wall-clock limit is needed.
-- Messages travel as Pydantic `Message` objects (payload + headers + trace metadata).
+- Messages travel as Pydantic `Message` objects (payload + headers + trace metadata + a mutable `meta` bag).
 
 Nodes & policies
 ----------------
@@ -24,14 +24,17 @@ Type safety
 -----------
 - Register models via `ModelRegistry.register(node_name, InModel, OutModel)`.
 - Pass registry to `flow.run(registry)`; `Node.invoke` validates according to policy.
-- `Message` payload can be any type; `StreamChunk` is a first-class payload for streaming paths.
-- `Headers` include `tenant`, optional `topic`, `priority`; `Message` carries `trace_id`, `ts`, and optional `deadline_s` for
-  per-trace wall-clock guardrails.
+- `Message` payload can be any type; the `.meta` dictionary is for auxiliary context and `StreamChunk` is a first-class payload for
+  streaming paths.
+- `Headers` include `tenant`, optional `topic`, `priority`; `Message` carries `trace_id`, `ts`, optional `deadline_s`, and
+  `meta` for per-trace guardrails plus side-channel metadata.
 - Runtime verifies that any node with validation enabled is registered when `flow.run(registry=...)` is called.
 
 Contexts & helpers
 ------------------
 - Each node gets a `Context` with `.emit()`/`.emit_nowait()` (selective or broadcast), `.emit_chunk()` for streaming replies, and `.fetch()`/`.fetch_any()` for incoming queues. `PenguiFlow.emit_chunk(...)` mirrors the helper for callers outside a node (e.g., SSE responders).
+- Metadata written to `message.meta` flows through retries, controller loops, playbooks, and streaming helpers; `emit_chunk`
+  clones the parent's metadata when wrapping `StreamChunk` payloads.
 - Cycle detection: default topological check; per-node opt-in self cycles (`allow_cycle=True`) or global `allow_cycles=True`.
 - Structured logs emitted per node event: `{ts, event, node_name, node_id, trace_id, latency_ms, q_depth_in, attempt, ...}`.
 - Middleware hook: async callables added via `flow.add_middleware(fn)`; receive the event payload.
@@ -97,6 +100,7 @@ Examples reference map
 - `examples/reliability_middleware/` — timeout/retry/middleware logging.
 - `examples/playbook_retrieval/` — controller invoking a subflow playbook.
 - `examples/streaming_llm/` — mock LLM emitting `StreamChunk`s to an SSE-style sink.
+- `examples/metadata_propagation/` — attaching and consuming `Message.meta` context across nodes.
 - `benchmarks/` — microbenchmarks for throughput, retry/timeout, and controller playbook latency.
 
 Testing & tooling

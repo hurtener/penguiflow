@@ -190,11 +190,14 @@ class Context:
             meta=meta_dict,
         )
 
+        message_meta = dict(parent.meta)
+
         message = Message(
             payload=chunk,
             headers=parent.headers,
             trace_id=parent.trace_id,
             deadline_s=parent.deadline_s,
+            meta=message_meta,
         )
 
         runtime = self._runtime
