@@ -15,6 +15,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
+from .metrics import FlowEvent
 from .middlewares import Middleware
 from .node import Node, NodePolicy
 from .registry import ModelRegistry
@@ -1052,34 +1053,41 @@ class PenguiFlow:
     ) -> None:
         node_name = getattr(node, "name", None)
         node_id = getattr(node, "node_id", node_name)
-        payload: dict[str, Any] = {
-            "ts": time.time(),
-            "event": event,
-            "node_name": node_name,
-            "node_id": node_id,
-            "trace_id": trace_id,
-            "latency_ms": latency_ms,
-            "q_depth_in": context.queue_depth_in(),
-            "q_depth_out": context.queue_depth_out(),
-            "attempt": attempt,
-            "outgoing": context.outgoing_count(),
-            "queue_maxsize": self._queue_maxsize,
-        }
-        if extra:
-            payload.update(extra)
+        queue_depth_in = context.queue_depth_in()
+        queue_depth_out = context.queue_depth_out()
+        outgoing = context.outgoing_count()
 
+        trace_pending: int | None = None
+        trace_inflight = 0
+        trace_cancelled = False
         if trace_id is not None:
-            payload["trace_pending"] = self._trace_counts.get(trace_id, 0)
-            payload["trace_inflight"] = len(
-                self._trace_invocations.get(trace_id, set())
-            )
-            payload["trace_cancelled"] = self._is_trace_cancelled(trace_id)
+            trace_pending = self._trace_counts.get(trace_id, 0)
+            trace_inflight = len(self._trace_invocations.get(trace_id, set()))
+            trace_cancelled = self._is_trace_cancelled(trace_id)
 
-        logger.log(level, event, extra=payload)
+        event_obj = FlowEvent(
+            event_type=event,
+            ts=time.time(),
+            node_name=node_name,
+            node_id=node_id,
+            trace_id=trace_id,
+            attempt=attempt,
+            latency_ms=latency_ms,
+            queue_depth_in=queue_depth_in,
+            queue_depth_out=queue_depth_out,
+            outgoing_edges=outgoing,
+            queue_maxsize=self._queue_maxsize,
+            trace_pending=trace_pending,
+            trace_inflight=trace_inflight,
+            trace_cancelled=trace_cancelled,
+            extra=extra or {},
+        )
+
+        logger.log(level, event, extra=event_obj.to_payload())
 
         for middleware in list(self._middlewares):
             try:
-                await middleware(event, payload)
+                await middleware(event_obj)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.exception(
                     "middleware_error",

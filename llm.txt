@@ -84,10 +84,13 @@ Playbooks
 - Subflow receives the original message (headers + trace id preserved).
 - Returns the first payload emitted to playbook’s Rookery; always stops the subflow (shielded).
 
-Middlewares & observability
----------------------------
-- Middleware signature: `async def middleware(event: str, payload: dict[str, Any]): ...`.
-- Typical events: `node_start`, `node_success`, `node_timeout`, `node_error`, `node_retry`, `node_failed`, `node_cancelled`.
+  Middlewares & observability
+  ---------------------------
+  - Middleware signature: `async def middleware(event: FlowEvent): ...`.
+  - `FlowEvent` exposes `.to_payload()` for structured logging plus `.metric_samples()` /
+    `.tag_values()` helpers for metrics sinks.
+  - Typical `event.event_type` values: `node_start`, `node_success`, `node_timeout`,
+    `node_error`, `node_retry`, `node_failed`, `node_cancelled`.
 
 Examples reference map
 ----------------------
@@ -97,7 +100,8 @@ Examples reference map
 - `examples/fanout_join/` — fan-out to workers + `join_k` aggregation.
 - `examples/map_concurrent/` — map helper inside a node.
 - `examples/controller_multihop/` — controller loop producing `FinalAnswer`.
-- `examples/reliability_middleware/` — timeout/retry/middleware logging.
+  - `examples/reliability_middleware/` — timeout/retry/middleware logging.
+  - `examples/mlflow_metrics/` — MLflow-backed metrics middleware (falls back to stdout).
 - `examples/playbook_retrieval/` — controller invoking a subflow playbook.
 - `examples/streaming_llm/` — mock LLM emitting `StreamChunk`s to an SSE-style sink.
 - `examples/metadata_propagation/` — attaching and consuming `Message.meta` context across nodes.

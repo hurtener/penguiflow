@@ -13,7 +13,8 @@ contributors understand how the pieces fit together.
 | `types.py` | Pydantic models for headers, messages (with `Message.meta` bag), and controller/state artifacts (`WM`, `Thought`, `FinalAnswer`). |
 | `registry.py` | `ModelRegistry` that caches `TypeAdapter`s for per-node validation. |
 | `patterns.py` | Batteries-included helpers: `map_concurrent`, routers, and `join_k` aggregator. |
-| `middlewares.py` | Async middleware hook contract for structured logging/observability sinks. |
+| `middlewares.py` | Async middleware hook contract consuming structured `FlowEvent` objects. |
+| `metrics.py` | `FlowEvent` model plus helpers for deriving metrics/tags. |
 | `__init__.py` | Public surface that re-exports the main primitives for consumers. |
 
 ## Key runtime behaviors
@@ -66,11 +67,11 @@ Each helper is a regular node and can be combined with hand-authored nodes seaml
 
 ## Middleware & logging
 
-`_emit_event` emits structured dictionaries with fields such as
-`{ts, event, node_name, node_id, trace_id, latency_ms, q_depth_in, q_depth_out, outgoing,
-trace_pending, trace_inflight, ...}`. Any middleware added via `flow.add_middleware`
-receives these events and can fan them out to logging frameworks, observability tools, or
-metrics backends.
+`_emit_event` now materialises a `FlowEvent` dataclass containing fields such as
+`{ts, event_type, node_name, node_id, trace_id, latency_ms, q_depth_in, q_depth_out,
+outgoing, trace_pending, trace_inflight, ...}`. Middleware added via
+`flow.add_middleware` receives these objects, can inspect `.to_payload()` for logging,
+and `.metric_samples()` / `.tag_values()` for metrics sinks like MLflow.
 
 ## Testing & examples
 

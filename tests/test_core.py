@@ -9,6 +9,7 @@ import pytest
 from pydantic import BaseModel
 
 from penguiflow.core import CycleError, PenguiFlow, create
+from penguiflow.metrics import FlowEvent
 from penguiflow.node import Node, NodePolicy
 from penguiflow.registry import ModelRegistry
 
@@ -232,8 +233,8 @@ async def test_middlewares_receive_events() -> None:
     events: list[tuple[str, int]] = []
 
     class Collector:
-        async def __call__(self, event: str, payload: dict[str, object]) -> None:
-            events.append((event, int(payload.get("attempt", -1))))
+        async def __call__(self, event: FlowEvent) -> None:
+            events.append((event.event_type, event.attempt))
 
     async def echo(msg: str, ctx) -> str:
         return msg

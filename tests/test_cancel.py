@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from penguiflow import Headers, Message, Node, NodePolicy, create
+from penguiflow.metrics import FlowEvent
 
 
 @pytest.mark.asyncio
@@ -37,14 +38,15 @@ async def test_cancel_trace_stops_inflight_run_without_affecting_others() -> Non
 
     flow = create(slow_node.to(sink_node))
 
-    async def recorder(event: str, payload: dict[str, object]) -> None:
-        if event == "trace_cancel_start":
+    async def recorder(event: FlowEvent) -> None:
+        payload = event.to_payload()
+        if event.event_type == "trace_cancel_start":
             cancel_started.set()
-        if event == "trace_cancel_finish":
+        if event.event_type == "trace_cancel_finish":
             cancel_finished.set()
-        if event.startswith("trace_cancel"):
-            cancel_events[event] += 1
-            payloads[event] = payload
+        if event.event_type.startswith("trace_cancel"):
+            cancel_events[event.event_type] += 1
+            payloads[event.event_type] = payload
 
     flow.add_middleware(recorder)
     flow.run()
