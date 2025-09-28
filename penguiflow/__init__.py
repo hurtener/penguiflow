@@ -22,7 +22,7 @@ from .streaming import (
     stream_flow,
 )
 from .types import WM, FinalAnswer, Headers, Message, PlanStep, StreamChunk, Thought
-from .viz import flow_to_mermaid
+from .viz import flow_to_dot, flow_to_mermaid
 
 __all__ = [
     "__version__",
@@ -52,6 +52,7 @@ __all__ = [
     "stream_flow",
     "emit_stream_events",
     "flow_to_mermaid",
+    "flow_to_dot",
     "create",
 ]
 

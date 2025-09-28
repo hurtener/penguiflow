@@ -15,6 +15,7 @@ contributors understand how the pieces fit together.
 | `patterns.py` | Batteries-included helpers: `map_concurrent`, routers, and `join_k` aggregator. |
 | `middlewares.py` | Async middleware hook contract consuming structured `FlowEvent` objects. |
 | `metrics.py` | `FlowEvent` model plus helpers for deriving metrics/tags. |
+| `viz.py` | Mermaid and DOT exporters with loop/subflow annotations. |
 | `__init__.py` | Public surface that re-exports the main primitives for consumers. |
 
 ## Key runtime behaviors
@@ -64,6 +65,15 @@ contributors understand how the pieces fit together.
 * `join_k` — buffer `k` messages per trace id, then emit a combined batch downstream.
 
 Each helper is a regular node and can be combined with hand-authored nodes seamlessly.
+
+## Visualization helpers
+
+`viz.flow_to_mermaid(flow, direction="TD")` and `viz.flow_to_dot(flow, rankdir="TB")`
+inspect the runtime graph and emit Mermaid or Graphviz definitions. Nodes tagged with
+`allow_cycle=True` (controller loops) are highlighted automatically, and edges touching
+`OPEN_SEA`/`ROOKERY` are annotated as ingress/egress so subflow boundaries stand out in
+diagrams. The `examples/visualizer/` folder contains a runnable script that exports both
+formats for docs.
 
 ## Middleware & logging
 
