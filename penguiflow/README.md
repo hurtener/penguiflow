@@ -9,6 +9,7 @@ contributors understand how the pieces fit together.
 | Module | Purpose |
 | --- | --- |
 | `core.py` | Runtime graph builder, execution engine, retries/timeouts, controller loop semantics, and playbook helper. |
+| `errors.py` | Defines `FlowError` and `FlowErrorCode` used for traceable exceptions. |
 | `node.py` | `Node` wrapper and `NodePolicy` configuration (validation scope, timeout, retry/backoff). |
 | `types.py` | Pydantic models for headers, messages (with `Message.meta` bag), and controller/state artifacts (`WM`, `Thought`, `FinalAnswer`). |
 | `registry.py` | `ModelRegistry` that caches `TypeAdapter`s for per-node validation. |
@@ -32,6 +33,10 @@ contributors understand how the pieces fit together.
 * **Reliability envelope**: each message dispatch goes through `_execute_with_reliability`
   which applies validation, timeout, retry with exponential backoff, structured logging,
   and middleware hooks.
+* **Traceable exceptions**: when retries are exhausted or timeouts fire, the runtime
+  builds a `FlowError` capturing the trace id, node metadata, and failure code. Setting
+  `emit_errors_to_rookery=True` on `penguiflow.core.create` pushes the `FlowError`
+  directly to Rookery so callers can inspect it.
 * **Metadata propagation**: every `Message` includes a mutable `meta` dictionary. The
   runtime clones it when emitting streaming chunks, preserving debugging or billing
   breadcrumbs across retries, controller loops, and playbook subflows.
