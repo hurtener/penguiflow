@@ -35,6 +35,7 @@ It provides:
 * **Deadlines & budgets** (`Message.deadline_s`, `WM.budget_hops`, and `WM.budget_tokens` guardrails that you can leave unset/`None`)
 * **Observability hooks** (`FlowEvent` callbacks for logging, MLflow, or custom metrics sinks)
 * **Policy-driven routing** (optional policies steer routers without breaking existing flows)
+* **Traceable exceptions** (`FlowError` captures node/trace metadata and optionally emits to Rookery)
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
@@ -235,11 +236,26 @@ can steer traffic from configuration instead of code changes:
   messages) and the helper constructors, while `examples/routing_policy/` shows how to
   reload a JSON mapping without touching the flow graph.
 
+### Traceable exceptions
+
+Phase 8 introduces a uniform error surface so downstream systems can handle failures
+without scraping logs:
+
+* Terminal node failures now build a `FlowError` that includes the trace id, node name,
+  node id, stable error code, and metadata such as the retry attempt and latency.
+* Setting `emit_errors_to_rookery=True` on `create(...)` surfaces the `FlowError` object
+  directly from `flow.fetch()`, preserving backwards compatibility by keeping the flag
+  opt-in.
+* `tests/test_errors.py` ensures retry exhaustion and timeout paths produce the correct
+  codes and metadata, while `examples/traceable_errors/` shows how to inspect the
+  payload in a real flow.
+
 ## 🧭 Repo Structure
 
 penguiflow/
   __init__.py
   core.py          # runtime orchestrator, retries, controller helpers, playbooks
+  errors.py        # FlowError / FlowErrorCode definitions
   node.py
   types.py
   registry.py

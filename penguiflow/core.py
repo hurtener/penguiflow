@@ -10,11 +10,12 @@ import asyncio
 import logging
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
+from .errors import FlowError, FlowErrorCode
 from .metrics import FlowEvent
 from .middlewares import Middleware
 from .node import Node, NodePolicy
@@ -299,6 +300,7 @@ class PenguiFlow:
         queue_maxsize: int = DEFAULT_QUEUE_MAXSIZE,
         allow_cycles: bool = False,
         middlewares: Sequence[Middleware] | None = None,
+        emit_errors_to_rookery: bool = False,
     ) -> None:
         self._queue_maxsize = queue_maxsize
         self._allow_cycles = allow_cycles
@@ -315,6 +317,7 @@ class PenguiFlow:
         self._trace_invocations: dict[str, set[asyncio.Future[Any]]] = {}
         self._trace_capacity_waiters: dict[str, list[asyncio.Event]] = {}
         self._latest_wm_hops: dict[str, int] = {}
+        self._emit_errors_to_rookery = emit_errors_to_rookery
 
         self._build_graph(adjacencies)
 
@@ -635,15 +638,28 @@ class PenguiFlow:
                     extra={"exception": repr(exc)},
                 )
                 if attempt >= node.policy.max_retries:
-                    await self._emit_event(
-                        event="node_failed",
+                    timeout_message: str | None = None
+                    if node.policy.timeout_s is not None:
+                        timeout_message = (
+                            f"Node '{node.name}' timed out after"
+                            f" {node.policy.timeout_s:.2f}s"
+                        )
+                    flow_error = self._create_flow_error(
                         node=node,
-                        context=context,
                         trace_id=trace_id,
+                        code=FlowErrorCode.NODE_TIMEOUT,
+                        exc=exc,
                         attempt=attempt,
                         latency_ms=latency,
-                        level=logging.ERROR,
-                        extra={"exception": repr(exc)},
+                        message=timeout_message,
+                        metadata={"timeout_s": node.policy.timeout_s},
+                    )
+                    await self._handle_flow_error(
+                        node=node,
+                        context=context,
+                        flow_error=flow_error,
+                        latency=latency,
+                        attempt=attempt,
                     )
                     return
                 attempt += 1
@@ -673,15 +689,24 @@ class PenguiFlow:
                     extra={"exception": repr(exc)},
                 )
                 if attempt >= node.policy.max_retries:
-                    await self._emit_event(
-                        event="node_failed",
+                    flow_error = self._create_flow_error(
                         node=node,
-                        context=context,
                         trace_id=trace_id,
+                        code=FlowErrorCode.NODE_EXCEPTION,
+                        exc=exc,
                         attempt=attempt,
                         latency_ms=latency,
-                        level=logging.ERROR,
-                        extra={"exception": repr(exc)},
+                        message=(
+                            f"Node '{node.name}' raised {type(exc).__name__}: {exc}"
+                        ),
+                        metadata={"exception_repr": repr(exc)},
+                    )
+                    await self._handle_flow_error(
+                        node=node,
+                        context=context,
+                        flow_error=flow_error,
+                        latency=latency,
+                        attempt=attempt,
                     )
                     return
                 attempt += 1
@@ -704,6 +729,63 @@ class PenguiFlow:
         if policy.max_backoff is not None:
             delay = min(delay, policy.max_backoff)
         return delay
+
+    def _create_flow_error(
+        self,
+        *,
+        node: Node,
+        trace_id: str | None,
+        code: FlowErrorCode,
+        exc: BaseException,
+        attempt: int,
+        latency_ms: float | None,
+        message: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> FlowError:
+        node_name = node.name
+        assert node_name is not None
+        meta: dict[str, Any] = {"attempt": attempt}
+        if latency_ms is not None:
+            meta["latency_ms"] = latency_ms
+        if metadata:
+            meta.update(metadata)
+        return FlowError.from_exception(
+            trace_id=trace_id,
+            node_name=node_name,
+            node_id=node.node_id,
+            exc=exc,
+            code=code,
+            message=message,
+            metadata=meta,
+        )
+
+    async def _handle_flow_error(
+        self,
+        *,
+        node: Node,
+        context: Context,
+        flow_error: FlowError,
+        latency: float | None,
+        attempt: int,
+    ) -> None:
+        original = flow_error.unwrap()
+        exception_repr = repr(original) if original is not None else flow_error.message
+        extra = {
+            "exception": exception_repr,
+            "flow_error": flow_error.to_payload(),
+        }
+        await self._emit_event(
+            event="node_failed",
+            node=node,
+            context=context,
+            trace_id=flow_error.trace_id,
+            attempt=attempt,
+            latency_ms=latency,
+            level=logging.ERROR,
+            extra=extra,
+        )
+        if self._emit_errors_to_rookery and flow_error.trace_id is not None:
+            await self._emit_to_rookery(flow_error, source=context.owner)
 
     async def _invoke_node(
         self,

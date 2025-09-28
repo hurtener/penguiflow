@@ -10,6 +10,7 @@ from .core import (
     call_playbook,
     create,
 )
+from .errors import FlowError, FlowErrorCode
 from .metrics import FlowEvent
 from .middlewares import Middleware
 from .node import Node, NodePolicy
@@ -36,6 +37,8 @@ __all__ = [
     "ModelRegistry",
     "Middleware",
     "FlowEvent",
+    "FlowError",
+    "FlowErrorCode",
     "call_playbook",
     "Headers",
     "Message",

@@ -12,6 +12,9 @@ Runtime overview
 - `Message.deadline_s` guards wall-clock execution; the runtime checks deadlines before invoking nodes and sends
   `FinalAnswer("Deadline exceeded")` to Rookery when expired. Leave it unset when no wall-clock limit is needed.
 - Messages travel as Pydantic `Message` objects (payload + headers + trace metadata + a mutable `meta` bag).
+- Exhausted retries and timeouts can emit a `FlowError` object to Rookery when
+  `create(..., emit_errors_to_rookery=True)` is used, preserving the trace id, node
+  metadata, and stable error code for downstream handling.
 
 Nodes & policies
 ----------------
@@ -115,6 +118,7 @@ Examples reference map
 - `examples/metadata_propagation/` — attaching and consuming `Message.meta` context across nodes.
 - `examples/routing_policy/` — config-driven policy overrides for predicate routers.
 - `examples/visualizer/` — generate Mermaid + DOT diagrams with loop/subflow annotations.
+- `examples/traceable_errors/` — opt-in FlowError emission surfaced from Rookery.
 - `benchmarks/` — microbenchmarks for throughput, retry/timeout, and controller playbook latency.
 
 Testing & tooling
