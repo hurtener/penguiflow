@@ -10,7 +10,7 @@ contributors understand how the pieces fit together.
 | --- | --- |
 | `core.py` | Runtime graph builder, execution engine, retries/timeouts, controller loop semantics, and playbook helper. |
 | `node.py` | `Node` wrapper and `NodePolicy` configuration (validation scope, timeout, retry/backoff). |
-| `types.py` | Pydantic models for headers, messages, and controller/state artifacts (`WM`, `Thought`, `FinalAnswer`). |
+| `types.py` | Pydantic models for headers, messages (with `Message.meta` bag), and controller/state artifacts (`WM`, `Thought`, `FinalAnswer`). |
 | `registry.py` | `ModelRegistry` that caches `TypeAdapter`s for per-node validation. |
 | `patterns.py` | Batteries-included helpers: `map_concurrent`, routers, and `join_k` aggregator. |
 | `middlewares.py` | Async middleware hook contract for structured logging/observability sinks. |
@@ -29,6 +29,9 @@ contributors understand how the pieces fit together.
 * **Reliability envelope**: each message dispatch goes through `_execute_with_reliability`
   which applies validation, timeout, retry with exponential backoff, structured logging,
   and middleware hooks.
+* **Metadata propagation**: every `Message` includes a mutable `meta` dictionary. The
+  runtime clones it when emitting streaming chunks, preserving debugging or billing
+  breadcrumbs across retries, controller loops, and playbook subflows.
 * **Deadline enforcement**: nodes never start executing stale work; `Message.deadline_s`
   is checked prior to invocation and expired traces are converted to
   `FinalAnswer("Deadline exceeded")` without running the user coroutine.

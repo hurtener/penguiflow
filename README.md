@@ -65,6 +65,7 @@ msg = Message(
     payload=QueryIn(text="unique reach last 30 days"),
     headers=Headers(tenant="acme")
 )
+msg.meta["request_id"] = "abc123"
 ```
 
 ### Node
@@ -200,6 +201,22 @@ Phase 3 adds wall-clock and logical guardrails so long-running traces shut down 
 * Leave `deadline_s` unset or configure `WM.budget_hops=None` / `WM.budget_tokens=None` to keep the behaviour unbounded—guardrails are entirely opt-in.
 * Tests in `tests/test_budgets.py` cover both deadline short-circuiting and token budget enforcement, complementing the hop and deadline checks exercised in `tests/test_controller.py`.
 * Example: `examples/controller_multihop/` demonstrates configuring deadlines, hop limits, and token budgets together in a looping controller.
+
+### Message metadata propagation
+
+Phase 4 introduces a `meta: dict[str, Any]` bag on every `Message` so nodes can attach
+debugging breadcrumbs, pricing data, routing hints, or attribution without polluting
+the primary payload:
+
+* The runtime preserves `message.meta` across retries, controller loops, and
+  subflows. Helpers such as `Context.emit_chunk` and `PenguiFlow.emit_chunk` now clone
+  the parent's metadata when wrapping `StreamChunk` payloads so streaming sinks stay in
+  sync with upstream context.
+* Nodes can safely mutate `message.meta` in-place or return a new message via
+  `message.model_copy(update={"meta": {...}})` when they need to add or redact keys.
+* `tests/test_metadata.py` exercises round-tripping metadata through multiple nodes and
+  streaming helpers, while `examples/metadata_propagation/` provides a runnable demo of
+  enriching messages with retrieval costs and summarizer details.
 
 ## 🧭 Repo Structure
 
@@ -457,6 +474,7 @@ pytest -q
 * `examples/playbook_retrieval/`: retrieval → rerank → compress playbook.
 * `examples/trace_cancel/`: per-trace cancellation propagating into a playbook.
 * `examples/streaming_llm/`: mock LLM emitting streaming chunks to an SSE sink.
+* `examples/metadata_propagation/`: attaching and consuming `Message.meta` context.
 
 ---
 
