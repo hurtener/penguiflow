@@ -395,13 +395,19 @@ flow focused on high-level orchestration logic.
 ### Visualization
 
 Need a quick view of the flow topology? Call `flow_to_mermaid(flow)` to render the graph
-as a Mermaid diagram ready for Markdown or docs tools:
+as a Mermaid diagram ready for Markdown or docs tools, or `flow_to_dot(flow)` for a
+Graphviz-friendly definition. Both outputs annotate controller loops and the synthetic
+OpenSea/Rookery boundaries so you can spot ingress/egress paths at a glance:
 
 ```python
-from penguiflow import flow_to_mermaid
+from penguiflow import flow_to_dot, flow_to_mermaid
 
 print(flow_to_mermaid(flow, direction="LR"))
+print(flow_to_dot(flow, rankdir="LR"))
 ```
+
+See `examples/visualizer/` for a runnable script that exports Markdown and DOT files for
+docs or diagramming pipelines.
 
 ---
 
@@ -481,6 +487,7 @@ pytest -q
 * `examples/trace_cancel/`: per-trace cancellation propagating into a playbook.
 * `examples/streaming_llm/`: mock LLM emitting streaming chunks to an SSE sink.
 * `examples/metadata_propagation/`: attaching and consuming `Message.meta` context.
+* `examples/visualizer/`: exports Mermaid + DOT diagrams with loop/subflow annotations.
 
 ---
 

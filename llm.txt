@@ -38,7 +38,9 @@ Contexts & helpers
 - Cycle detection: default topological check; per-node opt-in self cycles (`allow_cycle=True`) or global `allow_cycles=True`.
 - Structured logs emitted per node event: `{ts, event, node_name, node_id, trace_id, latency_ms, q_depth_in, attempt, ...}`.
 - Middleware hook: async callables added via `flow.add_middleware(fn)`; receive the event payload.
-- Visualization helper: `flow_to_mermaid(flow, direction="TD")` produces a Mermaid diagram string of the current graph.
+- Visualization helper: `flow_to_mermaid(flow, direction="TD")` produces a Mermaid diagram string of the current graph, and
+  `flow_to_dot(flow, rankdir="TB")` emits Graphviz DOT with the same annotations. Both highlight controller loops and the
+  OpenSea/Rookery ingress/egress boundaries.
 
 Deadlines & budgets
 -------------------
@@ -105,6 +107,7 @@ Examples reference map
 - `examples/playbook_retrieval/` — controller invoking a subflow playbook.
 - `examples/streaming_llm/` — mock LLM emitting `StreamChunk`s to an SSE-style sink.
 - `examples/metadata_propagation/` — attaching and consuming `Message.meta` context across nodes.
+- `examples/visualizer/` — generate Mermaid + DOT diagrams with loop/subflow annotations.
 - `benchmarks/` — microbenchmarks for throughput, retry/timeout, and controller playbook latency.
 
 Testing & tooling
