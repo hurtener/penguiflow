@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
@@ -26,7 +26,7 @@ class FlowEvent:
     trace_pending: int | None
     trace_inflight: int
     trace_cancelled: bool
-    extra: Mapping[str, Any] = MappingProxyType({})
+    extra: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "extra", MappingProxyType(dict(self.extra)))
