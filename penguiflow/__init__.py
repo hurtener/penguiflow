@@ -10,6 +10,7 @@ from .core import (
     call_playbook,
     create,
 )
+from .metrics import FlowEvent
 from .middlewares import Middleware
 from .node import Node, NodePolicy
 from .patterns import join_k, map_concurrent, predicate_router, union_router
@@ -33,6 +34,7 @@ __all__ = [
     "NodePolicy",
     "ModelRegistry",
     "Middleware",
+    "FlowEvent",
     "call_playbook",
     "Headers",
     "Message",

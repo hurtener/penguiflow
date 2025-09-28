@@ -3,23 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import pytest
 
 from penguiflow import Node, NodePolicy, create
+from penguiflow.metrics import FlowEvent
 
 
 class TrackingMiddleware:
     """Test middleware that tracks all events."""
 
     def __init__(self) -> None:
-        self.events: list[tuple[str, dict[str, Any]]] = []
+        self.events: list[FlowEvent] = []
         self.call_count = 0
 
-    async def __call__(self, event: str, payload: dict[str, Any]) -> None:
+    async def __call__(self, event: FlowEvent) -> None:
         self.call_count += 1
-        self.events.append((event, dict(payload)))
+        self.events.append(event)
 
 
 class ErrorMiddleware:
@@ -28,9 +28,9 @@ class ErrorMiddleware:
     def __init__(self, error_on_event: str | None = None) -> None:
         self.error_on_event = error_on_event
 
-    async def __call__(self, event: str, _payload: dict[str, Any]) -> None:
-        if self.error_on_event and event == self.error_on_event:
-            raise RuntimeError(f"Intentional error on {event}")
+    async def __call__(self, event: FlowEvent) -> None:
+        if self.error_on_event and event.event_type == self.error_on_event:
+            raise RuntimeError(f"Intentional error on {event.event_type}")
 
 
 class SlowMiddleware:
@@ -39,7 +39,7 @@ class SlowMiddleware:
     def __init__(self, delay: float = 0.1) -> None:
         self.delay = delay
 
-    async def __call__(self, _event: str, _payload: dict[str, Any]) -> None:
+    async def __call__(self, _event: FlowEvent) -> None:
         await asyncio.sleep(self.delay)
 
 
@@ -64,16 +64,21 @@ async def test_middleware_receives_all_node_events() -> None:
     assert tracker.call_count > 0
 
     # Check that we received expected events
-    event_types = {event for event, _ in tracker.events}
+    event_types = {evt.event_type for evt in tracker.events}
     assert "node_start" in event_types
     assert "node_success" in event_types
 
     # Verify payload structure
-    for event, payload in tracker.events:
-        if event in {"node_start", "node_success"}:
-            assert "node_name" in payload
-            assert "trace_id" in payload
+    for event in tracker.events:
+        if event.event_type in {"node_start", "node_success"}:
+            payload = event.to_payload()
             assert payload["node_name"] == "simple"
+            trace_id = payload.get("trace_id")
+            if trace_id is not None:
+                assert isinstance(trace_id, str)
+            assert payload["q_depth_total"] == (
+                payload["q_depth_in"] + payload["q_depth_out"]
+            )
 
 
 @pytest.mark.asyncio
@@ -151,7 +156,7 @@ async def test_middleware_with_retry_events() -> None:
     assert result == "success"
 
     # Check for retry events
-    event_types = [event for event, _ in tracker.events]
+    event_types = [evt.event_type for evt in tracker.events]
     assert "node_error" in event_types
     assert "node_retry" in event_types
     assert "node_success" in event_types

@@ -33,6 +33,7 @@ It provides:
 * **Runtime playbooks** (callable subflows with shared metadata)
 * **Per-trace cancellation** (`PenguiFlow.cancel` with `TraceCancelled` surfacing in nodes)
 * **Deadlines & budgets** (`Message.deadline_s`, `WM.budget_hops`, and `WM.budget_tokens` guardrails that you can leave unset/`None`)
+* **Observability hooks** (`FlowEvent` callbacks for logging, MLflow, or custom metrics sinks)
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
@@ -407,12 +408,14 @@ print(flow_to_mermaid(flow, direction="LR"))
 ## 🛡️ Reliability & Observability
 
 * **NodePolicy**: set validation scope plus per-node timeout, retries, and backoff curves.
-* **Per-trace metrics**: cancellation events now include `trace_pending`,
-  `trace_inflight`, `q_depth_in`, `q_depth_out`, and node fan-out counts for richer
-  observability.
-* **Structured logs**: enrich every node event with `{ts, trace_id, node_name, event, latency_ms, q_depth_in, attempt}`.
-* **Middleware hooks**: subscribe observers (e.g., MLflow) to the structured event stream.
-* See `examples/reliability_middleware/` for a concrete timeout + retry walkthrough.
+* **Per-trace metrics**: cancellation events include `trace_pending`, `trace_inflight`,
+  `q_depth_in`, `q_depth_out`, and node fan-out counts for richer observability.
+* **Structured `FlowEvent`s**: every node event carries `{ts, trace_id, node_name, event,
+  latency_ms, q_depth_in, q_depth_out, attempt}` plus a mutable `extra` map for custom
+  annotations.
+* **Middleware hooks**: subscribe observers (e.g., MLflow) to the structured `FlowEvent`
+  stream. See `examples/mlflow_metrics/` for an MLflow integration and
+  `examples/reliability_middleware/` for a concrete timeout + retry walkthrough.
 
 ---
 
@@ -420,7 +423,9 @@ print(flow_to_mermaid(flow, direction="LR"))
 
 - **In-process runtime**: there is no built-in distribution layer yet. Long-running CPU work should be delegated to your own pools or services.
 - **Registry-driven typing**: nodes default to validation. Provide a `ModelRegistry` when calling `flow.run(...)` or set `validate="none"` explicitly for untyped hops.
-- **Observability**: structured logs + middleware hooks are available, but integrations with third-party stacks (OTel, Prometheus) are DIY for now.
+- **Observability**: structured `FlowEvent` callbacks power logs/metrics; integrations with
+  third-party stacks (OTel, Prometheus, Datadog) remain DIY. See the MLflow middleware
+  example for a lightweight pattern.
 - **Roadmap**: v2 targets streaming, distributed backends, richer observability, and test harnesses. Contributions and proposals are welcome!
 
 ---
@@ -471,6 +476,7 @@ pytest -q
 * `examples/map_concurrent/`: bounded fan-out work inside a node.
 * `examples/controller_multihop/`: dynamic multi-hop agent loop.
 * `examples/reliability_middleware/`: retries, timeouts, and middleware hooks.
+* `examples/mlflow_metrics/`: structured `FlowEvent` export to MLflow (stdout fallback).
 * `examples/playbook_retrieval/`: retrieval → rerank → compress playbook.
 * `examples/trace_cancel/`: per-trace cancellation propagating into a playbook.
 * `examples/streaming_llm/`: mock LLM emitting streaming chunks to an SSE sink.
