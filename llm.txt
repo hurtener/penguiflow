@@ -1,5 +1,5 @@
-PenguiFlow quick facts (v1, phases 0–6 complete)
-===============================================
+PenguiFlow quick facts (v2: streaming, cancellation, guardrails, FlowTestKit)
+===================================================================================
 
 Runtime overview
 ----------------
@@ -7,43 +7,87 @@ Runtime overview
 - Graph endpoints: `OPEN_SEA` (ingress) and `ROOKERY` (egress); both use `Context` APIs.
 - `PenguiFlow.create(*adjacencies, queue_maxsize=64, allow_cycles=False, middlewares=None)` builds the graph.
 - Call `flow.run(registry=...)` once to start worker tasks, `flow.stop()` to cancel/await them.
-- Messages travel as Pydantic `Message` objects (payload + headers + trace metadata).
+- Per-trace cancellation: `await flow.cancel(trace_id)` requests cancellation and raises `TraceCancelled` inside the affected
+  nodes/subflows. Cancellation is idempotent and only impacts the matching trace.
+- `Message.deadline_s` guards wall-clock execution; the runtime checks deadlines before invoking nodes and sends
+  `FinalAnswer("Deadline exceeded")` to Rookery when expired. Leave it unset when no wall-clock limit is needed.
+- Messages travel as Pydantic `Message` objects (payload + headers + trace metadata + a mutable `meta` bag).
+- Exhausted retries and timeouts can emit a `FlowError` object to Rookery when
+  `create(..., emit_errors_to_rookery=True)` is used, preserving the trace id, node
+  metadata, and stable error code for downstream handling.
 
 Nodes & policies
 ----------------
 - Define nodes with `Node(async_fn, name?, policy?, allow_cycle=False)`; async function must accept `(message, ctx)`.
 - `NodePolicy` fields: `validate` (`"both"|"in"|"out"|"none"`), `timeout_s`, `max_retries`, `backoff_base`, `backoff_mult`, `max_backoff`.
+- Routers (`predicate_router` / `union_router`) accept an optional `policy=` implementing
+  the `RoutingPolicy` protocol; PenguiFlow passes a `RoutingRequest` describing the
+  message + candidate successors so policies can override or drop routes without
+  changing the flow topology.
 - Retries wrap exceptions *and* timeouts; backoff is exponential with optional cap.
+- If you do not need the `Context`, name it `_ctx` but keep the argument—the runtime passes it every time.
 
 Type safety
 -----------
 - Register models via `ModelRegistry.register(node_name, InModel, OutModel)`.
 - Pass registry to `flow.run(registry)`; `Node.invoke` validates according to policy.
-- `Message` payload can be any type; `Headers` include `tenant`, optional `topic`, `priority`, plus auto `trace_id`, `ts`, optional `deadline_s`.
+- `Message` payload can be any type; the `.meta` dictionary is for auxiliary context and `StreamChunk` is a first-class payload for
+  streaming paths.
+- `Headers` include `tenant`, optional `topic`, `priority`; `Message` carries `trace_id`, `ts`, optional `deadline_s`, and
+  `meta` for per-trace guardrails plus side-channel metadata.
 - Runtime verifies that any node with validation enabled is registered when `flow.run(registry=...)` is called.
 
 Contexts & helpers
 ------------------
-- Each node gets a `Context` with `.emit()`/`.emit_nowait()` (selective or broadcast) and `.fetch()`/`.fetch_any()` for incoming queues.
+- Each node gets a `Context` with `.emit()`/`.emit_nowait()` (selective or broadcast), `.emit_chunk()` for streaming replies, and `.fetch()`/`.fetch_any()` for incoming queues. `PenguiFlow.emit_chunk(...)` mirrors the helper for callers outside a node (e.g., SSE responders).
+- Metadata written to `message.meta` flows through retries, controller loops, playbooks, and streaming helpers; `emit_chunk`
+  clones the parent's metadata when wrapping `StreamChunk` payloads.
 - Cycle detection: default topological check; per-node opt-in self cycles (`allow_cycle=True`) or global `allow_cycles=True`.
 - Structured logs emitted per node event: `{ts, event, node_name, node_id, trace_id, latency_ms, q_depth_in, attempt, ...}`.
 - Middleware hook: async callables added via `flow.add_middleware(fn)`; receive the event payload.
-- Visualization helper: `flow_to_mermaid(flow, direction="TD")` produces a Mermaid diagram string of the current graph.
+- Visualization helper: `flow_to_mermaid(flow, direction="TD")` produces a Mermaid diagram string of the current graph, and
+  `flow_to_dot(flow, rankdir="TB")` emits Graphviz DOT with the same annotations. Both highlight controller loops and the
+  OpenSea/Rookery ingress/egress boundaries.
+
+Deadlines & budgets
+-------------------
+- Runtime validates `Message.deadline_s` before any node executes; expired work is skipped and turned into
+  `FinalAnswer("Deadline exceeded")` automatically.
+- Controller payload `WM` now tracks `tokens_used` and optional `budget_tokens` in addition to `hops`/`budget_hops`.
+- When `WM.tokens_used >= WM.budget_tokens` (if configured) or the hop budget is reached, PenguiFlow emits a terminal
+  `FinalAnswer` (`"Token budget exhausted"` / `"Hop budget exhausted"`) to Rookery without another controller invocation.
+- Set `WM.budget_hops=None` / `WM.budget_tokens=None` to disable those guardrails for an unbounded loop.
 
 Patterns (`penguiflow.patterns`)
 --------------------------------
 - `map_concurrent(items, worker, max_concurrency=8)` — semaphore-bounded async fan-out helper.
-- `predicate_router(name, predicate)` — route to successors based on payload/headers; predicate may return nodes, names, sequences, or None.
+- `predicate_router(name, predicate, policy=None)` — route to successors based on payload/headers; predicate may return nodes, names, sequences, or None, and the optional `policy` can override or filter the result.
 - `union_router(name, DiscriminatedModel)` — validates discriminated unions and forwards to named successor nodes.
 - `join_k(name, k)` — buffer `k` messages per `trace_id`; emits aggregated payload (list payload or list of messages).
+- `DictRoutingPolicy(mapping, key_getter=None)` — convenience helper that loads mapping-driven policies (JSON/env) and can be
+  hot-swapped via `update_mapping`/`set_default`.
+
+Streaming
+---------
+- `StreamChunk` model fields: `stream_id`, `seq`, `text`, `done`, and `meta` (dict).
+- `Context.emit_chunk(parent, text, stream_id=None, seq=None, done=False, meta=None, to=None)`
+  (and `PenguiFlow.emit_chunk(...)`) wrap the chunk in a `Message`, reuse the parent's
+  headers + trace, and respect queue backpressure just like `.emit()`.
+- Sequence numbers auto-increment per stream when `seq` is omitted; calling with
+  `done=True` clears the counter so future streams restart at 0.
+- Use downstream sink nodes to collect chunks, print SSE/WebSocket payloads, or fan
+  them out further. Helpers `format_sse_event(chunk, ...)` and `chunk_to_ws_json(chunk, ...)`
+  produce ready-to-send text for HTTP streaming or WebSocket broadcasts. See
+  `examples/streaming_llm/`.
 
 Controller loop models (`penguiflow.types`)
 -------------------------------------------
-- `WM`: working memory (`query`, `facts`, `hops`, `budget_hops`, `confidence`).
+- `WM`: working memory (`query`, `facts`, `hops`, `budget_hops`, `tokens_used`, `budget_tokens`, `confidence`).
 - `Thought`: optional planning artifact (`steps`, `rationale`, `done`).
 - `PlanStep`: enumerated tool/action descriptions.
 - `FinalAnswer`: terminal payload (`text`, `citations`).
-- Runtime auto-increments `WM.hops`, enforces `budget_hops` and `deadline_s`, converts violations to `FinalAnswer` with predefined text.
+- Runtime auto-increments `WM.hops`, enforces hop/token budgets when present, and checks deadlines before re-enqueueing
+  controller messages; violations automatically become `FinalAnswer` messages with the exhaustion reason.
 
 Playbooks
 ---------
@@ -51,10 +95,13 @@ Playbooks
 - Subflow receives the original message (headers + trace id preserved).
 - Returns the first payload emitted to playbook’s Rookery; always stops the subflow (shielded).
 
-Middlewares & observability
----------------------------
-- Middleware signature: `async def middleware(event: str, payload: dict[str, Any]): ...`.
-- Typical events: `node_start`, `node_success`, `node_timeout`, `node_error`, `node_retry`, `node_failed`, `node_cancelled`.
+  Middlewares & observability
+  ---------------------------
+  - Middleware signature: `async def middleware(event: FlowEvent): ...`.
+  - `FlowEvent` exposes `.to_payload()` for structured logging plus `.metric_samples()` /
+    `.tag_values()` helpers for metrics sinks.
+  - Typical `event.event_type` values: `node_start`, `node_success`, `node_timeout`,
+    `node_error`, `node_retry`, `node_failed`, `node_cancelled`.
 
 Examples reference map
 ----------------------
@@ -64,16 +111,26 @@ Examples reference map
 - `examples/fanout_join/` — fan-out to workers + `join_k` aggregation.
 - `examples/map_concurrent/` — map helper inside a node.
 - `examples/controller_multihop/` — controller loop producing `FinalAnswer`.
-- `examples/reliability_middleware/` — timeout/retry/middleware logging.
+  - `examples/reliability_middleware/` — timeout/retry/middleware logging.
+  - `examples/mlflow_metrics/` — MLflow-backed metrics middleware (falls back to stdout).
 - `examples/playbook_retrieval/` — controller invoking a subflow playbook.
+- `examples/streaming_llm/` — mock LLM emitting `StreamChunk`s to an SSE-style sink.
+- `examples/metadata_propagation/` — attaching and consuming `Message.meta` context across nodes.
+- `examples/routing_policy/` — config-driven policy overrides for predicate routers.
+- `examples/visualizer/` — generate Mermaid + DOT diagrams with loop/subflow annotations.
+- `examples/traceable_errors/` — opt-in FlowError emission surfaced from Rookery.
 - `benchmarks/` — microbenchmarks for throughput, retry/timeout, and controller playbook latency.
 
 Testing & tooling
 -----------------
 - Run tests with `pytest -q` (or `uv run pytest -q` in CI).
 - Lint with `ruff check .`; type-check package via `mypy penguiflow` (CI uses `uv run` commands).
-- Python 3.12+, Pydantic v2.
+- Python 3.11+, Pydantic v2.
 - No external brokers—everything uses asyncio queues in-process.
+- FlowTestKit helpers (`penguiflow.testkit`) keep unit tests concise:
+  - `await testkit.run_one(flow, message)` to execute a single trace end-to-end.
+  - `testkit.assert_node_sequence(trace_id, [...])` to verify ordering from recorded `FlowEvent`s.
+  - `testkit.simulate_error(...)` to model retry scenarios without bespoke coroutine glue.
 
 Usage checklist for new integrations
 ------------------------------------

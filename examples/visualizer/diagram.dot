@@ -1,0 +1,12 @@
+digraph PenguiFlow {
+    rankdir=LR
+    node [shape=box, style=rounded]
+    controller [label="controller", style="rounded,filled", fillcolor="#fef3c7"]
+    summarize [label="summarize"]
+    Rookery [label="Rookery", shape=oval, style="filled", fillcolor="#e0f2fe"]
+    OpenSea [label="OpenSea", shape=oval, style="filled", fillcolor="#e0f2fe"]
+    controller -> controller [label="loop"]
+    summarize -> Rookery [label="egress"]
+    OpenSea -> controller [label="ingress"]
+    controller -> summarize
+}

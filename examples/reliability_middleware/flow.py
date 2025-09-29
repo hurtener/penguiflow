@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
-from penguiflow import Headers, Message, Node, NodePolicy, PenguiFlow, create
+from penguiflow import (
+    FlowEvent,
+    Headers,
+    Message,
+    Node,
+    NodePolicy,
+    PenguiFlow,
+    create,
+)
 
 
 def build_flow() -> PenguiFlow:
@@ -35,10 +42,10 @@ def build_flow() -> PenguiFlow:
 
     flow = create(flaky_node.to())
 
-    async def middleware(event: str, payload: dict[str, Any]) -> None:
-        attempt = payload["attempt"]
-        latency = payload.get("latency_ms")
-        print(f"mw:{event}:attempt={attempt} latency={latency}")
+    async def middleware(event: FlowEvent) -> None:
+        attempt = event.attempt
+        latency = event.latency_ms
+        print(f"mw:{event.event_type}:attempt={attempt} latency={latency}")
 
     flow.add_middleware(middleware)
     return flow

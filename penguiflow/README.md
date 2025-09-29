@@ -9,11 +9,16 @@ contributors understand how the pieces fit together.
 | Module | Purpose |
 | --- | --- |
 | `core.py` | Runtime graph builder, execution engine, retries/timeouts, controller loop semantics, and playbook helper. |
+| `errors.py` | Defines `FlowError` and `FlowErrorCode` used for traceable exceptions. |
 | `node.py` | `Node` wrapper and `NodePolicy` configuration (validation scope, timeout, retry/backoff). |
-| `types.py` | Pydantic models for headers, messages, and controller/state artifacts (`WM`, `Thought`, `FinalAnswer`). |
+| `types.py` | Pydantic models for headers, messages (with `Message.meta` bag), and controller/state artifacts (`WM`, `Thought`, `FinalAnswer`). |
 | `registry.py` | `ModelRegistry` that caches `TypeAdapter`s for per-node validation. |
 | `patterns.py` | Batteries-included helpers: `map_concurrent`, routers, and `join_k` aggregator. |
-| `middlewares.py` | Async middleware hook contract for structured logging/observability sinks. |
+| `policies.py` | Policy protocol + helpers (e.g., `DictRoutingPolicy`) for config-driven routing decisions. |
+| `middlewares.py` | Async middleware hook contract consuming structured `FlowEvent` objects. |
+| `metrics.py` | `FlowEvent` model plus helpers for deriving metrics/tags. |
+| `viz.py` | Mermaid and DOT exporters with loop/subflow annotations. |
+| `testkit.py` | FlowTestKit helpers (`run_one`, `assert_node_sequence`, `simulate_error`). |
 | `__init__.py` | Public surface that re-exports the main primitives for consumers. |
 
 ## Key runtime behaviors
@@ -29,15 +34,28 @@ contributors understand how the pieces fit together.
 * **Reliability envelope**: each message dispatch goes through `_execute_with_reliability`
   which applies validation, timeout, retry with exponential backoff, structured logging,
   and middleware hooks.
+* **Traceable exceptions**: when retries are exhausted or timeouts fire, the runtime
+  builds a `FlowError` capturing the trace id, node metadata, and failure code. Setting
+  `emit_errors_to_rookery=True` on `penguiflow.core.create` pushes the `FlowError`
+  directly to Rookery so callers can inspect it.
+* **Metadata propagation**: every `Message` includes a mutable `meta` dictionary. The
+  runtime clones it when emitting streaming chunks, preserving debugging or billing
+  breadcrumbs across retries, controller loops, and playbook subflows.
+* **Deadline enforcement**: nodes never start executing stale work; `Message.deadline_s`
+  is checked prior to invocation and expired traces are converted to
+  `FinalAnswer("Deadline exceeded")` without running the user coroutine.
 * **Registry guardrails**: when `flow.run(registry=...)` is used, the runtime asserts that
   every validating node has a corresponding entry in the registry so configuration issues
   surface immediately.
 * **Controller loops**: when a node emits a `Message` whose payload is a `WM`, the runtime
-  increments hop counters, enforces budgets, and re-enqueues the message back to the
-  controller. Returning a `FinalAnswer` short-circuits to Rookery.
-* **Playbooks**: `call_playbook` accepts a factory that returns a `(PenguiFlow, registry)`
-  pair, runs it, emits the parent message (preserving headers + trace ID), and returns the
-  first payload produced by the subflow.
+  increments hop counters, enforces hop/token budgets (`budget_hops` / `budget_tokens`) when
+  they are set, checks deadlines, and re-enqueues the message back to the controller.
+  Returning a `FinalAnswer` short-circuits to Rookery or, if guardrails fire, the runtime
+  creates a `FinalAnswer` with the appropriate exhaustion message.
+* **Playbooks**: `Context.call_playbook` accepts a factory that returns a `(PenguiFlow,
+  registry)` pair, runs it, emits the parent message (preserving headers + trace ID),
+  mirrors cancellation signals to the subflow, and returns the first payload produced by
+  the subflow.
 
 ## Validation & typing
 
@@ -49,24 +67,40 @@ contributors understand how the pieces fit together.
 ## Patterns cheat sheet
 
 * `map_concurrent` — run an async worker over a list of inputs with bounded concurrency.
-* `predicate_router` — route to successor nodes based on simple boolean predicates.
-* `union_router` — enforce discriminated unions and send each variant to its matching node.
+* `predicate_router` — route to successor nodes based on simple boolean predicates; set
+  `policy=` to consult runtime routing policies.
+* `union_router` — enforce discriminated unions and send each variant to its matching node
+  (also accepts `policy=` overrides).
 * `join_k` — buffer `k` messages per trace id, then emit a combined batch downstream.
+* `DictRoutingPolicy` — load config-driven overrides (JSON/env) and attach them to router
+  helpers via `policy=`.
 
 Each helper is a regular node and can be combined with hand-authored nodes seamlessly.
 
+## Visualization helpers
+
+`viz.flow_to_mermaid(flow, direction="TD")` and `viz.flow_to_dot(flow, rankdir="TB")`
+inspect the runtime graph and emit Mermaid or Graphviz definitions. Nodes tagged with
+`allow_cycle=True` (controller loops) are highlighted automatically, and edges touching
+`OPEN_SEA`/`ROOKERY` are annotated as ingress/egress so subflow boundaries stand out in
+diagrams. The `examples/visualizer/` folder contains a runnable script that exports both
+formats for docs.
+
 ## Middleware & logging
 
-`_emit_event` emits structured dictionaries with fields:
-`{ts, event, node_name, node_id, trace_id, latency_ms, q_depth_in, attempt, ...}`. Any
-middleware added via `flow.add_middleware` receives these events and can fan them out to
-logging frameworks, observability tools, or metrics backends.
+`_emit_event` now materialises a `FlowEvent` dataclass containing fields such as
+`{ts, event_type, node_name, node_id, trace_id, latency_ms, q_depth_in, q_depth_out,
+outgoing, trace_pending, trace_inflight, ...}`. Middleware added via
+`flow.add_middleware` receives these objects, can inspect `.to_payload()` for logging,
+and `.metric_samples()` / `.tag_values()` for metrics sinks like MLflow.
 
 ## Testing & examples
 
 * Unit tests live under `tests/` and exercise every primitive (core runtime, registry,
-  types, patterns, controller behavior, playbooks).
+  types, patterns, controller behavior, playbooks, FlowTestKit).
 * Every major feature has a runnable example under `examples/`. Use `uv run python <path>`
   or `.venv/bin/python <path>` to execute them locally.
+* `examples/testkit_demo/` demonstrates the FlowTestKit harness in isolation so you can
+  replicate the pattern inside your own repositories.
 
 For a conceptual overview and getting-started guide, see the repository root `README.md`.

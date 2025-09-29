@@ -4,6 +4,21 @@
   <img src="asset/Penguiflow.png" alt="PenguiFlow logo" width="220">
 </p>
 
+<p align="center">
+  <a href="https://github.com/penguiflow/penguiflow/actions/workflows/ci.yml">
+    <img src="https://github.com/penguiflow/penguiflow/actions/workflows/ci.yml/badge.svg" alt="CI Status">
+  </a>
+  <a href="https://github.com/penguiflow/penguiflow">
+    <img src="https://img.shields.io/badge/coverage-85%25-brightgreen" alt="Coverage">
+  </a>
+  <a href="https://pypi.org/project/penguiflow/">
+    <img src="https://img.shields.io/pypi/v/penguiflow.svg" alt="PyPI version">
+  </a>
+  <a href="https://github.com/penguiflow/penguiflow/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
+  </a>
+</p>
+
 **Async-first orchestration library for multi-agent and data pipelines**
 
 PenguiFlow is a **lightweight Python library** to orchestrate agent flows.
@@ -13,8 +28,14 @@ It provides:
 * **Concurrent fan-out / fan-in patterns**
 * **Routing & decision points**
 * **Retries, timeouts, backpressure**
+* **Streaming chunks** (LLM-style token emission with `Context.emit_chunk`)
 * **Dynamic loops** (controller nodes)
 * **Runtime playbooks** (callable subflows with shared metadata)
+* **Per-trace cancellation** (`PenguiFlow.cancel` with `TraceCancelled` surfacing in nodes)
+* **Deadlines & budgets** (`Message.deadline_s`, `WM.budget_hops`, and `WM.budget_tokens` guardrails that you can leave unset/`None`)
+* **Observability hooks** (`FlowEvent` callbacks for logging, MLflow, or custom metrics sinks)
+* **Policy-driven routing** (optional policies steer routers without breaking existing flows)
+* **Traceable exceptions** (`FlowError` captures node/trace metadata and optionally emits to Rookery)
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
@@ -47,6 +68,7 @@ msg = Message(
     payload=QueryIn(text="unique reach last 30 days"),
     headers=Headers(tenant="acme")
 )
+msg.meta["request_id"] = "abc123"
 ```
 
 ### Node
@@ -65,6 +87,12 @@ async def triage(msg: QueryIn, ctx) -> QueryOut:
 
 triage_node = Node(triage, name="triage")
 ```
+
+Node functions must always accept **two positional parameters**: the incoming payload and
+the `Context` object. If a node does not use the context, name it `_` or `_ctx`, but keep
+the parameter so the runtime can still inject it. Registering the node with
+`ModelRegistry` ensures the payload is validated/cast to the expected Pydantic model;
+setting `NodePolicy(validate="none")` skips that validation for hot paths.
 
 ### Flow
 
@@ -139,13 +167,77 @@ await flow.stop()
 pip install -e ./penguiflow
 ```
 
-Requires **Python 3.12+**.
+Requires **Python 3.11+**.
+
+---
+
+## 🛠️ Key capabilities
+
+### Streaming & incremental delivery
+
+`Context.emit_chunk` (and `PenguiFlow.emit_chunk`) provide token-level streaming without
+sacrificing backpressure or ordering guarantees.  The helper wraps the payload in a
+`StreamChunk`, mirrors routing metadata from the parent message, and automatically
+increments per-stream sequence numbers.  See `tests/test_streaming.py` and
+`examples/streaming_llm/` for an end-to-end walk-through.
+
+### Reliability & guardrails
+
+PenguiFlow enforces reliability boundaries out of the box:
+
+* **Per-trace cancellation** (`PenguiFlow.cancel(trace_id)`) unwinds a single run while
+  other traces keep executing.  Worker tasks observe `TraceCancelled` and clean up
+  resources; `tests/test_cancel.py` covers the behaviour.
+* **Deadlines & budgets** let you keep loops honest.  `Message.deadline_s` guards
+  wall-clock execution, while controller payloads (`WM`) track hop and token budgets.
+  Exhaustion short-circuits into terminal `FinalAnswer` messages as demonstrated in
+  `tests/test_budgets.py` and `examples/controller_multihop/`.
+* **Retries & timeouts** live in `NodePolicy`.  Exponential backoff, timeout enforcement,
+  and structured retry events are exercised heavily in the core test suite.
+
+### Metadata & observability
+
+Every `Message` carries a mutable `meta` dictionary so nodes can propagate debugging
+breadcrumbs, billing information, or routing hints without touching the payload.  The
+runtime clones metadata during streaming and playbook calls (`tests/test_metadata.py`).
+Structured runtime events surface through `FlowEvent` objects; attach middlewares for
+custom logging or metrics ingestion (`examples/mlflow_metrics/`).
+
+### Routing & dynamic policies
+
+Branching flows stay flexible thanks to routers and optional policies.  The
+`predicate_router` and `union_router` helpers can consult a `RoutingPolicy` at runtime to
+override or drop successors, while `DictRoutingPolicy` provides a config-driven
+implementation ready for JSON/YAML/env inputs (`tests/test_routing_policy.py`,
+`examples/routing_policy/`).
+
+### Traceable exceptions
+
+When retries are exhausted or timeouts fire, PenguiFlow wraps the failure in a
+`FlowError` that preserves the trace id, node metadata, and a stable error code.
+Opt into `emit_errors_to_rookery=True` to receive these objects directly from
+`flow.fetch()`—see `tests/test_errors.py` and `examples/traceable_errors/` for usage.
+
+### FlowTestKit
+
+The new `penguiflow.testkit` module keeps unit tests tiny:
+
+* `await testkit.run_one(flow, message)` boots a flow, emits a message, captures runtime
+  events, and returns the first Rookery payload.
+* `testkit.assert_node_sequence(trace_id, [...])` asserts the order in which nodes ran.
+* `testkit.simulate_error(...)` builds coroutine helpers that fail a configurable number
+  of times—perfect for retry scenarios.
+
+The harness is covered by `tests/test_testkit.py` and demonstrated in
+`examples/testkit_demo/`.
+
 
 ## 🧭 Repo Structure
 
 penguiflow/
   __init__.py
   core.py          # runtime orchestrator, retries, controller helpers, playbooks
+  errors.py        # FlowError / FlowErrorCode definitions
   node.py
   types.py
   registry.py
@@ -234,17 +326,45 @@ stitched directly into a flow adjacency list:
 
 - `map_concurrent(items, worker, max_concurrency=8)` — fan a single message out into
   many in-memory tasks (e.g., batch document enrichment) while respecting a semaphore.
-- `predicate_router(name, mapping)` — route messages to successor nodes based on simple
-  boolean functions over payload or headers. Perfect for guardrails or conditional
-  tool invocation without building a full controller.
+- `predicate_router(name, predicate, policy=None)` — route messages to successor nodes
+  based on simple boolean functions over payload or headers, optionally consulting a
+  runtime `policy` to override or filter the computed targets. Perfect for guardrails or
+  conditional tool invocation without rebuilding the flow.
 - `union_router(name, discriminated_model)` — accept a Pydantic discriminated union and
   forward each variant to the matching typed successor node. Keeps type-safety even when
   multiple schema branches exist.
 - `join_k(name, k)` — aggregate `k` messages per `trace_id` before resuming downstream
   work. Useful for fan-out/fan-in batching, map-reduce style summarization, or consensus.
+- `DictRoutingPolicy(mapping, key_getter=None)` — load routing overrides from
+  configuration and pair it with the router helpers via `policy=...` to switch routing at
+  runtime without modifying the flow graph.
 
 All helpers are regular `Node` instances under the hood, so they inherit retries,
 timeouts, and validation just like hand-written nodes.
+
+### Streaming Responses
+
+PenguiFlow now supports **LLM-style streaming** with the `StreamChunk` model. Each
+chunk carries `stream_id`, `seq`, `text`, optional `meta`, and a `done` flag. Use
+`Context.emit_chunk(parent=message, text=..., done=...)` inside a node (or the
+convenience wrapper `await flow.emit_chunk(...)` from outside a node) to push
+chunks downstream without manually crafting `Message` envelopes:
+
+```python
+await ctx.emit_chunk(parent=msg, text=token, done=done)
+```
+
+- Sequence numbers auto-increment per `stream_id` (defaults to the parent trace).
+- Backpressure is preserved; if the downstream queue is full the helper awaits just
+  like `Context.emit`.
+- When `done=True`, the sequence counter resets so a new stream can reuse the same id.
+
+Pair the producer with a sink node that consumes `StreamChunk` payloads and assembles
+the final result when `done` is observed. See `examples/streaming_llm/` for a complete
+mock LLM → SSE pipeline. For presentation layers, utilities like
+`format_sse_event(chunk)` and `chunk_to_ws_json(chunk)` (both exported from the
+package) will convert a `StreamChunk` into SSE-compatible text or WebSocket JSON payloads
+without boilerplate.
 
 ### Dynamic Controller Loops
 
@@ -267,20 +387,21 @@ easy to surface guardrails to downstream consumers.
 ### Playbooks & Subflows
 
 Sometimes a controller or router needs to execute a **mini flow** — for example,
-retrieval → rerank → compress — without polluting the global topology. `call_playbook`
-spawns a brand-new `PenguiFlow` on demand and wires it into the parent message context:
+retrieval → rerank → compress — without polluting the global topology.
+`Context.call_playbook` spawns a brand-new `PenguiFlow` on demand and wires it into
+the parent message context:
 
 - Trace IDs and headers are reused so observability stays intact.
-- The helper respects optional timeouts and always stops the subflow (even on cancel).
+- The helper respects optional timeouts, mirrors cancellation to the subflow, and always
+  stops it (even on cancel).
 - The first payload emitted to the playbook's Rookery is returned to the caller,
   allowing you to treat subflows as normal async functions.
 
 ```python
-from penguiflow import call_playbook
 from penguiflow.types import Message
 
 async def controller(msg: Message, ctx) -> Message:
-    playbook_result = await call_playbook(build_retrieval_playbook, msg)
+    playbook_result = await ctx.call_playbook(build_retrieval_playbook, msg)
     return msg.model_copy(update={"payload": playbook_result})
 ```
 
@@ -292,22 +413,33 @@ flow focused on high-level orchestration logic.
 ### Visualization
 
 Need a quick view of the flow topology? Call `flow_to_mermaid(flow)` to render the graph
-as a Mermaid diagram ready for Markdown or docs tools:
+as a Mermaid diagram ready for Markdown or docs tools, or `flow_to_dot(flow)` for a
+Graphviz-friendly definition. Both outputs annotate controller loops and the synthetic
+OpenSea/Rookery boundaries so you can spot ingress/egress paths at a glance:
 
 ```python
-from penguiflow import flow_to_mermaid
+from penguiflow import flow_to_dot, flow_to_mermaid
 
 print(flow_to_mermaid(flow, direction="LR"))
+print(flow_to_dot(flow, rankdir="LR"))
 ```
+
+See `examples/visualizer/` for a runnable script that exports Markdown and DOT files for
+docs or diagramming pipelines.
 
 ---
 
 ## 🛡️ Reliability & Observability
 
 * **NodePolicy**: set validation scope plus per-node timeout, retries, and backoff curves.
-* **Structured logs**: enrich every node event with `{ts, trace_id, node_name, event, latency_ms, q_depth_in, attempt}`.
-* **Middleware hooks**: subscribe observers (e.g., MLflow) to the structured event stream.
-* See `examples/reliability_middleware/` for a concrete timeout + retry walkthrough.
+* **Per-trace metrics**: cancellation events include `trace_pending`, `trace_inflight`,
+  `q_depth_in`, `q_depth_out`, and node fan-out counts for richer observability.
+* **Structured `FlowEvent`s**: every node event carries `{ts, trace_id, node_name, event,
+  latency_ms, q_depth_in, q_depth_out, attempt}` plus a mutable `extra` map for custom
+  annotations.
+* **Middleware hooks**: subscribe observers (e.g., MLflow) to the structured `FlowEvent`
+  stream. See `examples/mlflow_metrics/` for an MLflow integration and
+  `examples/reliability_middleware/` for a concrete timeout + retry walkthrough.
 
 ---
 
@@ -315,8 +447,10 @@ print(flow_to_mermaid(flow, direction="LR"))
 
 - **In-process runtime**: there is no built-in distribution layer yet. Long-running CPU work should be delegated to your own pools or services.
 - **Registry-driven typing**: nodes default to validation. Provide a `ModelRegistry` when calling `flow.run(...)` or set `validate="none"` explicitly for untyped hops.
-- **Observability**: structured logs + middleware hooks are available, but integrations with third-party stacks (OTel, Prometheus) are DIY for now.
-- **Roadmap**: v2 targets streaming, distributed backends, richer observability, and test harnesses. Contributions and proposals are welcome!
+- **Observability**: structured `FlowEvent` callbacks power logs/metrics; integrations with
+  third-party stacks (OTel, Prometheus, Datadog) remain DIY. See the MLflow middleware
+  example for a lightweight pattern.
+- **Roadmap**: follow-up releases focus on optional distributed backends, deeper observability integrations, and additional playbook patterns. Contributions and proposals are welcome!
 
 ---
 
@@ -330,8 +464,8 @@ playbook latency. Copy them into product repos to watch for regressions over tim
 
 ## 🔮 Roadmap
 
-* **v1 (current)**: safe core runtime, type-safety, retries, timeouts, routing, controller loops, playbooks via examples.
-* **v2 (future)**: streaming support, per-trace cancel, deadlines/budgets, observability hooks, visualizer, testing harness.
+* **v2 (current)**: streaming, per-trace cancellation, deadlines/budgets, metadata propagation, observability hooks, visualizer, routing policies, traceable errors, and FlowTestKit.
+* **Future**: optional distributed runners, richer third-party observability adapters, and opinionated playbook templates.
 
 ---
 
@@ -365,7 +499,12 @@ pytest -q
 * `examples/map_concurrent/`: bounded fan-out work inside a node.
 * `examples/controller_multihop/`: dynamic multi-hop agent loop.
 * `examples/reliability_middleware/`: retries, timeouts, and middleware hooks.
+* `examples/mlflow_metrics/`: structured `FlowEvent` export to MLflow (stdout fallback).
 * `examples/playbook_retrieval/`: retrieval → rerank → compress playbook.
+* `examples/trace_cancel/`: per-trace cancellation propagating into a playbook.
+* `examples/streaming_llm/`: mock LLM emitting streaming chunks to an SSE sink.
+* `examples/metadata_propagation/`: attaching and consuming `Message.meta` context.
+* `examples/visualizer/`: exports Mermaid + DOT diagrams with loop/subflow annotations.
 
 ---
 

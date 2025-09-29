@@ -14,9 +14,11 @@ models shipped with PenguiFlow.
 
 ## Guardrails
 
-The runtime increments `WM.hops` and checks both `budget_hops` and `deadline_s`. If either
-limit is exceeded, PenguiFlow returns a `FinalAnswer` with an error message instead of
-looping forever.
+The runtime increments `WM.hops`, tracks `WM.tokens_used`, and checks the configured
+`budget_hops`, `budget_tokens`, and `Message.deadline_s`. If any limit is exceeded,
+PenguiFlow returns a `FinalAnswer` with an exhaustion message instead of looping forever.
+Leave any of these fields unset/`None` when you want the loop to run without that
+particular guardrail.
 
 ## Run it
 
@@ -27,8 +29,9 @@ uv run python examples/controller_multihop/flow.py
 On completion you should see something like:
 
 ```
-answer after 3 hops
+Token budget exhausted
 ```
 
-Try changing `budget_hops` or adding simulated latency in the controller to see how the
-runtime enforces budgets and deadlines.
+Try changing `budget_hops`, `budget_tokens`, or adding simulated latency in the controller
+to see how the runtime enforces deadlines and budgets—or set them to `None` to observe the
+unbounded behaviour.

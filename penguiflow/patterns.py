@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from pydantic.type_adapter import TypeAdapter
 
 from .node import Node, NodePolicy
+from .policies import PolicyLike, RoutingRequest, evaluate_policy
 from .types import Message
 
 PayloadT = TypeVar("PayloadT")
@@ -47,6 +48,8 @@ async def map_concurrent(
 def predicate_router(
     name: str,
     predicate: Callable[[Any], Sequence[Node | str] | Node | str | None],
+    *,
+    policy: PolicyLike | None = None,
 ) -> Node:
     """Create a node that routes messages based on predicate outputs."""
 
@@ -56,15 +59,36 @@ def predicate_router(
             return
 
         normalized = _normalize_targets(ctx, targets)
-        if normalized:
-            await ctx.emit(msg, to=normalized)
+        if not normalized:
+            return
 
-    return Node(router, name=name, policy=NodePolicy(validate="none"))
+        selected = normalized
+        if policy is not None:
+            request = RoutingRequest(
+                message=msg,
+                context=ctx,
+                node=router_node,
+                proposed=tuple(normalized),
+                trace_id=getattr(msg, "trace_id", None),
+            )
+            decision = await evaluate_policy(policy, request)
+            if decision is None:
+                return
+            selected = _normalize_targets(ctx, decision)
+            if not selected:
+                return
+
+        await ctx.emit(msg, to=selected)
+
+    router_node = Node(router, name=name, policy=NodePolicy(validate="none"))
+    return router_node
 
 
 def union_router(
     name: str,
     union_model: type[BaseModel],
+    *,
+    policy: PolicyLike | None = None,
 ) -> Node:
     """Route based on a discriminated union Pydantic model."""
 
@@ -77,9 +101,27 @@ def union_router(
         normalized = _normalize_targets(ctx, target)
         if not normalized:
             raise KeyError(f"No successor matches '{target}'")
-        await ctx.emit(validated, to=normalized)
 
-    return Node(router, name=name, policy=NodePolicy(validate="none"))
+        selected = normalized
+        if policy is not None:
+            request = RoutingRequest(
+                message=validated,
+                context=ctx,
+                node=router_node,
+                proposed=tuple(normalized),
+                trace_id=getattr(validated, "trace_id", None),
+            )
+            decision = await evaluate_policy(policy, request)
+            if decision is None:
+                return
+            selected = _normalize_targets(ctx, decision)
+            if not selected:
+                return
+
+        await ctx.emit(validated, to=selected)
+
+    router_node = Node(router, name=name, policy=NodePolicy(validate="none"))
+    return router_node
 
 
 def join_k(name: str, k: int) -> Node:
