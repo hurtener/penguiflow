@@ -1219,13 +1219,13 @@ async def call_playbook(
 
     trace_id = getattr(parent_msg, "trace_id", None)
     cancel_watch: asyncio.Task[None] | None = None
+    pre_cancelled = False
 
     if runtime is not None and trace_id is not None:
         parent_event = runtime._trace_events.setdefault(trace_id, asyncio.Event())
 
         if parent_event.is_set():
-            with suppress(Exception):
-                await flow.cancel(trace_id)
+            pre_cancelled = True
         else:
 
             async def _mirror_cancel() -> None:
@@ -1239,6 +1239,8 @@ async def call_playbook(
             cancel_watch = asyncio.create_task(_mirror_cancel())
 
     try:
+        if pre_cancelled:
+            raise TraceCancelled(trace_id)
         await flow.emit(parent_msg)
         fetch_coro = flow.fetch()
         if timeout is not None:
@@ -1249,7 +1251,7 @@ async def call_playbook(
             return result_msg.payload
         return result_msg
     except TraceCancelled:
-        if trace_id is not None:
+        if trace_id is not None and not pre_cancelled:
             with suppress(Exception):
                 await flow.cancel(trace_id)
         raise

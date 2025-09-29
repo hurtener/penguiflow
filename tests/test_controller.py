@@ -18,6 +18,7 @@ from penguiflow import (
     call_playbook,
     create,
 )
+from penguiflow.core import TraceCancelled
 
 
 @pytest.mark.asyncio
@@ -168,4 +169,41 @@ async def test_call_playbook_cancellation_stops_subflow() -> None:
     assert flow_holder, "playbook should have produced a flow"
     flow = flow_holder[0]
     assert not flow._running  # noqa: SLF001 test ensures cleanup
+    assert not flow._tasks
+
+
+@pytest.mark.asyncio
+async def test_call_playbook_respects_pre_cancelled_trace() -> None:
+    subflow_started = asyncio.Event()
+    flow_holder: list[Any] = []
+
+    async def worker(msg: Message, ctx) -> Message:
+        subflow_started.set()
+        return msg
+
+    def playbook() -> tuple[Any, Any]:
+        node = Node(worker, name="worker", policy=NodePolicy(validate="none"))
+        flow = create(node.to())
+        flow_holder.append(flow)
+        return flow, None
+
+    runtime = create()
+    trace_id = "trace-pre-cancelled"
+    cancel_event = asyncio.Event()
+    cancel_event.set()
+    runtime._trace_events[trace_id] = cancel_event  # noqa: SLF001 test sets state
+
+    parent = Message(
+        payload="task",
+        headers=Headers(tenant="acme"),
+        trace_id=trace_id,
+    )
+
+    with pytest.raises(TraceCancelled):
+        await call_playbook(playbook, parent, runtime=runtime)
+
+    assert flow_holder, "playbook should have produced a flow"
+    flow = flow_holder[0]
+    assert not subflow_started.is_set()
+    assert not flow._running  # noqa: SLF001 ensures cleanup
     assert not flow._tasks
