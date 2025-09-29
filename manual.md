@@ -800,3 +800,71 @@ result = await flow.fetch()
 # 7. Cleanup
 await flow.stop()
 ```
+
+---
+
+21. Distributed Hooks (State & Bus)
+
+21.1 Opt-in adapters
+
+PenguiFlow 2.1 introduces optional adapters so the core runtime can publish
+trace data for distributed or remote execution scenarios without forcing a
+specific backend:
+
+```
+from penguiflow import create, Node
+from penguiflow.state import StateStore
+from penguiflow.bus import MessageBus
+
+flow = create(
+    controller.to(worker),
+    state_store=my_state_store,   # implements StateStore
+    message_bus=my_message_bus,   # implements MessageBus
+)
+flow.run()
+```
+
+If either adapter is omitted the runtime behaves exactly as v2.0 did — all
+queues remain in-process and no persistence happens. This keeps existing
+deployments working without modification.
+
+21.2 StateStore lifecycle
+
+`StateStore` adapters receive a `StoredEvent` every time the runtime emits a
+`FlowEvent`. Each object captures `trace_id`, timestamp, event kind,
+`node_name`, and the structured payload used for logging. Events are written in
+order of occurrence, so you can rebuild a trace history after the fact:
+
+```
+history = await flow.load_history(trace_id)
+for event in history:
+    print(event.kind, event.payload)
+```
+
+Failures when calling `save_event` are logged with the
+`state_store_save_failed` event and **never** bubble up to user code. This makes
+adapters safe to deploy even before their backends are fully hardened. The
+protocol also includes `save_remote_binding` to persist correlations between a
+trace and an external worker or agent.
+
+21.3 MessageBus envelopes
+
+When a `MessageBus` is configured every floe publish creates a `BusEnvelope`
+containing:
+
+* edge identifier (`source->target`),
+* `trace_id`,
+* original message payload,
+* headers + meta for convenience.
+
+Envelopes are published for both `emit` and `emit_nowait`, including OpenSea →
+ingress and node → Rookery transitions. Consumers can subscribe to these events
+to trigger remote workers or cross-process queues. Publish errors are logged as
+`message_bus_publish_failed` but never stop the flow, so transient outages do
+not impact the in-process execution path.
+
+21.4 Testing helpers
+
+`tests/test_distribution_hooks.py` contains concrete reference adapters that
+record events/envelopes. Use them as a template when building new backends or
+extending coverage in downstream repositories.

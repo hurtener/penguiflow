@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from . import testkit
+from .bus import BusEnvelope, MessageBus
 from .core import (
     DEFAULT_QUEUE_MAXSIZE,
     Context,
@@ -18,6 +19,7 @@ from .node import Node, NodePolicy
 from .patterns import join_k, map_concurrent, predicate_router, union_router
 from .policies import DictRoutingPolicy, RoutingPolicy, RoutingRequest
 from .registry import ModelRegistry
+from .state import RemoteBinding, StateStore, StoredEvent
 from .streaming import (
     chunk_to_ws_json,
     emit_stream_events,
@@ -40,6 +42,8 @@ __all__ = [
     "FlowEvent",
     "FlowError",
     "FlowErrorCode",
+    "MessageBus",
+    "BusEnvelope",
     "call_playbook",
     "Headers",
     "Message",
@@ -63,6 +67,9 @@ __all__ = [
     "flow_to_dot",
     "create",
     "testkit",
+    "StateStore",
+    "StoredEvent",
+    "RemoteBinding",
 ]
 
-__version__ = "2.0.0"
+__version__ = "2.1.0a0"

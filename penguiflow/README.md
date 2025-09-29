@@ -10,6 +10,8 @@ contributors understand how the pieces fit together.
 | --- | --- |
 | `core.py` | Runtime graph builder, execution engine, retries/timeouts, controller loop semantics, and playbook helper. |
 | `errors.py` | Defines `FlowError` and `FlowErrorCode` used for traceable exceptions. |
+| `state.py` | Protocols for pluggable state stores plus the `StoredEvent`/`RemoteBinding` dataclasses. |
+| `bus.py` | Message bus protocol used to fan out floe traffic to remote workers. |
 | `node.py` | `Node` wrapper and `NodePolicy` configuration (validation scope, timeout, retry/backoff). |
 | `types.py` | Pydantic models for headers, messages (with `Message.meta` bag), and controller/state artifacts (`WM`, `Thought`, `FinalAnswer`). |
 | `registry.py` | `ModelRegistry` that caches `TypeAdapter`s for per-node validation. |
@@ -34,6 +36,11 @@ contributors understand how the pieces fit together.
 * **Reliability envelope**: each message dispatch goes through `_execute_with_reliability`
   which applies validation, timeout, retry with exponential backoff, structured logging,
   and middleware hooks.
+* **Distribution hooks**: when a flow is constructed with a `StateStore` or `MessageBus`
+  adapter, runtime events are persisted as `StoredEvent` records (`PenguiFlow.load_history`
+  exposes the trace timeline) and every floe publish also emits a `BusEnvelope` describing
+  the edge, trace id, headers, and metadata. Failures are logged but never surface to
+  user code so adapters can fail independently of the core engine.
 * **Traceable exceptions**: when retries are exhausted or timeouts fire, the runtime
   builds a `FlowError` capturing the trace id, node metadata, and failure code. Setting
   `emit_errors_to_rookery=True` on `penguiflow.core.create` pushes the `FlowError`
