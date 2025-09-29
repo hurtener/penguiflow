@@ -1,4 +1,4 @@
-PenguiFlow quick facts (v1 shipped, v2 streaming + cancellation + deadlines/budgets)
+PenguiFlow quick facts (v2: streaming, cancellation, guardrails, FlowTestKit)
 ===================================================================================
 
 Runtime overview
@@ -125,8 +125,12 @@ Testing & tooling
 -----------------
 - Run tests with `pytest -q` (or `uv run pytest -q` in CI).
 - Lint with `ruff check .`; type-check package via `mypy penguiflow` (CI uses `uv run` commands).
-- Python 3.12+, Pydantic v2.
+- Python 3.11+, Pydantic v2.
 - No external brokers—everything uses asyncio queues in-process.
+- FlowTestKit helpers (`penguiflow.testkit`) keep unit tests concise:
+  - `await testkit.run_one(flow, message)` to execute a single trace end-to-end.
+  - `testkit.assert_node_sequence(trace_id, [...])` to verify ordering from recorded `FlowEvent`s.
+  - `testkit.simulate_error(...)` to model retry scenarios without bespoke coroutine glue.
 
 Usage checklist for new integrations
 ------------------------------------

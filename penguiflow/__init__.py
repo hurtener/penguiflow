@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from . import testkit
 from .core import (
     DEFAULT_QUEUE_MAXSIZE,
     Context,
@@ -61,6 +62,7 @@ __all__ = [
     "flow_to_mermaid",
     "flow_to_dot",
     "create",
+    "testkit",
 ]
 
-__version__ = "1.0.3"
+__version__ = "2.0.0"

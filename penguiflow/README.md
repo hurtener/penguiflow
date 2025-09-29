@@ -18,6 +18,7 @@ contributors understand how the pieces fit together.
 | `middlewares.py` | Async middleware hook contract consuming structured `FlowEvent` objects. |
 | `metrics.py` | `FlowEvent` model plus helpers for deriving metrics/tags. |
 | `viz.py` | Mermaid and DOT exporters with loop/subflow annotations. |
+| `testkit.py` | FlowTestKit helpers (`run_one`, `assert_node_sequence`, `simulate_error`). |
 | `__init__.py` | Public surface that re-exports the main primitives for consumers. |
 
 ## Key runtime behaviors
@@ -96,8 +97,10 @@ and `.metric_samples()` / `.tag_values()` for metrics sinks like MLflow.
 ## Testing & examples
 
 * Unit tests live under `tests/` and exercise every primitive (core runtime, registry,
-  types, patterns, controller behavior, playbooks).
+  types, patterns, controller behavior, playbooks, FlowTestKit).
 * Every major feature has a runnable example under `examples/`. Use `uv run python <path>`
   or `.venv/bin/python <path>` to execute them locally.
+* `examples/testkit_demo/` demonstrates the FlowTestKit harness in isolation so you can
+  replicate the pattern inside your own repositories.
 
 For a conceptual overview and getting-started guide, see the repository root `README.md`.

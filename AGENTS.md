@@ -216,7 +216,7 @@ pyproject.toml
 
 ## Coding Standards
 
-* Python ≥ 3.12, **Pydantic ≥ 2**.
+* Python ≥ 3.11, **Pydantic ≥ 2**.
 * **Async-only** (`asyncio`); no threads in core.
 * `pytest` for tests; target ~95% coverage.
 * `ruff` for lint; `mypy` in loose mode where dynamic typing is needed.
