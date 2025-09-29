@@ -36,6 +36,8 @@ It provides:
 * **Observability hooks** (`FlowEvent` callbacks for logging, MLflow, or custom metrics sinks)
 * **Policy-driven routing** (optional policies steer routers without breaking existing flows)
 * **Traceable exceptions** (`FlowError` captures node/trace metadata and optionally emits to Rookery)
+* **Distribution hooks (opt-in)** — plug a `StateStore` to persist trace history and a
+  `MessageBus` to publish floe traffic for remote workers without changing existing flows.
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
@@ -126,6 +128,10 @@ out = await flow.fetch()      # fetch from Rookery
 print(out.payload)            # PackOut(...)
 await flow.stop()
 ```
+
+> **Opt-in distribution:** pass `state_store=` and/or `message_bus=` when calling
+> `penguiflow.core.create(...)` to persist trace history and publish floe traffic
+> without changing node logic.
 
 ---
 
