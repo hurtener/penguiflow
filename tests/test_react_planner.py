@@ -44,6 +44,11 @@ async def respond(args: Answer, ctx: object) -> Answer:
     return args
 
 
+@tool(desc="Return invalid documents")
+async def broken(args: Intent, ctx: object) -> Documents:  # type: ignore[return-type]
+    return "boom"  # type: ignore[return-value]
+
+
 class StubClient:
     def __init__(self, responses: list[Mapping[str, object]]) -> None:
         self._responses = [json.dumps(item) for item in responses]
@@ -66,11 +71,13 @@ def make_planner(client: StubClient) -> ReactPlanner:
     registry.register("triage", Query, Intent)
     registry.register("retrieve", Intent, Documents)
     registry.register("respond", Answer, Answer)
+    registry.register("broken", Intent, Documents)
 
     nodes = [
         Node(triage, name="triage"),
         Node(retrieve, name="retrieve"),
         Node(respond, name="respond"),
+        Node(broken, name="broken"),
     ]
     catalog = build_catalog(nodes, registry)
     return ReactPlanner(llm_client=client, catalog=catalog)
@@ -147,6 +154,29 @@ async def test_react_planner_reports_validation_error() -> None:
 
     errors = [step["error"] for step in result.metadata["steps"] if step["error"]]
     assert any("did not validate" in err for err in errors)
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_reports_output_validation_error() -> None:
+    client = StubClient(
+        [
+            {
+                "thought": "broken",
+                "next_node": "broken",
+                "args": {"intent": "docs"},
+            },
+            {"thought": "finish", "next_node": None, "args": {"answer": "fallback"}},
+        ]
+    )
+    registry = ModelRegistry()
+    registry.register("broken", Intent, Documents)
+    catalog = build_catalog([Node(broken, name="broken")], registry)
+    planner = ReactPlanner(llm_client=client, catalog=catalog)
+
+    result = await planner.run("Test output validation path")
+
+    errors = [step["error"] for step in result.metadata["steps"] if step["error"]]
+    assert any("returned data" in err for err in errors)
 
 
 def test_react_planner_requires_catalog_or_nodes() -> None:

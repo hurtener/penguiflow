@@ -229,7 +229,16 @@ class ReactPlanner:
                     error=error,
                 )
 
-            observation = spec.out_model.model_validate(result)
+            try:
+                observation = spec.out_model.model_validate(result)
+            except ValidationError as exc:
+                error = prompts.render_output_validation_error(
+                    spec.name,
+                    json.dumps(exc.errors(), ensure_ascii=False),
+                )
+                trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                continue
+
             trajectory.steps.append(
                 TrajectoryStep(action=action, observation=observation)
             )

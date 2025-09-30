@@ -81,6 +81,13 @@ def render_validation_error(node_name: str, error: str) -> str:
     )
 
 
+def render_output_validation_error(node_name: str, error: str) -> str:
+    return (
+        f"tool '{node_name}' returned data that did not validate: {error}. "
+        "Ensure the tool output matches the declared schema."
+    )
+
+
 def render_invalid_node(node_name: str, available: Sequence[str]) -> str:
     options = ", ".join(sorted(available))
     return (
