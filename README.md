@@ -41,6 +41,10 @@ It provides:
 * **Remote calls (opt-in)** — `RemoteNode` bridges the runtime to external agents through a
   pluggable `RemoteTransport` interface (A2A-ready) while propagating streaming chunks and
   cancellation.
+* **A2A server adapter (opt-in)** — wrap a PenguiFlow graph in a FastAPI surface using
+  `penguiflow_a2a.A2AServerAdapter` so other agents can call `message/send`,
+  `message/stream`, and `tasks/cancel` while reusing the runtime's backpressure and
+  cancellation semantics.
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
@@ -197,6 +201,52 @@ work to remote agents (e.g., the A2A JSON-RPC/SSE ecosystem) without changing ex
 nodes.  The helper records remote bindings via the `StateStore`, mirrors streaming
 partials back into the graph, and propagates per-trace cancellation to remote tasks via
 `RemoteTransport.cancel`.  See `tests/test_remote.py` for reference in-memory transports.
+
+### Exposing a flow over A2A
+
+Install the optional extra to expose PenguiFlow as an A2A-compatible FastAPI service:
+
+```bash
+pip install "penguiflow[a2a-server]"
+```
+
+Create the adapter and mount the routes:
+
+```python
+from penguiflow import Message, Node, create
+from penguiflow_a2a import A2AAgentCard, A2AServerAdapter, A2ASkill, create_a2a_app
+
+async def orchestrate(message: Message, ctx):
+    await ctx.emit_chunk(parent=message, text="thinking...")
+    return {"result": "done"}
+
+node = Node(orchestrate, name="main")
+flow = create(node.to())
+
+card = A2AAgentCard(
+    name="Main Agent",
+    description="Primary entrypoint for orchestration",
+    version="2.1.0",
+    skills=[A2ASkill(name="orchestrate", description="Handles orchestration")],
+)
+
+adapter = A2AServerAdapter(
+    flow,
+    agent_card=card,
+    agent_url="https://agent.example",
+)
+app = create_a2a_app(adapter)
+```
+
+The generated FastAPI app implements:
+
+* `GET /agent` for discovery (Agent Card)
+* `POST /message/send` for unary execution
+* `POST /message/stream` for SSE streaming
+* `POST /tasks/cancel` to mirror cancellation into PenguiFlow traces
+
+`A2AServerAdapter` reuses the runtime's `StateStore` hooks, so bindings between trace IDs
+and external `taskId`/`contextId` pairs are persisted automatically.
 
 ### Reliability & guardrails
 

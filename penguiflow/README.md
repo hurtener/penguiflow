@@ -24,6 +24,13 @@ contributors understand how the pieces fit together.
 | `testkit.py` | FlowTestKit helpers (`run_one`, `assert_node_sequence`, `simulate_error`). |
 | `__init__.py` | Public surface that re-exports the main primitives for consumers. |
 
+### Optional extras
+
+The `penguiflow_a2a` package ships separately and contains the FastAPI adapter used to
+expose PenguiFlow graphs via the A2A protocol. Installing the `a2a-server` extra adds the
+`A2AServerAdapter`, request models, and the `create_a2a_app` helper without introducing
+FastAPI as a core dependency.
+
 ## Key runtime behaviors
 
 * **Graph construction**: `PenguiFlow` builds contexts for every node plus the synthetic

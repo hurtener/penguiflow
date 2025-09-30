@@ -946,3 +946,70 @@ worker unwinds without executing additional remote calls.
 
 Use these test doubles as templates when adapting PenguiFlow to real A2A or
 HTTP transports.
+
+22.5 A2A server adapter
+
+Sometimes PenguiFlow itself must behave as an A2A agent. The optional
+`penguiflow_a2a` package provides a FastAPI adapter that projects any flow over
+the standard `message/send`, `message/stream`, and `tasks/cancel` surface.
+
+```bash
+pip install "penguiflow[a2a-server]"
+```
+
+```python
+from penguiflow import Message, Node, create
+from penguiflow_a2a import (
+    A2AAgentCard,
+    A2AServerAdapter,
+    A2ASkill,
+    create_a2a_app,
+)
+
+async def orchestrate(message: Message, ctx):
+    await ctx.emit_chunk(parent=message, text="thinking...", meta={"step": 0})
+    return {"result": "ok"}
+
+node = Node(orchestrate, name="main")
+flow = create(node.to(), state_store=my_store)
+
+card = A2AAgentCard(
+    name="Main Agent",
+    description="Primary orchestration entrypoint",
+    version="2.1.0",
+    skills=[A2ASkill(name="orchestrate", description="Primary entrypoint", mode="both")],
+)
+
+adapter = A2AServerAdapter(
+    flow,
+    agent_card=card,
+    agent_url="https://main-agent.example",
+)
+app = create_a2a_app(adapter)
+```
+
+Key behaviors:
+
+* **Startup/shutdown** — the FastAPI lifespan hooks call `flow.run(...)` and
+  `flow.stop()` automatically. Provide a `state_store` when creating the flow to
+  persist remote bindings for monitoring or resubscription.
+* **Agent discovery** — `GET /agent` serves the declared `A2AAgentCard`, so
+  upstream orchestrators can discover capabilities and skill metadata.
+* **Unary execution** — `POST /message/send` accepts a JSON payload containing
+  `payload`, `headers`, optional `meta`, and returns `{status, output, taskId}`.
+  If the flow raises a `FlowError`, the response sets `status="failed"` with the
+  structured error payload.
+* **Streaming** — `POST /message/stream` returns an SSE stream. Chunks are
+  formatted via `format_sse_event`, enriched with `taskId`/`contextId`, and a
+  final `artifact` event carries the terminal payload. A trailing `done` event
+  closes the stream.
+* **Cancellation** — `POST /tasks/cancel` looks up the `taskId` and mirrors the
+  request into `PenguiFlow.cancel(trace_id)`. The SSE stream emits a
+  `TRACE_CANCELLED` error event if a trace is cancelled mid-flight.
+* **Validation** — headers must at least include `tenant` to build a
+  `penguiflow.types.Headers` object. Missing headers raise a 422 response. Tests
+  live in `tests/test_a2a_server.py` and document the expected error payloads.
+
+The adapter intentionally keeps FastAPI isolated in the optional extra so the
+core package remains dependency-light. Bring your own middleware, auth, or CORS
+configuration by extending the returned FastAPI app.

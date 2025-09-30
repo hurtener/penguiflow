@@ -24,13 +24,18 @@ dev = [
     "pytest-cov>=4.0",
     "coverage[toml]>=7.0",
     "ruff>=0.2",
+    "fastapi>=0.110",
+    "httpx>=0.27",
+]
+a2a-server = [
+    "fastapi>=0.110",
 ]
 
 [project.urls]
 Homepage = "https://github.com/penguiflow/penguiflow"
 
 [tool.setuptools]
-packages = ["penguiflow"]
+packages = ["penguiflow", "penguiflow_a2a"]
 
 [tool.uv]
 package = true
@@ -51,7 +56,7 @@ known-first-party = ["penguiflow"]
 [tool.mypy]
 python_version = "3.11"
 plugins = []
-files = ["penguiflow"]
+files = ["penguiflow", "penguiflow_a2a"]
 disallow_untyped_defs = false
 ignore_missing_imports = true
 warn_unused_ignores = true
