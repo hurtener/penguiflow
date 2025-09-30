@@ -38,6 +38,9 @@ It provides:
 * **Traceable exceptions** (`FlowError` captures node/trace metadata and optionally emits to Rookery)
 * **Distribution hooks (opt-in)** — plug a `StateStore` to persist trace history and a
   `MessageBus` to publish floe traffic for remote workers without changing existing flows.
+* **Remote calls (opt-in)** — `RemoteNode` bridges the runtime to external agents through a
+  pluggable `RemoteTransport` interface (A2A-ready) while propagating streaming chunks and
+  cancellation.
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
@@ -186,6 +189,14 @@ sacrificing backpressure or ordering guarantees.  The helper wraps the payload i
 `StreamChunk`, mirrors routing metadata from the parent message, and automatically
 increments per-stream sequence numbers.  See `tests/test_streaming.py` and
 `examples/streaming_llm/` for an end-to-end walk-through.
+
+### Remote orchestration
+
+Phase 2 introduces `RemoteNode` and the `RemoteTransport` protocol so flows can delegate
+work to remote agents (e.g., the A2A JSON-RPC/SSE ecosystem) without changing existing
+nodes.  The helper records remote bindings via the `StateStore`, mirrors streaming
+partials back into the graph, and propagates per-trace cancellation to remote tasks via
+`RemoteTransport.cancel`.  See `tests/test_remote.py` for reference in-memory transports.
 
 ### Reliability & guardrails
 

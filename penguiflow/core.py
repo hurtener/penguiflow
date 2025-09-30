@@ -13,7 +13,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from .bus import BusEnvelope, MessageBus
 from .errors import FlowError, FlowErrorCode
@@ -21,7 +21,7 @@ from .metrics import FlowEvent
 from .middlewares import Middleware
 from .node import Node, NodePolicy
 from .registry import ModelRegistry
-from .state import StateStore, StoredEvent
+from .state import RemoteBinding, StateStore, StoredEvent
 from .types import WM, FinalAnswer, Message, StreamChunk
 
 logger = logging.getLogger("penguiflow.core")
@@ -316,7 +316,8 @@ class PenguiFlow:
         self._middlewares: list[Middleware] = list(middlewares or [])
         self._trace_counts: dict[str, int] = {}
         self._trace_events: dict[str, asyncio.Event] = {}
-        self._trace_invocations: dict[str, set[asyncio.Future[Any]]] = {}
+        self._trace_invocations: dict[str, set[asyncio.Task[Any]]] = {}
+        self._external_tasks: dict[str, set[asyncio.Future[Any]]] = {}
         self._trace_capacity_waiters: dict[str, list[asyncio.Event]] = {}
         self._latest_wm_hops: dict[str, int] = {}
         self._emit_errors_to_rookery = emit_errors_to_rookery
@@ -492,6 +493,26 @@ class PenguiFlow:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        if self._trace_invocations:
+            pending: list[asyncio.Task[Any]] = []
+            for invocation_tasks in self._trace_invocations.values():
+                for task in invocation_tasks:
+                    if not task.done():
+                        task.cancel()
+                    pending.append(task)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            self._trace_invocations.clear()
+        if self._external_tasks:
+            pending_ext: list[asyncio.Future[Any]] = []
+            for external_tasks in self._external_tasks.values():
+                for external_task in external_tasks:
+                    if not external_task.done():
+                        external_task.cancel()
+                    pending_ext.append(external_task)
+            if pending_ext:
+                await asyncio.gather(*pending_ext, return_exceptions=True)
+            self._external_tasks.clear()
         if self._bus_tasks:
             await asyncio.gather(*self._bus_tasks, return_exceptions=True)
             self._bus_tasks.clear()
@@ -561,6 +582,52 @@ class PenguiFlow:
         if self._state_store is None:
             raise RuntimeError("PenguiFlow was created without a state_store")
         return await self._state_store.load_history(trace_id)
+
+    def ensure_trace_event(self, trace_id: str) -> asyncio.Event:
+        """Return (and create if needed) the cancellation event for ``trace_id``."""
+
+        return self._trace_events.setdefault(trace_id, asyncio.Event())
+
+    def register_external_task(self, trace_id: str, task: asyncio.Future[Any]) -> None:
+        """Track an externally created task for cancellation bookkeeping."""
+
+        if trace_id is None:
+            return
+        tasks = self._external_tasks.get(trace_id)
+        if tasks is None:
+            tasks = set[asyncio.Future[Any]]()
+            self._external_tasks[trace_id] = tasks
+        tasks.add(task)
+
+        def _cleanup(finished: asyncio.Future[Any]) -> None:
+            remaining = self._external_tasks.get(trace_id)
+            if remaining is None:
+                return
+            remaining.discard(finished)
+            if not remaining:
+                self._external_tasks.pop(trace_id, None)
+
+        task.add_done_callback(_cleanup)
+
+    async def save_remote_binding(self, binding: RemoteBinding) -> None:
+        """Persist a remote binding if a state store is configured."""
+
+        if self._state_store is None:
+            return
+        try:
+            await self._state_store.save_remote_binding(binding)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.exception(
+                "state_store_binding_failed",
+                extra={
+                    "event": "state_store_binding_failed",
+                    "trace_id": binding.trace_id,
+                    "context_id": binding.context_id,
+                    "task_id": binding.task_id,
+                    "agent_url": binding.agent_url,
+                    "exception": repr(exc),
+                },
+            )
 
     async def _execute_with_reliability(
         self,
@@ -820,16 +887,19 @@ class PenguiFlow:
         return await self._await_invocation(node, invocation, trace_id, timeout)
 
     def _register_invocation_task(
-        self, trace_id: str, task: asyncio.Future[Any]
+        self, trace_id: str, task: asyncio.Task[Any]
     ) -> None:
-        tasks = self._trace_invocations.setdefault(trace_id, set())
+        tasks = self._trace_invocations.get(trace_id)
+        if tasks is None:
+            tasks = set[asyncio.Task[Any]]()
+            self._trace_invocations[trace_id] = tasks
         tasks.add(task)
 
         def _cleanup(finished: asyncio.Future[Any]) -> None:
             remaining = self._trace_invocations.get(trace_id)
             if remaining is None:
                 return
-            remaining.discard(finished)
+            remaining.discard(cast(asyncio.Task[Any], finished))
             if not remaining:
                 self._trace_invocations.pop(trace_id, None)
 
@@ -842,7 +912,7 @@ class PenguiFlow:
         trace_id: str,
         timeout: float | None,
     ) -> Any:
-        invocation_task = asyncio.ensure_future(invocation)
+        invocation_task = cast(asyncio.Task[Any], asyncio.ensure_future(invocation))
         self._register_invocation_task(trace_id, invocation_task)
 
         cancel_event = self._trace_events.get(trace_id)

@@ -868,3 +868,81 @@ not impact the in-process execution path.
 `tests/test_distribution_hooks.py` contains concrete reference adapters that
 record events/envelopes. Use them as a template when building new backends or
 extending coverage in downstream repositories.
+
+22. Remote transports & agent-to-agent calls
+
+22.1 RemoteTransport protocol
+
+Phase 2 introduces the `RemoteTransport` protocol. Implementations expose three
+coroutines:
+
+* `send(request)` — unary RPC returning a `RemoteCallResult` with the final
+  payload plus optional `context_id`/`task_id`/`agent_url` metadata.
+* `stream(request)` — async iterator yielding `RemoteStreamEvent` structures that
+  contain partial text (`text`), completion flags (`done`), and optional
+  `result` payloads.
+* `cancel(agent_url=..., task_id=...)` — fires when PenguiFlow cancels a trace so
+  the remote agent can unwind its own resources.
+
+`RemoteCallRequest` packages the originating `Message`, the remote `skill`
+identifier, the target `agent_url`, and any discovered agent card metadata. The
+runtime copies the parent message's `meta` dictionary into the request so
+transports can forward audit or billing annotations.
+
+22.2 RemoteNode usage
+
+`RemoteNode(...)` wraps a remote skill in a regular node. It requires a
+`RemoteTransport`, the remote `skill` string, and the `agent_url`:
+
+```
+from penguiflow import Headers, Message, RemoteNode, create
+from penguiflow.remote import RemoteTransport, RemoteCallResult
+
+class HttpA2ATransport(RemoteTransport):
+    ...  # implement send/stream/cancel over JSON-RPC + SSE
+
+search = RemoteNode(
+    transport=HttpA2ATransport(base_url="https://search-agent"),
+    skill="SearchAgent.find",
+    agent_url="https://search-agent",
+    name="remote-search",
+    streaming=True,
+)
+
+flow = create(search.to(), state_store=postgres_store)
+flow.run()
+await flow.emit(Message(payload={"query": "penguins"}, headers=Headers(tenant="acme")))
+```
+
+When a transport yields a `context_id`/`task_id`, the runtime persists the
+binding via `StateStore.save_remote_binding`. This allows dashboards and future
+resubscription logic to correlate PenguiFlow traces with remote agent tasks.
+
+22.3 Streaming & cancellation handshake
+
+While streaming, `RemoteNode` forwards each `RemoteStreamEvent.text` through
+`Context.emit_chunk` so downstream nodes (and ultimately the Rookery) receive
+partial results with the correct trace metadata. Final payloads returned via
+`event.result` become the node's return value, propagating to successors as
+usual.
+
+PenguiFlow now exposes `PenguiFlow.ensure_trace_event(trace_id)` and
+`PenguiFlow.register_external_task(trace_id, task)` so remote nodes can observe
+per-trace cancellation. Once a binding is recorded the runtime creates a watcher
+task that waits for the trace cancellation event and calls
+`RemoteTransport.cancel`. If a trace is already cancelled when the binding is
+discovered the runtime cancels immediately and raises `TraceCancelled` so the
+worker unwinds without executing additional remote calls.
+
+22.4 Reference tests
+
+`tests/test_remote.py` contains in-memory transports that cover:
+
+* Unary invocation (`RemoteTransport.send`) with binding persistence.
+* Streaming invocations (`RemoteTransport.stream`) emitting `StreamChunk`
+  payloads and returning a terminal result.
+* Per-trace cancellation mirroring into `RemoteTransport.cancel` to guarantee
+  remote tasks are cleaned up.
+
+Use these test doubles as templates when adapting PenguiFlow to real A2A or
+HTTP transports.

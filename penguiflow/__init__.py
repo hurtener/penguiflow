@@ -19,6 +19,13 @@ from .node import Node, NodePolicy
 from .patterns import join_k, map_concurrent, predicate_router, union_router
 from .policies import DictRoutingPolicy, RoutingPolicy, RoutingRequest
 from .registry import ModelRegistry
+from .remote import (
+    RemoteCallRequest,
+    RemoteCallResult,
+    RemoteNode,
+    RemoteStreamEvent,
+    RemoteTransport,
+)
 from .state import RemoteBinding, StateStore, StoredEvent
 from .streaming import (
     chunk_to_ws_json,
@@ -70,6 +77,11 @@ __all__ = [
     "StateStore",
     "StoredEvent",
     "RemoteBinding",
+    "RemoteTransport",
+    "RemoteCallRequest",
+    "RemoteCallResult",
+    "RemoteStreamEvent",
+    "RemoteNode",
 ]
 
 __version__ = "2.1.0a0"
