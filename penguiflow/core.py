@@ -629,6 +629,31 @@ class PenguiFlow:
                 },
             )
 
+    async def record_remote_event(
+        self,
+        *,
+        event: str,
+        node: Node,
+        context: Context,
+        trace_id: str | None,
+        latency_ms: float | None,
+        level: int = logging.INFO,
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Emit a structured :class:`FlowEvent` for remote transport activity."""
+
+        payload = dict(extra or {})
+        await self._emit_event(
+            event=event,
+            node=node,
+            context=context,
+            trace_id=trace_id,
+            attempt=0,
+            latency_ms=latency_ms,
+            level=level,
+            extra=payload,
+        )
+
     async def _execute_with_reliability(
         self,
         node: Node,

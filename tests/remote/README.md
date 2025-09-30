@@ -12,3 +12,7 @@ phase 2 remote-call surface:
 
 The tests rely on in-memory fakes and run entirely within the async runtime
 used by the rest of the test suite.
+
+See also `tests/observability_ops/test_remote_observability.py` for the Phase 4
+metrics coverage that inspects the structured `FlowEvent` telemetry emitted by
+remote nodes.

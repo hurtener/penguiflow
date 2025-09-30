@@ -23,6 +23,7 @@ contributors understand how the pieces fit together.
 | `viz.py` | Mermaid and DOT exporters with loop/subflow annotations. |
 | `testkit.py` | FlowTestKit helpers (`run_one`, `assert_node_sequence`, `simulate_error`). |
 | `__init__.py` | Public surface that re-exports the main primitives for consumers. |
+| `admin.py` | Developer CLI helpers (`penguiflow-admin`) for inspecting trace history. |
 
 ### Optional extras
 
@@ -54,6 +55,10 @@ FastAPI as a core dependency.
   configured `StateStore`, streaming updates reuse `Context.emit_chunk`, and per-trace
   cancellation mirrors to remote transports via `PenguiFlow.ensure_trace_event` and
   `RemoteTransport.cancel`.
+* **Remote observability**: remote invocations emit dedicated `FlowEvent`s capturing
+  latency, payload sizes, remote context/task identifiers, and cancellation reasons. The
+  data lands in the configured `StateStore`, enabling correlation in the new
+  `penguiflow-admin` CLI and custom middleware sinks.
 * **Traceable exceptions**: when retries are exhausted or timeouts fire, the runtime
   builds a `FlowError` capturing the trace id, node metadata, and failure code. Setting
   `emit_errors_to_rookery=True` on `penguiflow.core.create` pushes the `FlowError`
