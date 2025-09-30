@@ -1,242 +1,347 @@
-# PenguiFlow v2 — Agents Plan
+# PenguiFlow v2 → v2.1 — Agents Plan
 
 ## Vision
 
-Evolve **penguiflow** into a lightweight, repo-agnostic library that adds:
+Evolve **penguiflow** into a lightweight, repo-agnostic orchestration library that:
 
-* **Streaming support** (token/partial results),
-* **Per-trace cancellation** (stop a single run cleanly),
-* **Deadlines & budgets** (bounded loops),
-* **Message metadata propagation** (debug/cost/context),
-* **Metrics/observability hooks** (pluggable events),
-* **Flow visualizer** (Mermaid/DOT export),
-* **Dynamic routing by policy** (config-driven decisions),
-* **Traceable exceptions** (uniform error surface),
-* **Testing harness (FlowTestKit)** (easy flow unit tests),
+* Keeps v2’s async core, type-safety, reliability (backpressure, retries, timeouts, graceful stop), routing, controller loops, subflows, and **streaming**.
+* Adds **opt-in** hooks in v2.1 to support distributed execution and inter-agent calls without bloating the core:
 
-…while keeping v1’s async core, type-safety, reliability (backpressure, retries, timeouts, graceful stop), routing, controller loops, and subflows.
-No heavy deps; remain **asyncio-only** and **Pydantic v2**.
+  * **StateStore** (shared brain) — durable run history & correlation
+  * **MessageBus** (shared nervous system) — distributed edges between nodes/workers
+  * **RemoteTransport** (tiny seam) — optional HTTP/A2A client to call external agents
+
+Remain **asyncio-only** and **Pydantic v2**. No heavy deps. Users bring their own backends.
 
 ## Non-Goals
 
-* No external brokers (Kafka/Redis) in v2 (adapters may be explored in v2.1+).
-* No UI/console beyond logs and example sinks (e.g., SSE/WebSocket).
-* No job scheduler, DB, or persistence features in core.
-* No domain playbooks in library (keep in `examples/`).
+* No built-in broker/DB/scheduler in core.
+* No product/domain playbooks in core (keep in `examples/`).
+* No breaking changes to existing v2 public APIs.
+* No “exactly-once” delivery guarantees (at-least-once is acceptable for distributed adapters).
 
-## Repo Layout (target; additions for v2 in ⭐)
+---
+
+## Scope Recap — v2 (current)
+
+Shipped or in progress per README:
+
+* **Streaming support** (token/partial results with `Context.emit_chunk`)
+* **Per-trace cancellation**
+* **Deadlines & budgets**
+* **Message metadata propagation**
+* **Observability hooks** (FlowEvent)
+* **Flow visualizer** (Mermaid/DOT)
+* **Dynamic routing by policy**
+* **Traceable exceptions** (FlowError)
+* **Testing harness (FlowTestKit)**
+
+These are the foundation for v2.1’s distributed & remote features.
+
+---
+
+## v2.1 Overview — Distributed & A2A-ready (Opt-in)
+
+### Why now
+
+* Client pressure to use a **main agent** that delegates to specialized agents.
+* v2 already has **streaming, cancel, budgets** → perfect for remote tasks & partial delivery.
+* We want distribution **without** forcing a broker or DB on everyone.
+
+### What we add (opt-in)
+
+1. **StateStore** protocol — durable events/history and remote correlation (trace_id ↔ remote context/task).
+2. **MessageBus** protocol — pluggable queue for **Floe** edges across processes.
+3. **RemoteTransport** protocol — tiny seam to call external agents (e.g., **A2A** JSON-RPC + SSE), shipped as an optional extra.
+
+> Backwards-compat: If these are not provided, the runtime behaves exactly as today (in-proc queues, no persistence, no remote calls).
+
+---
+
+## Target Repo Layout (new files ⭐ for v2.1)
 
 ```
 penguiflow/
   __init__.py
-  core.py              # Context, Floe, PenguiFlow (runtime)
-  node.py              # Node, NodePolicy
-  types.py             # Message, Headers, ⭐ StreamChunk
-  registry.py          # ModelRegistry (TypeAdapters per node)
-  patterns.py          # router(s), join_k, map_concurrent
-  middlewares.py       # hooks: logging, mlflow (pluggable)
-  viz.py               # Mermaid exporter (existing) + ⭐ DOT/annotations
-  metrics.py           # ⭐ FlowEvent + on_event callbacks
-  errors.py            # ⭐ FlowError (traceable exceptions)
-  testkit.py           # ⭐ FlowTestKit (helpers for tests)
-  README.md
+  core.py
+  node.py
+  types.py
+  registry.py
+  patterns.py
+  middlewares.py
+  viz.py
+  errors.py
+  testkit.py
+  # v2.1 additions (opt-in protocols)
+  ⭐ state.py         # StateStore Protocol + StoredEvent types
+  ⭐ bus.py           # MessageBus Protocol
+  ⭐ remote.py        # RemoteTransport Protocol + RemoteNode helper
 examples/
-  quickstart/
-  routing_predicate/
-  routing_union/
-  fanout_join/
-  controller_multihop/
-  playbook_retrieval/          # example only
-  ⭐ streaming_llm/             # StreamChunk + SSE/WebSocket sink
-  ⭐ routing_policy/            # config-driven router
-  ⭐ visualizer/                # export Mermaid/DOT demo
-  ⭐ testkit_demo/              # FlowTestKit usage
-tests/
-  test_core.py
-  test_types.py
-  test_registry.py
-  test_patterns.py
-  test_controller.py
-  ⭐ test_streaming.py
-  ⭐ test_cancel.py
-  ⭐ test_budgets.py
-  ⭐ test_metadata.py
-  ⭐ test_metrics.py
-  ⭐ test_viz.py
-  ⭐ test_routing_policy.py
-  ⭐ test_errors.py
-  ⭐ test_testkit.py
-pyproject.toml
+  ...
+  ⭐ distributed_redis_pg/   # MessageBus + StateStore adapters (example only)
+  ⭐ a2a_orchestrator/       # PF main agent → specialized A2A agents (client only)
+  ⭐ a2a_server/ (optional)  # Expose a PF flow as an A2A server (adapter extra)
 ```
 
 ---
 
-## Phased Delivery (each phase is shippable)
+## Backwards-Compatibility Strategy
 
-### Phase 1 — Streaming Support
+* **Additive constructor params**:
 
-**Goal:** First-class token/partial streaming via messages.
+  * `PenguiFlow(..., state_store: StateStore | None = None, message_bus: MessageBus | None = None)`
+* Floe edges:
+
+  * Use `message_bus` **only if provided**, else in-proc `asyncio.Queue` (identical behavior).
+* Event persistence:
+
+  * Call `StateStore.save_event(...)` **only if provided**.
+* Remote:
+
+  * New `RemoteTransport` + `RemoteNode` live in `remote.py`; not used unless imported.
+* Optional extras:
+
+  * A2A adapters live under `penguiflow_a2a` (extra): no new heavy deps in core.
+
+---
+
+## API Sketches (minimal surfaces)
+
+```py
+# penguiflow/state.py
+from typing import Protocol
+
+class StateStore(Protocol):
+    async def save_event(self, trace_id: str, ts: float, kind: str, data: dict) -> None: ...
+    async def load_history(self, trace_id: str) -> list[dict]: ...
+    async def save_remote_binding(self, trace_id: str, context_id: str, task_id: str, agent_url: str) -> None: ...
+```
+
+```py
+# penguiflow/bus.py
+from typing import Protocol, Any
+
+class MessageBus(Protocol):
+    async def put(self, queue: str, message: Any) -> None: ...
+    async def get(self, queue: str, timeout_s: float | None = None) -> Any: ...
+    # optional: async def ack(self, delivery_token: str) -> None: ...
+```
+
+```py
+# penguiflow/remote.py
+from typing import Protocol, AsyncIterator, Any
+from penguiflow.node import Node
+
+class RemoteTransport(Protocol):
+    async def send(self, agent_url: str, agent_card: dict, message: dict) -> dict: ...
+    async def stream(self, agent_url: str, agent_card: dict, message: dict) -> AsyncIterator[dict]: ...
+    async def cancel(self, agent_url: str, task_id: str) -> None: ...
+
+def RemoteNode(name: str, *, transport: RemoteTransport, skill: str, agent_url: str, agent_card: dict | None = None) -> Node:
+    """Factory: returns a Node that delegates to `transport` (stream or send)."""
+```
+
+---
+
+## Phased Delivery (each phase shippable)
+
+### **Phase A — Core Hooks for Distribution**
+
+**Goal**
+Enable distributed execution without changing in-proc behavior.
 
 **Deliverables**
 
-* `types.StreamChunk` (`stream_id`, `seq`, `text`, `done`, `meta: dict`).
-* `Context.emit_chunk(stream_id, seq, text, done=False, meta=None)` sugar.
-* Example: `examples/streaming_llm/` with an LLM mock → SSE/WebSocket sink.
+* `StateStore` + `MessageBus` protocols and wiring in `core.py`/Floe edges.
+* Durable event emission (guarded by `if state_store`):
 
-**Acceptance**
+  * `node_start|end`, `message_emit|fetch`, `stream_chunk`, `trace_cancel_*`, `deadline_exceeded`.
+* Edge naming for queues (stable `source→target` identifiers).
 
-* `test_streaming.py`: preserves order by `seq`, handles `done=True`, respects queue backpressure.
-* Example streams to a client without blocking other nodes.
+**Acceptance / Tests**
+
+* Existing examples/tests pass unchanged (no hooks).
+* **Unit**: in-memory `StateStore`/`MessageBus` stubs; ordering/backpressure preserved.
+* **Integration (examples only)**: Redis `MessageBus`, Postgres `StateStore`; fan-out/fan-in; `join_k` across processes.
+* **Fault-injection**: kill a worker mid-trace → restart → resume from `load_history`.
+
+**Non-Goals**
+
+* No built-in Redis/Postgres deps (adapters live in examples).
 
 ---
 
-### Phase 2 — Per-Trace Cancellation
+### **Phase B — Remote Calls (Agnostic) + A2A Client (Optional Extra)**
 
-**Goal:** Cancel a single in-flight run (identified by `trace_id`) without stopping the flow.
+**Goal**
+Let a flow call external agents (HTTP) and stream partials (SSE).
 
 **Deliverables**
 
-* `PenguiFlow.cancel(trace_id: str) -> bool` (idempotent).
-* Propagate `CancelledError` through affected tasks, drain/selectively drop per-trace queues.
-* Emit metric events for cancel start/finish.
+* `RemoteTransport` protocol + `RemoteNode` helper.
+* `penguiflow_a2a` (optional extra):
 
-**Acceptance**
+  * A2A JSON-RPC client (`message/send`, `message/stream`) with SSE→chunk mapping.
+  * Cancel propagation (`tasks/cancel`).
+  * Minimal Agent Card parsing (decide stream vs send).
 
-* `test_cancel.py`: running run is canceled mid-stream; no orphan tasks; other runs unaffected.
+**Acceptance / Tests**
+
+* **Unit**: RemoteNode happy path, backoff/timeouts; chunk ordering/backpressure.
+* **Integration**: fake A2A server emitting SSE; stream→chunks; cancel unwinds remote & PF trace.
+* **Resubscribe**: use `StateStore.save_remote_binding` to recover a stream by task/context IDs.
+
+**Non-Goals**
+
+* No A2A SDK in core; keep as an extra.
+* No push-notification integration (SSE is enough in v2.1).
 
 ---
 
-### Phase 3 — Deadlines & Budgets
+### **Phase C — PF as A2A Server (Optional)**
 
-**Goal:** Enforce hop and wall-clock limits across loops and subflows.
+**Goal**
+Make a PF flow callable by 3rd-party agents via A2A.
 
 **Deliverables**
 
-* Extend `Message`/`Headers` with `deadline_s` (wall clock) and continue v1’s `budget_hops` in WM/controller.
-* Runtime checks deadline before scheduling next work; controller enforces hop budget.
+* `penguiflow_a2a.server` adapter (FastAPI):
 
-**Acceptance**
+  * Expose `message/send`, `message/stream`, `tasks/*` for a selected PF flow.
+  * Generate a minimal **Agent Card** (skills, streaming support).
+* Auth hooks (header injection) and simple rate limit options.
 
-* `test_budgets.py`: run halts when deadline exceeded or hop budget reached; emits final event/log.
+**Acceptance / Tests**
+
+* Contract/compat tests for send/stream/cancel.
+* Example: `examples/a2a_server/` with a simple flow.
+
+**Non-Goals**
+
+* No opinionated auth stack; leave OIDC/SSO to integrators.
 
 ---
 
-### Phase 4 — Metadata Propagation
+### **Phase D — Observability & Ops Polish**
 
-**Goal:** Pass debug/cost/context safely across nodes.
+**Goal**
+End-to-end traceability across remote and distributed paths.
 
 **Deliverables**
 
-* Add `meta: Dict[str, Any]` to `Message`.
-* Utilities to set/merge meta (non-PII, deterministic where possible).
+* Structured logs include PF `trace_id` and remote `contextId`/`taskId`.
+* Counters for remote latency, bytes, error rates, cancel latency.
+* Dev CLI: `pf inspect <trace_id>` dumps event history (using `StateStore`).
 
-**Acceptance**
+**Acceptance / Tests**
 
-* `test_metadata.py`: meta survives fan-out/fan-in and subflow boundaries; merge semantics defined (last-write-wins or merge keys).
+* Logs/metrics show correlated IDs across a remote call.
 
----
+**Non-Goals**
 
-### Phase 5 — Metrics / Observability Hooks
-
-**Goal:** Pluggable, low-overhead events for logs/MLflow/Prometheus.
-
-**Deliverables**
-
-* `metrics.FlowEvent` (node_start, node_end, node_error, retry, emit, fetch, stream_chunk, cancel_begin, cancel_end).
-* `on_event: Callable[[FlowEvent], None]` layered on the existing middleware hook to ease migration.
-* Default logger sink; example Prometheus counter.
-
-**Acceptance**
-
-* `test_metrics.py`: events fire with `{trace_id, node_name, ts, latency_ms, queue_depth}`; example sink increments counters.
+* No full observability stack in core; keep sinks as examples/middleware.
 
 ---
 
-### Phase 6 — Flow Visualizer
+## Examples (to ship with v2.1)
 
-**Goal:** Human-readable graph export for docs/debugging.
+1. `examples/distributed_redis_pg/`
 
-**Deliverables**
+   * Two workers, Redis `MessageBus`, Postgres `StateStore`, fan-out → `join_k` across processes.
 
-* `viz.to_mermaid(flow)` (existing) and new `viz.to_dot(flow)` with loop/subflow annotations.
-* Example outputs saved as `.md`/`.dot`.
+2. `examples/a2a_orchestrator/`
 
-**Acceptance**
+   * PF main agent calls two specialized A2A agents via `RemoteTransport(A2A)`; SSE streaming to client; cancel support.
 
-* `test_viz.py`: topology matches adjacency; node names, loops, and subflows represented consistently across formats.
+3. `examples/a2a_server/` *(optional)*
 
----
+   * Wrap a PF flow as an A2A server with a generated Agent Card.
 
-### Phase 7 — Dynamic Routing by Policy
-
-**Goal:** Config-driven decisions without code changes.
-
-**Deliverables**
-
-* Router wrapper that accepts a `Policy` (dict/config object) at runtime.
-* Policy access via env/JSON/YAML injection (loader not in core; pass object).
-* Example: tenant A → FAISS path, tenant B → hybrid path.
-
-**Acceptance**
-
-* `test_routing_policy.py`: same flow routes differently under two policies; deterministic selection.
+Each includes a short README and runnable script.
 
 ---
 
-### Phase 8 — Traceable Exceptions
+## Risks & Mitigations
 
-**Goal:** Uniform, debuggable errors with run context.
-
-**Deliverables**
-
-* `errors.FlowError(trace_id, node_name, code, message, original_exc)` and mapping from node failures/timeouts.
-* Option: emit terminal error message to Rookery in addition to logs.
-
-**Acceptance**
-
-* `test_errors.py`: errors carry `trace_id`/`node_name` and stable codes; retries map to final error if exhausted.
+| Risk                    | Mitigation                                                                                       |
+| ----------------------- | ------------------------------------------------------------------------------------------------ |
+| Hidden behavior change  | Hooks are **opt-in**; default path remains in-proc queues & no persistence.                      |
+| Heavy dependencies      | A2A & backend adapters are extras; core deps unchanged.                                          |
+| Serialization surprises | Only distributed edges serialize; document “payload must be JSON-serializable” when using a bus. |
+| Backpressure under SSE  | Reuse v2 ordered chunking & bounded queues; test slow-consumer scenarios.                        |
+| ID drift across systems | Persist `trace_id ↔ contextId/taskId` in `StateStore`; include in logs/metrics.                  |
 
 ---
 
-### Phase 9 — Testing Harness (FlowTestKit)
+## Definition of Done (per phase)
 
-**Goal:** Make flow unit tests tiny and readable.
-
-**Deliverables**
-
-* `testkit.run_one(flow, registry, input_msg) -> output_msg`
-* `testkit.assert_node_sequence(trace_id, expected_nodes)`
-* `testkit.simulate_error(node_name, code)` for retry tests.
-
-**Acceptance**
-
-* `test_testkit.py`: developers write <10 lines to test linear & branching flows.
+* **Code**: protocols + wiring + guarded calls (no behavioral drift for in-proc).
+* **Tests**: unit + integration + fault injection where relevant.
+* **Docs**: README sections (“Going Distributed”, “Calling Remote Agents”), API docstrings.
+* **Examples**: runnable end-to-end.
+* **CI**: no new mandatory services; example adapters exercised in an optional job.
 
 ---
 
-## Coding Standards
+## Developer Notes
 
-* Python ≥ 3.11, **Pydantic ≥ 2**.
-* **Async-only** (`asyncio`); no threads in core.
-* `pytest` for tests; target ~95% coverage.
-* `ruff` for lint; `mypy` in loose mode where dynamic typing is needed.
-* Every feature ships with **unit tests + example** and README updates.
-
-## Performance Notes
-
-* Reuse `TypeAdapter`s (registry cache).
-* For hot token paths set `NodePolicy(validate="in")` or `"none"` on output.
-* Use bounded queues (`maxsize`) and size them via config.
-* Keep metrics hooks non-blocking (queue or lightweight logging).
-
-## Examples to Add
-
-* `streaming_llm`: token streaming → SSE sink.
-* `routing_policy`: same flow, different policy routes.
-* `visualizer`: dump Mermaid/DOT into README snippets.
-* `testkit_demo`: how to write compact flow tests.
+* Python ≥ 3.11, asyncio-only; Pydantic v2.
+* Keep new modules **small and independent** (no cross-imports that drag extras into core).
+* Prefer **protocols** over abstract base classes; keep signatures minimal.
+* Ensure existing examples/tests run untouched on v2.1.
 
 ---
+
+## Migration Guide (Zero-touch Upgrade)
+
+* Upgrade to **v2.1** → no changes required; all existing flows continue to run in-proc.
+* **Going distributed?** Pass `message_bus` (+ optionally `state_store`) to `PenguiFlow(...)`.
+* **Calling remote agents (A2A)?** Use `RemoteNode` and install `penguiflow[a2a]`.
+
+**Examples:**
+
+*In-proc (unchanged):*
+
+```py
+flow = create(triage.to(retrieve), retrieve.to(pack))
+await flow.run(registry=registry)
+```
+
+*Distributed:*
+
+```py
+flow = create(triage.to(retrieve), retrieve.to(pack))
+flow.run(registry=registry, message_bus=RedisMessageBus(...), state_store=PostgresStateStore(...))
+```
+
+*Remote call (A2A extra):*
+
+```py
+from penguiflow.remote import RemoteNode
+from penguiflow_a2a import A2AClientTransport
+
+search = RemoteNode(
+  name="search",
+  transport=A2AClientTransport(base_url="https://search-agent"),
+  skill="SearchAgent.find",
+  agent_url="https://search-agent",
+)
+
+flow = create(triage.to(search), search.to(pack))
+```
+
+---
+
+## Open Questions (to track)
+
+* Do we provide a tiny `InMemoryStateStore` and `InProcBus` for tests/examples?
+* Should we add an optional `ack()` to `MessageBus` now or later?
+* Do we need a first-party “retry policy” for remote calls distinct from `NodePolicy`?
+
+---
+
+*End of AGENTS.md*
+
 
 ### Acceptance
 

@@ -36,6 +36,18 @@ It provides:
 * **Observability hooks** (`FlowEvent` callbacks for logging, MLflow, or custom metrics sinks)
 * **Policy-driven routing** (optional policies steer routers without breaking existing flows)
 * **Traceable exceptions** (`FlowError` captures node/trace metadata and optionally emits to Rookery)
+* **Distribution hooks (opt-in)** — plug a `StateStore` to persist trace history and a
+  `MessageBus` to publish floe traffic for remote workers without changing existing flows.
+* **Remote calls (opt-in)** — `RemoteNode` bridges the runtime to external agents through a
+  pluggable `RemoteTransport` interface (A2A-ready) while propagating streaming chunks and
+  cancellation.
+* **A2A server adapter (opt-in)** — wrap a PenguiFlow graph in a FastAPI surface using
+  `penguiflow_a2a.A2AServerAdapter` so other agents can call `message/send`,
+  `message/stream`, and `tasks/cancel` while reusing the runtime's backpressure and
+  cancellation semantics.
+* **Observability & ops polish** — remote calls emit structured metrics (latency, payload
+  sizes, cancel reasons) and the `penguiflow-admin` CLI replays trace history from any
+  configured `StateStore` for debugging.
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
@@ -127,6 +139,10 @@ print(out.payload)            # PackOut(...)
 await flow.stop()
 ```
 
+> **Opt-in distribution:** pass `state_store=` and/or `message_bus=` when calling
+> `penguiflow.core.create(...)` to persist trace history and publish floe traffic
+> without changing node logic.
+
 ---
 
 ## 🧭 Design Principles
@@ -180,6 +196,60 @@ sacrificing backpressure or ordering guarantees.  The helper wraps the payload i
 `StreamChunk`, mirrors routing metadata from the parent message, and automatically
 increments per-stream sequence numbers.  See `tests/test_streaming.py` and
 `examples/streaming_llm/` for an end-to-end walk-through.
+
+### Remote orchestration
+
+Phase 2 introduces `RemoteNode` and the `RemoteTransport` protocol so flows can delegate
+work to remote agents (e.g., the A2A JSON-RPC/SSE ecosystem) without changing existing
+nodes.  The helper records remote bindings via the `StateStore`, mirrors streaming
+partials back into the graph, and propagates per-trace cancellation to remote tasks via
+`RemoteTransport.cancel`.  See `tests/test_remote.py` for reference in-memory transports.
+
+### Exposing a flow over A2A
+
+Install the optional extra to expose PenguiFlow as an A2A-compatible FastAPI service:
+
+```bash
+pip install "penguiflow[a2a-server]"
+```
+
+Create the adapter and mount the routes:
+
+```python
+from penguiflow import Message, Node, create
+from penguiflow_a2a import A2AAgentCard, A2AServerAdapter, A2ASkill, create_a2a_app
+
+async def orchestrate(message: Message, ctx):
+    await ctx.emit_chunk(parent=message, text="thinking...")
+    return {"result": "done"}
+
+node = Node(orchestrate, name="main")
+flow = create(node.to())
+
+card = A2AAgentCard(
+    name="Main Agent",
+    description="Primary entrypoint for orchestration",
+    version="2.1.0",
+    skills=[A2ASkill(name="orchestrate", description="Handles orchestration")],
+)
+
+adapter = A2AServerAdapter(
+    flow,
+    agent_card=card,
+    agent_url="https://agent.example",
+)
+app = create_a2a_app(adapter)
+```
+
+The generated FastAPI app implements:
+
+* `GET /agent` for discovery (Agent Card)
+* `POST /message/send` for unary execution
+* `POST /message/stream` for SSE streaming
+* `POST /tasks/cancel` to mirror cancellation into PenguiFlow traces
+
+`A2AServerAdapter` reuses the runtime's `StateStore` hooks, so bindings between trace IDs
+and external `taskId`/`contextId` pairs are persisted automatically.
 
 ### Reliability & guardrails
 
@@ -437,9 +507,15 @@ docs or diagramming pipelines.
 * **Structured `FlowEvent`s**: every node event carries `{ts, trace_id, node_name, event,
   latency_ms, q_depth_in, q_depth_out, attempt}` plus a mutable `extra` map for custom
   annotations.
+* **Remote call telemetry**: `RemoteNode` executions emit extra metrics (latency, request
+  and response bytes, context/task identifiers, cancel reasons) so remote hops can be
+  traced end-to-end.
 * **Middleware hooks**: subscribe observers (e.g., MLflow) to the structured `FlowEvent`
   stream. See `examples/mlflow_metrics/` for an MLflow integration and
   `examples/reliability_middleware/` for a concrete timeout + retry walkthrough.
+* **`penguiflow-admin` CLI**: inspect or replay stored trace history from any configured
+  `StateStore` (`penguiflow-admin history <trace>` or `penguiflow-admin replay <trace>`)
+  when debugging distributed runs.
 
 ---
 
@@ -447,9 +523,9 @@ docs or diagramming pipelines.
 
 - **In-process runtime**: there is no built-in distribution layer yet. Long-running CPU work should be delegated to your own pools or services.
 - **Registry-driven typing**: nodes default to validation. Provide a `ModelRegistry` when calling `flow.run(...)` or set `validate="none"` explicitly for untyped hops.
-- **Observability**: structured `FlowEvent` callbacks power logs/metrics; integrations with
-  third-party stacks (OTel, Prometheus, Datadog) remain DIY. See the MLflow middleware
-  example for a lightweight pattern.
+- **Observability**: structured `FlowEvent` callbacks and the `penguiflow-admin` CLI power
+  local debugging; integrations with third-party stacks (OTel, Prometheus, Datadog) remain
+  DIY. See the MLflow middleware example for a lightweight pattern.
 - **Roadmap**: follow-up releases focus on optional distributed backends, deeper observability integrations, and additional playbook patterns. Contributions and proposals are welcome!
 
 ---

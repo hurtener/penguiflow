@@ -10,7 +10,10 @@ contributors understand how the pieces fit together.
 | --- | --- |
 | `core.py` | Runtime graph builder, execution engine, retries/timeouts, controller loop semantics, and playbook helper. |
 | `errors.py` | Defines `FlowError` and `FlowErrorCode` used for traceable exceptions. |
+| `state.py` | Protocols for pluggable state stores plus the `StoredEvent`/`RemoteBinding` dataclasses. |
+| `bus.py` | Message bus protocol used to fan out floe traffic to remote workers. |
 | `node.py` | `Node` wrapper and `NodePolicy` configuration (validation scope, timeout, retry/backoff). |
+| `remote.py` | RemoteTransport protocol plus the `RemoteNode` helper for opt-in agent-to-agent calls. |
 | `types.py` | Pydantic models for headers, messages (with `Message.meta` bag), and controller/state artifacts (`WM`, `Thought`, `FinalAnswer`). |
 | `registry.py` | `ModelRegistry` that caches `TypeAdapter`s for per-node validation. |
 | `patterns.py` | Batteries-included helpers: `map_concurrent`, routers, and `join_k` aggregator. |
@@ -20,6 +23,14 @@ contributors understand how the pieces fit together.
 | `viz.py` | Mermaid and DOT exporters with loop/subflow annotations. |
 | `testkit.py` | FlowTestKit helpers (`run_one`, `assert_node_sequence`, `simulate_error`). |
 | `__init__.py` | Public surface that re-exports the main primitives for consumers. |
+| `admin.py` | Developer CLI helpers (`penguiflow-admin`) for inspecting trace history. |
+
+### Optional extras
+
+The `penguiflow_a2a` package ships separately and contains the FastAPI adapter used to
+expose PenguiFlow graphs via the A2A protocol. Installing the `a2a-server` extra adds the
+`A2AServerAdapter`, request models, and the `create_a2a_app` helper without introducing
+FastAPI as a core dependency.
 
 ## Key runtime behaviors
 
@@ -34,6 +45,20 @@ contributors understand how the pieces fit together.
 * **Reliability envelope**: each message dispatch goes through `_execute_with_reliability`
   which applies validation, timeout, retry with exponential backoff, structured logging,
   and middleware hooks.
+* **Distribution hooks**: when a flow is constructed with a `StateStore` or `MessageBus`
+  adapter, runtime events are persisted as `StoredEvent` records (`PenguiFlow.load_history`
+  exposes the trace timeline) and every floe publish also emits a `BusEnvelope` describing
+  the edge, trace id, headers, and metadata. Failures are logged but never surface to
+  user code so adapters can fail independently of the core engine.
+* **Remote delegation**: `remote.RemoteNode` wraps remote execution through a
+  `RemoteTransport`. Bindings (`trace_id` ↔ remote context/task) persist via the
+  configured `StateStore`, streaming updates reuse `Context.emit_chunk`, and per-trace
+  cancellation mirrors to remote transports via `PenguiFlow.ensure_trace_event` and
+  `RemoteTransport.cancel`.
+* **Remote observability**: remote invocations emit dedicated `FlowEvent`s capturing
+  latency, payload sizes, remote context/task identifiers, and cancellation reasons. The
+  data lands in the configured `StateStore`, enabling correlation in the new
+  `penguiflow-admin` CLI and custom middleware sinks.
 * **Traceable exceptions**: when retries are exhausted or timeouts fire, the runtime
   builds a `FlowError` capturing the trace id, node metadata, and failure code. Setting
   `emit_errors_to_rookery=True` on `penguiflow.core.create` pushes the `FlowError`

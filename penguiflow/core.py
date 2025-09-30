@@ -13,13 +13,15 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
+from .bus import BusEnvelope, MessageBus
 from .errors import FlowError, FlowErrorCode
 from .metrics import FlowEvent
 from .middlewares import Middleware
 from .node import Node, NodePolicy
 from .registry import ModelRegistry
+from .state import RemoteBinding, StateStore, StoredEvent
 from .types import WM, FinalAnswer, Message, StreamChunk
 
 logger = logging.getLogger("penguiflow.core")
@@ -143,8 +145,7 @@ class Context:
         if self._runtime is None:
             raise RuntimeError("Context is not attached to a running flow")
         for floe in self._resolve_targets(to, self._outgoing):
-            self._runtime._on_message_enqueued(msg)
-            await floe.queue.put(msg)
+            await self._runtime._send_to_floe(floe, msg)
 
     def emit_nowait(
         self, msg: Any, to: Node | Endpoint | Sequence[Node | Endpoint] | None = None
@@ -152,8 +153,7 @@ class Context:
         if self._runtime is None:
             raise RuntimeError("Context is not attached to a running flow")
         for floe in self._resolve_targets(to, self._outgoing):
-            self._runtime._on_message_enqueued(msg)
-            floe.queue.put_nowait(msg)
+            self._runtime._send_to_floe_nowait(floe, msg)
 
     async def emit_chunk(
         self,
@@ -301,6 +301,8 @@ class PenguiFlow:
         allow_cycles: bool = False,
         middlewares: Sequence[Middleware] | None = None,
         emit_errors_to_rookery: bool = False,
+        state_store: StateStore | None = None,
+        message_bus: MessageBus | None = None,
     ) -> None:
         self._queue_maxsize = queue_maxsize
         self._allow_cycles = allow_cycles
@@ -314,10 +316,14 @@ class PenguiFlow:
         self._middlewares: list[Middleware] = list(middlewares or [])
         self._trace_counts: dict[str, int] = {}
         self._trace_events: dict[str, asyncio.Event] = {}
-        self._trace_invocations: dict[str, set[asyncio.Future[Any]]] = {}
+        self._trace_invocations: dict[str, set[asyncio.Task[Any]]] = {}
+        self._external_tasks: dict[str, set[asyncio.Future[Any]]] = {}
         self._trace_capacity_waiters: dict[str, list[asyncio.Event]] = {}
         self._latest_wm_hops: dict[str, int] = {}
         self._emit_errors_to_rookery = emit_errors_to_rookery
+        self._state_store = state_store
+        self._message_bus = message_bus
+        self._bus_tasks: set[asyncio.Task[None]] = set()
 
         self._build_graph(adjacencies)
 
@@ -487,6 +493,29 @@ class PenguiFlow:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        if self._trace_invocations:
+            pending: list[asyncio.Task[Any]] = []
+            for invocation_tasks in self._trace_invocations.values():
+                for task in invocation_tasks:
+                    if not task.done():
+                        task.cancel()
+                    pending.append(task)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            self._trace_invocations.clear()
+        if self._external_tasks:
+            pending_ext: list[asyncio.Future[Any]] = []
+            for external_tasks in self._external_tasks.values():
+                for external_task in external_tasks:
+                    if not external_task.done():
+                        external_task.cancel()
+                    pending_ext.append(external_task)
+            if pending_ext:
+                await asyncio.gather(*pending_ext, return_exceptions=True)
+            self._external_tasks.clear()
+        if self._bus_tasks:
+            await asyncio.gather(*self._bus_tasks, return_exceptions=True)
+            self._bus_tasks.clear()
         self._trace_counts.clear()
         self._trace_events.clear()
         self._trace_invocations.clear()
@@ -546,6 +575,84 @@ class PenguiFlow:
         result = await self._contexts[ROOKERY].fetch_any(from_)
         await self._finalize_message(result)
         return result
+
+    async def load_history(self, trace_id: str) -> Sequence[StoredEvent]:
+        """Return the persisted history for ``trace_id`` from the state store."""
+
+        if self._state_store is None:
+            raise RuntimeError("PenguiFlow was created without a state_store")
+        return await self._state_store.load_history(trace_id)
+
+    def ensure_trace_event(self, trace_id: str) -> asyncio.Event:
+        """Return (and create if needed) the cancellation event for ``trace_id``."""
+
+        return self._trace_events.setdefault(trace_id, asyncio.Event())
+
+    def register_external_task(self, trace_id: str, task: asyncio.Future[Any]) -> None:
+        """Track an externally created task for cancellation bookkeeping."""
+
+        if trace_id is None:
+            return
+        tasks = self._external_tasks.get(trace_id)
+        if tasks is None:
+            tasks = set[asyncio.Future[Any]]()
+            self._external_tasks[trace_id] = tasks
+        tasks.add(task)
+
+        def _cleanup(finished: asyncio.Future[Any]) -> None:
+            remaining = self._external_tasks.get(trace_id)
+            if remaining is None:
+                return
+            remaining.discard(finished)
+            if not remaining:
+                self._external_tasks.pop(trace_id, None)
+
+        task.add_done_callback(_cleanup)
+
+    async def save_remote_binding(self, binding: RemoteBinding) -> None:
+        """Persist a remote binding if a state store is configured."""
+
+        if self._state_store is None:
+            return
+        try:
+            await self._state_store.save_remote_binding(binding)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.exception(
+                "state_store_binding_failed",
+                extra={
+                    "event": "state_store_binding_failed",
+                    "trace_id": binding.trace_id,
+                    "context_id": binding.context_id,
+                    "task_id": binding.task_id,
+                    "agent_url": binding.agent_url,
+                    "exception": repr(exc),
+                },
+            )
+
+    async def record_remote_event(
+        self,
+        *,
+        event: str,
+        node: Node,
+        context: Context,
+        trace_id: str | None,
+        latency_ms: float | None,
+        level: int = logging.INFO,
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Emit a structured :class:`FlowEvent` for remote transport activity."""
+
+        payload = dict(extra or {})
+        await self._emit_event(
+            event=event,
+            node=node,
+            context=context,
+            trace_id=trace_id,
+            attempt=0,
+            latency_ms=latency_ms,
+            level=level,
+            extra=payload,
+        )
 
     async def _execute_with_reliability(
         self,
@@ -805,16 +912,19 @@ class PenguiFlow:
         return await self._await_invocation(node, invocation, trace_id, timeout)
 
     def _register_invocation_task(
-        self, trace_id: str, task: asyncio.Future[Any]
+        self, trace_id: str, task: asyncio.Task[Any]
     ) -> None:
-        tasks = self._trace_invocations.setdefault(trace_id, set())
+        tasks = self._trace_invocations.get(trace_id)
+        if tasks is None:
+            tasks = set[asyncio.Task[Any]]()
+            self._trace_invocations[trace_id] = tasks
         tasks.add(task)
 
         def _cleanup(finished: asyncio.Future[Any]) -> None:
             remaining = self._trace_invocations.get(trace_id)
             if remaining is None:
                 return
-            remaining.discard(finished)
+            remaining.discard(cast(asyncio.Task[Any], finished))
             if not remaining:
                 self._trace_invocations.pop(trace_id, None)
 
@@ -827,7 +937,7 @@ class PenguiFlow:
         trace_id: str,
         timeout: float | None,
     ) -> Any:
-        invocation_task = asyncio.ensure_future(invocation)
+        invocation_task = cast(asyncio.Task[Any], asyncio.ensure_future(invocation))
         self._register_invocation_task(trace_id, invocation_task)
 
         cancel_event = self._trace_events.get(trace_id)
@@ -903,6 +1013,89 @@ class PenguiFlow:
             return
         self._trace_counts[trace_id] = self._trace_counts.get(trace_id, 0) + 1
         self._trace_events.setdefault(trace_id, asyncio.Event())
+
+    def _node_label(self, node: Node | Endpoint | None) -> str | None:
+        if node is None:
+            return None
+        name = getattr(node, "name", None)
+        if name:
+            return name
+        return getattr(node, "node_id", None)
+
+    def _build_bus_envelope(
+        self,
+        source: Node | Endpoint | None,
+        target: Node | Endpoint | None,
+        message: Any,
+    ) -> BusEnvelope:
+        source_name = self._node_label(source)
+        target_name = self._node_label(target)
+        edge = f"{source_name or '*'}->{target_name or '*'}"
+        headers: Mapping[str, Any] | None = None
+        meta: Mapping[str, Any] | None = None
+        if isinstance(message, Message):
+            headers = message.headers.model_dump()
+            meta = dict(message.meta)
+        return BusEnvelope(
+            edge=edge,
+            source=source_name,
+            target=target_name,
+            trace_id=self._get_trace_id(message),
+            payload=message,
+            headers=headers,
+            meta=meta,
+        )
+
+    async def _publish_to_bus(
+        self,
+        source: Node | Endpoint | None,
+        target: Node | Endpoint | None,
+        message: Any,
+    ) -> None:
+        if self._message_bus is None:
+            return
+        envelope = self._build_bus_envelope(source, target, message)
+        try:
+            await self._message_bus.publish(envelope)
+        except Exception as exc:
+            logger.exception(
+                "message_bus_publish_failed",
+                extra={
+                    "event": "message_bus_publish_failed",
+                    "edge": envelope.edge,
+                    "trace_id": envelope.trace_id,
+                    "exception": repr(exc),
+                },
+            )
+
+    def _schedule_bus_publish(
+        self,
+        source: Node | Endpoint | None,
+        target: Node | Endpoint | None,
+        message: Any,
+    ) -> None:
+        if self._message_bus is None:
+            return
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(self._publish_to_bus(source, target, message))
+        self._bus_tasks.add(task)
+
+        def _cleanup(done: asyncio.Task[None]) -> None:
+            self._bus_tasks.discard(done)
+
+        task.add_done_callback(_cleanup)
+
+    async def _send_to_floe(self, floe: Floe, message: Any) -> None:
+        self._on_message_enqueued(message)
+        if self._message_bus is not None:
+            await self._publish_to_bus(floe.source, floe.target, message)
+        await floe.queue.put(message)
+
+    def _send_to_floe_nowait(self, floe: Floe, message: Any) -> None:
+        self._on_message_enqueued(message)
+        if self._message_bus is not None:
+            self._schedule_bus_publish(floe.source, floe.target, message)
+        floe.queue.put_nowait(message)
 
     async def _finalize_message(self, message: Any) -> None:
         trace_id = self._get_trace_id(message)
@@ -1107,11 +1300,12 @@ class PenguiFlow:
         if floe is None and incoming:
             floe = next(iter(incoming.values()))
 
-        self._on_message_enqueued(message)
-
         if floe is not None:
-            await floe.queue.put(message)
+            await self._send_to_floe(floe, message)
         else:
+            self._on_message_enqueued(message)
+            if self._message_bus is not None:
+                await self._publish_to_bus(source, ROOKERY, message)
             buffer = rookery_context._buffer
             buffer.append(message)
 
@@ -1166,6 +1360,21 @@ class PenguiFlow:
         )
 
         logger.log(level, event, extra=event_obj.to_payload())
+
+        if self._state_store is not None:
+            stored_event = StoredEvent.from_flow_event(event_obj)
+            try:
+                await self._state_store.save_event(stored_event)
+            except Exception as exc:
+                logger.exception(
+                    "state_store_save_failed",
+                    extra={
+                        "event": "state_store_save_failed",
+                        "trace_id": stored_event.trace_id,
+                        "kind": stored_event.kind,
+                        "exception": repr(exc),
+                    },
+                )
 
         for middleware in list(self._middlewares):
             try:
