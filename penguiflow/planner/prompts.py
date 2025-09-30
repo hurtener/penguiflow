@@ -160,10 +160,36 @@ def build_user_prompt(query: str, context_meta: Mapping[str, Any] | None = None)
     return _compact_json({"query": query})
 
 
-def render_observation(*, observation: Any | None, error: str | None) -> str:
+def render_observation(
+    *,
+    observation: Any | None,
+    error: str | None,
+    failure: Mapping[str, Any] | None = None,
+) -> str:
+    payload: dict[str, Any] = {}
+    if observation is not None:
+        payload["observation"] = observation
     if error:
-        return f"Observation: ERROR {error}"
-    return f"Observation: {_compact_json(observation)}"
+        payload["error"] = error
+    if failure:
+        payload["failure"] = dict(failure)
+    if not payload:
+        payload["observation"] = None
+    return _compact_json(payload)
+
+
+def render_hop_budget_violation(limit: int) -> str:
+    return (
+        "Hop budget exhausted; you have used all available tool calls. "
+        "Finish with the best answer so far or reply with no_path."
+        f" (limit={limit})"
+    )
+
+
+def render_deadline_exhausted() -> str:
+    return (
+        "Deadline reached. Provide the best available conclusion or return no_path."
+    )
 
 
 def render_validation_error(node_name: str, error: str) -> str:

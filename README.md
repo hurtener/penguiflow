@@ -331,6 +331,24 @@ Phase B adds the tools you need for longer-running, approval-driven flows:
 All three features are exercised in `examples/react_pause_resume/`, which runs
 entirely offline with stubbed LLM responses.
 
+### Adaptive re-planning & budgets (Phase C)
+
+Phase C closes the loop when things go sideways:
+
+* **Structured failure feedback** — if a tool raises after exhausting its retries,
+  the planner records `{failure: {node, args, error_code, suggestion}}` and feeds
+  it back to the LLM, prompting a constrained re-plan instead of aborting.
+* **Hard guardrails** — configure wall-clock deadlines and hop budgets directly
+  on `ReactPlanner`; attempts beyond the allotted hops surface deterministic
+  violations and ultimately finish with `reason="budget_exhausted"` alongside a
+  constraint snapshot.
+* **Typed exit reasons** — runs now finish with one of
+  `answer_complete`, `no_path`, or `budget_exhausted`, keeping downstream code
+  simple and machine-checkable.
+
+The new `examples/react_replan/` sample shows a retrieval timeout automatically
+recover via a cached index without leaving the JSON-only contract.
+
 
 ## 🧭 Repo Structure
 

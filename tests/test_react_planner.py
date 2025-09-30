@@ -56,6 +56,22 @@ async def approval_gate(args: Intent, ctx: Any) -> Intent:
     return args
 
 
+class PlannerTimeout(RuntimeError):
+    def __init__(self, message: str, suggestion: str) -> None:
+        super().__init__(message)
+        self.suggestion = suggestion
+
+
+@tool(desc="Remote fetch that may timeout", side_effects="external")
+async def unstable(args: Intent, ctx: object) -> Documents:
+    raise PlannerTimeout("upstream timeout", "use_cache")
+
+
+@tool(desc="Use cached retrieval", side_effects="read")
+async def cached(args: Intent, ctx: object) -> Documents:
+    return Documents(documents=[f"Cached docs for {args.intent}"])
+
+
 class StubClient:
     def __init__(self, responses: list[Mapping[str, object]]) -> None:
         self._responses = [json.dumps(item) for item in responses]
@@ -208,6 +224,72 @@ async def test_react_planner_reports_output_validation_error() -> None:
     assert any("returned data" in err for err in errors)
 
 
+@pytest.mark.asyncio()
+async def test_react_planner_replans_after_tool_failure() -> None:
+    client = StubClient(
+        [
+            {
+                "thought": "triage",
+                "next_node": "triage",
+                "args": {"question": "Need docs"},
+            },
+            {
+                "thought": "remote",
+                "next_node": "unstable",
+                "args": {"intent": "docs"},
+            },
+            {
+                "thought": "fallback",
+                "next_node": "cached",
+                "args": {"intent": "docs"},
+            },
+            {
+                "thought": "wrap",
+                "next_node": "respond",
+                "args": {"answer": "Using cached docs"},
+            },
+            {
+                "thought": "final",
+                "next_node": None,
+                "args": {"answer": "Using cached docs"},
+            },
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("triage", Query, Intent)
+    registry.register("unstable", Intent, Documents)
+    registry.register("cached", Intent, Documents)
+    registry.register("respond", Answer, Answer)
+
+    nodes = [
+        Node(triage, name="triage"),
+        Node(unstable, name="unstable"),
+        Node(cached, name="cached"),
+        Node(respond, name="respond"),
+    ]
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog(nodes, registry),
+        max_iters=5,
+    )
+
+    result = await planner.run("Fetch docs with fallback")
+
+    assert result.reason == "answer_complete"
+    failure_step = next(
+        (step for step in result.metadata["steps"] if step.get("failure")),
+        None,
+    )
+    assert failure_step is not None
+    assert failure_step["failure"]["node"] == "unstable"
+
+    failure_prompt = json.loads(client.calls[2][-1]["content"])
+    assert failure_prompt["failure"]["suggestion"] == "use_cache"
+    assert failure_prompt["failure"]["error_code"] == "PlannerTimeout"
+
+
 def test_react_planner_requires_catalog_or_nodes() -> None:
     client = StubClient([])
     with pytest.raises(ValueError):
@@ -243,6 +325,53 @@ async def test_react_planner_iteration_limit_returns_no_path() -> None:
 
     result = await planner.run("Explain")
     assert result.reason == "no_path"
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_enforces_hop_budget_limits() -> None:
+    client = StubClient(
+        [
+            {
+                "thought": "triage",
+                "next_node": "triage",
+                "args": {"question": "Budget"},
+            },
+            {
+                "thought": "still need",
+                "next_node": "retrieve",
+                "args": {"intent": "docs"},
+            },
+            {
+                "thought": "retry",
+                "next_node": "retrieve",
+                "args": {"intent": "docs"},
+            },
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("triage", Query, Intent)
+    registry.register("retrieve", Intent, Documents)
+
+    nodes = [
+        Node(triage, name="triage"),
+        Node(retrieve, name="retrieve"),
+    ]
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog(nodes, registry),
+        hop_budget=1,
+        max_iters=3,
+    )
+
+    result = await planner.run("Constrained plan")
+
+    assert result.reason == "budget_exhausted"
+    constraints = result.metadata["constraints"]
+    assert constraints["hop_exhausted"] is True
+    violation = json.loads(client.calls[2][-1]["content"])
+    assert "Hop budget" in violation["error"]
 
 
 @pytest.mark.asyncio()
