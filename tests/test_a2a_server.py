@@ -220,6 +220,52 @@ async def test_a2a_server_cancel_stream() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a2a_server_isolates_concurrent_traces() -> None:
+    store = RecordingStateStore()
+
+    async def variable_worker(message: Message, _ctx) -> dict[str, str]:
+        payload = message.payload
+        assert isinstance(payload, dict)
+        await asyncio.sleep(payload["delay"])
+        return {"agent": payload["name"]}
+
+    worker_node = Node(variable_worker, name="worker")
+    flow = create(worker_node.to(), state_store=store)
+    adapter = A2AServerAdapter(
+        flow,
+        agent_card=_default_agent_card(),
+        agent_url="https://main-agent.example",
+    )
+
+    await adapter.start()
+    try:
+        payloads = [
+            {"delay": 0.05, "name": "slow"},
+            {"delay": 0.0, "name": "fast"},
+        ]
+        tasks = [
+            asyncio.create_task(
+                adapter.handle_send(
+                    A2AMessagePayload(
+                        payload=payload,
+                        headers={"tenant": "acme"},
+                    )
+                )
+            )
+            for payload in payloads
+        ]
+        results = await asyncio.gather(*tasks)
+    finally:
+        await asyncio.wait_for(adapter.stop(), timeout=1.0)
+
+    assert {result["status"] for result in results} == {"succeeded"}
+    for payload, result in zip(payloads, results, strict=False):
+        assert result["output"] == {"agent": payload["name"]}
+        assert result["traceId"]
+        assert result["taskId"]
+
+
+@pytest.mark.asyncio
 async def test_a2a_server_requires_headers() -> None:
     store = RecordingStateStore()
 
