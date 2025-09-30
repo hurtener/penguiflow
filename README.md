@@ -316,6 +316,21 @@ deterministic:
 
 See `examples/react_minimal/` for a stubbed end-to-end run.
 
+### Trajectory summarisation & pause/resume (Phase B)
+
+Phase B adds the tools you need for longer-running, approval-driven flows:
+
+* **Token-aware summaries** — `Trajectory.compress()` keeps a compact state and
+  the planner can route summaries through a cheaper `summarizer_llm` before
+  asking for the next action.
+* **`PlannerPause` contract** — nodes can call `await ctx.pause(...)` to return a
+  typed pause payload. Resume the run later with `ReactPlanner.resume(token, user_input=...)`.
+* **Developer hints** — pass `planning_hints={...}` to enforce disallowed tools,
+  preferred ordering, or parallelism ceilings.
+
+All three features are exercised in `examples/react_pause_resume/`, which runs
+entirely offline with stubbed LLM responses.
+
 
 ## 🧭 Repo Structure
 
@@ -597,6 +612,7 @@ pytest -q
 * `examples/metadata_propagation/`: attaching and consuming `Message.meta` context.
 * `examples/visualizer/`: exports Mermaid + DOT diagrams with loop/subflow annotations.
 * `examples/react_minimal/`: JSON-only ReactPlanner loop with a stubbed LLM.
+* `examples/react_pause_resume/`: Phase B planner features with pause/resume and developer hints.
 
 ---
 

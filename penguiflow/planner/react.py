@@ -1,11 +1,13 @@
-"""JSON-only ReAct planner loop."""
+"""JSON-only ReAct planner loop with pause/resume and summarisation."""
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
+from uuid import uuid4
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -33,10 +35,43 @@ class PlannerAction(BaseModel):
     join: dict[str, Any] | None = None
 
 
+PlannerPauseReason = Literal[
+    "approval_required",
+    "await_input",
+    "external_event",
+    "constraints_conflict",
+]
+
+
+class PlannerPause(BaseModel):
+    reason: PlannerPauseReason
+    payload: dict[str, Any] = Field(default_factory=dict)
+    resume_token: str
+
+
 class PlannerFinish(BaseModel):
     reason: str
     payload: Any = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TrajectorySummary(BaseModel):
+    goals: list[str] = Field(default_factory=list)
+    facts: dict[str, Any] = Field(default_factory=dict)
+    pending: list[str] = Field(default_factory=list)
+    last_output_digest: str | None = None
+    note: str | None = None
+
+    def compact(self) -> dict[str, Any]:
+        payload = {
+            "goals": list(self.goals),
+            "facts": dict(self.facts),
+            "pending": list(self.pending),
+            "last_output_digest": self.last_output_digest,
+        }
+        if self.note:
+            payload["note"] = self.note
+        return payload
 
 
 @dataclass(slots=True)
@@ -63,9 +98,160 @@ class Trajectory:
     query: str
     context_meta: Mapping[str, Any] | None = None
     steps: list[TrajectoryStep] = field(default_factory=list)
+    summary: TrajectorySummary | None = None
+    hint_state: dict[str, Any] = field(default_factory=dict)
+    resume_user_input: str | None = None
 
     def to_history(self) -> list[dict[str, Any]]:
         return [step.dump() for step in self.steps]
+
+    def serialise(self) -> dict[str, Any]:
+        return {
+            "query": self.query,
+            "context_meta": dict(self.context_meta or {}),
+            "steps": self.to_history(),
+            "summary": self.summary.model_dump(mode="json")
+            if self.summary
+            else None,
+            "hint_state": dict(self.hint_state),
+            "resume_user_input": self.resume_user_input,
+        }
+
+    @classmethod
+    def from_serialised(cls, payload: Mapping[str, Any]) -> Trajectory:
+        trajectory = cls(
+            query=payload["query"],
+            context_meta=payload.get("context_meta"),
+        )
+        for step_data in payload.get("steps", []):
+            action = PlannerAction.model_validate(step_data["action"])
+            step = TrajectoryStep(
+                action=action,
+                observation=step_data.get("observation"),
+                error=step_data.get("error"),
+            )
+            trajectory.steps.append(step)
+        summary_data = payload.get("summary")
+        if summary_data:
+            trajectory.summary = TrajectorySummary.model_validate(summary_data)
+        trajectory.hint_state.update(payload.get("hint_state", {}))
+        trajectory.resume_user_input = payload.get("resume_user_input")
+        return trajectory
+
+    def compress(self) -> TrajectorySummary:
+        facts: dict[str, Any] = {}
+        pending: list[str] = []
+        last_observation = None
+        if self.steps:
+            last_step = self.steps[-1]
+            if last_step.observation is not None:
+                last_observation = last_step._serialise_observation()
+                facts["last_observation"] = last_observation
+            if last_step.error:
+                facts["last_error"] = last_step.error
+        for step in self.steps:
+            if step.error:
+                pending.append(
+                    f"retry {step.action.next_node or 'finish'}"
+                )
+        digest = None
+        if last_observation is not None:
+            digest_raw = json.dumps(last_observation, ensure_ascii=False)
+            digest = digest_raw if len(digest_raw) <= 120 else f"{digest_raw[:117]}..."
+        summary = TrajectorySummary(
+            goals=[self.query],
+            facts=facts,
+            pending=pending,
+            last_output_digest=digest,
+            note="rule_based",
+        )
+        self.summary = summary
+        return summary
+
+
+@dataclass(slots=True)
+class _PauseRecord:
+    trajectory: Trajectory
+    reason: str
+    payload: dict[str, Any]
+
+
+@dataclass(slots=True)
+class _PlanningHints:
+    ordering_hints: tuple[str, ...]
+    parallel_groups: tuple[tuple[str, ...], ...]
+    sequential_only: set[str]
+    disallow_nodes: set[str]
+    prefer_nodes: tuple[str, ...]
+    max_parallel: int | None
+    budget_hints: dict[str, Any]
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any] | None) -> _PlanningHints:
+        if not payload:
+            return cls((), (), set(), set(), (), None, {})
+        ordering = tuple(str(item) for item in payload.get("ordering_hints", ()))
+        parallel_groups = tuple(
+            tuple(str(node) for node in group)
+            for group in payload.get("parallel_groups", ())
+        )
+        sequential = {str(item) for item in payload.get("sequential_only", ())}
+        disallow = {str(item) for item in payload.get("disallow_nodes", ())}
+        prefer = tuple(str(item) for item in payload.get("prefer_nodes", ()))
+        budget_raw = dict(payload.get("budget_hints", {}))
+        max_parallel_value = payload.get("max_parallel")
+        if not isinstance(max_parallel_value, int):
+            candidate = budget_raw.get("max_parallel")
+            max_parallel_value = candidate if isinstance(candidate, int) else None
+        return cls(
+            ordering_hints=ordering,
+            parallel_groups=parallel_groups,
+            sequential_only=sequential,
+            disallow_nodes=disallow,
+            prefer_nodes=prefer,
+            max_parallel=max_parallel_value,
+            budget_hints=budget_raw,
+        )
+
+    def to_prompt_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        constraints: list[str] = []
+        if self.max_parallel is not None:
+            constraints.append(f"max_parallel={self.max_parallel}")
+        if self.sequential_only:
+            constraints.append(
+                "sequential_only=" + ",".join(sorted(self.sequential_only))
+            )
+        if constraints:
+            payload["constraints"] = "; ".join(constraints)
+        if self.ordering_hints:
+            payload["preferred_order"] = list(self.ordering_hints)
+        if self.parallel_groups:
+            payload["parallel_groups"] = [list(group) for group in self.parallel_groups]
+        if self.disallow_nodes:
+            payload["disallow_nodes"] = sorted(self.disallow_nodes)
+        if self.prefer_nodes:
+            payload["preferred_nodes"] = list(self.prefer_nodes)
+        if self.budget_hints:
+            payload["budget"] = dict(self.budget_hints)
+        return payload
+
+    def empty(self) -> bool:
+        return not (
+            self.ordering_hints
+            or self.parallel_groups
+            or self.sequential_only
+            or self.disallow_nodes
+            or self.prefer_nodes
+            or self.max_parallel is not None
+            or self.budget_hints
+        )
+
+
+class _PlannerPauseSignal(Exception):
+    def __init__(self, pause: PlannerPause) -> None:
+        super().__init__(pause.reason)
+        self.pause = pause
 
 
 class _LiteLLMJSONClient:
@@ -113,10 +299,23 @@ class _LiteLLMJSONClient:
 
 
 class _PlannerContext:
-    __slots__ = ("meta",)
+    __slots__ = ("meta", "_planner", "_trajectory")
 
-    def __init__(self, meta: Mapping[str, Any] | None = None) -> None:
-        self.meta = dict(meta) if meta else {}
+    def __init__(self, planner: ReactPlanner, trajectory: Trajectory) -> None:
+        self.meta = dict(trajectory.context_meta or {})
+        self._planner = planner
+        self._trajectory = trajectory
+
+    async def pause(
+        self,
+        reason: PlannerPauseReason,
+        payload: Mapping[str, Any] | None = None,
+    ) -> PlannerPause:
+        return await self._planner._pause_from_context(
+            reason,
+            dict(payload or {}),
+            self._trajectory,
+        )
 
 
 class ReactPlanner:
@@ -134,6 +333,11 @@ class ReactPlanner:
         temperature: float = 0.0,
         json_schema_mode: bool = True,
         system_prompt_extra: str | None = None,
+        token_budget: int | None = None,
+        pause_enabled: bool = True,
+        state_store: Any | None = None,
+        summarizer_llm: str | Mapping[str, Any] | None = None,
+        planning_hints: Mapping[str, Any] | None = None,
         repair_attempts: int = 3,
     ) -> None:
         if catalog is None:
@@ -146,13 +350,25 @@ class ReactPlanner:
         self._specs = list(catalog)
         self._spec_by_name = {spec.name: spec for spec in self._specs}
         self._catalog_records = [spec.to_tool_record() for spec in self._specs]
+        self._planning_hints = _PlanningHints.from_mapping(planning_hints)
+        hints_payload = (
+            self._planning_hints.to_prompt_payload()
+            if not self._planning_hints.empty()
+            else None
+        )
         self._system_prompt = prompts.build_system_prompt(
             self._catalog_records,
             extra=system_prompt_extra,
+            planning_hints=hints_payload,
         )
         self._max_iters = max_iters
         self._repair_attempts = repair_attempts
         self._json_schema_mode = json_schema_mode
+        self._token_budget = token_budget
+        self._pause_enabled = pause_enabled
+        self._state_store = state_store
+        self._pause_records: dict[str, _PauseRecord] = {}
+        self._active_trajectory: Trajectory | None = None
         self._response_format = (
             {
                 "type": "json_schema",
@@ -164,6 +380,7 @@ class ReactPlanner:
             if json_schema_mode
             else None
         )
+        self._summarizer_client: JSONLLMClient | None = None
         if llm_client is not None:
             self._client = llm_client
         else:
@@ -174,85 +391,137 @@ class ReactPlanner:
                 temperature=temperature,
                 json_schema_mode=json_schema_mode,
             )
+        if summarizer_llm is not None:
+            self._summarizer_client = _LiteLLMJSONClient(
+                summarizer_llm,
+                temperature=temperature,
+                json_schema_mode=True,
+            )
 
     async def run(
         self,
         query: str,
         *,
         context_meta: Mapping[str, Any] | None = None,
-    ) -> PlannerFinish:
+    ) -> PlannerFinish | PlannerPause:
         trajectory = Trajectory(query=query, context_meta=context_meta)
+        return await self._run_loop(trajectory)
+
+    async def resume(
+        self,
+        token: str,
+        user_input: str | None = None,
+    ) -> PlannerFinish | PlannerPause:
+        record = await self._load_pause_record(token)
+        trajectory = record.trajectory
+        trajectory.context_meta = trajectory.context_meta or {}
+        if user_input is not None:
+            trajectory.resume_user_input = user_input
+        return await self._run_loop(trajectory)
+
+    async def _run_loop(self, trajectory: Trajectory) -> PlannerFinish | PlannerPause:
         last_observation: Any | None = None
+        self._active_trajectory = trajectory
+        try:
+            while len(trajectory.steps) < self._max_iters:
+                action = await self.step(trajectory)
 
-        for _ in range(self._max_iters):
-            action = await self.step(trajectory)
+                if action.next_node is None:
+                    payload = action.args or last_observation
+                    return self._finish(
+                        trajectory,
+                        reason="answer_complete",
+                        payload=payload,
+                        thought=action.thought,
+                    )
 
-            if action.next_node is None:
-                payload = action.args or last_observation
-                return self._finish(
-                    trajectory,
-                    reason="answer_complete",
-                    payload=payload,
-                    thought=action.thought,
+                constraint_error = self._check_action_constraints(action, trajectory)
+                if constraint_error is not None:
+                    trajectory.steps.append(
+                        TrajectoryStep(action=action, error=constraint_error)
+                    )
+                    trajectory.summary = None
+                    continue
+
+                spec = self._spec_by_name.get(action.next_node)
+                if spec is None:
+                    error = prompts.render_invalid_node(
+                        action.next_node,
+                        list(self._spec_by_name.keys()),
+                    )
+                    trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                    trajectory.summary = None
+                    continue
+
+                try:
+                    parsed_args = spec.args_model.model_validate(action.args or {})
+                except ValidationError as exc:
+                    error = prompts.render_validation_error(
+                        spec.name,
+                        json.dumps(exc.errors(), ensure_ascii=False),
+                    )
+                    trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                    trajectory.summary = None
+                    continue
+
+                ctx = _PlannerContext(self, trajectory)
+                try:
+                    result = await spec.node.func(parsed_args, ctx)
+                except _PlannerPauseSignal as signal:
+                    trajectory.steps.append(
+                        TrajectoryStep(
+                            action=action,
+                            observation={
+                                "pause": signal.pause.reason,
+                                "payload": signal.pause.payload,
+                            },
+                        )
+                    )
+                    trajectory.summary = None
+                    await self._record_pause(signal.pause, trajectory)
+                    return signal.pause
+                except Exception as exc:  # pragma: no cover - surfaced via metadata
+                    error = f"tool '{spec.name}' raised {exc.__class__.__name__}: {exc}"
+                    trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                    trajectory.summary = None
+                    return self._finish(
+                        trajectory,
+                        reason="error",
+                        payload=None,
+                        thought=action.thought,
+                        error=error,
+                    )
+
+                try:
+                    observation = spec.out_model.model_validate(result)
+                except ValidationError as exc:
+                    error = prompts.render_output_validation_error(
+                        spec.name,
+                        json.dumps(exc.errors(), ensure_ascii=False),
+                    )
+                    trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                    trajectory.summary = None
+                    continue
+
+                trajectory.steps.append(
+                    TrajectoryStep(action=action, observation=observation)
                 )
+                trajectory.summary = None
+                last_observation = observation.model_dump(mode="json")
+                self._record_hint_progress(spec.name, trajectory)
+                trajectory.resume_user_input = None
 
-            spec = self._spec_by_name.get(action.next_node)
-            if spec is None:
-                error = prompts.render_invalid_node(
-                    action.next_node,
-                    list(self._spec_by_name.keys()),
-                )
-                trajectory.steps.append(TrajectoryStep(action=action, error=error))
-                continue
-
-            try:
-                parsed_args = spec.args_model.model_validate(action.args or {})
-            except ValidationError as exc:
-                error = prompts.render_validation_error(
-                    spec.name,
-                    json.dumps(exc.errors(), ensure_ascii=False),
-                )
-                trajectory.steps.append(TrajectoryStep(action=action, error=error))
-                continue
-
-            ctx = _PlannerContext(meta=context_meta)
-            try:
-                result = await spec.node.func(parsed_args, ctx)
-            except Exception as exc:  # pragma: no cover - surfaced via metadata
-                error = f"tool '{spec.name}' raised {exc.__class__.__name__}: {exc}"
-                trajectory.steps.append(TrajectoryStep(action=action, error=error))
-                return self._finish(
-                    trajectory,
-                    reason="error",
-                    payload=None,
-                    thought=action.thought,
-                    error=error,
-                )
-
-            try:
-                observation = spec.out_model.model_validate(result)
-            except ValidationError as exc:
-                error = prompts.render_output_validation_error(
-                    spec.name,
-                    json.dumps(exc.errors(), ensure_ascii=False),
-                )
-                trajectory.steps.append(TrajectoryStep(action=action, error=error))
-                continue
-
-            trajectory.steps.append(
-                TrajectoryStep(action=action, observation=observation)
+            return self._finish(
+                trajectory,
+                reason="no_path",
+                payload=last_observation,
+                thought="iteration limit reached",
             )
-            last_observation = observation.model_dump(mode="json")
-
-        return self._finish(
-            trajectory,
-            reason="no_path",
-            payload=last_observation,
-            thought="iteration limit reached",
-        )
+        finally:
+            self._active_trajectory = None
 
     async def step(self, trajectory: Trajectory) -> PlannerAction:
-        base_messages = self._build_messages(trajectory)
+        base_messages = await self._build_messages(trajectory)
         messages: list[dict[str, str]] = list(base_messages)
         last_error: str | None = None
 
@@ -278,7 +547,7 @@ class ReactPlanner:
 
         raise RuntimeError("Planner failed to produce valid JSON after repair attempts")
 
-    def _build_messages(self, trajectory: Trajectory) -> list[dict[str, str]]:
+    async def _build_messages(self, trajectory: Trajectory) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = [
             {"role": "system", "content": self._system_prompt},
             {
@@ -290,14 +559,15 @@ class ReactPlanner:
             },
         ]
 
+        history_messages: list[dict[str, str]] = []
         for step in trajectory.steps:
             action_payload = json.dumps(
                 step.action.model_dump(mode="json"),
                 ensure_ascii=False,
                 sort_keys=True,
             )
-            messages.append({"role": "assistant", "content": action_payload})
-            messages.append(
+            history_messages.append({"role": "assistant", "content": action_payload})
+            history_messages.append(
                 {
                     "role": "user",
                     "content": prompts.render_observation(
@@ -306,7 +576,237 @@ class ReactPlanner:
                     ),
                 }
             )
-        return messages
+
+        if trajectory.resume_user_input:
+            history_messages.append(
+                {
+                    "role": "user",
+                    "content": prompts.render_resume_user_input(
+                        trajectory.resume_user_input
+                    ),
+                }
+            )
+
+        if self._token_budget is None:
+            return messages + history_messages
+
+        candidate = messages + history_messages
+        if self._estimate_size(candidate) <= self._token_budget:
+            return candidate
+
+        summary = await self._summarise_trajectory(trajectory)
+        summary_message = {
+            "role": "system",
+            "content": prompts.render_summary(summary.compact()),
+        }
+        condensed: list[dict[str, str]] = messages + [summary_message]
+        if trajectory.steps:
+            last_step = trajectory.steps[-1]
+            condensed.append(
+                {
+                    "role": "assistant",
+                    "content": json.dumps(
+                        last_step.action.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                }
+            )
+            condensed.append(
+                {
+                    "role": "user",
+                    "content": prompts.render_observation(
+                        observation=last_step._serialise_observation(),
+                        error=last_step.error,
+                    ),
+                }
+            )
+        if trajectory.resume_user_input:
+            condensed.append(
+                {
+                    "role": "user",
+                    "content": prompts.render_resume_user_input(
+                        trajectory.resume_user_input
+                    ),
+                }
+            )
+        return condensed
+
+    def _estimate_size(self, messages: Sequence[Mapping[str, str]]) -> int:
+        return sum(len(item.get("content", "")) for item in messages)
+
+    async def _summarise_trajectory(
+        self, trajectory: Trajectory
+    ) -> TrajectorySummary:
+        if trajectory.summary is not None:
+            return trajectory.summary
+
+        base_summary = trajectory.compress()
+        summary_text = prompts.render_summary(base_summary.compact())
+        if (
+            self._summarizer_client is not None
+            and self._token_budget is not None
+            and len(summary_text) > self._token_budget
+        ):
+            messages = prompts.build_summarizer_messages(
+                trajectory.query,
+                trajectory.to_history(),
+                base_summary.compact(),
+            )
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "trajectory_summary",
+                    "schema": TrajectorySummary.model_json_schema(),
+                },
+            }
+            try:
+                raw = await self._summarizer_client.complete(
+                    messages=messages,
+                    response_format=response_format,
+                )
+                summary = TrajectorySummary.model_validate_json(raw)
+                summary.note = summary.note or "llm"
+                trajectory.summary = summary
+                return summary
+            except Exception:
+                base_summary.note = "rule_based_fallback"
+        trajectory.summary = base_summary
+        return base_summary
+
+    def _check_action_constraints(
+        self, action: PlannerAction, trajectory: Trajectory
+    ) -> str | None:
+        hints = self._planning_hints
+        node_name = action.next_node
+        if node_name and node_name in hints.disallow_nodes:
+            return prompts.render_disallowed_node(node_name)
+        if hints.max_parallel is not None and action.plan:
+            if len(action.plan) > hints.max_parallel:
+                return prompts.render_parallel_limit(hints.max_parallel)
+        if hints.sequential_only and action.plan:
+            for item in action.plan:
+                candidate = str(item.get("node", ""))
+                if candidate in hints.sequential_only:
+                    return prompts.render_sequential_only(candidate)
+        if hints.ordering_hints and node_name is not None:
+            state = trajectory.hint_state.setdefault(
+                "ordering_state",
+                {"completed": [], "warned": False},
+            )
+            completed = state.setdefault("completed", [])
+            expected_index = len(completed)
+            if expected_index < len(hints.ordering_hints):
+                expected_node = hints.ordering_hints[expected_index]
+                if node_name != expected_node:
+                    if (
+                        node_name in hints.ordering_hints
+                        and not state.get("warned", False)
+                    ):
+                        state["warned"] = True
+                        return prompts.render_ordering_hint_violation(
+                            hints.ordering_hints,
+                            node_name,
+                        )
+        return None
+
+    def _record_hint_progress(self, node_name: str, trajectory: Trajectory) -> None:
+        hints = self._planning_hints
+        if not hints.ordering_hints:
+            return
+        state = trajectory.hint_state.setdefault(
+            "ordering_state",
+            {"completed": [], "warned": False},
+        )
+        completed = state.setdefault("completed", [])
+        expected_index = len(completed)
+        if (
+            expected_index < len(hints.ordering_hints)
+            and node_name == hints.ordering_hints[expected_index]
+        ):
+            completed.append(node_name)
+            state["warned"] = False
+
+    async def pause(
+        self, reason: PlannerPauseReason, payload: Mapping[str, Any] | None = None
+    ) -> PlannerPause:
+        if self._active_trajectory is None:
+            raise RuntimeError("pause() requires an active planner run")
+        try:
+            await self._pause_from_context(
+                reason,
+                dict(payload or {}),
+                self._active_trajectory,
+            )
+        except _PlannerPauseSignal as signal:
+            return signal.pause
+        raise RuntimeError("pause request did not trigger")
+
+    async def _pause_from_context(
+        self,
+        reason: PlannerPauseReason,
+        payload: dict[str, Any],
+        trajectory: Trajectory,
+    ) -> PlannerPause:
+        if not self._pause_enabled:
+            raise RuntimeError("Pause/resume is disabled for this planner")
+        pause = PlannerPause(
+            reason=reason,
+            payload=dict(payload),
+            resume_token=uuid4().hex,
+        )
+        await self._record_pause(pause, trajectory)
+        raise _PlannerPauseSignal(pause)
+
+    async def _record_pause(self, pause: PlannerPause, trajectory: Trajectory) -> None:
+        snapshot = Trajectory.from_serialised(trajectory.serialise())
+        record = _PauseRecord(
+            trajectory=snapshot,
+            reason=pause.reason,
+            payload=dict(pause.payload),
+        )
+        await self._store_pause_record(pause.resume_token, record)
+
+    async def _store_pause_record(self, token: str, record: _PauseRecord) -> None:
+        self._pause_records[token] = record
+        if self._state_store is None:
+            return
+        saver = getattr(self._state_store, "save_planner_state", None)
+        if saver is None:
+            return
+        payload = self._serialise_pause_record(record)
+        result = saver(token, payload)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _load_pause_record(self, token: str) -> _PauseRecord:
+        record = self._pause_records.pop(token, None)
+        if record is not None:
+            return record
+        if self._state_store is not None:
+            loader = getattr(self._state_store, "load_planner_state", None)
+            if loader is not None:
+                result = loader(token)
+                if inspect.isawaitable(result):
+                    result = await result
+                if result is None:
+                    raise KeyError(token)
+                trajectory = Trajectory.from_serialised(result["trajectory"])
+                payload = dict(result.get("payload", {}))
+                reason = result.get("reason", "await_input")
+                return _PauseRecord(
+                    trajectory=trajectory,
+                    reason=reason,
+                    payload=payload,
+                )
+        raise KeyError(token)
+
+    def _serialise_pause_record(self, record: _PauseRecord) -> dict[str, Any]:
+        return {
+            "trajectory": record.trajectory.serialise(),
+            "reason": record.reason,
+            "payload": dict(record.payload),
+        }
 
     def _finish(
         self,
@@ -331,7 +831,9 @@ class ReactPlanner:
 __all__ = [
     "PlannerAction",
     "PlannerFinish",
+    "PlannerPause",
     "ReactPlanner",
     "Trajectory",
     "TrajectoryStep",
+    "TrajectorySummary",
 ]

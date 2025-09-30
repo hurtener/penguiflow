@@ -7,6 +7,93 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
+def render_summary(summary: Mapping[str, Any]) -> str:
+    return "Trajectory summary: " + _compact_json(summary)
+
+
+def render_resume_user_input(user_input: str) -> str:
+    return f"Resume input: {user_input}"
+
+
+def render_planning_hints(hints: Mapping[str, Any]) -> str:
+    lines: list[str] = []
+    constraints = hints.get("constraints")
+    if constraints:
+        lines.append(f"Respect the following constraints: {constraints}")
+    preferred = hints.get("preferred_order")
+    if preferred:
+        lines.append(f"Preferred order (if feasible): {preferred}")
+    parallels = hints.get("parallel_groups")
+    if parallels:
+        lines.append(f"Allowed parallel groups: {parallels}")
+    disallowed = hints.get("disallow_nodes")
+    if disallowed:
+        lines.append(f"Disallowed tools: {disallowed}")
+    preferred_nodes = hints.get("preferred_nodes")
+    if preferred_nodes:
+        lines.append(f"Preferred tools: {preferred_nodes}")
+    budget = hints.get("budget")
+    if budget:
+        lines.append(f"Budget hints: {budget}")
+    if not lines:
+        return ""
+    return "\n".join(lines)
+
+
+def render_disallowed_node(node_name: str) -> str:
+    return (
+        f"tool '{node_name}' is not permitted by constraints. "
+        "Choose an allowed tool or revise the plan."
+    )
+
+
+def render_ordering_hint_violation(expected: Sequence[str], proposed: str) -> str:
+    order = ", ".join(expected)
+    return (
+        "Ordering hint reminder: follow the preferred sequence "
+        f"[{order}]. Proposed: {proposed}. Revise the plan."
+    )
+
+
+def render_parallel_limit(max_parallel: int) -> str:
+    return (
+        f"Parallel action exceeds max_parallel={max_parallel}. Reduce parallel fan-out."
+    )
+
+
+def render_sequential_only(node_name: str) -> str:
+    return (
+        f"tool '{node_name}' must run sequentially. "
+        "Do not include it in a parallel plan."
+    )
+
+
+def build_summarizer_messages(
+    query: str,
+    history: Sequence[Mapping[str, Any]],
+    base_summary: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a summariser producing compact JSON state. "
+                "Respond with valid JSON matching the TrajectorySummary schema."
+            ),
+        },
+        {
+            "role": "user",
+            "content": _compact_json(
+                {
+                    "query": query,
+                    "history": list(history),
+                    "current_summary": dict(base_summary),
+                }
+            ),
+        },
+    ]
+
+
 def _compact_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, sort_keys=True)
 
@@ -42,6 +129,7 @@ def build_system_prompt(
     catalog: Sequence[Mapping[str, Any]],
     *,
     extra: str | None = None,
+    planning_hints: Mapping[str, Any] | None = None,
 ) -> str:
     rendered_tools = "\n".join(render_tool(item) for item in catalog)
     prompt = [
@@ -59,6 +147,10 @@ def build_system_prompt(
     ]
     if extra:
         prompt.extend(["", "Additional guidance:", extra])
+    if planning_hints:
+        rendered_hints = render_planning_hints(planning_hints)
+        if rendered_hints:
+            prompt.extend(["", rendered_hints])
     return "\n".join(prompt)
 
 
