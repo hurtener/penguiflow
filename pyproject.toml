@@ -30,6 +30,9 @@ dev = [
 a2a-server = [
     "fastapi>=0.110",
 ]
+planner = [
+    "litellm>=1.40.0",
+]
 
 [project.scripts]
 penguiflow-admin = "penguiflow.admin:main"

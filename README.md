@@ -301,6 +301,21 @@ The new `penguiflow.testkit` module keeps unit tests tiny:
 The harness is covered by `tests/test_testkit.py` and demonstrated in
 `examples/testkit_demo/`.
 
+### JSON-only ReAct planner (Phase A)
+
+Phase A introduces a lightweight planner loop that keeps PenguiFlow typed and
+deterministic:
+
+* `penguiflow.catalog.NodeSpec` + `build_catalog` turn registered nodes into
+  tool descriptors with JSON Schemas derived from your Pydantic models.
+* `penguiflow.planner.ReactPlanner` drives a JSON-only ReAct loop over those
+  descriptors, validating every LLM action with Pydantic and replaying invalid
+  steps to request corrections.
+* LiteLLM stays optional—install `penguiflow[planner]` or inject a custom
+  `llm_client` for deterministic/offline runs.
+
+See `examples/react_minimal/` for a stubbed end-to-end run.
+
 
 ## 🧭 Repo Structure
 
@@ -581,6 +596,7 @@ pytest -q
 * `examples/streaming_llm/`: mock LLM emitting streaming chunks to an SSE sink.
 * `examples/metadata_propagation/`: attaching and consuming `Message.meta` context.
 * `examples/visualizer/`: exports Mermaid + DOT diagrams with loop/subflow annotations.
+* `examples/react_minimal/`: JSON-only ReactPlanner loop with a stubbed LLM.
 
 ---
 
