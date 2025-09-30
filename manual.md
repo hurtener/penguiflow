@@ -934,7 +934,46 @@ task that waits for the trace cancellation event and calls
 discovered the runtime cancels immediately and raises `TraceCancelled` so the
 worker unwinds without executing additional remote calls.
 
-22.4 Reference tests
+22.4 Remote observability telemetry
+
+Phase 4 extends the remote surface with dedicated observability events. Every
+`RemoteNode` invocation now emits:
+
+* `remote_call_start` — request metadata, skill, transport, and an approximate
+  byte size of the serialized message.
+* `remote_stream_event` — one per streamed chunk with sequence number, byte
+  size, and the meta keys forwarded to downstream consumers.
+* `remote_call_success` — total latency, response byte count, and the resolved
+  `context_id`/`task_id`/`agent_url` tuple for correlation.
+* `remote_call_error` — failure details and the exception repr when the
+  transport raises.
+* `remote_call_cancelled` — cancel reason (`trace_cancel` vs
+  `pre_cancelled`) plus the time taken to deliver the remote cancel.
+* `remote_cancel_error` — emitted when `RemoteTransport.cancel` itself fails so
+  operators can detect stuck remote tasks.
+
+All events funnel through the configured `StateStore`, which means the remote
+identifiers and metrics become part of the persisted history. This unlocks
+end-to-end tracing across agents without adding new APIs.
+
+To inspect that history locally, install PenguiFlow with your adapters and run
+the new CLI:
+
+```bash
+penguiflow-admin history <trace-id> \
+  --state-store package.module:create_store
+
+penguiflow-admin replay <trace-id> \
+  --state-store package.module:create_store --tail 10
+```
+
+Both commands dynamically import the provided factory to create a `StateStore`
+instance and then print JSON lines for each stored `FlowEvent`. `replay` adds a
+header plus optional pacing (`--delay`) so you can simulate runtime emission in
+development environments. See `tests/observability_ops/test_admin_cli.py` for a
+compact example harness.
+
+22.5 Reference tests
 
 `tests/test_remote.py` contains in-memory transports that cover:
 
@@ -943,11 +982,14 @@ worker unwinds without executing additional remote calls.
   payloads and returning a terminal result.
 * Per-trace cancellation mirroring into `RemoteTransport.cancel` to guarantee
   remote tasks are cleaned up.
+* Observability telemetry (`tests/observability_ops/test_remote_observability.py`)
+  validating remote metrics, cancellation latency, and error paths, plus CLI
+  coverage in `tests/observability_ops/test_admin_cli.py`.
 
 Use these test doubles as templates when adapting PenguiFlow to real A2A or
 HTTP transports.
 
-22.5 A2A server adapter
+22.6 A2A server adapter
 
 Sometimes PenguiFlow itself must behave as an A2A agent. The optional
 `penguiflow_a2a` package provides a FastAPI adapter that projects any flow over

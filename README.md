@@ -45,6 +45,9 @@ It provides:
   `penguiflow_a2a.A2AServerAdapter` so other agents can call `message/send`,
   `message/stream`, and `tasks/cancel` while reusing the runtime's backpressure and
   cancellation semantics.
+* **Observability & ops polish** — remote calls emit structured metrics (latency, payload
+  sizes, cancel reasons) and the `penguiflow-admin` CLI replays trace history from any
+  configured `StateStore` for debugging.
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
@@ -504,9 +507,15 @@ docs or diagramming pipelines.
 * **Structured `FlowEvent`s**: every node event carries `{ts, trace_id, node_name, event,
   latency_ms, q_depth_in, q_depth_out, attempt}` plus a mutable `extra` map for custom
   annotations.
+* **Remote call telemetry**: `RemoteNode` executions emit extra metrics (latency, request
+  and response bytes, context/task identifiers, cancel reasons) so remote hops can be
+  traced end-to-end.
 * **Middleware hooks**: subscribe observers (e.g., MLflow) to the structured `FlowEvent`
   stream. See `examples/mlflow_metrics/` for an MLflow integration and
   `examples/reliability_middleware/` for a concrete timeout + retry walkthrough.
+* **`penguiflow-admin` CLI**: inspect or replay stored trace history from any configured
+  `StateStore` (`penguiflow-admin history <trace>` or `penguiflow-admin replay <trace>`)
+  when debugging distributed runs.
 
 ---
 
@@ -514,9 +523,9 @@ docs or diagramming pipelines.
 
 - **In-process runtime**: there is no built-in distribution layer yet. Long-running CPU work should be delegated to your own pools or services.
 - **Registry-driven typing**: nodes default to validation. Provide a `ModelRegistry` when calling `flow.run(...)` or set `validate="none"` explicitly for untyped hops.
-- **Observability**: structured `FlowEvent` callbacks power logs/metrics; integrations with
-  third-party stacks (OTel, Prometheus, Datadog) remain DIY. See the MLflow middleware
-  example for a lightweight pattern.
+- **Observability**: structured `FlowEvent` callbacks and the `penguiflow-admin` CLI power
+  local debugging; integrations with third-party stacks (OTel, Prometheus, Datadog) remain
+  DIY. See the MLflow middleware example for a lightweight pattern.
 - **Roadmap**: follow-up releases focus on optional distributed backends, deeper observability integrations, and additional playbook patterns. Contributions and proposals are welcome!
 
 ---
