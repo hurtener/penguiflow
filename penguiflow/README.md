@@ -13,6 +13,7 @@ contributors understand how the pieces fit together.
 | `state.py` | Protocols for pluggable state stores plus the `StoredEvent`/`RemoteBinding` dataclasses. |
 | `bus.py` | Message bus protocol used to fan out floe traffic to remote workers. |
 | `node.py` | `Node` wrapper and `NodePolicy` configuration (validation scope, timeout, retry/backoff). |
+| `remote.py` | RemoteTransport protocol plus the `RemoteNode` helper for opt-in agent-to-agent calls. |
 | `types.py` | Pydantic models for headers, messages (with `Message.meta` bag), and controller/state artifacts (`WM`, `Thought`, `FinalAnswer`). |
 | `registry.py` | `ModelRegistry` that caches `TypeAdapter`s for per-node validation. |
 | `patterns.py` | Batteries-included helpers: `map_concurrent`, routers, and `join_k` aggregator. |
@@ -41,6 +42,11 @@ contributors understand how the pieces fit together.
   exposes the trace timeline) and every floe publish also emits a `BusEnvelope` describing
   the edge, trace id, headers, and metadata. Failures are logged but never surface to
   user code so adapters can fail independently of the core engine.
+* **Remote delegation**: `remote.RemoteNode` wraps remote execution through a
+  `RemoteTransport`. Bindings (`trace_id` ↔ remote context/task) persist via the
+  configured `StateStore`, streaming updates reuse `Context.emit_chunk`, and per-trace
+  cancellation mirrors to remote transports via `PenguiFlow.ensure_trace_event` and
+  `RemoteTransport.cancel`.
 * **Traceable exceptions**: when retries are exhausted or timeouts fire, the runtime
   builds a `FlowError` capturing the trace id, node metadata, and failure code. Setting
   `emit_errors_to_rookery=True` on `penguiflow.core.create` pushes the `FlowError`
