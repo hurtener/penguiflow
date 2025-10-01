@@ -524,6 +524,66 @@ async def test_react_planner_pause_and_resume_flow() -> None:
 
 
 @pytest.mark.asyncio()
+async def test_react_planner_resume_preserves_hop_budget() -> None:
+    registry = ModelRegistry()
+    registry.register("approval", Intent, Intent)
+    registry.register("respond", Answer, Answer)
+
+    nodes = [
+        Node(approval_gate, name="approval"),
+        Node(respond, name="respond"),
+    ]
+    catalog = build_catalog(nodes, registry)
+
+    client = StubClient(
+        [
+            {
+                "thought": "request approval",
+                "next_node": "approval",
+                "args": {"intent": "docs"},
+            },
+            {
+                "thought": "follow up",
+                "next_node": "respond",
+                "args": {"answer": "Report"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"answer": "Report"},
+            },
+        ]
+    )
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=catalog,
+        pause_enabled=True,
+        hop_budget=1,
+    )
+
+    pause_result = await planner.run("Send report with approval")
+    assert isinstance(pause_result, PlannerPause)
+    assert pause_result.reason == "approval_required"
+
+    resume_result = await planner.resume(
+        pause_result.resume_token,
+        user_input="approved",
+    )
+    assert resume_result.reason == "answer_complete"
+
+    steps = resume_result.metadata["steps"]
+    assert any(
+        step.get("error") and "Hop budget" in step["error"]
+        for step in steps
+    ), "expected hop budget violation after resume"
+
+    constraints = resume_result.metadata["constraints"]
+    assert constraints["hops_used"] == 1
+    assert constraints["hop_exhausted"] is True
+
+
+@pytest.mark.asyncio()
 async def test_react_planner_disallows_nodes_from_hints() -> None:
     client = StubClient(
         [

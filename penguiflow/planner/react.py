@@ -178,6 +178,7 @@ class _PauseRecord:
     trajectory: Trajectory
     reason: str
     payload: dict[str, Any]
+    constraints: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -309,6 +310,34 @@ class _ConstraintTracker:
             "deadline_triggered": self.deadline_triggered,
             "hop_exhausted": self.hop_exhausted,
         }
+
+    @classmethod
+    def from_snapshot(
+        cls, snapshot: Mapping[str, Any], *, time_source: Callable[[], float]
+    ) -> _ConstraintTracker:
+        deadline_remaining = snapshot.get("deadline_remaining_s")
+        hop_budget = snapshot.get("hop_budget")
+        tracker = cls(
+            deadline_s=deadline_remaining,
+            hop_budget=hop_budget,
+            time_source=time_source,
+        )
+        tracker._hops_used = int(snapshot.get("hops_used", 0))
+        tracker._hop_budget = hop_budget
+        if deadline_remaining is None and snapshot.get("deadline_at") is None:
+            tracker._deadline_at = None
+        elif deadline_remaining is not None:
+            tracker._deadline_at = time_source() + max(float(deadline_remaining), 0.0)
+        else:
+            tracker._deadline_at = snapshot.get("deadline_at")
+        tracker.deadline_triggered = bool(snapshot.get("deadline_triggered", False))
+        tracker.hop_exhausted = bool(snapshot.get("hop_exhausted", False))
+        if (
+            tracker._hop_budget is not None
+            and tracker._hops_used >= tracker._hop_budget
+        ):
+            tracker.hop_exhausted = True
+        return tracker
 
 
 class _PlannerPauseSignal(Exception):
@@ -475,7 +504,7 @@ class ReactPlanner:
         context_meta: Mapping[str, Any] | None = None,
     ) -> PlannerFinish | PlannerPause:
         trajectory = Trajectory(query=query, context_meta=context_meta)
-        return await self._run_loop(trajectory)
+        return await self._run_loop(trajectory, tracker=None)
 
     async def resume(
         self,
@@ -487,16 +516,28 @@ class ReactPlanner:
         trajectory.context_meta = trajectory.context_meta or {}
         if user_input is not None:
             trajectory.resume_user_input = user_input
-        return await self._run_loop(trajectory)
+        tracker: _ConstraintTracker | None = None
+        if record.constraints is not None:
+            tracker = _ConstraintTracker.from_snapshot(
+                record.constraints,
+                time_source=self._time_source,
+            )
+        return await self._run_loop(trajectory, tracker=tracker)
 
-    async def _run_loop(self, trajectory: Trajectory) -> PlannerFinish | PlannerPause:
+    async def _run_loop(
+        self,
+        trajectory: Trajectory,
+        *,
+        tracker: _ConstraintTracker | None,
+    ) -> PlannerFinish | PlannerPause:
         last_observation: Any | None = None
         self._active_trajectory = trajectory
-        tracker = _ConstraintTracker(
-            deadline_s=self._deadline_s,
-            hop_budget=self._hop_budget,
-            time_source=self._time_source,
-        )
+        if tracker is None:
+            tracker = _ConstraintTracker(
+                deadline_s=self._deadline_s,
+                hop_budget=self._hop_budget,
+                time_source=self._time_source,
+            )
         self._active_tracker = tracker
         try:
             while len(trajectory.steps) < self._max_iters:
@@ -568,7 +609,7 @@ class ReactPlanner:
                         )
                     )
                     trajectory.summary = None
-                    await self._record_pause(signal.pause, trajectory)
+                    await self._record_pause(signal.pause, trajectory, tracker)
                     return signal.pause
                 except Exception as exc:
                     failure_payload = self._build_failure_payload(
@@ -894,15 +935,21 @@ class ReactPlanner:
             payload=dict(payload),
             resume_token=uuid4().hex,
         )
-        await self._record_pause(pause, trajectory)
+        await self._record_pause(pause, trajectory, self._active_tracker)
         raise _PlannerPauseSignal(pause)
 
-    async def _record_pause(self, pause: PlannerPause, trajectory: Trajectory) -> None:
+    async def _record_pause(
+        self,
+        pause: PlannerPause,
+        trajectory: Trajectory,
+        tracker: _ConstraintTracker | None,
+    ) -> None:
         snapshot = Trajectory.from_serialised(trajectory.serialise())
         record = _PauseRecord(
             trajectory=snapshot,
             reason=pause.reason,
             payload=dict(pause.payload),
+            constraints=tracker.snapshot() if tracker is not None else None,
         )
         await self._store_pause_record(pause.resume_token, record)
 
@@ -933,10 +980,12 @@ class ReactPlanner:
                 trajectory = Trajectory.from_serialised(result["trajectory"])
                 payload = dict(result.get("payload", {}))
                 reason = result.get("reason", "await_input")
+                constraints = result.get("constraints")
                 return _PauseRecord(
                     trajectory=trajectory,
                     reason=reason,
                     payload=payload,
+                    constraints=constraints,
                 )
         raise KeyError(token)
 
@@ -945,6 +994,9 @@ class ReactPlanner:
             "trajectory": record.trajectory.serialise(),
             "reason": record.reason,
             "payload": dict(record.payload),
+            "constraints": dict(record.constraints)
+            if record.constraints is not None
+            else None,
         }
 
     def _finish(
