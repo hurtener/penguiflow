@@ -132,5 +132,7 @@ and `.metric_samples()` / `.tag_values()` for metrics sinks like MLflow.
   or `.venv/bin/python <path>` to execute them locally.
 * `examples/testkit_demo/` demonstrates the FlowTestKit harness in isolation so you can
   replicate the pattern inside your own repositories.
+* `examples/react_parallel/` showcases Phase D fan-out, join metadata, and the new
+  parallel planner semantics with auto-populated join arguments.
 
 For a conceptual overview and getting-started guide, see the repository root `README.md`.

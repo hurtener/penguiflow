@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from .react import (
+    ParallelCall,
+    ParallelJoin,
     PlannerAction,
     PlannerFinish,
     PlannerPause,
@@ -13,6 +15,8 @@ from .react import (
 )
 
 __all__ = [
+    "ParallelCall",
+    "ParallelJoin",
     "PlannerAction",
     "PlannerFinish",
     "PlannerPause",

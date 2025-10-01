@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import time
@@ -28,12 +29,22 @@ class JSONLLMClient(Protocol):
         ...
 
 
+class ParallelCall(BaseModel):
+    node: str
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+class ParallelJoin(BaseModel):
+    node: str
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
 class PlannerAction(BaseModel):
     thought: str
     next_node: str | None = None
     args: dict[str, Any] | None = None
-    plan: list[dict[str, Any]] | None = None
-    join: dict[str, Any] | None = None
+    plan: list[ParallelCall] | None = None
+    join: ParallelJoin | None = None
 
 
 PlannerPauseReason = Literal[
@@ -346,6 +357,14 @@ class _PlannerPauseSignal(Exception):
         self.pause = pause
 
 
+@dataclass(slots=True)
+class _BranchExecutionResult:
+    observation: BaseModel | None = None
+    error: str | None = None
+    failure: Mapping[str, Any] | None = None
+    pause: PlannerPause | None = None
+
+
 class _LiteLLMJSONClient:
     def __init__(
         self,
@@ -553,6 +572,17 @@ class ReactPlanner:
 
                 action = await self.step(trajectory)
 
+                if action.plan:
+                    parallel_observation, pause = await self._execute_parallel_plan(
+                        action, trajectory, tracker
+                    )
+                    if pause is not None:
+                        return pause
+                    trajectory.summary = None
+                    last_observation = parallel_observation
+                    trajectory.resume_user_input = None
+                    continue
+
                 if action.next_node is None:
                     payload = action.args or last_observation
                     return self._finish(
@@ -702,6 +732,280 @@ class ReactPlanner:
                 continue
 
         raise RuntimeError("Planner failed to produce valid JSON after repair attempts")
+
+    async def _execute_parallel_plan(
+        self,
+        action: PlannerAction,
+        trajectory: Trajectory,
+        tracker: _ConstraintTracker,
+    ) -> tuple[Any | None, PlannerPause | None]:
+        if action.next_node is not None:
+            error = prompts.render_parallel_with_next_node(action.next_node)
+            trajectory.steps.append(TrajectoryStep(action=action, error=error))
+            trajectory.summary = None
+            return None, None
+
+        if not action.plan:
+            error = prompts.render_empty_parallel_plan()
+            trajectory.steps.append(TrajectoryStep(action=action, error=error))
+            trajectory.summary = None
+            return None, None
+
+        validation_errors: list[str] = []
+        entries: list[tuple[ParallelCall, NodeSpec, BaseModel]] = []
+        for plan_item in action.plan:
+            spec = self._spec_by_name.get(plan_item.node)
+            if spec is None:
+                validation_errors.append(
+                    prompts.render_invalid_node(
+                        plan_item.node, list(self._spec_by_name.keys())
+                    )
+                )
+                continue
+            try:
+                parsed_args = spec.args_model.model_validate(plan_item.args or {})
+            except ValidationError as exc:
+                validation_errors.append(
+                    prompts.render_validation_error(
+                        spec.name,
+                        json.dumps(exc.errors(), ensure_ascii=False),
+                    )
+                )
+                continue
+            entries.append((plan_item, spec, parsed_args))
+
+        if validation_errors:
+            error = prompts.render_parallel_setup_error(validation_errors)
+            trajectory.steps.append(TrajectoryStep(action=action, error=error))
+            trajectory.summary = None
+            return None, None
+
+        ctx = _PlannerContext(self, trajectory)
+        results = await asyncio.gather(
+            *(
+                self._run_parallel_branch(spec, parsed_args, ctx)
+                for (_, spec, parsed_args) in entries
+            )
+        )
+
+        branch_payloads: list[dict[str, Any]] = []
+        success_payloads: list[Any] = []
+        failure_entries: list[dict[str, Any]] = []
+        pause_result: PlannerPause | None = None
+
+        for (_, spec, parsed_args), outcome in zip(
+            entries, results, strict=False
+        ):
+            tracker.record_hop()
+            payload: dict[str, Any] = {
+                "node": spec.name,
+                "args": parsed_args.model_dump(mode="json"),
+            }
+            if outcome.pause is not None and pause_result is None:
+                pause_result = outcome.pause
+                payload["pause"] = {
+                    "reason": outcome.pause.reason,
+                    "payload": dict(outcome.pause.payload),
+                }
+            elif outcome.observation is not None:
+                obs_json = outcome.observation.model_dump(mode="json")
+                payload["observation"] = obs_json
+                success_payloads.append(obs_json)
+                self._record_hint_progress(spec.name, trajectory)
+            else:
+                error_text = outcome.error or prompts.render_parallel_unknown_failure(
+                    spec.name
+                )
+                payload["error"] = error_text
+                if outcome.failure is not None:
+                    payload["failure"] = dict(outcome.failure)
+                    failure_entries.append(
+                        {
+                            "node": spec.name,
+                            "error": error_text,
+                            "failure": dict(outcome.failure),
+                        }
+                    )
+                else:
+                    failure_entries.append(
+                        {"node": spec.name, "error": error_text}
+                    )
+            branch_payloads.append(payload)
+
+        stats = {"success": len(success_payloads), "failed": len(failure_entries)}
+        observation: dict[str, Any] = {
+            "branches": branch_payloads,
+            "stats": stats,
+        }
+
+        if pause_result is not None:
+            observation["join"] = {
+                "status": "skipped",
+                "reason": "pause",
+            }
+            trajectory.steps.append(
+                TrajectoryStep(action=action, observation=observation)
+            )
+            trajectory.summary = None
+            await self._record_pause(pause_result, trajectory, tracker)
+            return observation, pause_result
+
+        join_payload: dict[str, Any] | None = None
+        join_error: str | None = None
+        join_failure: Mapping[str, Any] | None = None
+        join_spec: NodeSpec | None = None
+        join_args_template: dict[str, Any] | None = None
+
+        if action.join is not None:
+            join_spec = self._spec_by_name.get(action.join.node)
+            if join_spec is None:
+                join_error = prompts.render_invalid_node(
+                    action.join.node, list(self._spec_by_name.keys())
+                )
+            elif failure_entries:
+                join_payload = {
+                    "node": join_spec.name,
+                    "status": "skipped",
+                    "reason": "branch_failures",
+                    "failures": list(failure_entries),
+                }
+            else:
+                join_args_template = dict(action.join.args or {})
+                join_fields = join_spec.args_model.model_fields
+                if "expect" in join_fields and "expect" not in join_args_template:
+                    join_args_template["expect"] = len(entries)
+                if "results" in join_fields and "results" not in join_args_template:
+                    join_args_template["results"] = list(success_payloads)
+                if "branches" in join_fields and "branches" not in join_args_template:
+                    join_args_template["branches"] = list(branch_payloads)
+                if "failures" in join_fields and "failures" not in join_args_template:
+                    join_args_template["failures"] = []
+                if (
+                    "success_count" in join_fields
+                    and "success_count" not in join_args_template
+                ):
+                    join_args_template["success_count"] = len(success_payloads)
+                if (
+                    "failure_count" in join_fields
+                    and "failure_count" not in join_args_template
+                ):
+                    join_args_template["failure_count"] = len(failure_entries)
+
+                try:
+                    join_args = join_spec.args_model.model_validate(join_args_template)
+                except ValidationError as exc:
+                    join_error = prompts.render_validation_error(
+                        join_spec.name,
+                        json.dumps(exc.errors(), ensure_ascii=False),
+                    )
+                else:
+                    join_ctx = _PlannerContext(self, trajectory)
+                    join_ctx.meta.update(
+                        {
+                            "parallel_results": branch_payloads,
+                            "parallel_success_count": len(success_payloads),
+                            "parallel_failure_count": len(failure_entries),
+                        }
+                    )
+                    if failure_entries:
+                        join_ctx.meta["parallel_failures"] = list(failure_entries)
+                    join_ctx.meta["parallel_input"] = dict(join_args_template)
+
+                    try:
+                        join_raw = await join_spec.node.func(join_args, join_ctx)
+                    except _PlannerPauseSignal as signal:
+                        tracker.record_hop()
+                        join_payload = {
+                            "node": join_spec.name,
+                            "pause": {
+                                "reason": signal.pause.reason,
+                                "payload": dict(signal.pause.payload),
+                            },
+                        }
+                        observation["join"] = join_payload
+                        trajectory.steps.append(
+                            TrajectoryStep(action=action, observation=observation)
+                        )
+                        trajectory.summary = None
+                        await self._record_pause(signal.pause, trajectory, tracker)
+                        return observation, signal.pause
+                    except Exception as exc:
+                        tracker.record_hop()
+                        join_error = (
+                            f"tool '{join_spec.name}' raised "
+                            f"{exc.__class__.__name__}: {exc}"
+                        )
+                        join_failure = self._build_failure_payload(
+                            join_spec, join_args, exc
+                        )
+                    else:
+                        try:
+                            join_model = join_spec.out_model.model_validate(join_raw)
+                        except ValidationError as exc:
+                            tracker.record_hop()
+                            join_error = prompts.render_output_validation_error(
+                                join_spec.name,
+                                json.dumps(exc.errors(), ensure_ascii=False),
+                            )
+                        else:
+                            tracker.record_hop()
+                            self._record_hint_progress(join_spec.name, trajectory)
+                            join_payload = {
+                                "node": join_spec.name,
+                                "observation": join_model.model_dump(mode="json"),
+                            }
+
+        if action.join is not None and "join" not in observation:
+            if join_payload is not None:
+                observation["join"] = join_payload
+            else:
+                join_name = (
+                    join_spec.name
+                    if join_spec is not None
+                    else action.join.node
+                    if action.join is not None
+                    else "join"
+                )
+                join_entry: dict[str, Any] = {"node": join_name}
+                if join_error is not None:
+                    join_entry["error"] = join_error
+                if join_failure is not None:
+                    join_entry["failure"] = dict(join_failure)
+                if "error" in join_entry or "failure" in join_entry:
+                    observation["join"] = join_entry
+                elif action.join is not None and join_spec is None:
+                    observation["join"] = join_entry
+
+        trajectory.steps.append(
+            TrajectoryStep(action=action, observation=observation)
+        )
+        trajectory.summary = None
+        return observation, None
+
+    async def _run_parallel_branch(
+        self, spec: NodeSpec, args: BaseModel, ctx: _PlannerContext
+    ) -> _BranchExecutionResult:
+        try:
+            raw = await spec.node.func(args, ctx)
+        except _PlannerPauseSignal as signal:
+            return _BranchExecutionResult(pause=signal.pause)
+        except Exception as exc:
+            failure_payload = self._build_failure_payload(spec, args, exc)
+            error = (
+                f"tool '{spec.name}' raised {exc.__class__.__name__}: {exc}"
+            )
+            return _BranchExecutionResult(error=error, failure=failure_payload)
+
+        try:
+            observation = spec.out_model.model_validate(raw)
+        except ValidationError as exc:
+            error = prompts.render_output_validation_error(
+                spec.name,
+                json.dumps(exc.errors(), ensure_ascii=False),
+            )
+            return _BranchExecutionResult(error=error)
+
+        return _BranchExecutionResult(observation=observation)
 
     async def _build_messages(self, trajectory: Trajectory) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = [
@@ -1023,6 +1327,8 @@ class ReactPlanner:
 
 
 __all__ = [
+    "ParallelCall",
+    "ParallelJoin",
     "PlannerAction",
     "PlannerFinish",
     "PlannerPause",
