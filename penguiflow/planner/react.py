@@ -1154,7 +1154,7 @@ class ReactPlanner:
                 return prompts.render_parallel_limit(hints.max_parallel)
         if hints.sequential_only and action.plan:
             for item in action.plan:
-                candidate = str(item.get("node", ""))
+                candidate = item.node
                 if candidate in hints.sequential_only:
                     return prompts.render_sequential_only(candidate)
         if hints.ordering_hints and node_name is not None:
