@@ -15,6 +15,7 @@ from penguiflow import (
     Message,
     Node,
     NodePolicy,
+    PenguiFlow,
     call_playbook,
     create,
 )
@@ -205,5 +206,29 @@ async def test_call_playbook_respects_pre_cancelled_trace() -> None:
     assert flow_holder, "playbook should have produced a flow"
     flow = flow_holder[0]
     assert not subflow_started.is_set()
+    assert not flow._running  # noqa: SLF001 ensures cleanup
+    assert not flow._tasks
+
+
+@pytest.mark.asyncio
+async def test_call_playbook_propagates_subflow_error() -> None:
+    flow_holder: list[PenguiFlow] = []
+
+    async def explode(msg: Message, ctx) -> Message:  # pragma: no cover - tested via exception path
+        raise RuntimeError("boom")
+
+    def playbook() -> tuple[Any, Any]:
+        node = Node(explode, name="explode", policy=NodePolicy(validate="none"))
+        flow = create(node.to())
+        flow_holder.append(flow)
+        return flow, None
+
+    parent = Message(payload="task", headers=Headers(tenant="acme"))
+
+    with pytest.raises(RuntimeError):
+        await call_playbook(playbook, parent)
+
+    assert flow_holder, "playbook should have produced a flow"
+    flow = flow_holder[0]
     assert not flow._running  # noqa: SLF001 ensures cleanup
     assert not flow._tasks
