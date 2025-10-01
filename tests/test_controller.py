@@ -214,8 +214,8 @@ async def test_call_playbook_respects_pre_cancelled_trace() -> None:
 async def test_call_playbook_propagates_subflow_error() -> None:
     flow_holder: list[PenguiFlow] = []
 
-    async def explode(msg: Message, ctx) -> Message:  # pragma: no cover - tested via exception path
-        raise RuntimeError("boom")
+    async def explode(msg: Message, ctx) -> Message:
+        raise RuntimeError("boom")  # pragma: no cover - tested via exception path
 
     def playbook() -> tuple[Any, Any]:
         node = Node(explode, name="explode", policy=NodePolicy(validate="none"))
