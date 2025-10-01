@@ -68,6 +68,29 @@ def render_sequential_only(node_name: str) -> str:
     )
 
 
+def render_parallel_setup_error(errors: Sequence[str]) -> str:
+    detail = "; ".join(errors)
+    return f"Parallel plan invalid: {detail}. Revise the plan and retry."
+
+
+def render_empty_parallel_plan() -> str:
+    return "Parallel plan must include at least one branch in 'plan'."
+
+
+def render_parallel_with_next_node(next_node: str) -> str:
+    return (
+        f"Parallel plan cannot set next_node='{next_node}'. "
+        "Use 'join' to continue or finish the run explicitly."
+    )
+
+
+def render_parallel_unknown_failure(node_name: str) -> str:
+    return (
+        f"tool '{node_name}' failed during parallel execution. "
+        "Investigate the tool and adjust the plan."
+    )
+
+
 def build_summarizer_messages(
     query: str,
     history: Sequence[Mapping[str, Any]],

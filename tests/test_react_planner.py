@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -30,6 +32,26 @@ class Answer(BaseModel):
     answer: str
 
 
+class ShardRequest(BaseModel):
+    topic: str
+    shard: int
+
+
+class ShardPayload(BaseModel):
+    shard: int
+    text: str
+
+
+class MergeArgs(BaseModel):
+    expect: int
+    results: list[ShardPayload]
+
+
+class AuditArgs(BaseModel):
+    branches: list[dict[str, Any]]
+    failures: list[dict[str, Any]]
+
+
 @tool(desc="Detect intent", tags=["nlp"])
 async def triage(args: Query, ctx: object) -> Intent:
     return Intent(intent="docs")
@@ -48,6 +70,34 @@ async def respond(args: Answer, ctx: object) -> Answer:
 @tool(desc="Return invalid documents")
 async def broken(args: Intent, ctx: object) -> Documents:  # type: ignore[return-type]
     return "boom"  # type: ignore[return-value]
+
+
+@tool(desc="Fetch documents from primary shard", tags=["parallel"])
+async def fetch_primary(args: ShardRequest, ctx: Any) -> ShardPayload:
+    await asyncio.sleep(0.05)
+    return ShardPayload(shard=args.shard, text=f"{args.topic}-primary")
+
+
+@tool(desc="Fetch documents from secondary shard", tags=["parallel"])
+async def fetch_secondary(args: ShardRequest, ctx: Any) -> ShardPayload:
+    await asyncio.sleep(0.05)
+    return ShardPayload(shard=args.shard, text=f"{args.topic}-secondary")
+
+
+@tool(desc="Merge shard payloads")
+async def merge_results(args: MergeArgs, ctx: Any) -> Documents:
+    assert ctx.meta.get("parallel_success_count") == args.expect
+    assert len(ctx.meta.get("parallel_results", [])) == args.expect
+    return Documents(documents=[item.text for item in args.results])
+
+
+AUDIT_CALLS: list[dict[str, Any]] = []
+
+
+@tool(desc="Audit failed branches")
+async def audit_parallel(args: AuditArgs, ctx: Any) -> Documents:
+    AUDIT_CALLS.append(args.model_dump())
+    return Documents(documents=[f"{len(args.failures)} failures"])
 
 
 @tool(desc="Approval required before proceeding")
@@ -653,3 +703,143 @@ async def test_react_planner_emits_ordering_hint_once() -> None:
         msg["role"] == "user" and "Ordering hint" in msg["content"]
         for msg in client.calls[1]
     )
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_parallel_plan_executes_concurrently() -> None:
+    client = StubClient(
+        [
+            {
+                "thought": "fan out",
+                "plan": [
+                    {
+                        "node": "fetch_primary",
+                        "args": {"topic": "topic", "shard": 0},
+                    },
+                    {
+                        "node": "fetch_secondary",
+                        "args": {"topic": "topic", "shard": 1},
+                    },
+                ],
+                "join": {"node": "merge_results"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"answer": "done"},
+            },
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("fetch_primary", ShardRequest, ShardPayload)
+    registry.register("fetch_secondary", ShardRequest, ShardPayload)
+    registry.register("merge_results", MergeArgs, Documents)
+
+    nodes = [
+        Node(fetch_primary, name="fetch_primary"),
+        Node(fetch_secondary, name="fetch_secondary"),
+        Node(merge_results, name="merge_results"),
+    ]
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog(nodes, registry),
+    )
+
+    start = time.perf_counter()
+    result = await planner.run("parallel fan out")
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.1
+    assert result.reason == "answer_complete"
+
+    step = result.metadata["steps"][0]
+    assert step["action"]["plan"]
+    join_obs = step["observation"]["join"]["observation"]
+    assert join_obs["documents"] == ["topic-primary", "topic-secondary"]
+    assert step["observation"]["stats"] == {"success": 2, "failed": 0}
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_parallel_plan_handles_branch_failure() -> None:
+    AUDIT_CALLS.clear()
+    client = StubClient(
+        [
+            {
+                "thought": "fan out",
+                "plan": [
+                    {"node": "retrieve", "args": {"intent": "docs"}},
+                    {"node": "broken", "args": {"intent": "docs"}},
+                ],
+                "join": {"node": "audit_parallel"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"answer": "done"},
+            },
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("retrieve", Intent, Documents)
+    registry.register("broken", Intent, Documents)
+    registry.register("audit_parallel", AuditArgs, Documents)
+
+    nodes = [
+        Node(retrieve, name="retrieve"),
+        Node(broken, name="broken"),
+        Node(audit_parallel, name="audit_parallel"),
+    ]
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog(nodes, registry),
+    )
+
+    result = await planner.run("parallel failure")
+
+    assert result.reason == "answer_complete"
+    step = result.metadata["steps"][0]
+    branches = step["observation"]["branches"]
+    failures = [entry for entry in branches if "error" in entry]
+    assert len(failures) == 1
+    assert "did not validate" in failures[0]["error"]
+
+    join_info = step["observation"]["join"]
+    assert join_info["status"] == "skipped"
+    assert join_info["reason"] == "branch_failures"
+    assert join_info["failures"][0]["node"] == "broken"
+    assert AUDIT_CALLS == []
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_parallel_plan_rejects_invalid_node() -> None:
+    client = StubClient(
+        [
+            {
+                "thought": "invalid",
+                "plan": [{"node": "missing", "args": {}}],
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"answer": "done"},
+            },
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("respond", Answer, Answer)
+    nodes = [Node(respond, name="respond")]
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog(nodes, registry),
+    )
+
+    result = await planner.run("invalid parallel plan")
+
+    first_step = result.metadata["steps"][0]
+    assert "Parallel plan invalid" in first_step["error"]

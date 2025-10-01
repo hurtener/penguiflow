@@ -349,6 +349,22 @@ Phase C closes the loop when things go sideways:
 The new `examples/react_replan/` sample shows a retrieval timeout automatically
 recover via a cached index without leaving the JSON-only contract.
 
+### Parallel fan-out & joins (Phase D)
+
+Phase D lets the planner propose sets of independent tool calls and join them
+without leaving the typed surface area:
+
+* **Parallel `plan` blocks** — the LLM can return `{"plan": [...]}` actions
+  where each branch is validated against the catalog and executed concurrently.
+* **Typed joins** — provide a `{"join": {"node": ...}}` descriptor and the
+  planner will aggregate results, auto-populate fields like `expect`, `results`,
+  or `failures`, and feed branch metadata through `ctx.meta` for the join node.
+* **Deterministic telemetry** — branch errors, pauses, and joins are recorded as
+  structured observations so follow-up actions can re-plan or finish cleanly.
+
+See `examples/react_parallel/` for a shard fan-out that merges responses in one
+round-trip.
+
 
 ## 🧭 Repo Structure
 
