@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from penguiflow.planner import prompts
 
 
@@ -43,7 +45,8 @@ def test_build_user_prompt_serialises_context() -> None:
 
 def test_render_helpers() -> None:
     error_obs = prompts.render_observation(observation=None, error="boom")
-    assert "ERROR" in error_obs
+    error_payload = json.loads(error_obs)
+    assert error_payload["error"] == "boom"
     output_error = prompts.render_output_validation_error("ghost", "bad")
     assert "returned data" in output_error
     invalid = prompts.render_invalid_node("ghost", ["known"])
