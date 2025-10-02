@@ -11,6 +11,9 @@
   <a href="https://github.com/penguiflow/penguiflow">
     <img src="https://img.shields.io/badge/coverage-85%25-brightgreen" alt="Coverage">
   </a>
+  <a href="https://nightly.link/penguiflow/penguiflow/workflows/benchmarks/main/benchmarks.json.zip">
+    <img src="https://img.shields.io/badge/benchmarks-latest-orange" alt="Benchmarks">
+  </a>
   <a href="https://pypi.org/project/penguiflow/">
     <img src="https://img.shields.io/pypi/v/penguiflow.svg" alt="PyPI version">
   </a>
@@ -51,6 +54,23 @@ It provides:
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
+
+## Gold Standard Scorecard
+
+| Area | Metric | Target | Current |
+| --- | --- | --- | --- |
+| Hop overhead | µs per hop | ≤ 500 | 398 |
+| Streaming order | gaps/dupes | 0 | 0 |
+| Cancel leakage | orphan tasks | 0 | 0 |
+| Coverage | lines | ≥85% | 87% |
+| Deps | count | ≤2 | 2 |
+| Import time | ms | ≤220 | 203 |
+
+## 📑 Core Behavior Spec
+
+* [Core Behavior Spec](docs/core_behavior_spec.md) — single-page rundown of ordering,
+  streaming, cancellation, deadline, and fan-in invariants with pointers to regression
+  tests.
 
 ---
 
