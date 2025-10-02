@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from typing import Iterable
+from collections.abc import Iterable
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 from penguiflow import Headers, Message
 from penguiflow.core import create
@@ -81,7 +82,7 @@ def stream_scenarios(draw: st.DrawFn) -> tuple[list[list[str]], list[tuple[int, 
 
     stream_count = draw(st.integers(min_value=1, max_value=3))
     streams: list[list[str]] = []
-    for stream_idx in range(stream_count):
+    for _ in range(stream_count):
         tokens = draw(
             st.lists(
                 st.text(min_size=1, max_size=8),

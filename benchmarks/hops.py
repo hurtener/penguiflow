@@ -50,14 +50,22 @@ async def _stream_sink(message: Message, _ctx) -> StreamChunk:
 
 async def run_hop_benchmark(hops: int, messages: int) -> dict[str, Any]:
     hop_nodes = [
-        Node(_identity, name=f"hop-{idx}", policy=NodePolicy(validate="none"))
+        Node(
+            _identity,
+            name=f"hop-{idx}",
+            policy=NodePolicy(validate="none"),
+        )
         for idx in range(hops)
     ]
-    sink_node = Node(_identity, name="sink", policy=NodePolicy(validate="none"))
+    sink_node = Node(
+        _identity,
+        name="sink",
+        policy=NodePolicy(validate="none"),
+    )
 
     adjacencies = []
     chain = hop_nodes + [sink_node]
-    for current, nxt in zip(chain, chain[1:]):
+    for current, nxt in zip(chain, chain[1:], strict=True):
         adjacencies.append(current.to(nxt))
     adjacencies.append(sink_node.to())
 
@@ -104,8 +112,16 @@ async def run_hop_benchmark(hops: int, messages: int) -> dict[str, Any]:
 async def run_streaming_benchmark(
     tokens_per_message: int, messages: int
 ) -> dict[str, Any]:
-    stream_node = Node(_streamer, name="streamer", policy=NodePolicy(validate="none"))
-    sink_node = Node(_stream_sink, name="stream-sink", policy=NodePolicy(validate="none"))
+    stream_node = Node(
+        _streamer,
+        name="streamer",
+        policy=NodePolicy(validate="none"),
+    )
+    sink_node = Node(
+        _stream_sink,
+        name="stream-sink",
+        policy=NodePolicy(validate="none"),
+    )
     flow = create(stream_node.to(sink_node), sink_node.to())
     flow.run()
 
@@ -168,9 +184,17 @@ async def main(args: argparse.Namespace) -> dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hops", type=int, default=4, help="Number of hop nodes to chain")
     parser.add_argument(
-        "--messages", type=int, default=1000, help="Number of messages to emit for hop latency"
+        "--hops",
+        type=int,
+        default=4,
+        help="Number of hop nodes to chain",
+    )
+    parser.add_argument(
+        "--messages",
+        type=int,
+        default=1000,
+        help="Number of messages to emit for hop latency",
     )
     parser.add_argument(
         "--stream-tokens",

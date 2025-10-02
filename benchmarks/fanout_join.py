@@ -59,11 +59,19 @@ async def run_benchmark(
     worker_nodes = []
     for idx in range(branches):
         worker = make_worker(chr(ord("A") + idx), worker_latency_ms / 1000.0)
-        worker_node = Node(worker, name=f"worker-{idx}", policy=NodePolicy(validate="none"))
+        worker_node = Node(
+            worker,
+            name=f"worker-{idx}",
+            policy=NodePolicy(validate="none"),
+        )
         worker_nodes.append(worker_node)
 
     join_node = join_k("join", branches)
-    summarize_node = Node(summarize, name="summarize", policy=NodePolicy(validate="none"))
+    summarize_node = Node(
+        summarize,
+        name="summarize",
+        policy=NodePolicy(validate="none"),
+    )
 
     adjacencies = [fan_node.to(*worker_nodes)]
     for node in worker_nodes:
@@ -147,7 +155,13 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":  # pragma: no cover
     arguments = parse_args()
-    results = asyncio.run(run_benchmark(arguments.messages, arguments.worker_latency_ms, arguments.branches))
+    results = asyncio.run(
+        run_benchmark(
+            arguments.messages,
+            arguments.worker_latency_ms,
+            arguments.branches,
+        )
+    )
     payload = json.dumps(results, indent=2)
     print(payload)
     if arguments.output:
