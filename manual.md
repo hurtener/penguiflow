@@ -93,6 +93,36 @@ async def my_node(message):
     return process(message)
 ```
 
+### 2.3 Preserve the `Message` Envelope
+
+PenguiFlow routes full `Message` objects. Whenever a node receives a `Message`, return the same instance or a copy that carries forward headers, `trace_id`, and `meta`. Dropping the envelope (returning only the payload) breaks retries, subflows, and downstream helpers that rely on metadata.
+
+Use `model_copy` when updating the payload or meta:
+
+```python
+async def enrich(message: Message, ctx):
+    enriched = await add_metadata(message.payload)
+    return message.model_copy(update={"payload": enriched})
+```
+
+If a node must emit a brand-new message, copy across the important fields explicitly:
+
+```python
+async def rewrite(message: Message, ctx):
+    new_payload = transform(message.payload)
+    new_meta = {**message.meta, "resource_manager": "v2"}
+    return Message(
+        payload=new_payload,
+        headers=message.headers,
+        trace_id=message.trace_id,
+        meta=new_meta,
+    )
+```
+
+The registry entry should match the actual contract: when nodes return `Message` objects, register them as `Message -> Message`. Reserve `Payload -> Payload` registrations for nodes that never receive or emit envelopes.
+
+Avoid mutating the shared `meta` dictionary in place; use `model_copy(update=...)` or clone the dict (`{**message.meta, "key": value}`) so retries and sibling nodes see a consistent snapshot.
+
 ---
 
 ## 3. Context API
@@ -457,11 +487,24 @@ async def my_middleware(event: FlowEvent):
     # - queue_depth_in, queue_depth_out
     # - trace_pending, trace_inflight, trace_cancelled
 
-    if event.event_type == "node_error":
-        logger.error(f"Node {event.node_name} failed", extra=event.to_payload())
+    if event.event_type in {"node_error", "node_failed", "node_timeout"}:
+        flow_error_payload = {}
+        if event.extra and "flow_error" in event.extra:
+            flow_error_payload = event.extra["flow_error"]
+
+        logger.error(
+            "Node %s failed",
+            event.node_name,
+            extra={
+                **event.to_payload(),
+                "flow_error": flow_error_payload,
+            },
+        )
 
 flow.add_middleware(my_middleware)
 ```
+
+`FlowError` instances emitted by the runtime are serialized into `event.extra["flow_error"]`. Surfacing that structure alongside the base `event.to_payload()` keeps logs actionable without guessing at nested attributes.
 
 ### 11.2 Structured Logging
 

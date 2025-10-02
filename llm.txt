@@ -32,7 +32,8 @@ Type safety
 - Register models via `ModelRegistry.register(node_name, InModel, OutModel)`.
 - Pass registry to `flow.run(registry)`; `Node.invoke` validates according to policy.
 - `Message` payload can be any type; the `.meta` dictionary is for auxiliary context and `StreamChunk` is a first-class payload for
-  streaming paths.
+  streaming paths. When a node receives a `Message`, return the same envelope (or a copy via `model_copy`) instead of stripping the
+  payload—otherwise trace metadata and `meta` entries are lost.
 - `Headers` include `tenant`, optional `topic`, `priority`; `Message` carries `trace_id`, `ts`, optional `deadline_s`, and
   `meta` for per-trace guardrails plus side-channel metadata.
 - Runtime verifies that any node with validation enabled is registered when `flow.run(registry=...)` is called.
@@ -100,6 +101,8 @@ Playbooks
   - Middleware signature: `async def middleware(event: FlowEvent): ...`.
   - `FlowEvent` exposes `.to_payload()` for structured logging plus `.metric_samples()` /
     `.tag_values()` helpers for metrics sinks.
+  - On `node_error`/`node_failed`/`node_timeout`, inspect `event.extra.get("flow_error")` for the serialized
+    `FlowError.to_payload()` structure (trace id, node name, error code, etc.).
   - Typical `event.event_type` values: `node_start`, `node_success`, `node_timeout`,
     `node_error`, `node_retry`, `node_failed`, `node_cancelled`.
 
