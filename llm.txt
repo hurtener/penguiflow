@@ -1,153 +1,1502 @@
-PenguiFlow quick facts (v2: streaming, cancellation, guardrails, FlowTestKit)
-===================================================================================
+PenguiFlow AI Assistant Reference (v2.5)
+==========================================
 
-Runtime overview
-----------------
-- In-process asyncio orchestrator with bounded queues (`asyncio.Queue`) per edge.
-- Graph endpoints: `OPEN_SEA` (ingress) and `ROOKERY` (egress); both use `Context` APIs.
-- `PenguiFlow.create(*adjacencies, queue_maxsize=64, allow_cycles=False, middlewares=None)` builds the graph.
-- Call `flow.run(registry=...)` once to start worker tasks, `flow.stop()` to cancel/await them.
-- Per-trace cancellation: `await flow.cancel(trace_id)` requests cancellation and raises `TraceCancelled` inside the affected
-  nodes/subflows. Cancellation is idempotent and only impacts the matching trace.
-- `Message.deadline_s` guards wall-clock execution; the runtime checks deadlines before invoking nodes and sends
-  `FinalAnswer("Deadline exceeded")` to Rookery when expired. Leave it unset when no wall-clock limit is needed.
-- Messages travel as Pydantic `Message` objects (payload + headers + trace metadata + a mutable `meta` bag).
-- Exhausted retries and timeouts can emit a `FlowError` object to Rookery when
-  `create(..., emit_errors_to_rookery=True)` is used, preserving the trace id, node
-  metadata, and stable error code for downstream handling.
+This file helps AI code assistants understand and use PenguiFlow effectively.
+For complete documentation, see manual.md. For humans, see README.md.
 
-Nodes & policies
-----------------
-- Define nodes with `Node(async_fn, name?, policy?, allow_cycle=False)`; async function must accept `(message, ctx)`.
-- `NodePolicy` fields: `validate` (`"both"|"in"|"out"|"none"`), `timeout_s`, `max_retries`, `backoff_base`, `backoff_mult`, `max_backoff`.
-- Routers (`predicate_router` / `union_router`) accept an optional `policy=` implementing
-  the `RoutingPolicy` protocol; PenguiFlow passes a `RoutingRequest` describing the
-  message + candidate successors so policies can override or drop routes without
-  changing the flow topology.
-- Retries wrap exceptions *and* timeouts; backoff is exponential with optional cap.
-- If you do not need the `Context`, name it `_ctx` but keep the argument—the runtime passes it every time.
+## A. Quick Overview
 
-Type safety
------------
-- Register models via `ModelRegistry.register(node_name, InModel, OutModel)`.
-- Pass registry to `flow.run(registry)`; `Node.invoke` validates according to policy.
-- `Message` payload can be any type; the `.meta` dictionary is for auxiliary context and `StreamChunk` is a first-class payload for
-  streaming paths. When a node receives a `Message`, return the same envelope (or a copy via `model_copy`) instead of stripping the
-  payload—otherwise trace metadata and `meta` entries are lost.
-- `Headers` include `tenant`, optional `topic`, `priority`; `Message` carries `trace_id`, `ts`, optional `deadline_s`, and
-  `meta` for per-trace guardrails plus side-channel metadata.
-- Runtime verifies that any node with validation enabled is registered when `flow.run(registry=...)` is called.
+### What is PenguiFlow?
 
-Contexts & helpers
-------------------
-- Each node gets a `Context` with `.emit()`/`.emit_nowait()` (selective or broadcast), `.emit_chunk()` for streaming replies, and `.fetch()`/`.fetch_any()` for incoming queues. `PenguiFlow.emit_chunk(...)` mirrors the helper for callers outside a node (e.g., SSE responders).
-- Metadata written to `message.meta` flows through retries, controller loops, playbooks, and streaming helpers; `emit_chunk`
-  clones the parent's metadata when wrapping `StreamChunk` payloads.
-- Cycle detection: default topological check; per-node opt-in self cycles (`allow_cycle=True`) or global `allow_cycles=True`.
-- Structured logs emitted per node event: `{ts, event, node_name, node_id, trace_id, latency_ms, q_depth_in, attempt, ...}`.
-- Middleware hook: async callables added via `flow.add_middleware(fn)`; receive the event payload.
-- Visualization helper: `flow_to_mermaid(flow, direction="TD")` produces a Mermaid diagram string of the current graph, and
-  `flow_to_dot(flow, rankdir="TB")` emits Graphviz DOT with the same annotations. Both highlight controller loops and the
-  OpenSea/Rookery ingress/egress boundaries.
+PenguiFlow is a Python library for building **asynchronous data pipelines** where messages flow through a chain of processing steps (nodes).
 
-Deadlines & budgets
--------------------
-- Runtime validates `Message.deadline_s` before any node executes; expired work is skipped and turned into
-  `FinalAnswer("Deadline exceeded")` automatically.
-- Controller payload `WM` now tracks `tokens_used` and optional `budget_tokens` in addition to `hops`/`budget_hops`.
-- When `WM.tokens_used >= WM.budget_tokens` (if configured) or the hop budget is reached, PenguiFlow emits a terminal
-  `FinalAnswer` (`"Token budget exhausted"` / `"Hop budget exhausted"`) to Rookery without another controller invocation.
-- Set `WM.budget_hops=None` / `WM.budget_tokens=None` to disable those guardrails for an unbounded loop.
+**Think of it like a factory assembly line:**
+- Messages enter at **OpenSea** (entry point)
+- Each **node** processes the message (validate, retrieve, generate)
+- Messages flow along edges to downstream nodes
+- Final results exit at **Rookery** (collection point)
 
-Patterns (`penguiflow.patterns`)
---------------------------------
-- `map_concurrent(items, worker, max_concurrency=8)` — semaphore-bounded async fan-out helper.
-- `predicate_router(name, predicate, policy=None)` — route to successors based on payload/headers; predicate may return nodes, names, sequences, or None, and the optional `policy` can override or filter the result.
-- `union_router(name, DiscriminatedModel)` — validates discriminated unions and forwards to named successor nodes.
-- `join_k(name, k)` — buffer `k` messages per `trace_id`; emits aggregated payload (list payload or list of messages).
-- `DictRoutingPolicy(mapping, key_getter=None)` — convenience helper that loads mapping-driven policies (JSON/env) and can be
-  hot-swapped via `update_mapping`/`set_default`.
+**Key use cases:**
+- Multi-step LLM workflows (triage → retrieve → summarize)
+- Agent systems with decision points and loops
+- Data processing pipelines (extract → transform → load)
 
-Streaming
----------
-- `StreamChunk` model fields: `stream_id`, `seq`, `text`, `done`, and `meta` (dict).
-- `Context.emit_chunk(parent, text, stream_id=None, seq=None, done=False, meta=None, to=None)`
-  (and `PenguiFlow.emit_chunk(...)`) wrap the chunk in a `Message`, reuse the parent's
-  headers + trace, and respect queue backpressure just like `.emit()`.
-- Sequence numbers auto-increment per stream when `seq` is omitted; calling with
-  `done=True` clears the counter so future streams restart at 0.
-- Use downstream sink nodes to collect chunks, print SSE/WebSocket payloads, or fan
-  them out further. Helpers `format_sse_event(chunk, ...)` and `chunk_to_ws_json(chunk, ...)`
-  produce ready-to-send text for HTTP streaming or WebSocket broadcasts. See
-  `examples/streaming_llm/`.
+**Why PenguiFlow?**
+- **Typed**: Pydantic validation for all messages
+- **Async**: Non-blocking I/O, high concurrency
+- **Reliable**: Built-in retries, timeouts, backpressure
+- **Observable**: FlowEvent tracking, middleware hooks
+- **Testable**: FlowTestKit for concise unit tests
 
-Controller loop models (`penguiflow.types`)
--------------------------------------------
-- `WM`: working memory (`query`, `facts`, `hops`, `budget_hops`, `tokens_used`, `budget_tokens`, `confidence`).
-- `Thought`: optional planning artifact (`steps`, `rationale`, `done`).
-- `PlanStep`: enumerated tool/action descriptions.
-- `FinalAnswer`: terminal payload (`text`, `citations`).
-- Runtime auto-increments `WM.hops`, enforces hop/token budgets when present, and checks deadlines before re-enqueueing
-  controller messages; violations automatically become `FinalAnswer` messages with the exhaustion reason.
+### Core Architecture
 
-Playbooks
----------
-- `call_playbook(factory, parent_msg, timeout=None)` expects `factory -> (PenguiFlow, ModelRegistry|None)`.
-- Subflow receives the original message (headers + trace id preserved).
-- Returns the first payload emitted to playbook’s Rookery; always stops the subflow (shielded).
+**Five key components:**
+1. **Message**: Pydantic envelope (payload + headers + trace_id + meta)
+2. **Node**: Async function that processes messages
+3. **Context (ctx)**: Runtime handle (emit, emit_chunk, fetch)
+4. **OpenSea**: Entry point (flow.emit())
+5. **Rookery**: Exit point (flow.fetch())
 
-  Middlewares & observability
-  ---------------------------
-  - Middleware signature: `async def middleware(event: FlowEvent): ...`.
-  - `FlowEvent` exposes `.to_payload()` for structured logging plus `.metric_samples()` /
-    `.tag_values()` helpers for metrics sinks.
-  - On `node_error`/`node_failed`/`node_timeout`, inspect `event.extra.get("flow_error")` for the serialized
-    `FlowError.to_payload()` structure (trace id, node name, error code, etc.).
-  - Typical `event.event_type` values: `node_start`, `node_success`, `node_timeout`,
-    `node_error`, `node_retry`, `node_failed`, `node_cancelled`.
+**Flow guarantees:**
+- **Backpressure**: Bounded queues (default 64 messages/edge)
+- **Ordering**: Messages arrive in order at each node
+- **Isolation**: Each trace is independent (no shared state)
 
-Examples reference map
-----------------------
-- `examples/quickstart/` — typed pipeline (registry + validation).
-- `examples/routing_predicate/` — predicate router with branching.
-- `examples/routing_union/` — discriminated union routing.
-- `examples/fanout_join/` — fan-out to workers + `join_k` aggregation.
-- `examples/map_concurrent/` — map helper inside a node.
-- `examples/controller_multihop/` — controller loop producing `FinalAnswer`.
-  - `examples/reliability_middleware/` — timeout/retry/middleware logging.
-  - `examples/mlflow_metrics/` — MLflow-backed metrics middleware (falls back to stdout).
-- `examples/playbook_retrieval/` — controller invoking a subflow playbook.
-- `examples/streaming_llm/` — mock LLM emitting `StreamChunk`s to an SSE-style sink.
-- `examples/metadata_propagation/` — attaching and consuming `Message.meta` context across nodes.
-- `examples/routing_policy/` — config-driven policy overrides for predicate routers.
-- `examples/visualizer/` — generate Mermaid + DOT diagrams with loop/subflow annotations.
-- `examples/traceable_errors/` — opt-in FlowError emission surfaced from Rookery.
-- `benchmarks/` — microbenchmarks for throughput, retry/timeout, and controller playbook latency.
+### When to Use PenguiFlow
 
-Testing & tooling
------------------
-- Run tests with `pytest -q` (or `uv run pytest -q` in CI).
-- Lint with `ruff check .`; type-check package via `mypy penguiflow` (CI uses `uv run` commands).
-- Python 3.11+, Pydantic v2.
-- No external brokers—everything uses asyncio queues in-process.
-- FlowTestKit helpers (`penguiflow.testkit`) keep unit tests concise:
-  - `await testkit.run_one(flow, message)` to execute a single trace end-to-end.
-  - `testkit.assert_node_sequence(trace_id, [...])` to verify ordering from recorded `FlowEvent`s.
-  - `testkit.simulate_error(...)` to model retry scenarios without bespoke coroutine glue.
+**✅ Good fit:**
+- Multi-step async workflows with branching
+- Controller loops (agentic reasoning)
+- Need observability (tracing, metrics)
+- Type safety matters (Pydantic validation)
+- Want testability (FlowTestKit)
 
-Usage checklist for new integrations
-------------------------------------
-1. Model contracts in Pydantic; register with `ModelRegistry`.
-2. Wrap async node functions with `Node`, set `NodePolicy` (timeouts/retries optional).
-3. Wire nodes with `create(node_a.to(node_b, node_c), ...)`.
-4. `flow.run(registry)` → `await flow.emit(message)` → `result = await flow.fetch()` → `await flow.stop()`.
-5. Use patterns/routers/playbooks as needed for branching, fan-out, or subflows.
-6. Attach middlewares if you need structured logging/metrics.
+**❌ Not a fit:**
+- Simple synchronous scripts
+- Need external broker (Kafka/Redis) - use adapters
+- Single-step transformations - use functions
+- Heavy state persistence - add StateStore integration
 
-Gotchas & reminders
--------------------
-- Node callables **must** be declared with `async def` and accept exactly two positional
-  parameters `(message, ctx)`; otherwise `Node` will raise at construction time.
-- Helpers like `map_concurrent` expect an async worker that returns an awaitable result.
-- Always call `flow.run(...)` before emitting messages, and `await flow.stop()` during
-  teardown to ensure worker tasks are cancelled and awaited.
+---
+
+## B. Essential Concepts
+
+### Message Envelope vs Payload (CRITICAL!)
+
+**Every message has two parts:**
+
+1. **Envelope** (Message object):
+   - `headers`: Routing metadata (tenant, topic, priority)
+   - `trace_id`: Unique ID for this run
+   - `meta`: Mutable dict for cost/debug info
+   - `deadline_s`: Optional wall-clock timeout (Unix timestamp)
+
+2. **Payload**: Your business data (can be any type):
+   - Pydantic model (recommended): QueryIn(text="...")
+   - Dict: {"data": "value"}
+   - String: "raw text"
+   - List: [1, 2, 3]
+
+**Node signature receives payload, NOT full Message:**
+
+```python
+# ✅ CORRECT - node receives payload directly
+async def my_node(msg: QueryIn, ctx):  # msg is QueryIn, not Message
+    return result
+
+# ❌ WRONG - trying to access envelope fields on payload
+async def my_node(msg: QueryIn, ctx):
+    trace_id = msg.trace_id  # AttributeError! QueryIn has no trace_id
+```
+
+**When you return from a node:**
+- PenguiFlow automatically wraps result in new Message
+- New message inherits headers, trace_id, meta from input
+
+### Node Patterns: Choose the Right One
+
+**99% of nodes: Payload-to-Payload Pattern**
+
+```python
+from pydantic import BaseModel
+
+class InputData(BaseModel):
+    text: str
+
+class OutputData(BaseModel):
+    result: str
+
+# Node works with payloads directly
+async def process(data: InputData, ctx) -> OutputData:
+    return OutputData(result=data.text.upper())
+
+# Registry tells PenguiFlow the types
+registry = ModelRegistry()
+registry.register("process", InputData, OutputData)
+```
+
+**How it works:**
+1. PenguiFlow receives Message(payload=InputData(...))
+2. Registry extracts payload → passes InputData to your node
+3. Your node returns OutputData
+4. PenguiFlow wraps it back into Message, preserving trace_id/headers/meta
+
+**When to use:** Almost always. Simple, type-safe, handles metadata automatically.
+
+---
+
+**1% of nodes: Message-Aware Pattern**
+
+```python
+from penguiflow import Message
+
+# Message-aware node (only when you need envelope access)
+async def enrich_metadata(message: Message, ctx) -> Message:
+    # Access Message fields directly
+    print(f"Trace: {message.trace_id}, Tenant: {message.headers.tenant}")
+
+    # Modify payload
+    enriched = await add_context(message.payload)
+
+    # Use model_copy to update immutably
+    return message.model_copy(update={"payload": enriched})
+
+# Register as Message -> Message
+registry.register("enrich", Message, Message)
+```
+
+**When to use:**
+- Multi-tenant routing (inspecting headers)
+- Cost tracking (updating meta)
+- Debugging (accessing trace_id)
+- Subflows (preserving context)
+
+**When NOT to use:** Regular data transformations. Use payload-to-payload instead.
+
+**Important:** Avoid mutating `message.meta` in place. Use `model_copy` or dict cloning.
+
+### Return vs Emit Decision
+
+**Most nodes should simply return their result:**
+
+```python
+async def my_node(message: Message, ctx):
+    result = await process(message.payload)
+    return result  # Automatically emits to all successors
+```
+
+**Use ctx.emit() when you need control:**
+
+```python
+async def router_node(message: Message, ctx):
+    if message.payload["priority"] == "high":
+        await ctx.emit(message, to=urgent_handler)
+    else:
+        await ctx.emit(message, to=normal_handler)
+    return None  # Return None to skip automatic emission
+```
+
+**Decision tree:**
+- **Single successor, simple transform?** → Use return
+- **Multiple targets, conditional routing?** → Use ctx.emit(to=...)
+- **Need to emit multiple times?** → Use ctx.emit()
+- **Streaming partial results?** → Use ctx.emit_chunk()
+- **Terminal node (no downstream)?** → Return None
+
+### Validation Modes
+
+**NodePolicy.validate controls when Pydantic validation occurs:**
+
+| Mode | Input Validation | Output Validation | Use Case |
+|------|------------------|-------------------|----------|
+| `"both"` | Yes | Yes | **Default.** Production pipelines where type safety matters. |
+| `"in"` | Yes | No | You trust your node's output type. Slight performance gain. |
+| `"out"` | No | Yes | Input is pre-validated upstream (rare). |
+| `"none"` | No | No | Performance-critical paths or custom validation. Use with caution. |
+
+**Validation overhead:** Typically <1ms per message. Only use "in" or "none" if profiling shows validation as a bottleneck.
+
+### Message Types
+
+**Standard Message (use for most flows):**
+
+```python
+from penguiflow.types import Message, Headers
+import time
+
+msg = Message(
+    payload={"key": "value"},          # Your data
+    headers=Headers(tenant="org1"),     # Routing metadata
+    trace_id="trace-123",               # Auto-generated if omitted
+    deadline_s=time.time() + 60,        # Unix timestamp (optional)
+    meta={"user_id": "12345"}           # Side-channel data (optional)
+)
+```
+
+**WM (Working Memory) - For Controller Loops:**
+
+```python
+from penguiflow.types import WM
+
+wm = WM(
+    query="What is the revenue?",        # Your question/task
+    facts=[],                            # Accumulated information
+    budget_hops=8,                       # Max iterations (default: 8)
+    budget_tokens=1000,                  # Max token usage (optional, manual tracking required)
+)
+# Runtime auto-increments wm.hops after each iteration
+# When hops >= budget_hops, loop terminates with FinalAnswer
+```
+
+**FinalAnswer - Ends Controller Loop:**
+
+```python
+from penguiflow.types import FinalAnswer
+
+final = FinalAnswer(
+    text="The revenue is $1M",
+    citations=["source1", "source2"]  # Optional
+)
+```
+
+**Controller loop behavior:**
+- Return WM → runtime increments hops, sends back to controller
+- Return FinalAnswer → runtime emits to successors, stops loop
+- Budget exhausted → automatic FinalAnswer("Hop/Token/Deadline budget exhausted")
+
+---
+
+## C. Quick Start Template
+
+### Minimal Working Flow
+
+```python
+import asyncio
+from pydantic import BaseModel
+from penguiflow import create, Node, NodePolicy, ModelRegistry, Message, Headers
+
+# 1. Define data models
+class QueryIn(BaseModel):
+    text: str
+
+class QueryOut(BaseModel):
+    result: str
+
+# 2. Define node function
+async def process(msg: QueryIn, ctx) -> QueryOut:
+    result = msg.text.upper()
+    return QueryOut(result=result)
+
+# 3. Wrap in Node with policy
+process_node = Node(
+    process,
+    name="process",
+    policy=NodePolicy(validate="both")
+)
+
+# 4. Register types
+registry = ModelRegistry()
+registry.register("process", QueryIn, QueryOut)
+
+# 5. Build flow
+flow = create(process_node.to())  # process → Rookery
+
+# 6. Run
+async def main():
+    flow.run(registry=registry)
+
+    msg = Message(payload=QueryIn(text="hello"), headers=Headers(tenant="demo"))
+    await flow.emit(msg)
+
+    result = await flow.fetch()
+    print(result.payload.result)  # "HELLO"
+
+    await flow.stop()
+
+asyncio.run(main())
+```
+
+### Essential Imports Checklist
+
+```python
+# Core
+from penguiflow import create, Node, NodePolicy, Message, Headers
+
+# Types
+from penguiflow.types import WM, FinalAnswer, StreamChunk
+
+# Validation
+from penguiflow import ModelRegistry
+
+# Patterns
+from penguiflow.patterns import (
+    predicate_router,
+    union_router,
+    join_k,
+    map_concurrent,
+)
+from penguiflow.policies import DictRoutingPolicy
+
+# Error handling
+from penguiflow.errors import FlowError, FlowErrorCode
+
+# Observability
+from penguiflow.metrics import FlowEvent
+
+# Testing
+from penguiflow.testkit import run_one, assert_node_sequence, simulate_error
+
+# Visualization
+from penguiflow.viz import flow_to_mermaid, flow_to_dot
+```
+
+### Typical Flow Lifecycle
+
+```python
+# 1. Define nodes and registry (one-time setup)
+registry = ModelRegistry()
+registry.register("node_a", InputA, OutputA)
+
+# 2. Create flow (one-time setup)
+flow = create(node_a.to(node_b), node_b.to())
+
+# 3. Start workers (once per flow instance)
+flow.run(registry=registry)
+
+# 4. Emit messages (many times)
+for i in range(100):
+    msg = Message(payload=InputA(...), headers=Headers(tenant="demo"))
+    await flow.emit(msg)
+
+# 5. Fetch results (many times)
+for i in range(100):
+    result = await flow.fetch()
+    process(result)
+
+# 6. Stop workers (once, during shutdown)
+await flow.stop()
+```
+
+---
+
+## D. Pattern Decision Matrix
+
+### When to Use Each Pattern
+
+| Pattern | Use When | Example |
+|---------|----------|---------|
+| `map_concurrent` | Processing items in a list in parallel | Score multiple documents, call multiple APIs |
+| `predicate_router` | Route based on content/fields with custom logic | Priority routing, multi-field conditions |
+| `union_router` | Route based on message type (type safety) | Different task types (SearchWeb vs SearchDB) |
+| `join_k` | Aggregate results from fan-out | Collect all worker results before proceeding |
+| `DictRoutingPolicy` | Need runtime-configurable routing | Multi-tenant routing, A/B tests, feature flags |
+
+### map_concurrent - Parallel Processing Inside Nodes
+
+**Use when:** You have a list/collection that needs the same async operation applied to each item.
+
+```python
+from penguiflow.patterns import map_concurrent
+
+async def score_documents(message, ctx):
+    doc_ids = message.payload["documents"]
+
+    async def score_one_doc(doc_id):
+        await asyncio.sleep(0.1)  # Expensive operation
+        return {"id": doc_id, "score": random.random()}
+
+    # Process up to 4 documents concurrently
+    results = await map_concurrent(
+        doc_ids,
+        score_one_doc,
+        max_concurrency=4
+    )
+
+    return {"scores": results}
+```
+
+**Key points:**
+- max_concurrency controls parallel executions
+- Results maintain input order
+- Uses semaphore for backpressure
+
+### predicate_router - Conditional Routing
+
+**Use when:** Routing depends on message content (not just type).
+
+```python
+from penguiflow.patterns import predicate_router
+
+def priority_logic(message):
+    """Return target node(s) based on message."""
+    priority = message.payload.get("priority")
+
+    if priority == "urgent":
+        return [high_priority_node, audit_node]  # Send to both
+    elif priority == "normal":
+        return [standard_node]  # Send to one
+    else:
+        return None  # Drop message
+
+router = predicate_router("priority_router", priority_logic)
+
+flow = create(
+    ingress_node.to(router),
+    router.to(high_priority_node, standard_node, audit_node),
+)
+```
+
+**Return value options:**
+- `[node1, node2]` - Route to multiple nodes
+- `[node1]` or `node1` - Route to single node
+- `["node_name"]` - Route by name
+- `None` - Drop message
+
+### union_router - Type-Based Routing
+
+**Use when:** Different message types need different handlers (type-safe routing).
+
+```python
+from penguiflow.patterns import union_router
+from pydantic import BaseModel, Field
+from typing import Literal, Annotated
+
+# Define message types with discriminator
+class WebSearch(BaseModel):
+    kind: Literal["web"]
+    query: str
+
+class DatabaseSearch(BaseModel):
+    kind: Literal["database"]
+    table: str
+
+# Union type
+SearchTask = Annotated[
+    WebSearch | DatabaseSearch,
+    Field(discriminator="kind")
+]
+
+# Router routes based on 'kind' field
+router = union_router("search_router", SearchTask)
+
+# IMPORTANT: Node names MUST match discriminator values
+web_handler = Node(handle_web, name="web")        # matches kind="web"
+db_handler = Node(handle_db, name="database")    # matches kind="database"
+
+flow = create(
+    router.to(web_handler, db_handler),
+)
+```
+
+**How it works:**
+1. Validates message against SearchTask union
+2. Extracts discriminator value from 'kind' field
+3. Routes to node with matching name
+
+### join_k - Fan-In Aggregation
+
+**Use when:** You fan out to multiple nodes and need to wait for all results.
+
+```python
+from penguiflow.patterns import join_k
+
+# Wait for exactly 3 messages per trace_id
+aggregator = join_k("collect_results", k=3)
+
+flow = create(
+    # Fan out to 3 workers
+    splitter.to(worker_a, worker_b, worker_c),
+
+    # All workers feed into aggregator
+    worker_a.to(aggregator),
+    worker_b.to(aggregator),
+    worker_c.to(aggregator),
+
+    # Aggregator emits batch when k=3 received
+    aggregator.to(final_processor)
+)
+```
+
+**Output format:**
+- If inputs are Message objects: Returns Message with payload=[msg1.payload, msg2.payload, ...]
+- Otherwise: Returns list [msg1, msg2, msg3, ...]
+
+**Important:**
+- **Requires trace_id** - messages without trace_id raise ValueError
+- **Exactly k messages** - if fewer arrive, messages remain buffered
+- Order not guaranteed within batch
+
+### DictRoutingPolicy - Config-Driven Routing
+
+**Use when:** Want to change routing without code changes (multi-tenant, A/B testing).
+
+```python
+from penguiflow import predicate_router
+from penguiflow.policies import DictRoutingPolicy
+
+# Define key extractor
+def tenant_key(request):
+    return request.message.headers.tenant
+
+# Load policy from JSON
+policy = DictRoutingPolicy.from_json_file(
+    "routing_config.json",
+    default="standard_handler",
+    key_getter=tenant_key
+)
+
+# Predicate proposes, policy decides
+router = predicate_router(
+    "tenant_router",
+    lambda msg: ["premium_handler", "standard_handler"],
+    policy=policy  # Policy selects based on tenant
+)
+
+# Update policy at runtime
+policy.update_mapping({
+    "tenant_a": "standard_handler",  # Downgrade
+    "new_tenant": "premium_handler"  # Add
+})
+```
+
+**routing_config.json:**
+```json
+{
+    "tenant_a": "premium_handler",
+    "tenant_b": "standard_handler"
+}
+```
+
+---
+
+## E. Common Code Snippets
+
+### 1. Simple Payload-to-Payload Node
+
+```python
+from pydantic import BaseModel
+from penguiflow import Node, NodePolicy, ModelRegistry
+
+class Input(BaseModel):
+    value: int
+
+class Output(BaseModel):
+    result: str
+
+async def process(msg: Input, ctx) -> Output:
+    return Output(result=str(msg.value * 2))
+
+registry = ModelRegistry()
+registry.register("process", Input, Output)
+
+node = Node(process, name="process", policy=NodePolicy(validate="both"))
+```
+
+### 2. Message-Aware Node with Meta Tracking
+
+```python
+from penguiflow import Message
+
+async def track_cost(message: Message, ctx) -> Message:
+    # Call LLM
+    response = await llm.complete(message.payload["query"])
+
+    # Track cost in meta (preserve existing meta)
+    new_meta = {
+        **message.meta,
+        "cost_usd": 0.003,
+        "tokens": 500
+    }
+
+    # Update payload and meta
+    return message.model_copy(update={
+        "payload": {"response": response.text},
+        "meta": new_meta
+    })
+```
+
+### 3. Router with Predicate Logic
+
+```python
+from penguiflow.patterns import predicate_router
+
+def route_by_priority(message):
+    priority = message.payload.get("priority", "normal")
+
+    if priority == "urgent":
+        return ["urgent_handler"]
+    elif priority == "high":
+        return ["high_handler"]
+    else:
+        return ["normal_handler"]
+
+router = predicate_router("priority_router", route_by_priority)
+
+flow = create(
+    intake.to(router),
+    router.to(urgent_handler, high_handler, normal_handler)
+)
+```
+
+### 4. Controller Loop with Budget
+
+```python
+from penguiflow.types import WM, FinalAnswer
+from penguiflow import Node, Message
+
+async def controller(message: Message, ctx):
+    wm = message.payload  # WM object
+
+    # Check if we have enough information
+    if len(wm.facts) >= 5 or wm.hops >= 8:
+        return FinalAnswer(text=f"Answer: {synthesize(wm.facts)}")
+
+    # Need more information - call tool
+    new_fact = await query_tool(wm.query, wm.facts)
+
+    # Return updated WM (runtime auto-increments hops)
+    return wm.model_copy(update={
+        "facts": wm.facts + [new_fact]
+    })
+
+controller_node = Node(controller, name="controller", allow_cycle=True)
+flow = create(controller_node.to(controller_node))
+
+# Initialize with budget
+wm = WM(query="What is X?", facts=[], budget_hops=10)
+await flow.emit(Message(payload=wm, headers=Headers(tenant="demo")))
+```
+
+### 5. Streaming Node Example
+
+```python
+from penguiflow import Message, Context
+
+async def streaming_llm(message: Message, ctx: Context):
+    query = message.payload["query"]
+
+    # Stream tokens as they arrive
+    async for token in llm_stream(query):
+        await ctx.emit_chunk(
+            parent=message,
+            text=token,
+            done=False
+        )
+
+    # Send final chunk with done=True
+    await ctx.emit_chunk(
+        parent=message,
+        text="",
+        done=True
+    )
+
+    return None  # No regular return (already emitted chunks)
+
+# Downstream handler
+async def consume_stream(chunk: StreamChunk, ctx):
+    if chunk.done:
+        return {"final_text": accumulated_text}
+    else:
+        print(f"Chunk {chunk.seq}: {chunk.text}")
+        return None
+```
+
+### 6. Error Handling with Retries
+
+```python
+from penguiflow import Node, NodePolicy
+from penguiflow.errors import FlowError
+
+async def resilient_api_call(message, ctx):
+    try:
+        response = await external_api.fetch(message.payload)
+        return response
+    except Exception as exc:
+        # Log but let retry system handle it
+        logger.warning(f"API call failed (will retry): {exc}")
+        raise  # Re-raise to trigger retry
+
+node = Node(
+    resilient_api_call,
+    name="api_call",
+    policy=NodePolicy(
+        max_retries=5,        # 6 total attempts
+        backoff_base=1.0,     # Start with 1s
+        backoff_mult=2.0,     # Double each time
+        max_backoff=30.0,     # Cap at 30s
+        timeout_s=10.0        # 10s per attempt
+    )
+)
+
+flow = create(node.to(), emit_errors_to_rookery=True)
+
+# Handle errors
+result = await flow.fetch()
+if isinstance(result, FlowError):
+    if result.code == "NODE_TIMEOUT":
+        notify_ops("API timeout after retries")
+    elif result.code == "NODE_EXCEPTION":
+        fallback_response = get_cached_response()
+```
+
+### 7. Middleware for Observability
+
+```python
+from penguiflow.metrics import FlowEvent
+
+async def error_alerting_middleware(event: FlowEvent):
+    """Alert on node failures."""
+    if event.event_type == "node_failed":
+        flow_error = event.extra.get("flow_error", {})
+
+        code = flow_error.get("code")
+        node_name = flow_error.get("node_name")
+
+        if code == "NODE_TIMEOUT":
+            await send_alert(
+                severity="high",
+                message=f"Node {node_name} timeout",
+                trace_id=event.trace_id
+            )
+
+flow.add_middleware(error_alerting_middleware)
+```
+
+### 8. Testing with FlowTestKit
+
+```python
+import pytest
+from penguiflow.testkit import run_one, assert_node_sequence, simulate_error
+from penguiflow.errors import FlowErrorCode
+
+@pytest.mark.asyncio
+async def test_retry_succeeds():
+    # Simulate node that fails twice then succeeds
+    flaky_func = simulate_error(
+        "flaky",
+        FlowErrorCode.NODE_EXCEPTION,
+        fail_times=2,
+        result="success"
+    )
+
+    flaky_node = Node(
+        flaky_func,
+        name="flaky",
+        policy=NodePolicy(
+            validate="none",
+            max_retries=2,
+            backoff_base=0.001
+        )
+    )
+
+    flow = create(flaky_node.to())
+
+    message = Message(payload="test", headers=Headers(tenant="test"))
+    result = await run_one(flow, message)
+
+    assert result == "success"
+    assert flaky_func.simulation.attempts == 3  # 1 initial + 2 retries
+    assert_node_sequence(message.trace_id, ["flaky"])
+```
+
+---
+
+## F. API Quick Reference
+
+### NodePolicy Options
+
+```python
+from penguiflow import NodePolicy
+
+policy = NodePolicy(
+    validate="both",        # "both"|"in"|"out"|"none"
+    timeout_s=30.0,        # Per-invocation timeout (None = no timeout)
+    max_retries=2,         # Retry attempts (0 = no retries, total attempts = 1 + max_retries)
+    backoff_base=0.5,      # Initial backoff delay in seconds
+    backoff_mult=2.0,      # Exponential multiplier
+    max_backoff=10.0       # Cap on backoff delay (None = no cap)
+)
+```
+
+**Backoff formula:** `delay = backoff_base * (backoff_mult ^ (attempt - 1))`
+
+**Example progression (base=0.5, mult=2.0, max=5.0):**
+- Attempt 1: 0.5s
+- Attempt 2: 1.0s
+- Attempt 3: 2.0s
+- Attempt 4: 4.0s
+- Attempt 5+: 5.0s (capped)
+
+### Context Methods
+
+```python
+from penguiflow import Context, Message
+
+async def my_node(message: Message, ctx: Context):
+    # Emit to all successors
+    await ctx.emit(result)
+
+    # Emit to specific nodes
+    await ctx.emit(result, to=[node_a, node_b])
+
+    # Emit to specific node by name
+    await ctx.emit(result, to="node_a")
+
+    # Non-blocking emit (use sparingly, bypasses backpressure)
+    ctx.emit_nowait(result)
+
+    # Emit streaming chunk
+    await ctx.emit_chunk(
+        parent=message,         # Inherits headers/trace/meta
+        text="token",
+        stream_id=None,         # Defaults to trace_id
+        seq=None,               # Auto-increments
+        done=False,             # Set True on final chunk
+        meta=None,              # Optional chunk metadata
+        to=None                 # Target nodes (optional)
+    )
+
+    # Fetch from incoming queue (advanced, rarely needed)
+    msg = await ctx.fetch(from_=predecessor_node)
+
+    # Fetch from any predecessor
+    msg = await ctx.fetch_any(from_=[node_a, node_b])
+```
+
+### ModelRegistry Registration
+
+```python
+from penguiflow import ModelRegistry
+
+registry = ModelRegistry()
+
+# Register node types
+registry.register("node_name", InputModel, OutputModel)
+
+# Register message-aware node
+from penguiflow import Message
+registry.register("meta_node", Message, Message)
+
+# Use with flow
+flow.run(registry=registry)
+```
+
+### Flow Creation Parameters
+
+```python
+from penguiflow import create
+
+flow = create(
+    node_a.to(node_b),
+    node_b.to(node_c),
+
+    # Optional parameters
+    queue_maxsize=64,           # Max messages per edge queue (default: 64)
+    allow_cycles=False,         # Global cycle permission (default: False)
+    middlewares=None,           # List of middleware callables
+    emit_errors_to_rookery=False,  # Send FlowError to Rookery (default: False)
+
+    # Advanced (distributed execution)
+    state_store=None,           # StateStore for event persistence
+    message_bus=None,           # MessageBus for external publishing
+    skill_catalog=None,         # Catalog for remote node lookup
+)
+```
+
+### FlowEvent Types (Observability)
+
+**Core node events:**
+- `node_start` - Before node invocation
+- `node_success` - After successful execution
+- `node_error` - Exception raised (before retry check)
+- `node_timeout` - Timeout exceeded (before retry check)
+- `node_retry` - Before sleeping for backoff
+- `node_failed` - Max retries exhausted
+
+**Trace lifecycle:**
+- `deadline_skip` - Message skipped (deadline expired)
+- `trace_cancel_start` - Cancellation initiated
+- `trace_cancel_drop` - Message dropped during cancellation
+- `node_trace_cancelled` - Node invocation cancelled
+- `trace_cancel_finish` - Cancellation cleanup complete
+- `node_cancelled` - Node worker cancelled during shutdown
+
+**Remote transport (advanced):**
+- `remote_call_start`, `remote_call_success`, `remote_call_error`
+- `remote_stream_event`, `remote_call_cancelled`, `remote_cancel_error`
+
+### FlowError Codes
+
+```python
+from penguiflow.errors import FlowError, FlowErrorCode
+
+# Error codes
+FlowErrorCode.NODE_TIMEOUT       # NodePolicy.timeout_s exceeded after retries
+FlowErrorCode.NODE_EXCEPTION     # Node raised Exception after retries
+FlowErrorCode.TRACE_CANCELLED    # User called flow.cancel(trace_id)
+
+# Note: Budget exhaustion (deadline, hops, tokens) produces FinalAnswer, NOT FlowError
+```
+
+### Visualization Utilities
+
+```python
+from penguiflow.viz import flow_to_mermaid, flow_to_dot
+
+# Generate Mermaid diagram
+mermaid_str = flow_to_mermaid(flow, direction="TD")  # or "LR"
+print(mermaid_str)
+
+# Generate Graphviz DOT
+dot_str = flow_to_dot(flow, rankdir="TB")  # or "LR"
+print(dot_str)
+```
+
+---
+
+## G. Decision Trees
+
+### When to Use Validation?
+
+```
+Need type safety guarantees? ──Yes──> Use validate="both"
+                │
+                No
+                │
+         Performance critical? ──Yes──> Profile first
+                │                       │
+                No                      Bottleneck found? ──No──> Keep validate="both"
+                │                       │
+    Use validate="both"                Yes
+                                        │
+                                    Hot path (streaming)? ──Yes──> validate="in"
+                                        │
+                                        No
+                                        │
+                                    Custom validation? ──Yes──> validate="none" + manual checks
+                                        │
+                                        No
+                                        │
+                                    Use validate="in"
+```
+
+**Rule of thumb:** Start with `"both"`, optimize only if profiling shows validation overhead.
+
+### Which Node Pattern to Use?
+
+```
+Need access to trace_id, headers, or meta? ──Yes──> Message-Aware Pattern
+                │                                   (Message -> Message)
+                No
+                │
+         Simple data transform? ──Yes──> Payload-to-Payload Pattern
+                                         (InputModel -> OutputModel)
+                                         ← Use this 99% of the time
+```
+
+**Examples:**
+
+**Payload-to-Payload (99%):**
+- Data transformations (upper, parse, filter)
+- API calls (fetch, post)
+- LLM calls (query, embed)
+- Database operations (select, insert)
+
+**Message-Aware (1%):**
+- Multi-tenant routing (check headers.tenant)
+- Cost tracking (update meta["cost"])
+- Debugging (log trace_id)
+- Subflow boundary (preserve full context)
+
+### Which Routing Pattern?
+
+```
+Need type safety (discriminated union)? ──Yes──> union_router
+                │
+                No
+                │
+    Content-based routing (fields)? ──Yes──> predicate_router
+                │
+                No
+                │
+    Runtime config changes needed? ──Yes──> predicate_router + DictRoutingPolicy
+                │
+                No
+                │
+    Simple static routing? ──Yes──> .to(node_a, node_b, node_c) (broadcast)
+```
+
+### When to Use Controller Loops?
+
+**✅ Use controller loops when:**
+- Iterative refinement (ReAct, plan-execute)
+- Tool calling (agent decides next tool)
+- Multi-hop retrieval (progressive search)
+- Uncertain iteration count (until condition met)
+
+**❌ Don't use controller loops when:**
+- Fixed number of steps known upfront (use linear chain)
+- Parallel fan-out (use router + join_k)
+- Single-pass transformation (use simple node)
+
+**Controller requirements:**
+1. Node must have `allow_cycle=True`
+2. Must emit to self (controller.to(controller))
+3. Payload must be WM (with budget_hops)
+4. Must eventually return FinalAnswer (or hit budget)
+
+### When to Use Playbooks (Subflows)?
+
+**✅ Use playbooks when:**
+- Reusable logic across multiple flows
+- Isolate risky operations (timeout independently)
+- Different teams own different components
+- Need independent testing of sub-workflows
+
+**❌ Don't use playbooks when:**
+- Simple linear chain (add more nodes)
+- One-off logic specific to single flow
+- Shared utilities (use Python functions)
+
+**Playbook pattern:**
+```python
+def my_playbook() -> tuple[PenguiFlow, ModelRegistry]:
+    # Build subflow
+    flow = create(...)
+    registry = ModelRegistry()
+    return flow, registry
+
+# Call from node
+async def caller_node(message: Message, ctx: Context):
+    result = await ctx.call_playbook(my_playbook, message, timeout=10.0)
+    return process_result(result)
+```
+
+---
+
+## H. Common Mistakes & Fixes
+
+### Mistake 1: join_k Without trace_id
+
+**❌ WRONG:**
+```python
+await flow.emit({"data": "value"})  # No trace_id
+```
+
+**Error:** `ValueError: join_k requires trace_id`
+
+**✅ CORRECT:**
+```python
+await flow.emit(Message(
+    payload={"data": "value"},
+    trace_id="trace-123",  # Required!
+    headers=Headers(tenant="demo")
+))
+```
+
+### Mistake 2: union_router Node Name Mismatch
+
+**❌ WRONG:**
+```python
+class WebSearch(BaseModel):
+    kind: Literal["web"]  # Discriminator value
+
+# Node name doesn't match!
+web_node = Node(handle_web, name="web_search_handler")  # ❌
+```
+
+**Error:** `KeyError: 'web'` (runtime looks for node named "web")
+
+**✅ CORRECT:**
+```python
+web_node = Node(handle_web, name="web")  # Matches kind="web"
+```
+
+### Mistake 3: Mutating meta In Place
+
+**❌ WRONG:**
+```python
+async def bad_node(message: Message, ctx):
+    message.meta["cost"] = 0.05  # Mutates in place!
+    return message
+```
+
+**Why bad:** Retries and parallel paths see inconsistent state.
+
+**✅ CORRECT:**
+```python
+async def good_node(message: Message, ctx):
+    new_meta = {**message.meta, "cost": 0.05}
+    return message.model_copy(update={"meta": new_meta})
+```
+
+### Mistake 4: emit_nowait Without Backpressure Awareness
+
+**❌ WRONG:**
+```python
+async def bad_node(message: Message, ctx):
+    for i in range(10000):
+        ctx.emit_nowait(data)  # Bypasses backpressure!
+```
+
+**Why bad:** Can cause unbounded memory growth if downstream is slow.
+
+**✅ CORRECT:**
+```python
+async def good_node(message: Message, ctx):
+    for i in range(10000):
+        await ctx.emit(data)  # Respects backpressure
+```
+
+### Mistake 5: Confusing max_retries with Total Attempts
+
+**❌ WRONG assumption:**
+```python
+policy = NodePolicy(max_retries=3)
+# Expected: 3 total attempts
+# Actual: 4 total attempts (1 initial + 3 retries)
+```
+
+**✅ CORRECT understanding:**
+```python
+policy = NodePolicy(max_retries=2)  # 3 total attempts (1 + 2)
+
+# Formula: total_attempts = 1 + max_retries
+```
+
+### Mistake 6: Expecting FlowError for Budget Exhaustion
+
+**❌ WRONG:**
+```python
+result = await flow.fetch()
+if isinstance(result, FlowError) and result.code == "HOP_BUDGET_EXHAUSTED":
+    # This NEVER happens!
+    pass
+```
+
+**Why:** Budget exhaustion produces `FinalAnswer`, not `FlowError`.
+
+**✅ CORRECT:**
+```python
+result = await flow.fetch()
+if isinstance(result, Message) and isinstance(result.payload, FinalAnswer):
+    if result.payload.text == "Hop budget exhausted":
+        handle_budget_exhaustion()
+```
+
+### Mistake 7: Adding Middleware After run()
+
+**❌ WRONG:**
+```python
+flow.run()
+flow.add_middleware(my_middleware)  # Too late!
+```
+
+**✅ CORRECT:**
+```python
+flow.add_middleware(my_middleware)  # Before run()
+flow.run()
+```
+
+### Mistake 8: Not Setting Token Budget But Expecting Enforcement
+
+**❌ WRONG:**
+```python
+wm = WM(query="...", budget_tokens=5000)
+# Node doesn't update tokens_used → stays 0 → budget never enforced
+```
+
+**✅ CORRECT:**
+```python
+async def llm_node(message: Message, ctx):
+    wm = message.payload
+    response = await llm.complete(wm.query)
+
+    # REQUIRED: Manually track tokens
+    return message.model_copy(update={
+        "payload": wm.model_copy(update={
+            "tokens_used": wm.tokens_used + response.usage.total_tokens
+        })
+    })
+```
+
+### Mistake 9: Confusing deadline_s (Unix timestamp) with Duration
+
+**❌ WRONG:**
+```python
+msg = Message(payload=..., deadline_s=60)  # ❌ 60 seconds from epoch (1970)!
+```
+
+**✅ CORRECT:**
+```python
+import time
+msg = Message(payload=..., deadline_s=time.time() + 60)  # 60s from now
+```
+
+### Mistake 10: Not Sending done=True on Final Chunk
+
+**❌ WRONG:**
+```python
+async def streaming_node(message: Message, ctx):
+    for chunk in generate():
+        await ctx.emit_chunk(parent=message, text=chunk, done=False)
+    # Missing final done=True chunk!
+```
+
+**Why bad:** Downstream nodes never know streaming finished.
+
+**✅ CORRECT:**
+```python
+async def streaming_node(message: Message, ctx):
+    for chunk in generate():
+        await ctx.emit_chunk(parent=message, text=chunk, done=False)
+
+    # Send final chunk
+    await ctx.emit_chunk(parent=message, text="", done=True)
+```
+
+---
+
+## I. Advanced Features Index
+
+### Cancellation
+
+**Per-trace cancellation** stops in-flight work for specific trace_id without affecting other traces.
+
+```python
+# Cancel specific trace
+cancelled = await flow.cancel(trace_id="abc-123")
+
+# Handle in nodes
+from penguiflow.core import TraceCancelled
+
+async def my_node(message: Message, ctx):
+    try:
+        result = await long_operation()
+        return result
+    except TraceCancelled:
+        logger.info(f"Cancelled trace {message.trace_id}")
+        await cleanup()
+        raise  # Must re-raise
+```
+
+**See:** Manual Section 8 for full cancellation guide.
+
+### Deadlines & Budgets
+
+**Three enforcement mechanisms:**
+
+1. **deadline_s** (wall-clock, Unix timestamp) - Auto-checked by runtime
+2. **budget_hops** (iteration limit) - Auto-incremented by runtime
+3. **budget_tokens** (cost limit) - **Manual tracking required**
+
+```python
+import time
+from penguiflow.types import WM, Message
+
+msg = Message(
+    payload=WM(
+        query="...",
+        budget_hops=10,      # Max 10 iterations
+        budget_tokens=5000   # Max 5000 tokens (you must track!)
+    ),
+    deadline_s=time.time() + 30  # 30s wall-clock limit
+)
+```
+
+**Critical:** Budget exhaustion produces `FinalAnswer("Budget exhausted")`, NOT `FlowError`.
+
+**See:** Manual Section 9 for detailed semantics.
+
+### FlowError Handling
+
+**FlowError wraps node failures** (after retry exhaustion) with full context.
+
+```python
+from penguiflow.errors import FlowError, FlowErrorCode
+
+flow = create(*adjacencies, emit_errors_to_rookery=True)
+
+result = await flow.fetch()
+if isinstance(result, FlowError):
+    print(f"[{result.code}] {result.node_name}: {result.message}")
+    print(f"Trace: {result.trace_id}")
+    print(f"Attempt: {result.metadata['attempt']}")
+
+    # Access original exception
+    original = result.unwrap()
+```
+
+**See:** Manual Section 10 for retry flow, error codes, and patterns.
+
+### Playbooks (Subflows)
+
+**Reusable sub-workflows** with automatic cancellation mirroring.
+
+```python
+def retrieval_playbook() -> tuple[PenguiFlow, ModelRegistry]:
+    # Build subflow
+    embed_node = Node(embed, name="embed")
+    search_node = Node(search, name="search")
+    flow = create(embed_node.to(search_node), search_node.to())
+
+    registry = ModelRegistry()
+    registry.register("embed", QueryIn, EmbeddedQuery)
+    registry.register("search", EmbeddedQuery, SearchResults)
+
+    return flow, registry
+
+# Call from parent node
+async def agent_node(message: Message, ctx: Context):
+    results = await ctx.call_playbook(
+        retrieval_playbook,
+        Message(payload=QueryIn(query="..."), headers=message.headers),
+        timeout=15.0
+    )
+    return process(results)
+```
+
+**See:** Manual Section 7 for factory pattern, propagation, error handling.
+
+### Observability (Middleware)
+
+**FlowEvent-based observability** with three integration points:
+
+1. **Structured logging** (automatic, via Python logging)
+2. **State store** (optional, for audit trails)
+3. **Middleware** (custom metrics, alerting, tracing)
+
+```python
+from penguiflow.metrics import FlowEvent
+
+async def prometheus_middleware(event: FlowEvent):
+    if event.event_type == "node_success":
+        latency_histogram.observe(event.latency_ms / 1000)
+
+flow.add_middleware(prometheus_middleware)
+```
+
+**See:** Manual Section 11 for event catalog, patterns, state store protocol.
+
+### Distributed Execution
+
+**Three components for cross-agent communication:**
+
+1. **StateStore** - Event persistence and history
+2. **MessageBus** - External message publishing (Kafka, Redis)
+3. **RemoteNode** - Agent-to-Agent (A2A) remote execution
+
+```python
+from penguiflow.remote import RemoteNode
+from penguiflow.catalog import SkillCatalog
+
+# Define remote skill
+remote_search = RemoteNode(
+    skill="web_search",
+    catalog=skill_catalog,
+    policy=NodePolicy(timeout_s=30)
+)
+
+flow = create(
+    router.to(local_node, remote_search),
+    remote_search.to(final_node)
+)
+```
+
+**See:** Manual Section 16 (Remote Execution), Section 17 (Distributed Hooks).
+
+### Performance Tuning
+
+**Key tuning knobs:**
+
+1. **Queue sizes:** `create(..., queue_maxsize=128)` (default: 64)
+2. **Validation:** Use `validate="in"` or `"none"` for hot paths (profile first!)
+3. **Concurrency:** `map_concurrent(max_concurrency=8)` for parallel processing
+4. **Backoff:** Fast backoff for tests (`backoff_base=0.001`)
+
+**Rule:** Start with defaults, profile, then optimize.
+
+### Visualization
+
+**Generate diagrams** for documentation and debugging:
+
+```python
+from penguiflow.viz import flow_to_mermaid, flow_to_dot
+
+# Mermaid (Markdown-friendly)
+mermaid = flow_to_mermaid(flow, direction="TD")
+with open("flow.md", "w") as f:
+    f.write(f"```mermaid\n{mermaid}\n```")
+
+# Graphviz DOT (high-quality rendering)
+dot = flow_to_dot(flow, rankdir="LR")
+with open("flow.dot", "w") as f:
+    f.write(dot)
+```
+
+**See:** Manual Section 15 for annotations, loop detection, subflow markers.
+
+---
+
+## J. Cross-Reference Map
+
+### Quick Task Index
+
+**I want to...**
+
+- **Build my first flow** → Section C (Quick Start Template)
+- **Choose the right node pattern** → Section B (Node Patterns), Section G (Decision Trees)
+- **Route based on content** → Section D (predicate_router)
+- **Route based on type** → Section D (union_router)
+- **Aggregate fan-out results** → Section D (join_k)
+- **Handle retries and errors** → Section E (snippet 6), Section F (NodePolicy)
+- **Stream partial results** → Section E (snippet 5)
+- **Test my flow** → Section E (snippet 8), Manual Section 12
+- **Cancel a running trace** → Section I (Cancellation)
+- **Set time limits** → Section I (Deadlines & Budgets)
+- **Track costs** → Section E (snippet 2), Manual Section 9.4
+- **Add observability** → Section E (snippet 7), Section I (Observability)
+- **Reuse sub-workflows** → Section I (Playbooks)
+- **Configure runtime routing** → Section D (DictRoutingPolicy)
+- **Visualize my flow** → Section F (Visualization), Manual Section 15
+
+### Manual Section Quick Links
+
+- **Section 1:** Core Concepts (architecture, message vs payload)
+- **Section 2:** Node Configuration (patterns, policies, signatures)
+- **Section 3:** Context API (emit, emit_chunk, fetch)
+- **Section 4:** Message Types (Message, WM, FinalAnswer)
+- **Section 5:** ModelRegistry (validation, when to use)
+- **Section 6:** Patterns (decision matrix, all pattern details)
+- **Section 7:** Playbooks (factory pattern, propagation, errors)
+- **Section 8:** Cancellation (per-trace, handling, propagation)
+- **Section 9:** Deadlines & Budgets (deadline_s, hops, tokens)
+- **Section 10:** Error Handling (FlowError, retries, emit_errors_to_rookery)
+- **Section 11:** Observability (FlowEvent, middleware, state store)
+- **Section 12:** Testing (FlowTestKit, run_one, assert_node_sequence, simulate_error)
+- **Section 13:** Flow Configuration (cycles, queue sizes)
+- **Section 14:** Best Practices
+- **Section 15:** Visualization (mermaid, dot)
+- **Section 16:** Remote Execution (A2A, RemoteNode)
+- **Section 17:** Distributed Hooks (StateStore, MessageBus)
+- **Section 18:** Examples & Tutorials
+
+### Example Files Map
+
+- **examples/quickstart/** - Typed pipeline (registry + validation)
+- **examples/routing_predicate/** - Predicate router with branching
+- **examples/routing_union/** - Discriminated union routing
+- **examples/fanout_join/** - Fan-out + join_k aggregation
+- **examples/map_concurrent/** - Parallel processing helper
+- **examples/controller_multihop/** - Controller loop + FinalAnswer
+- **examples/reliability_middleware/** - Timeout/retry/middleware logging
+- **examples/mlflow_metrics/** - MLflow-backed metrics middleware
+- **examples/playbook_retrieval/** - Controller invoking subflow
+- **examples/streaming_llm/** - StreamChunk + SSE-style sink
+- **examples/metadata_propagation/** - Message.meta across nodes
+- **examples/routing_policy/** - Config-driven policy overrides
+- **examples/visualizer/** - Mermaid + DOT diagram generation
+- **examples/traceable_errors/** - FlowError emission from Rookery
+
+### Test Files Map
+
+- **tests/test_core.py** - Core runtime, lifecycle
+- **tests/test_types.py** - Message, WM, FinalAnswer
+- **tests/test_registry.py** - ModelRegistry validation
+- **tests/test_patterns.py** - Router, join_k patterns
+- **tests/test_controller.py** - Controller loops, budgets
+- **tests/test_streaming.py** - StreamChunk, emit_chunk
+- **tests/test_cancel.py** - Per-trace cancellation
+- **tests/test_budgets.py** - Deadline, hop, token budgets
+- **tests/test_metadata.py** - Message.meta propagation
+- **tests/test_metrics.py** - FlowEvent, middleware
+- **tests/test_errors.py** - FlowError, retry flow
+- **tests/test_testkit.py** - FlowTestKit utilities
+
+---
+
+**End of AI Assistant Reference**
+
+For complete documentation, see `manual.md`.
+For human-readable introduction, see `README.md`.
+For project guidance, see `CLAUDE.md`.
