@@ -8292,3 +8292,2306 @@ await flow.stop()
 - **Section 11 (Observability):** FlowEvent structure for remote_call_* events
 - **Section 17 (Distributed Hooks):** StateStore.save_remote_binding for trace correlation
 - **Section 16.1 (Quick Reference):** Import paths for RemoteNode and protocols
+
+---
+
+# Section 19: React Planner
+
+## 19. React Planner
+
+### 19.1 What is React Planner?
+
+**React Planner** is PenguiFlow's implementation of the **ReAct (Reasoning + Acting)** pattern, where an LLM orchestrates multi-step workflows by iteratively deciding which tool to call next, executing it, observing results, and repeating until task completion.
+
+**Think of it as an autonomous agent:**
+- **Planner** (LLM): Decides which tool to use based on current state
+- **Tools** (PenguiFlow nodes): Execute specific tasks (search, retrieve, transform)
+- **Trajectory**: Execution history tracking decisions and observations
+- **Constraints**: Budgets and hints to keep execution bounded and safe
+
+**Key use cases:**
+- Multi-step reasoning requiring tool selection (research assistants, data analysis)
+- Dynamic workflows where next step depends on previous results (adaptive retrieval)
+- Tasks requiring parallel tool execution (multi-shard queries, concurrent API calls)
+- Long-running processes with checkpoints (approval workflows, pause/resume)
+
+**Why React Planner?**
+- **JSON-Only**: Structured LLM outputs (no free-form text parsing)
+- **Type-Safe**: Pydantic validation for all tool inputs/outputs
+- **Autonomous**: LLM drives execution without manual orchestration
+- **Bounded**: Enforces iteration limits, deadlines, and token budgets
+- **Recoverable**: Handles failures with structured error feedback for adaptive replanning
+
+#### Comparison to Controller Loops
+
+| Feature | React Planner | Controller Loops (Section 4.2) |
+|---------|---------------|-------------------------------|
+| **Orchestration Level** | Multi-tool selection across nodes | Single-node iteration logic |
+| **Decision Maker** | LLM (dynamic reasoning) | Developer (fixed logic) |
+| **Tool Flexibility** | Selects from catalog at runtime | Calls fixed tools/functions |
+| **State Management** | Trajectory history | WM.facts accumulation |
+| **Termination** | PlannerFinish / PlannerPause | FinalAnswer |
+| **Budget Types** | Hop limit, deadline, token budget | budget_hops in WM |
+| **Parallel Execution** | Built-in parallel fan-out with join | Manual via Context.emit() |
+| **Cost** | LLM call per planning step | No LLM overhead |
+| **Best For** | Dynamic multi-step reasoning | Known iteration patterns |
+
+**Example comparison:**
+
+```python
+# Controller Loop (Section 4.2) - Fixed logic, single tool
+async def controller(message: Message, ctx):
+    wm = message.payload
+    if len(wm.facts) >= 5:
+        return FinalAnswer(text=synthesize(wm.facts))
+    new_fact = await query_tool(wm.query)  # Always calls same tool
+    return WM(query=wm.query, facts=wm.facts + [new_fact])
+
+# React Planner - LLM decides which tool
+# Step 1: LLM chooses "triage" tool
+# Step 2: LLM chooses "retrieve" based on triage output
+# Step 3: LLM chooses "summarize" based on retrieval results
+planner = ReactPlanner(llm="gpt-4", catalog=[triage, retrieve, summarize])
+result = await planner.run("Explain PenguiFlow")
+```
+
+**When to use React Planner over Controller Loops:**
+- Need adaptive tool selection (not fixed sequence)
+- Routing logic is complex or changes frequently
+- Acceptable to pay LLM cost for flexibility
+- Want structured error recovery with re-planning
+
+#### Architecture Diagram
+
+```
+┌─────────────────────────────────────────┐
+│       ReactPlanner (Orchestrator)        │
+│  • Calls LLM → PlannerAction             │
+│  • Executes tools (sequential/parallel)  │
+│  • Manages trajectory history            │
+│  • Enforces budgets & constraints        │
+└──────────────┬──────────────────────────┘
+               │
+               │ selects from
+               ↓
+┌─────────────────────────────────────────┐
+│      NodeSpec Catalog (Tool Registry)    │
+│  • JSON schemas per tool                 │
+│  • Metadata (side effects, cost)         │
+│  • Built from Nodes + ModelRegistry      │
+└──────────────┬──────────────────────────┘
+               │
+               │ wraps
+               ↓
+┌─────────────────────────────────────────┐
+│     PenguiFlow Nodes (Tools)             │
+│  • Standard async functions              │
+│  • Can be simple transforms              │
+│  • Can be controller loops (WM)          │
+│  • Can be playbooks (subflows)           │
+└─────────────────────────────────────────┘
+```
+
+**Key insight**: React Planner sits **above** the PenguiFlow flow graph level. It orchestrates which nodes to call and in what order, but each tool is a standard PenguiFlow node.
+
+---
+
+### 19.2 Core Concepts
+
+#### PlannerAction - The LLM's Decision
+
+Every planning step produces a `PlannerAction` from the LLM:
+
+```python
+from penguiflow.planner import PlannerAction
+
+class PlannerAction(BaseModel):
+    thought: str                               # LLM's reasoning
+    next_node: str | None = None               # Tool to execute (None = finish)
+    args: dict[str, Any] | None = None         # Tool arguments
+    plan: list[ParallelCall] | None = None     # Parallel execution plan
+    join: ParallelJoin | None = None           # Join node after parallel
+```
+
+**Sequential execution:**
+```python
+{
+    "thought": "Need to classify the user's question first",
+    "next_node": "triage",
+    "args": {"text": "Explain PenguiFlow"}
+}
+```
+
+**Parallel execution:**
+```python
+{
+    "thought": "Fan out to multiple shards concurrently",
+    "plan": [
+        {"node": "fetch_primary", "args": {"topic": "penguins", "shard": 0}},
+        {"node": "fetch_secondary", "args": {"topic": "penguins", "shard": 1}}
+    ],
+    "join": {"node": "merge_results"}
+}
+```
+
+**Finish execution:**
+```python
+{
+    "thought": "I have gathered enough information to answer",
+    "next_node": null,  # null signals completion
+    "args": {"answer": "PenguiFlow is a lightweight async pipeline library..."}
+}
+```
+
+#### Trajectory - Execution History
+
+The `Trajectory` records the planner's journey from query to answer:
+
+```python
+from penguiflow.planner import Trajectory, TrajectoryStep
+
+@dataclass
+class TrajectoryStep:
+    action: PlannerAction                      # What LLM decided
+    observation: Any | None = None             # Tool output
+    error: str | None = None                   # Error message if failed
+    failure: Mapping[str, Any] | None = None   # Structured failure info
+
+@dataclass
+class Trajectory:
+    query: str                                  # User's question
+    context_meta: Mapping[str, Any] | None      # Additional context
+    steps: list[TrajectoryStep]                 # Execution history
+    summary: TrajectorySummary | None           # Compressed history
+    hint_state: dict[str, Any]                  # Planning hints state
+    resume_user_input: str | None               # Input after pause
+```
+
+**Example trajectory:**
+```python
+Trajectory(
+    query="Explain PenguiFlow",
+    context_meta={"tenant": "demo"},
+    steps=[
+        TrajectoryStep(
+            action=PlannerAction(thought="...", next_node="triage", args={...}),
+            observation={"intent": "documentation"}
+        ),
+        TrajectoryStep(
+            action=PlannerAction(thought="...", next_node="retrieve", args={...}),
+            observation={"documents": ["doc1", "doc2"]}
+        ),
+        TrajectoryStep(
+            action=PlannerAction(thought="...", next_node=None, args={"answer": "..."}),
+            observation=None
+        )
+    ]
+)
+```
+
+#### NodeSpec - Tool Metadata for LLM
+
+Tools are registered in a catalog with rich metadata:
+
+```python
+from penguiflow.catalog import NodeSpec
+
+class NodeSpec(BaseModel):
+    name: str                                   # Tool name
+    desc: str                                   # Human description
+    args_schema: dict[str, Any]                 # Input JSON schema
+    out_schema: dict[str, Any]                  # Output JSON schema
+    side_effects: Literal["pure", "read", "write", "external", "stateful"]
+    tags: list[str]                             # Categories
+    auth_scopes: list[str]                      # Permissions
+    cost_hint: Literal["low", "medium", "high"]
+    latency_hint_ms: int | None
+    safety_notes: str | None
+    custom_meta: dict[str, Any]
+```
+
+The LLM receives all NodeSpec details in the system prompt to make informed tool selection decisions.
+
+#### Terminal States
+
+React Planner execution ends in one of two states:
+
+**PlannerFinish** - Successful completion or budget exhaustion:
+```python
+from penguiflow.planner import PlannerFinish
+
+class PlannerFinish(BaseModel):
+    reason: Literal["answer_complete", "no_path", "budget_exhausted"]
+    payload: Any                                # Final result
+    metadata: dict[str, Any]                    # Execution metadata
+```
+
+**PlannerPause** - Human intervention required:
+```python
+from penguiflow.planner import PlannerPause
+
+class PlannerPause(BaseModel):
+    reason: Literal["approval_required", "await_input", "external_event", "constraints_conflict"]
+    payload: dict[str, Any]
+    resume_token: str                           # Token for resuming
+```
+
+---
+
+### 19.3 Basic Usage
+
+#### Minimal Working Example
+
+```python
+from penguiflow.catalog import build_catalog, tool
+from penguiflow.node import Node
+from penguiflow.planner import ReactPlanner
+from penguiflow.registry import ModelRegistry
+from pydantic import BaseModel
+
+# 1. Define data models
+class Question(BaseModel):
+    text: str
+
+class Intent(BaseModel):
+    intent: str
+
+class Documents(BaseModel):
+    documents: list[str]
+
+# 2. Define tools with @tool decorator
+@tool(desc="Detect the caller intent", tags=["triage"])
+async def triage(args: Question, ctx: object) -> Intent:
+    intent = "docs" if "explain" in args.text.lower() else "general"
+    return Intent(intent=intent)
+
+@tool(desc="Retrieve supporting documents", side_effects="read")
+async def retrieve(args: Intent, ctx: object) -> Documents:
+    docs = [f"Content about {args.intent}"]
+    return Documents(documents=docs)
+
+# 3. Setup registry
+registry = ModelRegistry()
+registry.register("triage", Question, Intent)
+registry.register("retrieve", Intent, Documents)
+
+# 4. Create nodes
+nodes = [
+    Node(triage, name="triage"),
+    Node(retrieve, name="retrieve"),
+]
+
+# 5. Initialize planner
+planner = ReactPlanner(
+    llm="gpt-4",  # or any LiteLLM-compatible model
+    catalog=build_catalog(nodes, registry),
+    max_iters=8,
+    temperature=0.0,
+)
+
+# 6. Run
+result = await planner.run("Explain PenguiFlow")
+
+# 7. Handle result
+if result.reason == "answer_complete":
+    print(result.payload)
+elif result.reason == "budget_exhausted":
+    print("Hit iteration limit")
+```
+
+#### Step-by-Step Explanation
+
+| Step | What it does |
+|------|-------------|
+| 1-2 | Define your business logic as Pydantic models + async functions |
+| 3 | Register input/output types for validation |
+| 4 | Wrap functions in Node objects (standard PenguiFlow pattern) |
+| 5 | Initialize planner with LLM and catalog |
+| 6 | Run planner with user query |
+| 7 | Handle terminal state (success or budget exhausted) |
+
+**Common Imports Checklist:**
+
+```python
+# Core planner
+from penguiflow.planner import (
+    ReactPlanner,
+    PlannerAction,
+    PlannerFinish,
+    PlannerPause,
+    Trajectory,
+    TrajectoryStep,
+)
+
+# Tool definition
+from penguiflow.catalog import build_catalog, tool, NodeSpec
+
+# Standard PenguiFlow
+from penguiflow import Node, ModelRegistry
+from pydantic import BaseModel
+```
+
+---
+
+### 19.4 Tool Definition and Registration
+
+#### The @tool Decorator
+
+The `@tool` decorator adds metadata to async functions for LLM consumption:
+
+```python
+from penguiflow.catalog import tool
+
+@tool(
+    desc="Human-readable description for LLM",
+    side_effects="pure|read|write|external|stateful",
+    tags=["category1", "category2"],
+    auth_scopes=["scope1"],
+    cost_hint="low|medium|high",
+    latency_hint_ms=100,
+    safety_notes="Special considerations"
+)
+async def my_tool(args: InputModel, ctx: object) -> OutputModel:
+    ...
+```
+
+**Decorator parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `desc` | `str` | **Required** | Human-readable description for LLM |
+| `side_effects` | `str` | `"pure"` | Effect type: pure, read, write, external, stateful |
+| `tags` | `list[str]` | `[]` | Categories for filtering |
+| `auth_scopes` | `list[str]` | `[]` | Required permissions |
+| `cost_hint` | `str` | `"low"` | Cost estimate: low, medium, high |
+| `latency_hint_ms` | `int \| None` | `None` | Expected latency in milliseconds |
+| `safety_notes` | `str \| None` | `None` | Safety warnings for LLM |
+
+**Side effects explained:**
+
+| Value | Meaning | Example |
+|-------|---------|---------|
+| `"pure"` | No side effects, deterministic | String transform, math calculation |
+| `"read"` | Reads state but doesn't modify | Database SELECT, file read |
+| `"write"` | Modifies state | Database INSERT, file write |
+| `"external"` | Calls external systems | API request, webhook |
+| `"stateful"` | Complex state interactions | Multi-step transaction |
+
+#### Building the Catalog
+
+**Option 1: From nodes + registry (recommended):**
+
+```python
+from penguiflow.catalog import build_catalog
+
+registry = ModelRegistry()
+registry.register("triage", Question, Intent)
+registry.register("retrieve", Intent, Documents)
+
+nodes = [
+    Node(triage, name="triage"),
+    Node(retrieve, name="retrieve"),
+]
+
+catalog = build_catalog(nodes, registry)
+# Returns list[NodeSpec] with auto-derived JSON schemas
+```
+
+**Option 2: Pass nodes directly to planner:**
+
+```python
+planner = ReactPlanner(
+    llm="gpt-4",
+    nodes=nodes,
+    registry=registry,  # Planner calls build_catalog internally
+)
+```
+
+**Option 3: Pre-built catalog:**
+
+```python
+# For custom catalog construction or caching
+catalog = build_catalog(nodes, registry)
+planner = ReactPlanner(llm="gpt-4", catalog=catalog)
+```
+
+#### Tool Signature Requirements
+
+Tools **MUST**:
+- Be declared with `async def`
+- Accept exactly 2 positional parameters: `(args, ctx)`
+- Return a value (not None)
+- Have Pydantic models for `args` type hint
+
+```python
+# ✅ CORRECT
+@tool(desc="Valid tool")
+async def my_tool(args: InputModel, ctx: object) -> OutputModel:
+    return OutputModel(result="success")
+
+# ❌ WRONG - not async
+@tool(desc="Invalid")
+def my_tool(args: InputModel, ctx: object):
+    return result
+
+# ❌ WRONG - missing ctx parameter
+@tool(desc="Invalid")
+async def my_tool(args: InputModel) -> OutputModel:
+    return result
+
+# ❌ WRONG - no type hint for args
+@tool(desc="Invalid")
+async def my_tool(args, ctx: object):
+    return result
+```
+
+#### Context Object in Tools
+
+Tools receive a `_PlannerContext` object with limited API:
+
+```python
+from typing import Protocol
+
+class _PlannerContext(Protocol):
+    meta: dict[str, Any]  # Shared metadata across trajectory
+
+    async def pause(
+        self,
+        reason: Literal["approval_required", "await_input", "external_event", "constraints_conflict"],
+        payload: Mapping[str, Any] | None = None,
+    ) -> PlannerPause: ...
+```
+
+**Example usage:**
+
+```python
+@tool(desc="Approval checkpoint")
+async def approval_gate(args: Intent, ctx) -> Intent:
+    # Check if high-risk action
+    if args.intent in ["delete", "transfer"]:
+        # Pause for human approval
+        await ctx.pause(
+            "approval_required",
+            {"intent": args.intent, "risk": "high"}
+        )
+    return args
+```
+
+**Shared metadata:**
+
+```python
+@tool(desc="Track cost")
+async def llm_call(args: Query, ctx) -> Response:
+    response = await llm.complete(args.text)
+
+    # Update shared metadata (visible to all subsequent tools)
+    ctx.meta["total_tokens"] = ctx.meta.get("total_tokens", 0) + response.usage.total_tokens
+
+    return Response(text=response.text)
+```
+
+---
+
+### 19.5 JSON Schema Generation (Deep Dive)
+
+React Planner uses Pydantic models to auto-generate JSON schemas that the LLM uses for tool validation.
+
+#### How Schema Generation Works
+
+**Process:**
+1. Extract type hints from tool signature (`args: InputModel`)
+2. Generate JSON Schema from Pydantic model using `model_json_schema()`
+3. Include schema in NodeSpec (`args_schema` and `out_schema`)
+4. Embed schemas in system prompt sent to LLM
+5. LLM generates JSON matching schema
+6. Runtime validates LLM output against schema using Pydantic
+
+**Example:**
+
+```python
+from pydantic import BaseModel, Field
+
+class SearchQuery(BaseModel):
+    """Search the knowledge base."""
+    topic: str = Field(..., description="Topic to search for")
+    max_results: int = Field(10, ge=1, le=100, description="Max results to return")
+    filters: dict[str, str] = Field(default_factory=dict, description="Optional filters")
+
+# Generated JSON Schema (simplified):
+{
+    "type": "object",
+    "properties": {
+        "topic": {
+            "type": "string",
+            "description": "Topic to search for"
+        },
+        "max_results": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 10,
+            "description": "Max results to return"
+        },
+        "filters": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": "Optional filters"
+        }
+    },
+    "required": ["topic"]
+}
+```
+
+**What the LLM sees in system prompt:**
+
+```
+Tool: search
+Description: Search the knowledge base
+Arguments Schema:
+  - topic (string, required): Topic to search for
+  - max_results (integer, 1-100, default 10): Max results to return
+  - filters (object, optional): Optional filters
+```
+
+#### Best Practices for Schema Design
+
+**✅ DO:**
+
+1. **Use Field() with descriptions:**
+```python
+class ToolArgs(BaseModel):
+    query: str = Field(..., description="User's search query")  # Clear description for LLM
+    limit: int = Field(10, ge=1, le=100, description="Max results")
+```
+
+2. **Add validation constraints:**
+```python
+class Args(BaseModel):
+    email: str = Field(..., pattern=r'^[\w\.-]+@[\w\.-]+\.\w+$')
+    priority: Literal["low", "medium", "high"]
+    count: int = Field(ge=1, le=1000)  # ge = greater-equal, le = less-equal
+```
+
+3. **Use Optional for optional fields:**
+```python
+class Args(BaseModel):
+    required_field: str
+    optional_field: str | None = None  # LLM knows it's optional
+```
+
+4. **Provide defaults where appropriate:**
+```python
+class Args(BaseModel):
+    mode: str = "auto"  # LLM will use "auto" if not specified
+    verbose: bool = False
+```
+
+5. **Use nested models for structure:**
+```python
+class Filter(BaseModel):
+    field: str
+    operator: Literal["eq", "gt", "lt"]
+    value: str
+
+class SearchArgs(BaseModel):
+    query: str
+    filters: list[Filter] = []  # LLM can generate structured filters
+```
+
+**❌ DON'T:**
+
+1. **Don't use overly complex schemas:**
+```python
+# ❌ Too complex for LLM
+class Args(BaseModel):
+    config: dict[str, dict[str, list[tuple[str, int]]]]  # Hard to generate correctly
+
+# ✅ Better: flatten or use explicit models
+class ConfigEntry(BaseModel):
+    key: str
+    values: list[int]
+
+class Args(BaseModel):
+    configs: list[ConfigEntry]
+```
+
+2. **Don't use ambiguous field names:**
+```python
+# ❌ Ambiguous
+class Args(BaseModel):
+    data: str  # What kind of data?
+
+# ✅ Clear
+class Args(BaseModel):
+    search_query: str  # Explicit purpose
+```
+
+3. **Don't omit descriptions for complex types:**
+```python
+# ❌ Missing description
+class Args(BaseModel):
+    filters: dict[str, Any]
+
+# ✅ With description
+class Args(BaseModel):
+    filters: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Key-value filters (e.g., {'status': 'active', 'type': 'user'})"
+    )
+```
+
+#### Schema Validation Flow
+
+```
+┌─────────────────────────────────────────┐
+│  LLM generates JSON                      │
+│  {"next_node": "search",                 │
+│   "args": {"topic": "penguins"}}         │
+└──────────────┬──────────────────────────┘
+               │
+               ↓
+┌─────────────────────────────────────────┐
+│  Pydantic validates PlannerAction        │
+│  PlannerAction.model_validate_json(raw)  │
+└──────────────┬──────────────────────────┘
+               │
+               ↓ (extracts args)
+┌─────────────────────────────────────────┐
+│  Pydantic validates tool args            │
+│  SearchQuery.model_validate(args)        │
+└──────────────┬──────────────────────────┘
+               │
+               ↓ (validation passes)
+┌─────────────────────────────────────────┐
+│  Execute tool with validated args        │
+│  await search(validated_args, ctx)       │
+└──────────────┬──────────────────────────┘
+               │
+               ↓ (tool returns)
+┌─────────────────────────────────────────┐
+│  Pydantic validates tool output          │
+│  SearchResult.model_validate(output)     │
+└──────────────┬──────────────────────────┘
+               │
+               ↓
+┌─────────────────────────────────────────┐
+│  Add to trajectory as observation        │
+│  TrajectoryStep(action=...,              │
+│                 observation=output)       │
+└─────────────────────────────────────────┘
+```
+
+#### Handling Validation Errors
+
+**Input validation failure:**
+```python
+# LLM generates:
+{"next_node": "search", "args": {"topic": 123}}  # Wrong type
+
+# Runtime catches:
+# pydantic.ValidationError: topic: Input should be a valid string
+
+# Planner records error in trajectory:
+TrajectoryStep(
+    action=PlannerAction(...),
+    observation=None,
+    error="tool 'search' did not validate: topic: Input should be a valid string"
+)
+
+# LLM sees error in next iteration and can correct
+```
+
+**Output validation failure:**
+```python
+@tool(desc="Search")
+async def search(args: Query, ctx) -> SearchResult:
+    # Tool returns wrong type
+    return {"results": ["item1"]}  # dict instead of SearchResult
+
+# Runtime catches:
+# pydantic.ValidationError: SearchResult expected, got dict
+
+# Recorded as error in trajectory
+```
+
+---
+
+### 19.6 LiteLLM Integration
+
+React Planner uses [LiteLLM](https://docs.litellm.ai/) for model-agnostic LLM access.
+
+#### Supported Providers
+
+LiteLLM supports 100+ models across providers:
+- **OpenAI**: gpt-4, gpt-3.5-turbo, gpt-4-turbo
+- **Anthropic**: claude-3-opus, claude-3-sonnet, claude-3-haiku
+- **Google**: gemini-pro, gemini-ultra
+- **Azure OpenAI**: Custom deployments
+- **Open-source**: Llama, Mistral, etc.
+
+**See**: [LiteLLM Providers](https://docs.litellm.ai/docs/providers)
+
+#### Model Configuration
+
+**Simple string (most common):**
+
+```python
+planner = ReactPlanner(
+    llm="gpt-4",  # Uses OPENAI_API_KEY env var
+    catalog=catalog,
+)
+```
+
+**With model parameters:**
+
+```python
+planner = ReactPlanner(
+    llm={
+        "model": "gpt-4-turbo",
+        "temperature": 0.0,
+        "max_tokens": 1000,
+        "api_key": "sk-...",  # Optional, uses env var otherwise
+    },
+    catalog=catalog,
+)
+```
+
+**Azure OpenAI:**
+
+```python
+planner = ReactPlanner(
+    llm={
+        "model": "azure/gpt-4-deployment",
+        "api_base": "https://your-endpoint.openai.azure.com",
+        "api_key": os.getenv("AZURE_API_KEY"),
+        "api_version": "2023-05-15",
+    },
+    catalog=catalog,
+)
+```
+
+**Anthropic Claude:**
+
+```python
+planner = ReactPlanner(
+    llm={
+        "model": "claude-3-sonnet-20240229",
+        "api_key": os.getenv("ANTHROPIC_API_KEY"),
+    },
+    catalog=catalog,
+)
+```
+
+#### Environment Variables
+
+LiteLLM automatically reads API keys from environment:
+
+```bash
+# OpenAI
+export OPENAI_API_KEY="sk-..."
+
+# Anthropic
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# Google
+export GOOGLE_API_KEY="..."
+
+# Azure
+export AZURE_API_KEY="..."
+export AZURE_API_BASE="https://..."
+```
+
+#### Custom LLM Client
+
+For non-LiteLLM providers or testing, implement the `JSONLLMClient` protocol:
+
+```python
+from typing import Protocol, Mapping, Any, Sequence
+
+class JSONLLMClient(Protocol):
+    async def complete(
+        self,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Return raw JSON string."""
+        ...
+
+# Example: Stub client for testing
+class StubClient:
+    def __init__(self, responses: list[dict]):
+        self._responses = [json.dumps(r) for r in responses]
+        self._index = 0
+
+    async def complete(self, *, messages, response_format=None) -> str:
+        response = self._responses[self._index]
+        self._index += 1
+        return response
+
+# Use custom client
+stub = StubClient([
+    {"thought": "Step 1", "next_node": "triage", "args": {...}},
+    {"thought": "Step 2", "next_node": "retrieve", "args": {...}},
+    {"thought": "Done", "next_node": None, "args": {"answer": "..."}}
+])
+
+planner = ReactPlanner(llm_client=stub, catalog=catalog)
+```
+
+#### JSON Schema Mode
+
+**Structured outputs** (recommended for supported models):
+
+```python
+planner = ReactPlanner(
+    llm="gpt-4-turbo",
+    catalog=catalog,
+    json_schema_mode=True,  # Default: True
+)
+```
+
+**When enabled:**
+- Uses `response_format={"type": "json_schema", "json_schema": {...}}`
+- LLM guaranteed to return valid JSON matching PlannerAction schema
+- Reduces JSON repair retries
+
+**When disabled (fallback):**
+```python
+planner = ReactPlanner(
+    llm="claude-3-opus",
+    catalog=catalog,
+    json_schema_mode=False,  # For models without schema support
+)
+```
+
+- Uses system prompt only
+- Relies on JSON repair loop (see Section 19.9)
+
+---
+
+### 19.7 Parallel Execution
+
+React Planner supports concurrent tool execution with automatic result merging.
+
+#### How Parallel Execution Works
+
+**LLM returns parallel plan:**
+
+```python
+{
+    "thought": "Fan out to multiple shards concurrently",
+    "plan": [
+        {"node": "fetch_primary", "args": {"topic": "penguins", "shard": 0}},
+        {"node": "fetch_secondary", "args": {"topic": "penguins", "shard": 1}}
+    ],
+    "join": {"node": "merge_results"}  # Optional join node
+}
+```
+
+**Runtime execution:**
+1. Validate all branch specifications
+2. Execute branches concurrently using `asyncio.gather()`
+3. Collect results (successes and failures)
+4. Optionally call join node with aggregated results
+5. Record observation in trajectory
+
+#### Defining Parallel-Compatible Tools
+
+**Branch tools:**
+
+```python
+from pydantic import BaseModel
+
+class ShardRequest(BaseModel):
+    topic: str
+    shard: int
+
+class ShardResult(BaseModel):
+    shard: int
+    documents: list[str]
+
+@tool(desc="Fetch from primary shard", tags=["parallel"])
+async def fetch_primary(args: ShardRequest, ctx) -> ShardResult:
+    # Simulate shard query
+    await asyncio.sleep(0.1)
+    docs = [f"primary-doc-{i}" for i in range(3)]
+    return ShardResult(shard=args.shard, documents=docs)
+
+@tool(desc="Fetch from secondary shard", tags=["parallel"])
+async def fetch_secondary(args: ShardRequest, ctx) -> ShardResult:
+    # Simulate shard query
+    await asyncio.sleep(0.1)
+    docs = [f"secondary-doc-{i}" for i in range(3)]
+    return ShardResult(shard=args.shard, documents=docs)
+```
+
+**Join node (optional):**
+
+```python
+class MergeArgs(BaseModel):
+    expect: int                            # Expected branch count
+    results: list[ShardResult]             # Successful results
+    # Auto-populated fields available in ctx.meta:
+    # - parallel_branches: list[dict]
+    # - parallel_success_count: int
+    # - parallel_failure_count: int
+
+class MergedResult(BaseModel):
+    total_documents: int
+    documents: list[str]
+
+@tool(desc="Merge shard results")
+async def merge_results(args: MergeArgs, ctx) -> MergedResult:
+    # Access auto-populated metadata
+    assert ctx.meta["parallel_success_count"] == args.expect
+
+    # Merge documents from all successful shards
+    all_docs = []
+    for result in args.results:
+        all_docs.extend(result.documents)
+
+    return MergedResult(
+        total_documents=len(all_docs),
+        documents=all_docs
+    )
+```
+
+#### Auto-Populated Join Arguments
+
+When a join node is specified, the runtime auto-populates these fields in `args`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `expect` | `int` | Number of branches in plan |
+| `results` | `list[Any]` | Successful tool outputs (in plan order) |
+
+**And in `ctx.meta`:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `parallel_branches` | `list[dict]` | Full branch specs from plan |
+| `parallel_success_count` | `int` | Number of successful branches |
+| `parallel_failure_count` | `int` | Number of failed branches |
+| `parallel_failures` | `list[dict]` | Failure details per failed branch |
+
+**Example join args:**
+
+```python
+{
+    "expect": 2,
+    "results": [
+        ShardResult(shard=0, documents=["doc1", "doc2"]),
+        ShardResult(shard=1, documents=["doc3", "doc4"])
+    ]
+}
+
+# ctx.meta contains:
+{
+    "parallel_branches": [
+        {"node": "fetch_primary", "args": {"topic": "...", "shard": 0}},
+        {"node": "fetch_secondary", "args": {"topic": "...", "shard": 1}}
+    ],
+    "parallel_success_count": 2,
+    "parallel_failure_count": 0,
+    "parallel_failures": []
+}
+```
+
+#### Handling Partial Failures
+
+**Scenario: One branch fails, one succeeds:**
+
+```python
+# LLM plan:
+{
+    "plan": [
+        {"node": "fetch_primary", "args": {...}},
+        {"node": "fetch_secondary", "args": {...}}  # This one fails
+    ],
+    "join": {"node": "merge_results"}
+}
+
+# Runtime execution:
+# - fetch_primary succeeds → ShardResult(...)
+# - fetch_secondary raises exception
+
+# Join args:
+{
+    "expect": 2,
+    "results": [ShardResult(...)]  # Only successful result
+}
+
+# ctx.meta:
+{
+    "parallel_success_count": 1,
+    "parallel_failure_count": 1,
+    "parallel_failures": [
+        {
+            "node": "fetch_secondary",
+            "args": {...},
+            "error_code": "RuntimeError",
+            "message": "...",
+            "suggestion": None  # or error.suggestion if available
+        }
+    ]
+}
+```
+
+**Join node can handle partial success:**
+
+```python
+@tool(desc="Merge with fallback")
+async def robust_merge(args: MergeArgs, ctx) -> MergedResult:
+    success_count = ctx.meta["parallel_success_count"]
+    failure_count = ctx.meta["parallel_failure_count"]
+
+    if failure_count > 0:
+        logger.warning(f"{failure_count} branches failed, using partial results")
+
+    # Merge successful results only
+    all_docs = []
+    for result in args.results:
+        all_docs.extend(result.documents)
+
+    return MergedResult(
+        total_documents=len(all_docs),
+        documents=all_docs
+    )
+```
+
+#### Parallel Execution Guarantees
+
+**✅ Guaranteed:**
+- All branches execute concurrently (`asyncio.gather`)
+- Each branch counts as one hop toward budget
+- Results maintain plan order (results[0] = plan[0])
+- Join node receives accurate success/failure counts
+- Failures don't crash planner (recorded in trajectory)
+
+**⚠️ Not guaranteed:**
+- Completion order (branch 2 may finish before branch 1)
+- Resource limits (no max concurrency cap within planner)
+
+#### Planning Hints for Parallel Execution
+
+Control parallel behavior with `planning_hints`:
+
+```python
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    planning_hints={
+        "parallel_groups": [
+            ["fetch_primary", "fetch_secondary", "fetch_tertiary"]
+        ],  # Allowed parallel combinations
+        "sequential_only": ["approval_gate", "write_database"],  # Never parallelize
+        "max_parallel": 4,  # Max concurrent branches
+    }
+)
+```
+
+**Enforcement:**
+- `parallel_groups`: Soft hint (LLM can deviate, warning logged)
+- `sequential_only`: Hard constraint (plan rejected if violated)
+- `max_parallel`: Hard constraint (plan rejected if exceeded)
+
+---
+
+### 19.8 Pause and Resume
+
+React Planner supports pausing execution for human approval or external input.
+
+#### When to Use Pause/Resume
+
+**Use cases:**
+- Approval workflows (manager approval before action)
+- Human-in-the-loop (user provides clarification)
+- External event waiting (webhook callback)
+- Constraint violations (requires manual override)
+
+#### How to Pause
+
+Tools request pause by calling `ctx.pause()`:
+
+```python
+@tool(desc="Approval checkpoint", side_effects="external")
+async def approval_gate(args: Intent, ctx) -> Intent:
+    # Check if high-risk
+    if args.intent in ["delete_data", "transfer_funds"]:
+        # Pause and wait for approval
+        await ctx.pause(
+            "approval_required",
+            {"intent": args.intent, "risk": "high"}
+        )
+    return args  # Execution continues after resume
+```
+
+**`ctx.pause()` signature:**
+
+```python
+async def pause(
+    self,
+    reason: Literal["approval_required", "await_input", "external_event", "constraints_conflict"],
+    payload: Mapping[str, Any] | None = None,
+) -> PlannerPause
+```
+
+**Raises:** `_PlannerPauseSignal` exception (internal, caught by runtime)
+
+**Effect:**
+1. Execution halts immediately
+2. Trajectory serialized with all state
+3. Unique resume token generated
+4. `PlannerPause` returned to caller
+5. If `state_store` configured, pause state persisted
+
+#### Resume Token Structure
+
+```python
+# Auto-generated format:
+f"pause_{trace_id}_{timestamp}_{random_hex}"
+
+# Example:
+"pause_abc-123_1700000000_a1b2c3d4"
+```
+
+**Security note:** Token is NOT signed. For production, validate trace ownership before resuming.
+
+#### How to Resume
+
+**Basic resume:**
+
+```python
+result = await planner.run("Process sensitive operation")
+
+if isinstance(result, PlannerPause):
+    print(f"Paused: {result.reason}")
+    print(f"Payload: {result.payload}")
+
+    # Store token for later
+    resume_token = result.resume_token
+
+    # ... wait for approval ...
+
+    # Resume execution
+    final = await planner.resume(resume_token)
+
+    if isinstance(final, PlannerFinish):
+        print(f"Completed: {final.payload}")
+```
+
+**Resume with user input:**
+
+```python
+@tool(desc="Ask user for clarification")
+async def ask_user(args: Query, ctx) -> Query:
+    await ctx.pause(
+        "await_input",
+        {"question": "Which database? (prod/staging)"}
+    )
+    # After resume, user_input is available in trajectory
+    return args
+
+# Resume with input
+final = await planner.resume(
+    resume_token,
+    user_input="prod"  # Injected into trajectory
+)
+
+# Tool can access via trajectory.resume_user_input
+```
+
+#### State Persistence
+
+**Without StateStore (in-memory):**
+
+```python
+planner = ReactPlanner(llm="gpt-4", catalog=catalog, pause_enabled=True)
+
+# Pause state stored in planner._pause_store (dict)
+# Lost if process restarts
+```
+
+**With StateStore (durable):**
+
+```python
+from penguiflow.state import StateStore
+
+class RedisStateStore:
+    """Example StateStore implementation."""
+    def __init__(self, redis_client):
+        self.redis = redis_client
+
+    async def save_pause_state(self, token: str, state: dict) -> None:
+        # Serialize trajectory
+        await self.redis.set(f"pause:{token}", json.dumps(state))
+
+    async def load_pause_state(self, token: str) -> dict:
+        data = await self.redis.get(f"pause:{token}")
+        return json.loads(data) if data else None
+
+state_store = RedisStateStore(redis_client)
+
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    pause_enabled=True,
+    state_store=state_store
+)
+
+# Pause state survives process restarts
+```
+
+**Stored state includes:**
+- Full trajectory (query, steps, observations)
+- Constraint state (hop budget, deadline, hints)
+- Context metadata (ctx.meta)
+
+#### Disabling Pause
+
+```python
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    pause_enabled=False  # ctx.pause() raises RuntimeError
+)
+```
+
+**Use when:** Pause not needed and want to prevent accidental pauses.
+
+#### Complete Example: Approval Workflow
+
+```python
+from penguiflow.planner import ReactPlanner, PlannerPause, PlannerFinish
+
+# Define tools
+@tool(desc="Triage request")
+async def triage(args: Request, ctx) -> Intent:
+    return Intent(intent=args.type)
+
+@tool(desc="Approval gate")
+async def approval(args: Intent, ctx) -> Intent:
+    if args.intent == "delete":
+        await ctx.pause("approval_required", {"intent": "delete", "requires": "manager"})
+    return args
+
+@tool(desc="Execute action")
+async def execute(args: Intent, ctx) -> Result:
+    return Result(status="completed")
+
+# Setup planner
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=build_catalog([triage, approval, execute], registry),
+    pause_enabled=True
+)
+
+# First run - pauses at approval
+result = await planner.run("Delete user data")
+
+if isinstance(result, PlannerPause):
+    # Show approval UI
+    print(f"Approval needed: {result.payload}")
+
+    # Simulate approval
+    manager_approved = True
+
+    if manager_approved:
+        # Resume execution
+        final = await planner.resume(result.resume_token)
+
+        if isinstance(final, PlannerFinish):
+            print(f"Action completed: {final.payload}")
+```
+
+---
+
+### 19.9 Constraint Enforcement
+
+React Planner enforces three types of constraints to prevent runaway execution.
+
+#### Hop Budget (Iteration Limit)
+
+**Purpose:** Limit number of tool calls to prevent infinite loops.
+
+**Configuration:**
+
+```python
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    hop_budget=10,  # Max 10 tool calls
+)
+```
+
+**Behavior:**
+- Each sequential tool call increments hop counter
+- Each parallel branch counts as one hop total (not per branch)
+- When `hops >= hop_budget`, planner terminates with `PlannerFinish(reason="budget_exhausted")`
+
+**Example:**
+
+```python
+# Sequential execution:
+# Hop 0: triage
+# Hop 1: retrieve
+# Hop 2: summarize
+# Total: 3 hops
+
+# Parallel execution:
+# Hop 0: fan-out (fetch_primary + fetch_secondary) → counts as 1 hop
+# Hop 1: merge_results
+# Total: 2 hops
+```
+
+#### Deadline (Wall-Clock Limit)
+
+**Purpose:** Enforce time limits for user-facing responses.
+
+**Configuration:**
+
+```python
+import time
+
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    deadline_s=time.time() + 30,  # 30 seconds from now
+)
+```
+
+**Behavior:**
+- Checked before each LLM call and tool execution
+- When `time.time() > deadline_s`, terminates with `PlannerFinish(reason="budget_exhausted")`
+
+**Note:** Uses same time source as Section 9.2 deadlines.
+
+#### Token Budget (Context Window Limit)
+
+**Purpose:** Trigger trajectory summarization when context grows too large.
+
+**Configuration:**
+
+```python
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    token_budget=1000,  # Trigger summarization at 1000 tokens
+)
+```
+
+**Behavior:**
+- Runtime estimates message size (crude character count)
+- When estimated tokens > token_budget:
+  - Triggers trajectory summarization
+  - Replaces full history with compact summary
+  - LLM sees summary + last step instead of full history
+
+**Summarization modes:**
+
+**Rule-based (default, free):**
+```python
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    token_budget=500,  # No summarizer_llm
+)
+# Uses rule-based compression (extracts last observation, lists failed steps)
+```
+
+**LLM-based (optional, costs extra):**
+```python
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    token_budget=500,
+    summarizer_llm="gpt-3.5-turbo",  # Cheaper model for summarization
+)
+# Calls summarizer LLM to generate TrajectorySummary
+```
+
+#### Combining Constraints
+
+```python
+import time
+
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    hop_budget=15,                     # Max 15 tool calls
+    deadline_s=time.time() + 60,       # 60 second limit
+    token_budget=2000,                 # Summarize at 2k tokens
+    summarizer_llm="gpt-3.5-turbo",   # Use cheap model for summary
+)
+
+# First constraint hit terminates execution
+```
+
+**Check order (same as Section 9.5):**
+1. Deadline (most urgent)
+2. Token budget → summarization (not termination)
+3. Hop budget
+
+---
+
+### 19.10 Error Handling and Adaptive Replanning
+
+React Planner handles tool failures gracefully with structured error feedback.
+
+#### How Error Feedback Works
+
+**When a tool fails:**
+1. Exception caught by runtime
+2. Error details extracted (message, type, suggestion)
+3. Recorded in trajectory as failed step
+4. LLM sees error in next iteration
+5. LLM can replan based on error details
+
+**Error observation structure:**
+
+```python
+# Tool raises exception
+raise ValueError("Invalid shard ID: must be 0-9")
+
+# Recorded in trajectory:
+TrajectoryStep(
+    action=PlannerAction(thought="...", next_node="fetch_shard", args={...}),
+    observation=None,
+    error="tool 'fetch_shard' did not validate: Invalid shard ID: must be 0-9",
+    failure=None
+)
+
+# LLM receives in next step:
+{
+    "observation": {
+        "error": "tool 'fetch_shard' did not validate: Invalid shard ID: must be 0-9"
+    }
+}
+```
+
+#### Exception with Suggestions
+
+Tools can provide replanning hints via `.suggestion` attribute:
+
+```python
+class RemoteTimeout(RuntimeError):
+    """Exception with suggestion for replanning."""
+    def __init__(self, message: str, suggestion: str):
+        super().__init__(message)
+        self.suggestion = suggestion  # or .remedy
+
+@tool(desc="Call remote API", side_effects="external")
+async def remote_api(args: Query, ctx) -> Documents:
+    try:
+        return await http_client.get(f"/search?q={args.text}", timeout=5.0)
+    except TimeoutError:
+        raise RemoteTimeout(
+            "Remote search timed out",
+            suggestion="use_cached_index"  # Hint for LLM
+        )
+
+@tool(desc="Fallback to cached index", side_effects="read")
+async def cached_api(args: Query, ctx) -> Documents:
+    return Documents(documents=cached_db.search(args.text))
+```
+
+**Failure observation with suggestion:**
+
+```python
+# Recorded in trajectory:
+TrajectoryStep(
+    action=PlannerAction(..., next_node="remote_api", args={...}),
+    observation=None,
+    error="Remote search timed out",
+    failure={
+        "node": "remote_api",
+        "args": {...},
+        "error_code": "RemoteTimeout",
+        "message": "Remote search timed out",
+        "suggestion": "use_cached_index"  # LLM sees this
+    }
+)
+
+# LLM receives:
+{
+    "error": "Remote search timed out",
+    "failure": {
+        "node": "remote_api",
+        "suggestion": "use_cached_index"
+    }
+}
+
+# LLM can adapt:
+{
+    "thought": "Remote API timed out, suggestion says use cached index",
+    "next_node": "cached_api",  # Switches to fallback
+    "args": {...}
+}
+```
+
+#### JSON Repair Loop
+
+**Problem:** LLMs sometimes generate malformed JSON.
+
+**Solution:** React Planner includes automatic repair:
+
+```python
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    repair_attempts=3,  # Max repair retries (default: 3)
+)
+```
+
+**Repair process:**
+1. LLM returns raw JSON
+2. Pydantic validation fails (e.g., missing field, wrong type)
+3. Runtime appends repair prompt with error details
+4. LLM tries again with error feedback
+5. Repeat up to `repair_attempts` times
+6. If still invalid, raise `ValidationError`
+
+**Example repair:**
+
+```
+# LLM first attempt:
+{
+    "thought": "Search for docs",
+    "next_node": "search"
+    // Missing "args" field
+}
+
+# Pydantic error:
+ValidationError: 1 validation error for PlannerAction
+args
+  Field required [type=missing, input_value=...]
+
+# Runtime injects repair prompt:
+{
+    "role": "system",
+    "content": "Previous response invalid: args field required. Please return valid JSON matching PlannerAction schema."
+}
+
+# LLM second attempt:
+{
+    "thought": "Search for docs",
+    "next_node": "search",
+    "args": {"query": "PenguiFlow"}  # Fixed
+}
+```
+
+**Best practices:**
+- Set `temperature=0.0` to reduce JSON errors
+- Use `json_schema_mode=True` for supported models (eliminates repairs)
+- Set `repair_attempts=1` for fast failures in production
+
+---
+
+### 19.11 Planning Hints
+
+Planning hints provide developer guidance to the LLM for safer, more efficient execution.
+
+#### Complete Hint Reference
+
+```python
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    planning_hints={
+        # Ordering preferences
+        "ordering_hints": ["triage", "retrieve", "summarize"],
+
+        # Parallel execution control
+        "parallel_groups": [["shard_0", "shard_1", "shard_2"]],
+        "sequential_only": ["approval_gate", "write_database"],
+        "max_parallel": 4,
+
+        # Tool filtering
+        "disallow_nodes": ["deprecated_tool", "dangerous_operation"],
+        "prefer_nodes": ["fast_search", "cached_retrieval"],
+
+        # Budget hints (soft guidance)
+        "budget_hints": {
+            "max_parallel": 3,
+            "prefer_sequential": True
+        }
+    }
+)
+```
+
+#### Hint Types Explained
+
+**ordering_hints** (soft, warns once):
+- Suggests preferred tool sequence
+- LLM can deviate if needed
+- Warning logged on first deviation
+- Useful for: Common workflows, best practices
+
+```python
+"ordering_hints": ["triage", "approval", "retrieve", "process", "respond"]
+# LLM will try to follow this order but can skip/reorder if logic requires
+```
+
+**parallel_groups** (soft):
+- Suggests which tools can run concurrently
+- LLM not strictly bound
+- Useful for: Documenting safe parallel combinations
+
+```python
+"parallel_groups": [
+    ["fetch_shard_0", "fetch_shard_1", "fetch_shard_2"],  # Can parallel
+    ["primary_db", "secondary_db"]                         # Can parallel
+]
+```
+
+**sequential_only** (hard constraint):
+- Tools that **must never** be parallelized
+- Plan rejected if violated
+- Useful for: Stateful operations, approval gates
+
+```python
+"sequential_only": ["approval_gate", "commit_transaction", "send_email"]
+# Plan with parallel approval_gate → rejected
+```
+
+**max_parallel** (hard constraint):
+- Maximum concurrent branches allowed
+- Plan rejected if exceeded
+- Useful for: Resource limits, rate limiting
+
+```python
+"max_parallel": 4
+# Plan with 5 branches → rejected
+```
+
+**disallow_nodes** (hard constraint):
+- Tools that **cannot** be used
+- Tool selection rejected if attempted
+- Useful for: Deprecation, permissions, safety
+
+```python
+"disallow_nodes": ["delete_all_data", "call_paid_api_v1"]
+# LLM tries to use delete_all_data → plan rejected, error in trajectory
+```
+
+**prefer_nodes** (soft):
+- Tools to prefer over alternatives
+- Not enforced, just guidance
+- Useful for: Cost optimization, performance
+
+```python
+"prefer_nodes": ["cached_search", "local_embedding"]
+# Suggests using these first before remote/expensive alternatives
+```
+
+#### Hint Enforcement Example
+
+```python
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    planning_hints={
+        "ordering_hints": ["triage", "retrieve"],
+        "disallow_nodes": ["dangerous_delete"],
+        "max_parallel": 2,
+    }
+)
+
+# LLM generates plan:
+{
+    "thought": "Skip triage, go straight to retrieve",  # Violates ordering_hints
+    "next_node": "retrieve",  # Warning logged, but allowed
+    "args": {...}
+}
+# ✅ Executes (soft hint)
+
+# LLM generates plan:
+{
+    "thought": "Delete all data",
+    "next_node": "dangerous_delete",  # Violates disallow_nodes
+    "args": {}
+}
+# ❌ Rejected, error recorded in trajectory
+
+# LLM generates plan:
+{
+    "plan": [
+        {"node": "fetch_0", "args": {...}},
+        {"node": "fetch_1", "args": {...}},
+        {"node": "fetch_2", "args": {...}}  # 3 branches > max_parallel (2)
+    ]
+}
+# ❌ Rejected, error recorded in trajectory
+```
+
+---
+
+### 19.12 React Planner vs. Alternatives Decision Matrix
+
+| Requirement | Use React Planner | Use Controller Loops | Use Routing Patterns | Use Playbooks |
+|-------------|-------------------|---------------------|---------------------|---------------|
+| **Need adaptive tool selection** | ✅ Yes | ❌ No | ❌ No | ❌ No |
+| **Fixed workflow known upfront** | ❌ No | ⚠️ Maybe | ✅ Yes | ✅ Yes |
+| **LLM cost acceptable** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Zero LLM cost required** | ❌ No | ⚠️ Maybe | ✅ Yes | ✅ Yes |
+| **Complex multi-step reasoning** | ✅ Yes | ⚠️ Maybe | ❌ No | ⚠️ Maybe |
+| **Parallel fan-out needed** | ✅ Yes (built-in) | ⚠️ Manual | ⚠️ Manual | ⚠️ Manual |
+| **Approval workflows** | ✅ Yes (pause/resume) | ❌ No | ❌ No | ❌ No |
+| **Need structured error recovery** | ✅ Yes | ❌ No | ❌ No | ❌ No |
+| **Deterministic execution required** | ❌ No (LLM varies) | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Real-time latency critical** | ❌ No (LLM adds latency) | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Iteration within single node** | ❌ No | ✅ Yes | ❌ No | ❌ No |
+| **Type-safe routing** | ⚠️ Runtime | ⚠️ Runtime | ✅ Compile-time (union_router) | ⚠️ Runtime |
+| **Config-driven routing** | ❌ No | ❌ No | ✅ Yes (DictRoutingPolicy) | ❌ No |
+| **Reusable sub-workflows** | ⚠️ Tools can be playbooks | ❌ No | ❌ No | ✅ Yes |
+
+**Decision tree:**
+
+```
+Need adaptive multi-tool selection?
+  ├─ Yes → Need approval/pause workflows?
+  │        ├─ Yes → Use React Planner
+  │        └─ No  → Acceptable LLM cost per step?
+  │                 ├─ Yes → Use React Planner
+  │                 └─ No  → Consider Controller Loops + manual tool switching
+  └─ No  → Fixed sequence known?
+           ├─ Yes → Type-based routing needed?
+           │        ├─ Yes → Use union_router
+           │        └─ No  → Use Playbooks or predicate_router
+           └─ No  → Single-node iteration?
+                    ├─ Yes → Use Controller Loops
+                    └─ No  → Use Routing Patterns
+```
+
+---
+
+### 19.13 Testing React Planners
+
+#### Stub LLM for Deterministic Tests
+
+**StubClient** for scripted responses:
+
+```python
+from penguiflow.planner import ReactPlanner
+import json
+
+class StubClient:
+    """Deterministic LLM for testing."""
+    def __init__(self, responses: list[dict]):
+        self._responses = [json.dumps(r) for r in responses]
+        self._index = 0
+
+    async def complete(self, *, messages, response_format=None) -> str:
+        if self._index >= len(self._responses):
+            raise IndexError("No more scripted responses")
+        response = self._responses[self._index]
+        self._index += 1
+        return response
+
+# Test with scripted responses
+stub = StubClient([
+    {"thought": "Step 1", "next_node": "triage", "args": {"text": "..."}},
+    {"thought": "Step 2", "next_node": "retrieve", "args": {"intent": "docs"}},
+    {"thought": "Done", "next_node": None, "args": {"answer": "Complete"}},
+])
+
+planner = ReactPlanner(llm_client=stub, catalog=catalog)
+
+result = await planner.run("test query")
+assert result.reason == "answer_complete"
+assert result.payload == {"answer": "Complete"}
+```
+
+#### Testing Tool Execution
+
+```python
+import pytest
+from penguiflow.testkit import run_one
+
+@pytest.mark.asyncio
+async def test_tool_execution():
+    """Test that tools execute correctly."""
+    call_count = 0
+
+    @tool(desc="Test tool")
+    async def test_tool(args: Query, ctx) -> Result:
+        nonlocal call_count
+        call_count += 1
+        return Result(value=f"call_{call_count}")
+
+    stub = StubClient([
+        {"thought": "Call tool", "next_node": "test_tool", "args": {"text": "input"}},
+        {"thought": "Done", "next_node": None, "args": {"answer": "done"}},
+    ])
+
+    planner = ReactPlanner(llm_client=stub, catalog=[test_tool])
+    result = await planner.run("test")
+
+    assert call_count == 1
+    assert result.payload == {"answer": "done"}
+```
+
+#### Testing Error Recovery
+
+```python
+@pytest.mark.asyncio
+async def test_adaptive_replanning():
+    """Test planner recovers from tool failure."""
+
+    @tool(desc="Flaky tool")
+    async def flaky_tool(args: Query, ctx) -> Result:
+        raise RuntimeError("Service unavailable")
+
+    @tool(desc="Fallback tool")
+    async def fallback_tool(args: Query, ctx) -> Result:
+        return Result(value="fallback_result")
+
+    stub = StubClient([
+        {"thought": "Try primary", "next_node": "flaky_tool", "args": {...}},
+        # LLM sees error, retries with fallback
+        {"thought": "Use fallback", "next_node": "fallback_tool", "args": {...}},
+        {"thought": "Done", "next_node": None, "args": {"answer": "success"}},
+    ])
+
+    planner = ReactPlanner(llm_client=stub, catalog=[flaky_tool, fallback_tool])
+    result = await planner.run("test")
+
+    assert result.reason == "answer_complete"
+    assert result.payload == {"answer": "success"}
+```
+
+#### Testing Budget Exhaustion
+
+```python
+@pytest.mark.asyncio
+async def test_hop_budget():
+    """Test hop budget enforcement."""
+
+    @tool(desc="Infinite loop simulator")
+    async def loop_tool(args: Query, ctx) -> Query:
+        return args  # Returns same type, can loop forever
+
+    stub = StubClient([
+        {"thought": f"Step {i}", "next_node": "loop_tool", "args": {"text": "..."}}
+        for i in range(20)  # More than budget
+    ])
+
+    planner = ReactPlanner(
+        llm_client=stub,
+        catalog=[loop_tool],
+        hop_budget=5  # Stop after 5 hops
+    )
+
+    result = await planner.run("loop forever")
+
+    assert result.reason == "budget_exhausted"
+    assert "hop" in result.metadata.get("constraints", {})
+```
+
+#### Testing Pause/Resume
+
+```python
+@pytest.mark.asyncio
+async def test_pause_resume():
+    """Test pause and resume flow."""
+
+    @tool(desc="Approval gate")
+    async def approval(args: Intent, ctx) -> Intent:
+        await ctx.pause("approval_required", {"intent": args.intent})
+        return args
+
+    stub = StubClient([
+        {"thought": "Need approval", "next_node": "approval", "args": {...}},
+        # After resume:
+        {"thought": "Approved, continue", "next_node": None, "args": {"answer": "done"}},
+    ])
+
+    planner = ReactPlanner(llm_client=stub, catalog=[approval], pause_enabled=True)
+
+    # First run - pauses
+    result = await planner.run("test")
+    assert isinstance(result, PlannerPause)
+    assert result.reason == "approval_required"
+
+    # Resume
+    final = await planner.resume(result.resume_token)
+    assert isinstance(final, PlannerFinish)
+    assert final.payload == {"answer": "done"}
+```
+
+---
+
+### 19.14 Common Mistakes
+
+#### Mistake 1: Missing @tool Decorator
+
+```python
+# ❌ WRONG - function not decorated
+async def my_tool(args: InputModel, ctx: object) -> OutputModel:
+    return OutputModel(...)
+
+nodes = [Node(my_tool, name="my_tool")]
+catalog = build_catalog(nodes, registry)  # Won't have metadata
+
+# ✅ CORRECT
+@tool(desc="My tool description")
+async def my_tool(args: InputModel, ctx: object) -> OutputModel:
+    return OutputModel(...)
+```
+
+#### Mistake 2: Confusing Hop Budget with max_iters
+
+```python
+# ❌ WRONG - hop_budget and max_iters are different
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    max_iters=10,     # Max planning steps (LLM calls)
+    hop_budget=10,    # Max tool executions
+)
+# If parallel execution: 1 planning step can execute 3 tools (1 hop total)
+
+# ✅ CORRECT - understand the difference
+# max_iters: How many times LLM is called
+# hop_budget: How many tool calls are made
+# Parallel fan-out counts as 1 hop
+```
+
+#### Mistake 3: Not Handling PlannerPause
+
+```python
+# ❌ WRONG - assume PlannerFinish
+result = await planner.run("query")
+print(result.payload)  # AttributeError if result is PlannerPause!
+
+# ✅ CORRECT - check type
+result = await planner.run("query")
+if isinstance(result, PlannerPause):
+    # Handle pause
+    token = result.resume_token
+    final = await planner.resume(token)
+elif isinstance(result, PlannerFinish):
+    # Handle completion
+    print(result.payload)
+```
+
+#### Mistake 4: Setting Both llm and llm_client
+
+```python
+# ❌ WRONG - conflicting configuration
+planner = ReactPlanner(
+    llm="gpt-4",           # Can't use both
+    llm_client=my_client,  # Can't use both
+    catalog=catalog
+)
+# Raises ValueError
+
+# ✅ CORRECT - choose one
+planner = ReactPlanner(llm="gpt-4", catalog=catalog)
+# OR
+planner = ReactPlanner(llm_client=my_client, catalog=catalog)
+```
+
+#### Mistake 5: Forgetting to Register Tool Types
+
+```python
+# ❌ WRONG - tool not registered
+@tool(desc="Search")
+async def search(args: Query, ctx) -> Results:
+    ...
+
+# Registry missing search registration
+registry = ModelRegistry()
+# registry.register("search", Query, Results)  # FORGOT THIS
+
+planner = ReactPlanner(llm="gpt-4", nodes=[search], registry=registry)
+# Validation will fail when tool is called
+
+# ✅ CORRECT - register all tools
+registry = ModelRegistry()
+registry.register("search", Query, Results)
+```
+
+#### Mistake 6: Using json_schema_mode with Unsupported Models
+
+```python
+# ❌ WRONG - not all models support structured outputs
+planner = ReactPlanner(
+    llm="claude-2",  # Doesn't support json_schema mode
+    catalog=catalog,
+    json_schema_mode=True  # Will fail or behave unexpectedly
+)
+
+# ✅ CORRECT - disable for unsupported models
+planner = ReactPlanner(
+    llm="claude-2",
+    catalog=catalog,
+    json_schema_mode=False  # Falls back to prompt-based JSON
+)
+```
+
+#### Mistake 7: Expecting Tools to Access Message Fields
+
+```python
+# ❌ WRONG - tools receive args, not Message
+@tool(desc="Tool")
+async def my_tool(args: InputModel, ctx) -> OutputModel:
+    trace_id = args.trace_id  # AttributeError! args is InputModel, not Message
+    return OutputModel(...)
+
+# ✅ CORRECT - use context_meta for extra data
+# Pass via run():
+result = await planner.run(
+    "query",
+    context_meta={"trace_id": "abc-123", "tenant": "demo"}
+)
+
+# Access in tool via ctx (not directly):
+@tool(desc="Tool")
+async def my_tool(args: InputModel, ctx) -> OutputModel:
+    # ctx.meta contains context_meta
+    # But tools typically don't need it
+    return OutputModel(...)
+```
+
+#### Mistake 8: Not Setting Temperature=0 for Determinism
+
+```python
+# ❌ RISKY - non-zero temperature varies output
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    temperature=0.7  # Varies between runs
+)
+
+# ✅ BETTER - use 0 for reproducibility
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=catalog,
+    temperature=0.0  # Deterministic (as much as possible)
+)
+```
+
+---
+
+### 19.15 Complete Example: Multi-Shard Retrieval with Approval
+
+```python
+import asyncio
+from pydantic import BaseModel, Field
+from penguiflow.catalog import build_catalog, tool
+from penguiflow.node import Node
+from penguiflow.planner import ReactPlanner, PlannerFinish, PlannerPause
+from penguiflow.registry import ModelRegistry
+
+# === Data Models ===
+
+class Question(BaseModel):
+    """User question."""
+    text: str
+
+class Intent(BaseModel):
+    """Classified intent."""
+    intent: str
+    risk_level: str  # "low", "medium", "high"
+
+class ShardQuery(BaseModel):
+    """Shard-specific query."""
+    topic: str
+    shard: int = Field(ge=0, le=2, description="Shard ID (0-2)")
+
+class ShardResult(BaseModel):
+    """Results from a single shard."""
+    shard: int
+    documents: list[str]
+
+class MergeArgs(BaseModel):
+    """Auto-populated args for join node."""
+    expect: int
+    results: list[ShardResult]
+
+class FinalAnswer(BaseModel):
+    """Final response to user."""
+    answer: str
+    sources: list[str]
+
+# === Tools ===
+
+@tool(desc="Classify user intent and assess risk", tags=["triage"])
+async def triage(args: Question, ctx: object) -> Intent:
+    """Classify question and determine risk level."""
+    text_lower = args.text.lower()
+
+    if "delete" in text_lower or "remove" in text_lower:
+        return Intent(intent="delete", risk_level="high")
+    elif "search" in text_lower or "find" in text_lower:
+        return Intent(intent="search", risk_level="low")
+    else:
+        return Intent(intent="general", risk_level="medium")
+
+@tool(desc="Approval checkpoint for high-risk operations", side_effects="external")
+async def approval_gate(args: Intent, ctx: object) -> Intent:
+    """Pause for approval if high-risk."""
+    if args.risk_level == "high":
+        await ctx.pause(
+            "approval_required",
+            {"intent": args.intent, "risk": "high"}
+        )
+    return args
+
+@tool(desc="Fetch from primary shard", side_effects="read", tags=["parallel"])
+async def fetch_primary(args: ShardQuery, ctx: object) -> ShardResult:
+    """Query primary shard."""
+    await asyncio.sleep(0.05)  # Simulate I/O
+    docs = [f"primary-shard{args.shard}-doc{i}" for i in range(2)]
+    return ShardResult(shard=args.shard, documents=docs)
+
+@tool(desc="Fetch from secondary shard", side_effects="read", tags=["parallel"])
+async def fetch_secondary(args: ShardQuery, ctx: object) -> ShardResult:
+    """Query secondary shard."""
+    await asyncio.sleep(0.05)  # Simulate I/O
+    docs = [f"secondary-shard{args.shard}-doc{i}" for i in range(2)]
+    return ShardResult(shard=args.shard, documents=docs)
+
+@tool(desc="Merge results from multiple shards")
+async def merge_results(args: MergeArgs, ctx: object) -> FinalAnswer:
+    """Combine shard results into final answer."""
+    # Access metadata
+    success_count = ctx.meta.get("parallel_success_count", 0)
+    failure_count = ctx.meta.get("parallel_failure_count", 0)
+
+    if failure_count > 0:
+        print(f"Warning: {failure_count} shards failed, using partial results")
+
+    # Merge documents
+    all_docs = []
+    for result in args.results:
+        all_docs.extend(result.documents)
+
+    answer = f"Found {len(all_docs)} documents across {success_count} shards"
+    return FinalAnswer(answer=answer, sources=all_docs)
+
+# === Setup ===
+
+def create_planner() -> ReactPlanner:
+    """Create configured planner."""
+    # Register types
+    registry = ModelRegistry()
+    registry.register("triage", Question, Intent)
+    registry.register("approval_gate", Intent, Intent)
+    registry.register("fetch_primary", ShardQuery, ShardResult)
+    registry.register("fetch_secondary", ShardQuery, ShardResult)
+    registry.register("merge_results", MergeArgs, FinalAnswer)
+
+    # Create nodes
+    nodes = [
+        Node(triage, name="triage"),
+        Node(approval_gate, name="approval_gate"),
+        Node(fetch_primary, name="fetch_primary"),
+        Node(fetch_secondary, name="fetch_secondary"),
+        Node(merge_results, name="merge_results"),
+    ]
+
+    # Initialize planner
+    planner = ReactPlanner(
+        llm="gpt-4",  # or use StubClient for testing
+        catalog=build_catalog(nodes, registry),
+        max_iters=10,
+        hop_budget=8,
+        temperature=0.0,
+        pause_enabled=True,
+        planning_hints={
+            "ordering_hints": ["triage", "approval_gate", "fetch_primary", "merge_results"],
+            "parallel_groups": [["fetch_primary", "fetch_secondary"]],
+            "sequential_only": ["approval_gate"],
+        }
+    )
+
+    return planner
+
+# === Usage ===
+
+async def main():
+    """Run example workflow."""
+    planner = create_planner()
+
+    # Example 1: Low-risk query (no approval needed)
+    print("=== Example 1: Low-risk query ===")
+    result = await planner.run("Search for penguin research")
+
+    if isinstance(result, PlannerFinish):
+        print(f"Result: {result.payload}")
+        print(f"Reason: {result.reason}")
+
+    # Example 2: High-risk query (requires approval)
+    print("\n=== Example 2: High-risk query ===")
+    result = await planner.run("Delete all user data")
+
+    if isinstance(result, PlannerPause):
+        print(f"Paused: {result.reason}")
+        print(f"Payload: {result.payload}")
+
+        # Simulate approval
+        print("Manager approved action")
+        final = await planner.resume(result.resume_token)
+
+        if isinstance(final, PlannerFinish):
+            print(f"Result: {final.payload}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+**Expected LLM Plan (Low-risk):**
+
+```
+Step 1: triage
+  → Intent(intent="search", risk_level="low")
+
+Step 2: approval_gate (skips pause for low-risk)
+  → Intent(intent="search", risk_level="low")
+
+Step 3: Parallel fan-out
+  plan: [
+    {node: "fetch_primary", args: {topic: "penguin", shard: 0}},
+    {node: "fetch_secondary", args: {topic: "penguin", shard: 1}}
+  ]
+  join: {node: "merge_results"}
+  → FinalAnswer(answer="Found 4 documents across 2 shards", sources=[...])
+
+Step 4: Finish
+  next_node: null
+```
+
+---
+
+### 19.16 See Also
+
+**Related Sections:**
+- **Section 4.2:** Controller Loops (comparison to React Planner)
+- **Section 5:** ModelRegistry (type validation used in catalog)
+- **Section 6:** Routing Patterns (alternative orchestration approaches)
+- **Section 7:** Playbooks (can be used as tools in React Planner)
+- **Section 9:** Deadlines and Budgets (constraint enforcement mechanisms)
+- **Section 10:** Error Handling (exception handling in tools)
+- **Section 12:** Testing (testing React Planners with StubClient)
+
+**Implementation Files:**
+- `penguiflow/planner/react.py` - Main ReactPlanner implementation (1,340 lines)
+- `penguiflow/planner/prompts.py` - Prompt engineering utilities (244 lines)
+- `penguiflow/catalog.py` - NodeSpec and tool registration (147 lines)
+
+**Example Files:**
+- `examples/react_minimal/` - Basic sequential flow with stub LLM
+- `examples/react_parallel/` - Parallel fan-out with join node
+- `examples/react_replan/` - Adaptive replanning after failures
+- `examples/react_pause_resume/` - Pause/resume with planning hints
+
+**Test Files:**
+- `tests/test_react_planner.py` - Comprehensive test suite (846 lines, 25+ tests)
+- `tests/test_planner_prompts.py` - Prompt rendering tests (56 lines)
+
+---
+
+**End of Section 19**

@@ -20,6 +20,7 @@ PenguiFlow is a Python library for building **asynchronous data pipelines** wher
 - Multi-step LLM workflows (triage → retrieve → summarize)
 - Agent systems with decision points and loops
 - Data processing pipelines (extract → transform → load)
+- LLM-driven orchestration with React Planner (autonomous tool selection)
 
 **Why PenguiFlow?**
 - **Typed**: Pydantic validation for all messages
@@ -375,6 +376,7 @@ await flow.stop()
 | `union_router` | Route based on message type (type safety) | Different task types (SearchWeb vs SearchDB) |
 | `join_k` | Aggregate results from fan-out | Collect all worker results before proceeding |
 | `DictRoutingPolicy` | Need runtime-configurable routing | Multi-tenant routing, A/B tests, feature flags |
+| `ReactPlanner` | LLM-driven multi-tool orchestration | Autonomous agent, adaptive workflows, pause/resume |
 
 ### map_concurrent - Parallel Processing Inside Nodes
 
@@ -797,6 +799,148 @@ async def test_retry_succeeds():
     assert_node_sequence(message.trace_id, ["flaky"])
 ```
 
+### 9. React Planner - Basic Usage
+
+```python
+from penguiflow.catalog import build_catalog, tool
+from penguiflow.node import Node
+from penguiflow.planner import ReactPlanner, PlannerFinish
+from penguiflow.registry import ModelRegistry
+from pydantic import BaseModel
+
+# Define models
+class Question(BaseModel):
+    text: str
+
+class Intent(BaseModel):
+    intent: str
+
+class Documents(BaseModel):
+    documents: list[str]
+
+# Define tools
+@tool(desc="Classify user intent", tags=["triage"])
+async def triage(args: Question, ctx) -> Intent:
+    intent = "docs" if "explain" in args.text.lower() else "general"
+    return Intent(intent=intent)
+
+@tool(desc="Retrieve documents", side_effects="read")
+async def retrieve(args: Intent, ctx) -> Documents:
+    docs = [f"Content about {args.intent}"]
+    return Documents(documents=docs)
+
+# Setup
+registry = ModelRegistry()
+registry.register("triage", Question, Intent)
+registry.register("retrieve", Intent, Documents)
+
+nodes = [Node(triage, name="triage"), Node(retrieve, name="retrieve")]
+
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=build_catalog(nodes, registry),
+    max_iters=8,
+    temperature=0.0
+)
+
+# Run
+result = await planner.run("Explain PenguiFlow")
+
+if result.reason == "answer_complete":
+    print(result.payload)
+```
+
+### 10. React Planner - Parallel Execution
+
+```python
+from penguiflow.catalog import tool
+from pydantic import BaseModel, Field
+
+class ShardQuery(BaseModel):
+    topic: str
+    shard: int = Field(ge=0, le=2)
+
+class ShardResult(BaseModel):
+    shard: int
+    documents: list[str]
+
+class MergeArgs(BaseModel):
+    expect: int  # Auto-populated by runtime
+    results: list[ShardResult]  # Auto-populated by runtime
+
+class FinalAnswer(BaseModel):
+    answer: str
+    sources: list[str]
+
+# Parallel-compatible tools
+@tool(desc="Fetch from shard", tags=["parallel"])
+async def fetch_shard(args: ShardQuery, ctx) -> ShardResult:
+    docs = [f"shard{args.shard}-doc{i}" for i in range(2)]
+    return ShardResult(shard=args.shard, documents=docs)
+
+# Join node
+@tool(desc="Merge shard results")
+async def merge_results(args: MergeArgs, ctx) -> FinalAnswer:
+    # Access metadata
+    success_count = ctx.meta["parallel_success_count"]
+
+    # Merge documents
+    all_docs = []
+    for result in args.results:
+        all_docs.extend(result.documents)
+
+    return FinalAnswer(
+        answer=f"Found {len(all_docs)} docs from {success_count} shards",
+        sources=all_docs
+    )
+
+# LLM generates parallel plan:
+# {
+#   "plan": [
+#     {"node": "fetch_shard", "args": {"topic": "penguin", "shard": 0}},
+#     {"node": "fetch_shard", "args": {"topic": "penguin", "shard": 1}}
+#   ],
+#   "join": {"node": "merge_results"}
+# }
+```
+
+### 11. React Planner - Pause/Resume for Approvals
+
+```python
+from penguiflow.planner import ReactPlanner, PlannerPause, PlannerFinish
+
+@tool(desc="Approval gate", side_effects="external")
+async def approval_gate(args: Intent, ctx) -> Intent:
+    if args.intent == "delete":
+        await ctx.pause(
+            "approval_required",
+            {"intent": "delete", "risk": "high"}
+        )
+    return args
+
+# Setup planner with pause enabled
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=build_catalog([triage, approval_gate, execute], registry),
+    pause_enabled=True
+)
+
+# Run
+result = await planner.run("Delete user data")
+
+if isinstance(result, PlannerPause):
+    print(f"Paused: {result.reason}")
+    print(f"Payload: {result.payload}")
+
+    # ... wait for approval ...
+
+    # Resume execution
+    final = await planner.resume(result.resume_token)
+
+    if isinstance(final, PlannerFinish):
+        print(f"Completed: {final.payload}")
+```
+
 ---
 
 ## F. API Quick Reference
@@ -1070,6 +1214,40 @@ async def caller_node(message: Message, ctx: Context):
     return process_result(result)
 ```
 
+### When to Use React Planner?
+
+**✅ Use React Planner when:**
+- Need adaptive multi-tool selection (LLM decides which tool)
+- Routing logic is complex or changes frequently
+- Want parallel tool execution with auto-join
+- Need approval workflows (pause/resume)
+- Acceptable to pay LLM cost per planning step
+- Want structured error recovery with replanning
+
+**❌ Don't use React Planner when:**
+- Fixed workflow known upfront (use routing patterns)
+- Zero LLM cost required (use controller loops)
+- Deterministic execution critical (use predicate_router)
+- Real-time latency critical (LLM adds overhead)
+
+**Decision tree:**
+```
+Need adaptive multi-tool selection?
+  ├─ Yes → Need approval/pause workflows?
+  │        ├─ Yes → Use React Planner
+  │        └─ No  → Acceptable LLM cost per step?
+  │                 ├─ Yes → Use React Planner
+  │                 └─ No  → Consider Controller Loops + manual tool switching
+  └─ No  → Fixed sequence known?
+           ├─ Yes → Use Routing Patterns (predicate_router or union_router)
+           └─ No  → Use Controller Loops
+```
+
+**vs. Controller Loops:**
+- **React Planner**: LLM orchestrates multiple tools dynamically
+- **Controller Loop**: Developer-written logic, single-node iteration
+- **Use both**: Controller loops can be React Planner tools
+
 ---
 
 ## H. Common Mistakes & Fixes
@@ -1251,6 +1429,66 @@ async def streaming_node(message: Message, ctx):
 
     # Send final chunk
     await ctx.emit_chunk(parent=message, text="", done=True)
+```
+
+### Mistake 11: Missing @tool Decorator
+
+**❌ WRONG:**
+```python
+async def my_tool(args: InputModel, ctx) -> OutputModel:
+    return OutputModel(...)
+
+nodes = [Node(my_tool, name="my_tool")]
+catalog = build_catalog(nodes, registry)  # Won't have metadata for LLM
+```
+
+**✅ CORRECT:**
+```python
+from penguiflow.catalog import tool
+
+@tool(desc="Clear description for LLM")
+async def my_tool(args: InputModel, ctx) -> OutputModel:
+    return OutputModel(...)
+```
+
+### Mistake 12: Not Handling PlannerPause
+
+**❌ WRONG:**
+```python
+result = await planner.run("query")
+print(result.payload)  # AttributeError if result is PlannerPause!
+```
+
+**✅ CORRECT:**
+```python
+from penguiflow.planner import PlannerPause, PlannerFinish
+
+result = await planner.run("query")
+if isinstance(result, PlannerPause):
+    token = result.resume_token
+    final = await planner.resume(token)
+elif isinstance(result, PlannerFinish):
+    print(result.payload)
+```
+
+### Mistake 13: Forgetting to Register React Planner Tool Types
+
+**❌ WRONG:**
+```python
+@tool(desc="Search")
+async def search(args: Query, ctx) -> Results:
+    ...
+
+# Missing registration!
+planner = ReactPlanner(llm="gpt-4", nodes=[search], registry=registry)
+```
+
+**✅ CORRECT:**
+```python
+registry = ModelRegistry()
+registry.register("search", Query, Results)  # Required!
+
+planner = ReactPlanner(llm="gpt-4", nodes=[search], registry=registry)
 ```
 
 ---
@@ -1457,6 +1695,9 @@ with open("flow.dot", "w") as f:
 - **Reuse sub-workflows** → Section I (Playbooks)
 - **Configure runtime routing** → Section D (DictRoutingPolicy)
 - **Visualize my flow** → Section F (Visualization), Manual Section 15
+- **Build LLM-driven agent** → Section E (snippets 9-11), Section G (React Planner), Manual Section 19
+- **Autonomous tool selection** → Section D (ReactPlanner), Section E (snippet 9), Manual Section 19
+- **Pause for approval workflows** → Section E (snippet 11), Manual Section 19.8
 
 ### Manual Section Quick Links
 
@@ -1478,6 +1719,7 @@ with open("flow.dot", "w") as f:
 - **Section 16:** Remote Execution (A2A, RemoteNode)
 - **Section 17:** Distributed Hooks (StateStore, MessageBus)
 - **Section 18:** Examples & Tutorials
+- **Section 19:** React Planner (LLM-driven orchestration, tool catalog, pause/resume)
 
 ### Example Files Map
 
@@ -1495,6 +1737,10 @@ with open("flow.dot", "w") as f:
 - **examples/routing_policy/** - Config-driven policy overrides
 - **examples/visualizer/** - Mermaid + DOT diagram generation
 - **examples/traceable_errors/** - FlowError emission from Rookery
+- **examples/react_minimal/** - Basic React Planner with stub LLM
+- **examples/react_parallel/** - Parallel tool execution with join node
+- **examples/react_replan/** - Adaptive replanning after tool failures
+- **examples/react_pause_resume/** - Pause/resume with planning hints
 
 ### Test Files Map
 
@@ -1510,6 +1756,8 @@ with open("flow.dot", "w") as f:
 - **tests/test_metrics.py** - FlowEvent, middleware
 - **tests/test_errors.py** - FlowError, retry flow
 - **tests/test_testkit.py** - FlowTestKit utilities
+- **tests/test_react_planner.py** - React Planner comprehensive suite (25+ tests)
+- **tests/test_planner_prompts.py** - Prompt rendering tests
 
 ---
 
