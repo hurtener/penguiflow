@@ -6095,6 +6095,35 @@ class FlowEvent:
 | `trace_inflight` | Active tasks for trace | High parallelism or long-running tasks |
 | `attempt > 0` | Retry in progress | Check retry rates (transient vs persistent failures) |
 
+#### Surfacing FlowError payloads in telemetry
+
+`FlowEvent.extra` always includes a `flow_error` key when a node emits a terminal
+`FlowError`. Rather than unpacking the mapping manually, use the
+`FlowEvent.error_payload` convenience property to obtain a read-only view of the
+structured error payload:
+
+```python
+async def capture_errors(event: FlowEvent):
+    error = event.error_payload
+    if error is None:
+        return
+
+    logger.error(
+        "node failed",
+        extra={
+            "trace_id": error.get("trace_id"),
+            "node_name": error.get("node_name"),
+            "code": error["code"],
+            "message": error["message"],
+        },
+    )
+```
+
+For turnkey structured logging, the runtime now ships
+`penguiflow.debug.format_flow_event(event)`, which mirrors
+`event.to_payload()` and flattens the embedded FlowError payload into
+`flow_error_*` fields that log aggregators can index directly.
+
 ---
 
 #### Prometheus Integration Example

@@ -32,6 +32,15 @@ class FlowEvent:
         object.__setattr__(self, "extra", MappingProxyType(dict(self.extra)))
 
     @property
+    def error_payload(self) -> Mapping[str, Any] | None:
+        """Return the structured ``FlowError`` payload if present."""
+
+        raw_payload = self.extra.get("flow_error")
+        if isinstance(raw_payload, Mapping):
+            return MappingProxyType(dict(raw_payload))
+        return None
+
+    @property
     def queue_depth(self) -> int:
         """Return the combined depth of incoming and outgoing queues."""
 

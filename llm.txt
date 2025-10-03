@@ -727,9 +727,11 @@ from penguiflow.metrics import FlowEvent
 async def error_alerting_middleware(event: FlowEvent):
     """Alert on node failures."""
     if event.event_type == "node_failed":
-        flow_error = event.extra.get("flow_error", {})
+        flow_error = event.error_payload
+        if flow_error is None:
+            return
 
-        code = flow_error.get("code")
+        code = flow_error["code"]
         node_name = flow_error.get("node_name")
 
         if code == "NODE_TIMEOUT":
@@ -741,6 +743,11 @@ async def error_alerting_middleware(event: FlowEvent):
 
 flow.add_middleware(error_alerting_middleware)
 ```
+
+Use `penguiflow.debug.format_flow_event(event)` to mirror
+`event.to_payload()` while automatically flattening any embedded FlowError
+fields (e.g., `flow_error_code`, `flow_error_message`) for structured logging
+pipelines.
 
 ### 8. Testing with FlowTestKit
 

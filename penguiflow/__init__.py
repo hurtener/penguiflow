@@ -13,6 +13,7 @@ from .core import (
     call_playbook,
     create,
 )
+from .debug import format_flow_event
 from .errors import FlowError, FlowErrorCode
 from .metrics import FlowEvent
 from .middlewares import Middleware
@@ -59,6 +60,7 @@ __all__ = [
     "tool",
     "Middleware",
     "FlowEvent",
+    "format_flow_event",
     "FlowError",
     "FlowErrorCode",
     "MessageBus",
