@@ -16,7 +16,7 @@ from .core import (
 from .debug import format_flow_event
 from .errors import FlowError, FlowErrorCode
 from .metrics import FlowEvent
-from .middlewares import Middleware
+from .middlewares import LatencyCallback, Middleware, log_flow_events
 from .node import Node, NodePolicy
 from .patterns import join_k, map_concurrent, predicate_router, union_router
 from .planner import (
@@ -59,6 +59,8 @@ __all__ = [
     "build_catalog",
     "tool",
     "Middleware",
+    "log_flow_events",
+    "LatencyCallback",
     "FlowEvent",
     "format_flow_event",
     "FlowError",

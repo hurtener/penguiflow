@@ -3303,6 +3303,38 @@ async def logging_middleware(event: FlowEvent):
     logger.info(f"Runtime event", extra=payload)
 ```
 
+Need a turnkey option? Import the built-in middleware:
+
+```python
+from penguiflow import log_flow_events
+
+flow = create(
+    pipeline,
+    middlewares=[
+        log_flow_events(),  # Logs node_start/node_success/node_error with latency
+    ],
+)
+```
+
+Pass a custom logger or attach histogram timers via the optional callback:
+
+```python
+import logging
+
+latencies: list[tuple[str, float]] = []
+
+middleware = log_flow_events(
+    logging.getLogger("service.runtime"),
+    latency_callback=lambda kind, latency, event: latencies.append((kind, latency)),
+)
+
+flow.add_middleware(middleware)
+```
+
+`latency_callback` is invoked for `node_success` and `node_error` events. Exceptions
+raised inside the callback are captured and logged as
+`log_flow_events_latency_callback_error` without disrupting the flow.
+
 **`metric_samples() -> dict[str, float]`**
 
 Extract numeric metrics for time-series databases (MLflow, Prometheus, CloudWatch).

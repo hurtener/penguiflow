@@ -754,6 +754,12 @@ Use `penguiflow.debug.format_flow_event(event)` to mirror
 fields (e.g., `flow_error_code`, `flow_error_message`) for structured logging
 pipelines.
 
+Prefer a drop-in option? `penguiflow.log_flow_events()` returns a middleware
+that logs `node_start`, `node_success`, and `node_error` with structured fields
+and latency. Supply an optional `latency_callback(kind, latency_ms, event)` to
+pipe timing into Prometheus/StatsD histograms. Exceptions from the callback are
+logged as `log_flow_events_latency_callback_error` so flows continue unharmed.
+
 ### 8. Testing with FlowTestKit
 
 ```python

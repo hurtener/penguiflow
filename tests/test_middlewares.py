@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
-from penguiflow import Node, NodePolicy, create
+from penguiflow import Node, NodePolicy, create, log_flow_events
 from penguiflow.metrics import FlowEvent
 
 
@@ -185,3 +186,102 @@ async def test_middleware_performance_impact_minimal() -> None:
     # Even with slow middleware, flow should complete reasonably fast
     # (middleware is async so shouldn't block main execution)
     assert duration < 1.0  # Should be well under 1 second
+
+
+@pytest.mark.asyncio
+async def test_log_flow_events_emits_logs_and_latency(caplog: pytest.LogCaptureFixture) -> None:
+    """Built-in logging middleware emits lifecycle logs and latency metrics."""
+
+    logger_name = "tests.log_flow_events"
+    caplog.set_level(logging.DEBUG, logger=logger_name)
+    recorded: list[tuple[str, float, str | None]] = []
+
+    def capture_latency(event_type: str, latency_ms: float, event: FlowEvent) -> None:
+        recorded.append((event_type, latency_ms, event.node_name))
+
+    middleware = log_flow_events(
+        logging.getLogger(logger_name),
+        latency_callback=capture_latency,
+    )
+
+    async def worker(msg: str, _ctx) -> str:
+        await asyncio.sleep(0.01)
+        return msg.upper()
+
+    node = Node(worker, name="logger", policy=NodePolicy(validate="none"))
+    flow = create(node.to(), middlewares=[middleware])
+    flow.run()
+
+    await flow.emit("hello")
+    result = await flow.fetch()
+    await flow.stop()
+
+    assert result == "HELLO"
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == logger_name
+    ]
+    assert "node_start" in messages
+    assert "node_success" in messages
+
+    success_record = next(
+        record
+        for record in caplog.records
+        if record.name == logger_name and record.getMessage() == "node_success"
+    )
+    assert getattr(success_record, "node_name", None) == "logger"
+    assert getattr(success_record, "latency_ms", None) is not None
+
+    assert recorded and recorded[0][0] == "node_success"
+    assert recorded[0][1] > 0.0
+
+
+@pytest.mark.asyncio
+async def test_log_flow_events_handles_latency_callback_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Latency callback errors are logged and do not disrupt the flow."""
+
+    logger_name = "tests.log_flow_events.error"
+    caplog.set_level(logging.ERROR, logger=logger_name)
+    callback_calls = 0
+
+    def failing_callback(event_type: str, latency_ms: float, event: FlowEvent) -> None:
+        nonlocal callback_calls
+        callback_calls += 1
+        raise RuntimeError("timer failed")
+
+    middleware = log_flow_events(
+        logging.getLogger(logger_name),
+        latency_callback=failing_callback,
+    )
+
+    async def failing_node(_msg: str, _ctx) -> str:
+        raise ValueError("boom")
+
+    node = Node(
+        failing_node,
+        name="fails",
+        policy=NodePolicy(validate="none", max_retries=0),
+    )
+    flow = create(node.to(), middlewares=[middleware])
+    flow.run()
+
+    await flow.emit("x")
+    for _ in range(20):
+        if callback_calls:
+            break
+        await asyncio.sleep(0.01)
+
+    await flow.stop()
+
+    assert callback_calls == 1
+    error_records = [
+        record
+        for record in caplog.records
+        if record.name == logger_name
+        and getattr(record, "event", "") == "log_flow_events_latency_callback_error"
+    ]
+    assert error_records
