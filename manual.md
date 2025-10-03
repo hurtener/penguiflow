@@ -405,6 +405,7 @@ async def transform_completely(message: Message, ctx) -> Message:
 
 * **Runtime warning:** If a node is registered as `Message -> Message` (via `ModelRegistry`) but returns a bare payload, PenguiFlow now emits a `RuntimeWarning`. The warning names the offending node and reminds you to return a full `penguiflow.types.Message` so headers, trace IDs, and metadata are preserved.
 * **Testkit helper:** `penguiflow.testkit.assert_preserves_message_envelope(...)` executes a node with a sample `Message` and asserts that the returned value is also a `Message` with the same `headers` and `trace_id`. Use it in unit tests to prevent regressions when refactoring Message-aware nodes.
+* **Flow diagnostics helper:** `penguiflow.testkit.get_recorded_events(trace_id)` surfaces the immutable `FlowEvent` history collected during `run_one(...)`. Use it to assert retry sequences, inspect `node_failed` payloads, or verify observability middleware output without reaching into private caches.
 * **Documentation cross-link:** This section and the LLM prompt (`llm.txt`) both call out the guardrails so runtime behaviour and guidance stay in sync.
 
 ### 2.6 Validation Modes Explained
@@ -4313,10 +4314,12 @@ async def fast_middleware(event: FlowEvent):
 
 The testkit (`penguiflow.testkit`) provides utilities for **concise flow unit tests** without manual lifecycle management:
 
-**Three main utilities:**
+**Core helpers:**
 1. **`run_one()`**: Execute single trace end-to-end with automatic start/stop
 2. **`assert_node_sequence()`**: Validate node execution order
-3. **`simulate_error()`**: Create controllable failures for retry testing
+3. **`get_recorded_events()`**: Inspect immutable `FlowEvent` history for a trace
+4. **`simulate_error()`**: Create controllable failures for retry testing
+5. **`assert_preserves_message_envelope()`**: Guard Message-aware nodes from envelope drift
 
 **When to use testkit:**
 - Testing single-output flows (linear, branching with single result)
@@ -4357,9 +4360,9 @@ async def run_one(
 - `timeout_s` (float | None): Timeout in seconds (default: 1.0, None = unbounded)
 
 **Returns:**
-- `Any`: The first message fetched from Rookery (**payload only**, not Message wrapper)
+- `Any`: The first object fetched from Rookery (commonly a `Message`, `FlowError`, or bare payload depending on downstream nodes)
 
-⚠️ **CRITICAL:** Returns the **payload**, not the full `Message` object.
+⚠️ **CRITICAL:** `run_one()` does not coerce the result; if you need the Message envelope ensure your terminal node returns a `Message`.
 
 #### How run_one() Works
 
@@ -4377,9 +4380,9 @@ t=0ms:   run_one() called
 t=1ms:   flow.run(registry=registry)
 t=2ms:   flow.emit(message)
 t=3ms:   [flow executes nodes...]
-t=150ms: flow.fetch() returns result
-t=151ms: flow.stop() (cleanup)
-t=152ms: run_one() returns result.payload
+  t=150ms: flow.fetch() returns result
+  t=151ms: flow.stop() (cleanup)
+  t=152ms: run_one() returns result
 ```
 
 #### Basic Usage
@@ -4476,6 +4479,77 @@ try:
 except asyncio.TimeoutError:
     print("Flow took too long")
     # Flow is still stopped automatically in finally block
+```
+
+#### Inspect FlowEvent Diagnostics with get_recorded_events()
+
+`run_one()` wires in the FlowTestKit recorder so you can introspect
+runtime telemetry after the trace completes. Call
+`penguiflow.testkit.get_recorded_events(trace_id)` to retrieve an immutable
+list of `FlowEvent` objects for assertions about retries, middleware logs,
+or embedded `FlowError` payloads.
+
+```python
+import logging
+import pytest
+
+from penguiflow import (
+    FlowError,
+    FlowErrorCode,
+    Headers,
+    Message,
+    Node,
+    NodePolicy,
+    create,
+    log_flow_events,
+    testkit,
+)
+
+
+@pytest.mark.asyncio
+async def test_logs_and_error_payload() -> None:
+    # Middleware captures structured node lifecycle logs
+    logger = logging.getLogger("tests.testkit.log_flow_events")
+    logger.setLevel(logging.INFO)
+
+    latency_events: list[tuple[str, float]] = []
+
+    def capture_latency(event_type: str, latency_ms: float, event) -> None:
+        latency_events.append((event_type, latency_ms))
+
+    async def always_fails(message: Message, _ctx) -> Message:
+        raise ValueError("boom")
+
+    node = Node(
+        always_fails,
+        name="flaky",
+        policy=NodePolicy(validate="none", max_retries=0),
+    )
+    flow = create(
+        node.to(),
+        middlewares=[log_flow_events(logger, latency_callback=capture_latency)],
+        emit_errors_to_rookery=True,
+    )
+
+    message = Message(payload="hello", headers=Headers(tenant="acme"))
+
+    # run_one returns the FlowError produced by the runtime
+    result = await testkit.run_one(flow, message)
+    assert isinstance(result, FlowError)
+    assert result.code == FlowErrorCode.NODE_EXCEPTION.value
+
+    events = testkit.get_recorded_events(message.trace_id)
+    error_events = [evt for evt in events if evt.event_type == "node_error"]
+    failed_events = [evt for evt in events if evt.event_type == "node_failed"]
+    assert error_events and failed_events
+
+    payload = failed_events[0].error_payload
+    assert payload is not None
+    assert payload["node_name"] == "flaky"
+    assert payload["code"] == FlowErrorCode.NODE_EXCEPTION.value
+
+    # Latency callback observes the node_error timing for metrics integration
+    assert latency_events and latency_events[0][0] == "node_error"
 ```
 
 ---

@@ -26,6 +26,7 @@ from .types import Headers, Message
 __all__ = [
     "run_one",
     "assert_node_sequence",
+    "get_recorded_events",
     "simulate_error",
     "assert_preserves_message_envelope",
 ]
@@ -264,6 +265,19 @@ def assert_node_sequence(trace_id: str, expected: Sequence[str]) -> None:
             f"  expected: {expected_nodes}\n"
             f"  actual:   {actual_nodes}"
         )
+
+
+def get_recorded_events(trace_id: str) -> tuple[FlowEvent, ...]:
+    """Return the recorded :class:`FlowEvent` history for ``trace_id``.
+
+    The FlowTestKit recorder maintains a bounded cache of trace histories.
+    This helper exposes the immutable snapshot so tests can assert on
+    diagnostics such as ``node_failed`` payloads or retry attempts without
+    touching the private cache directly.
+    """
+
+    events = _TRACE_HISTORY.get(trace_id, [])
+    return tuple(events)
 
 
 class _ErrorSimulation:
