@@ -189,7 +189,9 @@ async def test_middleware_performance_impact_minimal() -> None:
 
 
 @pytest.mark.asyncio
-async def test_log_flow_events_emits_logs_and_latency(caplog: pytest.LogCaptureFixture) -> None:
+async def test_log_flow_events_emits_logs_and_latency(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Built-in logging middleware emits lifecycle logs and latency metrics."""
 
     logger_name = "tests.log_flow_events"
