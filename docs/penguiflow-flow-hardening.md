@@ -11,9 +11,9 @@ Downstream teams integrating PenguiFlow highlighted pain points around surfaced 
 - Document the new helper in the runtime diagnostics section so adopters immediately see how to surface actionable errors.
 
 ### 2. Message Envelope Guardrails
-- Introduce an optional `ensure_message_output` decorator or FlowTestKit assertion (`assert_preserves_message_envelope(node_fn)`) that verifies nodes return a `Message` when expected.
-- Emit a runtime warning when a node configured as `Message -> Message` returns a bare payload, helping catch regressions earlier.
-- Expand library docs to state the contract explicitly and link to the helper utilities above.
+- Added `testkit.assert_preserves_message_envelope(...)` so library tests can assert Message-aware nodes preserve the full envelope (headers + trace id) when returning results.
+- The runtime now emits a `RuntimeWarning` whenever a node registered as `Message -> Message` returns a bare payload instead of a `penguiflow.types.Message`, surfacing mistakes before they hit production.
+- Expanded the runtime documentation (`manual.md` / `llm.txt`) to call out the guardrails, the new helper, and best practices for Message-aware nodes.
 
 ### 3. Built-in Diagnostics Hooks
 - Ship a reusable middleware (`log_flow_events`) that logs start/finish/elapsed plus error detail, so adopters can enable rich telemetry with one import.

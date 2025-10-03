@@ -155,6 +155,11 @@ registry.register("enrich", Message, Message)
 
 **Important:** Avoid mutating `message.meta` in place. Use `model_copy` or dict cloning.
 
+**Guardrails for Message-aware nodes:**
+- **Runtime warning:** Nodes registered as `Message -> Message` now emit a `RuntimeWarning` if they return a bare payload. Return a `penguiflow.types.Message` so headers and trace IDs stay intact.
+- **Test helper:** Use `penguiflow.testkit.assert_preserves_message_envelope(...)` in unit tests to ensure Message-aware nodes keep the envelope unchanged.
+- **Docs alignment:** This guidance is mirrored in `manual.md` so human- and model-facing docs stay consistent.
+
 ### Return vs Emit Decision
 
 **Most nodes should simply return their result:**

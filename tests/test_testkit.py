@@ -90,3 +90,47 @@ def test_simulate_error_validation() -> None:
     with pytest.raises(ValueError):
         testkit.simulate_error("oops", FlowErrorCode.NODE_EXCEPTION, fail_times=0)
 
+
+@pytest.mark.asyncio
+async def test_assert_preserves_message_envelope_accepts_copy() -> None:
+    async def annotate(message: Message, _ctx: Any) -> Message:
+        return message.model_copy(update={"payload": f"{message.payload}!"})
+
+    message = Message(payload="hello", headers=Headers(tenant="acme"))
+
+    result = await testkit.assert_preserves_message_envelope(annotate, message=message)
+
+    assert isinstance(result, Message)
+    assert result.payload == "hello!"
+    assert result.headers == message.headers
+    assert result.trace_id == message.trace_id
+
+
+@pytest.mark.asyncio
+async def test_assert_preserves_message_envelope_rejects_bare_payload() -> None:
+    async def bad_node(message: Message, _ctx: Any) -> str:
+        return message.payload
+
+    message = Message(payload="hello", headers=Headers(tenant="acme"))
+
+    with pytest.raises(AssertionError) as excinfo:
+        await testkit.assert_preserves_message_envelope(bad_node, message=message)
+
+    assert "must return a Message" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_assert_preserves_message_envelope_rejects_header_mutation() -> None:
+    async def mutate_headers(message: Message, _ctx: Any) -> Message:
+        replacement = Headers(tenant="other")
+        return message.model_copy(update={"headers": replacement})
+
+    message = Message(payload="hello", headers=Headers(tenant="acme"))
+
+    with pytest.raises(AssertionError) as excinfo:
+        await testkit.assert_preserves_message_envelope(
+            mutate_headers, message=message
+        )
+
+    assert "headers" in str(excinfo.value)
+
