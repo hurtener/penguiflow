@@ -401,6 +401,12 @@ async def transform_completely(message: Message, ctx) -> Message:
 
 **Important:** Avoid mutating `message.meta` in place (e.g., `message.meta["key"] = value`). Use `model_copy` or dict cloning to ensure retries and parallel paths see consistent state.
 
+#### Guardrails for Message-Aware Nodes
+
+* **Runtime warning:** If a node is registered as `Message -> Message` (via `ModelRegistry`) but returns a bare payload, PenguiFlow now emits a `RuntimeWarning`. The warning names the offending node and reminds you to return a full `penguiflow.types.Message` so headers, trace IDs, and metadata are preserved.
+* **Testkit helper:** `penguiflow.testkit.assert_preserves_message_envelope(...)` executes a node with a sample `Message` and asserts that the returned value is also a `Message` with the same `headers` and `trace_id`. Use it in unit tests to prevent regressions when refactoring Message-aware nodes.
+* **Documentation cross-link:** This section and the LLM prompt (`llm.txt`) both call out the guardrails so runtime behaviour and guidance stay in sync.
+
 ### 2.6 Validation Modes Explained
 
 The `validate` parameter in `NodePolicy` controls when Pydantic validation occurs:
