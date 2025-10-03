@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from penguiflow.debug import format_flow_event
 from penguiflow.metrics import FlowEvent
 
 
@@ -39,3 +42,92 @@ def test_flow_event_payload_and_metrics() -> None:
     assert tags["event_type"] == "node_success"
     assert tags["node_name"] == "worker"
     assert tags["custom_tag"] == "alpha"
+
+
+def test_flow_event_error_payload_property() -> None:
+    event = FlowEvent(
+        event_type="node_failed",
+        ts=1700000001.0,
+        node_name="worker",
+        node_id="node-1",
+        trace_id="trace-err",
+        attempt=2,
+        latency_ms=None,
+        queue_depth_in=0,
+        queue_depth_out=0,
+        outgoing_edges=0,
+        queue_maxsize=64,
+        trace_pending=None,
+        trace_inflight=0,
+        trace_cancelled=False,
+        extra={
+            "flow_error": {
+                "code": "NODE_EXCEPTION",
+                "message": "boom",
+                "trace_id": "trace-err",
+                "node_name": "worker",
+            }
+        },
+    )
+
+    payload = event.error_payload
+    assert payload is not None
+    assert payload["code"] == "NODE_EXCEPTION"
+    assert payload["message"] == "boom"
+
+    with pytest.raises(TypeError):
+        payload["code"] = "MUTATED"  # type: ignore[index]
+
+
+def test_flow_event_error_payload_absent() -> None:
+    event = FlowEvent(
+        event_type="node_success",
+        ts=1700000002.0,
+        node_name="worker",
+        node_id="node-1",
+        trace_id="trace-ok",
+        attempt=1,
+        latency_ms=5.0,
+        queue_depth_in=0,
+        queue_depth_out=0,
+        outgoing_edges=0,
+        queue_maxsize=64,
+        trace_pending=None,
+        trace_inflight=0,
+        trace_cancelled=False,
+        extra={},
+    )
+
+    assert event.error_payload is None
+
+
+def test_format_flow_event_flattens_error_payload() -> None:
+    event = FlowEvent(
+        event_type="node_failed",
+        ts=1700000003.0,
+        node_name="worker",
+        node_id="node-1",
+        trace_id="trace-err",
+        attempt=1,
+        latency_ms=None,
+        queue_depth_in=0,
+        queue_depth_out=0,
+        outgoing_edges=0,
+        queue_maxsize=64,
+        trace_pending=None,
+        trace_inflight=0,
+        trace_cancelled=False,
+        extra={
+            "flow_error": {
+                "code": "NODE_TIMEOUT",
+                "message": "too slow",
+            },
+        },
+    )
+
+    formatted = format_flow_event(event)
+
+    assert formatted["event"] == "node_failed"
+    assert formatted["flow_error_code"] == "NODE_TIMEOUT"
+    assert formatted["flow_error_message"] == "too slow"
+    assert formatted["flow_error"]["code"] == "NODE_TIMEOUT"
