@@ -159,6 +159,7 @@ registry.register("enrich", Message, Message)
 **Guardrails for Message-aware nodes:**
 - **Runtime warning:** Nodes registered as `Message -> Message` now emit a `RuntimeWarning` if they return a bare payload. Return a `penguiflow.types.Message` so headers and trace IDs stay intact.
 - **Test helper:** Use `penguiflow.testkit.assert_preserves_message_envelope(...)` in unit tests to ensure Message-aware nodes keep the envelope unchanged.
+- **Flow diagnostics:** `penguiflow.testkit.get_recorded_events(trace_id)` exposes the immutable `FlowEvent` history captured by `run_one(...)` so you can assert `node_failed` payloads or verify `log_flow_events` output inside tests.
 - **Docs alignment:** This guidance is mirrored in `manual.md` so human- and model-facing docs stay consistent.
 
 ### Return vs Emit Decision
@@ -330,7 +331,12 @@ from penguiflow.errors import FlowError, FlowErrorCode
 from penguiflow.metrics import FlowEvent
 
 # Testing
-from penguiflow.testkit import run_one, assert_node_sequence, simulate_error
+from penguiflow.testkit import (
+    run_one,
+    assert_node_sequence,
+    simulate_error,
+    get_recorded_events,
+)
 
 # Visualization
 from penguiflow.viz import flow_to_mermaid, flow_to_dot
@@ -765,9 +771,17 @@ logged as `log_flow_events_latency_callback_error` so flows continue unharmed.
 ### 8. Testing with FlowTestKit
 
 ```python
+import logging
 import pytest
-from penguiflow.testkit import run_one, assert_node_sequence, simulate_error
+
+from penguiflow import FlowError, Headers, Message, Node, NodePolicy, create, log_flow_events
 from penguiflow.errors import FlowErrorCode
+from penguiflow.testkit import (
+    run_one,
+    assert_node_sequence,
+    simulate_error,
+    get_recorded_events,
+)
 
 @pytest.mark.asyncio
 async def test_retry_succeeds():
@@ -797,6 +811,43 @@ async def test_retry_succeeds():
     assert result == "success"
     assert flaky_func.simulation.attempts == 3  # 1 initial + 2 retries
     assert_node_sequence(message.trace_id, ["flaky"])
+
+    events = get_recorded_events(message.trace_id)
+    assert any(evt.event_type == "node_success" for evt in events)
+
+
+@pytest.mark.asyncio
+async def test_log_flow_events_error_payload() -> None:
+    logger = logging.getLogger("tests.testkit.log_flow_events")
+    logger.setLevel(logging.INFO)
+
+    latency_samples: list[tuple[str, float]] = []
+
+    def capture_latency(event_type: str, latency_ms: float, event) -> None:
+        latency_samples.append((event_type, latency_ms))
+
+    async def always_fails(message: Message, _ctx) -> Message:
+        raise ValueError("boom")
+
+    node = Node(
+        always_fails,
+        name="flaky",
+        policy=NodePolicy(validate="none", max_retries=0),
+    )
+    flow = create(
+        node.to(),
+        middlewares=[log_flow_events(logger, latency_callback=capture_latency)],
+        emit_errors_to_rookery=True,
+    )
+
+    message = Message(payload="demo", headers=Headers(tenant="test"))
+    result = await run_one(flow, message)
+
+    assert isinstance(result, FlowError)
+    events = get_recorded_events(message.trace_id)
+    failed_event = next(evt for evt in events if evt.event_type == "node_failed")
+    assert failed_event.error_payload["code"] == FlowErrorCode.NODE_EXCEPTION.value
+    assert latency_samples and latency_samples[0][0] == "node_error"
 ```
 
 ### 9. React Planner - Basic Usage
