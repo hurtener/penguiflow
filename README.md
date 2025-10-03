@@ -5,21 +5,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/penguiflow/penguiflow/actions/workflows/ci.yml">
-    <img src="https://github.com/penguiflow/penguiflow/actions/workflows/ci.yml/badge.svg" alt="CI Status">
-  </a>
-  <a href="https://github.com/penguiflow/penguiflow">
-    <img src="https://img.shields.io/badge/coverage-85%25-brightgreen" alt="Coverage">
-  </a>
-  <a href="https://nightly.link/penguiflow/penguiflow/workflows/benchmarks/main/benchmarks.json.zip">
-    <img src="https://img.shields.io/badge/benchmarks-latest-orange" alt="Benchmarks">
-  </a>
-  <a href="https://pypi.org/project/penguiflow/">
-    <img src="https://img.shields.io/pypi/v/penguiflow.svg" alt="PyPI version">
-  </a>
-  <a href="https://github.com/penguiflow/penguiflow/blob/main/LICENSE">
-    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
-  </a>
+  <a href="https://github.com/hurtener/penguiflow/actions/workflows/ci.yml"><img src="https://github.com/hurtener/penguiflow/actions/workflows/ci.yml/badge.svg" alt="CI Status"></a>
+  <a href="https://github.com/hurtener/penguiflow"><img src="https://img.shields.io/badge/coverage-85%25-brightgreen" alt="Coverage"></a>
+  <a href="https://nightly.link/hurtener/penguiflow/workflows/benchmarks/main/benchmarks.json.zip"><img src="https://img.shields.io/badge/benchmarks-latest-orange" alt="Benchmarks"></a>
+  <a href="https://pypi.org/project/penguiflow/"><img src="https://img.shields.io/pypi/v/penguiflow.svg" alt="PyPI version"></a>
+  <a href="https://github.com/hurtener/penguiflow/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
 </p>
 
 **Async-first orchestration library for multi-agent and data pipelines**
@@ -33,6 +23,7 @@ It provides:
 * **Retries, timeouts, backpressure**
 * **Streaming chunks** (LLM-style token emission with `Context.emit_chunk`)
 * **Dynamic loops** (controller nodes)
+* **LLM-driven orchestration** (`ReactPlanner` for autonomous multi-step workflows with tool selection, parallel execution, and pause/resume)
 * **Runtime playbooks** (callable subflows with shared metadata)
 * **Per-trace cancellation** (`PenguiFlow.cancel` with `TraceCancelled` surfacing in nodes)
 * **Deadlines & budgets** (`Message.deadline_s`, `WM.budget_hops`, and `WM.budget_tokens` guardrails that you can leave unset/`None`)
@@ -321,69 +312,52 @@ The new `penguiflow.testkit` module keeps unit tests tiny:
 The harness is covered by `tests/test_testkit.py` and demonstrated in
 `examples/testkit_demo/`.
 
-### JSON-only ReAct planner (Phase A)
+### React Planner - LLM-Driven Orchestration
 
-Phase A introduces a lightweight planner loop that keeps PenguiFlow typed and
-deterministic:
+Build autonomous agents that select and execute tools dynamically using the ReAct (Reasoning + Acting) pattern:
 
-* `penguiflow.catalog.NodeSpec` + `build_catalog` turn registered nodes into
-  tool descriptors with JSON Schemas derived from your Pydantic models.
-* `penguiflow.planner.ReactPlanner` drives a JSON-only ReAct loop over those
-  descriptors, validating every LLM action with Pydantic and replaying invalid
-  steps to request corrections.
-* LiteLLM stays optional—install `penguiflow[planner]` or inject a custom
-  `llm_client` for deterministic/offline runs.
+```python
+from penguiflow import ReactPlanner, tool, build_catalog
 
-See `examples/react_minimal/` for a stubbed end-to-end run.
+@tool(desc="Search documentation")
+async def search_docs(args: Query, ctx) -> Documents:
+    return Documents(results=await search(args.text))
 
-### Trajectory summarisation & pause/resume (Phase B)
+@tool(desc="Summarize results")
+async def summarize(args: Documents, ctx) -> Summary:
+    return Summary(text=await llm_summarize(args.results))
 
-Phase B adds the tools you need for longer-running, approval-driven flows:
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=build_catalog([search_docs, summarize], registry),
+    max_iters=10
+)
 
-* **Token-aware summaries** — `Trajectory.compress()` keeps a compact state and
-  the planner can route summaries through a cheaper `summarizer_llm` before
-  asking for the next action.
-* **`PlannerPause` contract** — nodes can call `await ctx.pause(...)` to return a
-  typed pause payload. Resume the run later with `ReactPlanner.resume(token, user_input=...)`.
-* **Developer hints** — pass `planning_hints={...}` to enforce disallowed tools,
-  preferred ordering, or parallelism ceilings.
+result = await planner.run("Explain PenguiFlow routing")
+print(result.payload)  # LLM orchestrated search → summarize automatically
+```
 
-All three features are exercised in `examples/react_pause_resume/`, which runs
-entirely offline with stubbed LLM responses.
+**Key capabilities:**
 
-### Adaptive re-planning & budgets (Phase C)
+* **Autonomous tool selection** — LLM decides which tools to call and in what order based on your query
+* **Type-safe execution** — All tool inputs/outputs validated with Pydantic, JSON schemas auto-generated from models
+* **Parallel execution** — LLM can fan out to multiple tools concurrently with automatic result joining
+* **Pause/resume workflows** — Add approval gates with `await ctx.pause()`, resume later with user input
+* **Adaptive replanning** — Tool failures feed structured error suggestions back to LLM for recovery
+* **Constraint enforcement** — Set hop budgets, deadlines, and token limits to prevent runaway execution
+* **Planning hints** — Guide LLM behavior with ordering preferences, parallel groups, and tool filters
 
-Phase C closes the loop when things go sideways:
+**Model support:**
+* Install `penguiflow[planner]` for LiteLLM integration (100+ models: OpenAI, Anthropic, Azure, etc.)
+* Or inject a custom `llm_client` for deterministic/offline testing
 
-* **Structured failure feedback** — if a tool raises after exhausting its retries,
-  the planner records `{failure: {node, args, error_code, suggestion}}` and feeds
-  it back to the LLM, prompting a constrained re-plan instead of aborting.
-* **Hard guardrails** — configure wall-clock deadlines and hop budgets directly
-  on `ReactPlanner`; attempts beyond the allotted hops surface deterministic
-  violations and ultimately finish with `reason="budget_exhausted"` alongside a
-  constraint snapshot.
-* **Typed exit reasons** — runs now finish with one of
-  `answer_complete`, `no_path`, or `budget_exhausted`, keeping downstream code
-  simple and machine-checkable.
+**Examples:**
+* `examples/react_minimal/` — Basic sequential flow with stub LLM
+* `examples/react_parallel/` — Parallel shard fan-out with join node
+* `examples/react_pause_resume/` — Approval workflow with planning hints
+* `examples/react_replan/` — Adaptive recovery from tool failures
 
-The new `examples/react_replan/` sample shows a retrieval timeout automatically
-recover via a cached index without leaving the JSON-only contract.
-
-### Parallel fan-out & joins (Phase D)
-
-Phase D lets the planner propose sets of independent tool calls and join them
-without leaving the typed surface area:
-
-* **Parallel `plan` blocks** — the LLM can return `{"plan": [...]}` actions
-  where each branch is validated against the catalog and executed concurrently.
-* **Typed joins** — provide a `{"join": {"node": ...}}` descriptor and the
-  planner will aggregate results, auto-populate fields like `expect`, `results`,
-  or `failures`, and feed branch metadata through `ctx.meta` for the join node.
-* **Deterministic telemetry** — branch errors, pauses, and joins are recorded as
-  structured observations so follow-up actions can re-plan or finish cleanly.
-
-See `examples/react_parallel/` for a shard fan-out that merges responses in one
-round-trip.
+See **manual.md Section 19** for complete documentation.
 
 
 ## 🧭 Repo Structure
