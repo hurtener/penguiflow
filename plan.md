@@ -1,252 +1,661 @@
-# PenguiFlow v2.1 — Distributed & A2A-ready (Lightweight)
+# PenguiFlow v2.5 — ReAct Planner (LiteLLM)
 
-*A phased plan for hooks, features, tests, and examples*
+*A lightweight, typed, product-agnostic planner that chooses & sequences PenguiFlow nodes/recipes using a JSON-only protocol.*
 
-## Why now (context)
+## Vision
 
-* `dev-v2` already delivers **streaming chunks**, **per-trace cancellation**, and **deadlines/budgets** — perfect primitives for remote work, partial results, and abortable long tasks. ([GitHub][1])
-* The A2A protocol standardizes **JSON-RPC over HTTP**, **SSE streaming**, and **Agent Cards** for capability discovery — exactly what we need to interoperate with specialized agents from a main orchestrator. ([GitHub][2])
+Add intelligent planning to PenguiFlow without compromising its core DNA: **typed, reliable, lightweight**.
 
-## Goals (v2.1)
+## Goals
 
-* Add two **pluggable hooks** to enable distribution with zero heavy deps in core:
+* **Planner chooses PenguiFlow Nodes/Recipes** (tools) at runtime
+* **Typed I/O**: strict JSON contracts from your Node schemas (Pydantic v2)
+* **Reliability**: use existing NodeRunner semantics (retries, exponential backoff, timeouts, cancellation)
+* **Pause/Resume**: approvals / deferred work (persisted via v2.1 `StateStore` hook; in-proc fallback)
+* **Adaptive re-planning**: detect failures/assumption breaks and request constrained plan updates
+* **Token-aware**: compact trajectory state with structured summaries
+* **LLM-agnostic** via **LiteLLM**; JSON-only responses (no free-form ReAct logs)
+* **Library-only**: no endpoints, UI, or storage; provide hooks only
 
-  1. `StateStore` (durable run history & correlation)
-  2. `MessageBus` (distributed edges between nodes/workers)
-* Add a **tiny optional seam** to call external agents:
-  3) `RemoteTransport` (e.g., A2A over HTTP/SSE)
-* Ship **examples + tests** so teams can either:
-  (a) scale flows across workers, (b) federate with remote A2A agents, or (c) do both.
+## Non-Goals
 
-## Non-Goals (v2.1)
-
-* Not a scheduler, broker, or DB.
-* No “exactly-once” guarantees.
-* No hard dependency on A2A or any backend. (All integrations are optional extras.)
-
----
-
-## Phase 1 — Core Hooks for Distribution (State & Bus)
-
-### Deliverables
-
-1. **StateStore Protocol** (`penguiflow/state.py`)
-
-   * `save_event(trace_id, ts, kind, data)`
-   * `load_history(trace_id)`
-   * (A2A-prep) `save_remote_binding(trace_id, context_id, task_id, agent_url)` for correlation
-     *Purpose:* durable event journal for recovery/resume; bind PF `trace_id` to remote **A2A context/task**. (A2A’s task lifecycle and resubscribe rely on these IDs.) ([a2a-protocol.org][3])
-
-2. **MessageBus Protocol** (`penguiflow/bus.py`)
-
-   * `put(queue_name, message)`
-   * `get(queue_name, timeout_s: float|None=None)`
-   * (Nice-to-have) `ack(delivery_token)` for at-least-once backends
-     *Purpose:* replace process-local `asyncio.Queue` edges (Floe) with named distributed queues.
-
-3. **Runtime wiring**
-
-   * `PenguiFlow(..., state_store=None, message_bus=None)`
-   * Floes use `message_bus` if provided; otherwise in-proc queues.
-   * Emit durable events for: `node_start|end`, `message_emit|fetch`, `stream_chunk`, `trace_cancel_*`, `deadline_exceeded`.
-
-### Success criteria
-
-* A single flow can run across 2+ processes with **fan-out/fan-in** and **join_k** behavior preserved.
-* Crash during a trace → restart a worker → **resume** based on `load_history`.
-
-### Tests
-
-* **Unit**: In-memory `StateStore` & `MessageBus` stubs; ordering, backpressure, timeout behavior.
-* **Integration**: Redis `MessageBus`, Postgres `StateStore` (example adapters), fan-out/fan-in, join_k across processes.
-* **Faults**: kill a worker mid-trace; ensure no message loss (at-least-once), resume from history.
-
-### Examples
-
-* `examples/distributed_redis_pg/`:
-
-  * RedisBus + PostgresStore; two workers each hosting a subset of nodes; CLI args `--nodes=a,b`.
-
-### Non-goals
-
-* No baked-in Redis/Postgres deps; adapters live in example project(s).
+* Not a DSL or training framework (no DSPy-style signature graph)
+* No built-in database, broker, or scheduler (use v2.1 `StateStore` / `MessageBus` when present)
+* No endpoint/UI scaffolding (samples may show FastAPI glue in `examples/` only)
 
 ---
 
-## Phase 2 — Remote Calls (Agnostic) + A2A Client (Optional Extra)
+## Architecture Overview
 
-### Deliverables
-
-1. **RemoteTransport Protocol** (`penguiflow/remote.py`)
-
-   * `send(agent_url, agent_card, message) -> Message|Artifact`
-   * `stream(agent_url, agent_card, message) -> AsyncIterator[Event]` (map SSE → PF chunks)
-   * `cancel(agent_url, task_id)`
-     *Purpose:* a tiny seam for **HTTP-based agent calls** (A2A, or any RPC).
-
-2. **RemoteNode helper**
-
-   * Looks like any `Node`, but delegates via `RemoteTransport`.
-   * Streams map to `Context.emit_chunk(...)` (v2 capability). ([GitHub][1])
-
-3. **A2A client adapter** (`penguiflow[a2a]`)
-
-   * **JSON-RPC** `message/send` + `message/stream` (SSE) with **Agent Card** parsing. ([a2a-protocol.org][3])
-   * Map **tasks/cancel** to `PenguiFlow.cancel(trace_id)` propagation. ([a2a-protocol.org][3])
-
-### Success criteria
-
-* From a PF flow, call a remote A2A agent, **receive streaming partials** via SSE, and forward them downstream / to Rookery. (A2A mandates SSE for `message/stream`.) ([a2a-protocol.org][3])
-* Cancelling a PF trace cancels the remote A2A task.
-
-### Tests
-
-* **Unit**: RemoteNode happy path, backoff, timeouts; chunk-ordering/backpressure.
-* **Integration**: fake A2A server (SSE), stream → chunks, cancel → `tasks/cancel`, resubscribe using stored `task_id`.
-
-### Examples
-
-* `examples/a2a_orchestrator/`: main PF agent delegates to two specialized A2A agents; streams partials; supports cancel.
-
-### Non-goals
-
-* No A2A SDK in core; adapter shipped as optional extra.
-* No push-notification setup yet (SSE is enough for v2.1).
-
----
-
-## Phase 3 — A2A Server Adapter (Optional, but powerful)
-
-### Deliverables
-
-* **FastAPI A2A Server adapter** (`penguiflow[a2a-server]`)
-
-  * Expose `message/send`, `message/stream`, `tasks/*` for a PF “main agent”.
-  * **Generate Agent Card** from flow skills/capabilities (names, streaming support). ([GitHub][2])
-* Map PF outputs to A2A **Artifact** (final result) and status events.
-* Auth hooks (bearer/API key) pass-through.
-
-### Success criteria
-
-* Other A2A clients can discover the main PF agent via the **Agent Card** and call it over JSON-RPC, stream results, and cancel tasks. ([GitHub][2])
-
-### Tests
-
-* Contract tests: `message/send`, `message/stream`, `tasks/get|cancel`.
-* (Optional) Run A2A **compliance tests** against the adapter.
-
-### Examples
-
-* `examples/a2a_server/`: wrap a PF flow as an A2A agent with a generated Agent Card.
-
-### Non-goals
-
-* Not a universal auth story; leave SSO/OIDC to integrators.
-
----
-
-## Phase 4 — Observability & Ops polish
-
-### Deliverables
-
-* Structured logs & metrics for remote calls (latency, bytes, error rates, cancel latency).
-* Correlate PF `trace_id` ↔ A2A `contextId`/`taskId` in logs & events (via `StateStore`). ([a2a-protocol.org][3])
-* Minimal admin CLI: inspect trace history, replay last N events (dev-only).
-
-### Success criteria
-
-* SRE can follow a cross-agent trace end-to-end with IDs.
-
----
-
-## API Sketches (minimal surfaces)
-
-```py
-# penguiflow/state.py
-class StateStore(Protocol):
-    async def save_event(self, trace_id: str, ts: float, kind: str, data: dict): ...
-    async def load_history(self, trace_id: str) -> list[dict]: ...
-    async def save_remote_binding(self, trace_id: str, context_id: str, task_id: str, agent_url: str): ...
-
-# penguiflow/bus.py
-class MessageBus(Protocol):
-    async def put(self, queue: str, message: Any) -> None: ...
-    async def get(self, queue: str, timeout_s: float | None = None) -> Any: ...
-    # optional: async def ack(self, token: str) -> None: ...
-
-# penguiflow/remote.py
-class RemoteTransport(Protocol):
-    async def send(self, agent_url: str, agent_card: dict, message: dict) -> dict: ...
-    async def stream(self, agent_url: str, agent_card: dict, message: dict) -> AsyncIterator[dict]: ...
-    async def cancel(self, agent_url: str, task_id: str) -> None: ...
 ```
+User Query
+   └─► ReactPlanner (LiteLLM JSON)
+         ├─ Catalog: [NodeSpec...]  ← (auto from Node + registry)
+         ├─ Trajectory: [Step{node,args,observation,summary}]
+         ├─ Policies: budgets, max_iters, parallelism
+         └─► NodeRunner
+               ├─ retries / backoff / timeouts
+               └─ emits observations (+ StreamChunks)
+```
+
+### Key Components
+
+**NodeSpec** (derived from existing Nodes):
+
+```json
+{
+  "name": "retrieve_docs",
+  "description": "Fetch k docs by topic",
+  "side_effects": "read",
+  "input_schema": { ... JSON Schema from Pydantic ... },
+  "output_schema": { ... }
+}
+```
+
+**Planner contract** (LLM output):
+
+```json
+{"thought":"...", "next_node":"retrieve_docs", "args":{"topic":"metrics", "k":5}}
+```
+
+---
+
+## Tool Catalog System
+
+Before diving into phases, let's establish how nodes become discoverable tools for the planner.
+
+### NodeSpec Dataclass
+
+New module: `penguiflow/catalog.py`
+
+```python
+from dataclasses import dataclass, field
+from typing import Any, Literal, Mapping, Optional, Sequence, Type
+from pydantic import BaseModel
+from penguiflow.node import Node
+
+SideEffect = Literal["pure", "read", "write", "external", "stateful"]
+
+@dataclass(frozen=True)
+class NodeSpec:
+    node: Node
+    name: str
+    desc: str
+    args_model: Type[BaseModel]
+    out_model: Type[BaseModel]
+    side_effects: SideEffect = "pure"
+    tags: Sequence[str] = ()
+    auth_scopes: Sequence[str] = ()
+    cost_hint: Optional[str] = None         # "low", "med", "high" or "$$"
+    latency_hint_ms: Optional[int] = None   # rough typical latency
+    safety_notes: Optional[str] = None
+    extra: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_tool_record(self) -> dict[str, Any]:
+        """Used by planner to render compact tool descriptor + JSON schemas."""
+        return {
+            "name": self.name,
+            "desc": self.desc,
+            "side_effects": self.side_effects,
+            "tags": list(self.tags),
+            "auth_scopes": list(self.auth_scopes),
+            "cost_hint": self.cost_hint,
+            "latency_hint_ms": self.latency_hint_ms,
+            "safety_notes": self.safety_notes,
+            "args_schema": self.args_model.model_json_schema(),
+            "out_schema": self.out_model.model_json_schema(),
+            "extra": dict(self.extra),
+        }
+```
+
+### Three Ergonomic Ways to Annotate Nodes
+
+#### A) Decorator (Preferred)
+
+```python
+from penguiflow.catalog import tool
+
+@tool(desc="KB search over internal docs", side_effects="read", tags=["search","docs"])
+async def search_docs(msg: SearchArgs, ctx) -> SearchOut:
+    """Search the internal knowledge base for relevant documents."""
+    ...
+
+search_node = Node(search_docs, name="search_docs")
+```
+
+#### B) Node Wrapper
+
+```python
+from penguiflow.catalog import describe_node
+
+search_node = describe_node(
+    Node(search_docs, name="search_docs"),
+    desc="KB search over internal docs",
+    side_effects="read",
+    tags=["search","docs"],
+)
+```
+
+#### C) External Catalog
+
+```python
+from penguiflow.catalog import NodeSpec
+
+specs = [
+    NodeSpec(
+        node=search_node,
+        name="search_docs",
+        desc="KB search",
+        args_model=SearchArgs,
+        out_model=SearchOut,
+        side_effects="read",
+    ),
+]
+```
+
+### Catalog Builder
+
+```python
+from penguiflow.catalog import build_catalog
+
+catalog = build_catalog(
+    nodes=[search_node, triage_node, summarize_node],
+    registry=my_registry,
+    overrides={"search_docs": {"cost_hint": "low"}}
+)
+```
+
+**Fallback behavior**:
+- If no `desc` provided: use function docstring → Pydantic Field descriptions → `"{name} (no description)"`
+- I/O models from `ModelRegistry` if provided, otherwise from Node's adapters
+
+---
+
+## Phase A — JSON-only ReAct Loop
+
+**Objective**: Implement minimal, deterministic loop: *user query → choose node (JSON) → run node → record observation → repeat (bounded)*.
+
+### Deliverables
+
+1. **`penguiflow/planner/react.py`**
+
+   ```python
+   class ReactPlanner:
+       def __init__(
+           self,
+           llm: str | dict,                      # LiteLLM model name or config
+           nodes: Sequence[Node] | None = None,  # or provide catalog directly
+           catalog: Sequence[NodeSpec] | None = None,
+           *,
+           max_iters: int = 8,
+           temperature: float = 0.0,
+           json_schema_mode: bool = True,
+           registry: ModelRegistry | None = None,
+       ) -> None: ...
+
+       async def run(self, query: str, *, context_meta: dict | None = None) -> Any: ...
+       async def step(self, trajectory: Trajectory) -> PlannerAction: ...
+   ```
+
+   - JSON coercion & validation (Pydantic) for `PlannerAction`
+   - Catalog builder: introspect Node/Recipe → `NodeSpec` → tool descriptor
+   - LiteLLM client shim (strict JSON response via `response_format={"type": "json_object"}` where supported)
+
+2. **Prompt Templates** (`planner/prompts.py`)
+
+   - System prompt: objectives, rules, JSON-only format, available nodes with compact schemas
+   - Few-shot mini examples (optional) demonstrating valid outputs & failure cases
+
+3. **Trajectory Model** (`planner/types.py`)
+
+   ```python
+   class TrajectoryStep(BaseModel):
+       thought: str
+       node: str
+       args: dict[str, Any]
+       observation: Any
+       error: Optional[str] = None
+       tokens: Optional[int] = None
+       latency_ms: Optional[float] = None
+
+   class Trajectory(BaseModel):
+       steps: list[TrajectoryStep]
+       # ... stats methods
+   ```
+
+### Algorithm
+
+1. Build catalog from nodes (via `build_catalog`)
+2. Seed trajectory with user query
+3. Ask LLM for `{thought, next_node, args}` (JSON only)
+4. Validate `args` against Node's **input schema**; if invalid, repair (max 2 attempts)
+5. Execute Node via NodeRunner (inherits retries/backoff/timeouts)
+6. Append observation (validated against `out` schema); loop until `finish`/`stop`/`max_iters`
+
+### Testing
+
+**Unit**:
+- JSON parsing & schema validation (good/invalid/repair)
+- Node failures: ensure NodeRunner backoff kicks in; observation records error
+- Deterministic output with temperature=0
+
+**Integration**:
+- Example flow: `triage → retrieve → summarize`
+- Streaming: if a node emits `StreamChunk`, planner surfaces partials (pass through or aggregate)
+
+### Example
+
+`examples/react_minimal/` — 3 nodes + planner; run once; prints final result & trajectory
+
+### Acceptance
+
+* Planner completes within `max_iters` for happy-path scenario
+* On invalid args, it self-repairs JSON and proceeds
+* No free-form tool logs: planner and LLM exchange **strict JSON**
+
+---
+
+## Phase B — Trajectory Summarization + Pause/Resume + Developer Hints
+
+**Objective**: Keep token footprint low, enable approvals / long-running handoffs, and let developers inject domain knowledge.
+
+### Deliverables
+
+1. **Token-aware Summarizer**
+
+   - `Trajectory.compress()` creates structured mini-state:
+
+     ```json
+     {
+       "goals": ["..."],
+       "facts": {"topic": "metrics", "k": 5, "docs_seen": 12},
+       "pending": ["call summarize(topic, docs)"],
+       "last_output_digest": "…"
+     }
+     ```
+
+   - **Optional cheaper LLM** for summarization:
+     - Planner accepts `summarizer_llm` separate from main `llm`
+     - If unset: (a) rule-based compressor first (deterministic truncation), then (b) fall back to `llm` when necessary
+     - Summarizer prompt: **short**, **schema-bound**, JSON-only output
+
+   - Prompts include **summary** instead of full logs when over budget
+
+2. **Pause/Resume Hooks**
+
+   ```python
+   class PlannerPause(BaseModel):
+       reason: Literal["approval_required", "await_input", "external_event", "constraints_conflict"]
+       payload: dict
+       resume_token: str
+
+   # API methods:
+   async def pause(self, reason: str, payload: dict) -> PlannerPause: ...
+   async def resume(self, token: str, user_input: str | None = None) -> Any: ...
+   ```
+
+   - Storage: in-proc dict; if v2.1 `StateStore` provided, use it for durability (opt-in)
+
+3. **Approvals Pattern**
+
+   - Inject "policy node" requiring human approval on high-risk actions
+   - Planner yields `PlannerPause(approval_required)`
+
+4. **Developer Prompt Hints**
+
+   Configurable **system prompt extension** + **structured hints**:
+
+   ```python
+   class ReactPlanner:
+       def __init__(
+           self,
+           llm: str | dict,
+           nodes: Sequence[Node] | None = None,
+           catalog: Sequence[NodeSpec] | None = None,
+           *,
+           max_iters: int = 8,
+           temperature: float = 0.0,
+           json_schema_mode: bool = True,
+           token_budget: int | None = None,
+           pause_enabled: bool = True,
+           state_store: Any | None = None,
+           registry: ModelRegistry | None = None,
+           # NEW in Phase B:
+           summarizer_llm: str | dict | None = None,       # cheaper model for compaction
+           system_prompt_extra: str | None = None,         # append-only dev guidance
+           planning_hints: dict | None = None,             # structured constraints/guidance
+       ) -> None: ...
+   ```
+
+   **Planning Hints Schema**:
+
+   ```json
+   {
+     "ordering_hints": ["triage", "retrieve_docs", "rerank", "summarize"],
+     "parallel_groups": [["retrieve_docs_A", "retrieve_docs_B"], ["rerank"]],
+     "sequential_only": ["apply_compliance", "send_email"],
+     "disallow_nodes": ["expensive_tool_v1"],
+     "prefer_nodes": ["cached_search"],
+     "budget_hints": {"max_parallel": 3, "max_cost_usd": 0.10}
+   }
+   ```
+
+   **Execution Semantics**:
+
+   - **Hard constraints enforced in code**:
+     - `disallow_nodes`: reject actions referencing these nodes, ask for corrected plan
+     - `max_parallel`: cap concurrent actions at executor level
+     - `sequential_only`: prevent nodes from appearing in parallel groups; auto-rewrite or request revision
+
+   - **Soft preferences** (prompt-level nudges):
+     - `prefer_nodes`, `ordering_hints`: if violated, do **one** corrective iteration before proceeding
+
+   **Prompting Changes**:
+
+   - Planner system prompt now appends:
+     - `system_prompt_extra` (verbatim, if provided)
+     - Compact rendering of `planning_hints`:
+       - "**Respect** the following constraints: …"
+       - "Preferred order (if applicable): …"
+       - "Allowed parallel groups: …; do not exceed `max_parallel`."
+       - "Disallowed tools: … (never call)."
+
+   - Summarizer prompt (when compaction needed):
+     - Ultra-brief instructions, JSON-only output, keep **facts/pending/goals**
+     - If `summarizer_llm` not set, try rule-based compressor first; if still too long, use main `llm`
+
+### Testing
+
+**Summarizer**:
+- Uses cheaper model when set; falls back to main LLM only if summarizer fails
+- Rule-based shrink first → summarizer second; ensure output remains valid and helpful for re-planning
+
+**Pause/Resume**:
+- Serialize → restore → continue; deterministic outcome
+
+**Prompt Hints**:
+- Plans follow `ordering_hints` when feasible; if not, we get a single correction pass
+- `disallow_nodes` never executed (guard tested)
+- `max_parallel` enforced even if LLM proposes larger fan-out
+
+### Example
+
+`examples/react_pause_resume/`:
+
+```python
+planner = ReactPlanner(
+    llm="gpt-4o",
+    summarizer_llm="gpt-4o-mini",
+    nodes=[triage, retrieve_docs, rerank, summarize, apply_compliance, send_email],
+    system_prompt_extra="Break the query into minimal steps. Prefer cached_search when available.",
+    planning_hints={
+        "ordering_hints": ["triage", "retrieve_docs", "rerank", "summarize"],
+        "parallel_groups": [["retrieve_docs_A", "retrieve_docs_B"]],
+        "sequential_only": ["apply_compliance", "send_email"],
+        "disallow_nodes": ["expensive_tool_v1"],
+        "prefer_nodes": ["cached_search"],
+        "budget_hints": {"max_parallel": 2, "max_cost_usd": 0.05}
+    }
+)
+
+result = await planner.run("Share last month's metrics to Slack")
+```
+
+### Error Handling & Fallbacks
+
+- If summarizer returns invalid JSON:
+  - 1–2 JSON repair attempts; then fall back to rule-based truncation with clear `summary_note`
+
+- If hints produce impossible plan (e.g., required node is disallowed):
+  - Planner returns `PlannerPause(reason="constraints_conflict")`, or falls back to safe, minimal path if allowed
+
+### Acceptance
+
+* Prompts stay under configurable token budget
+* Resumed runs preserve constraints and state
+* Cheaper summarizer slashes cost for iterative sessions
+* Developer hints yield faster, cheaper, more reliable plans without hardcoding flows
+
+---
+
+## Phase C — Adaptive Re-Planning (Error Feedback)
+
+**Objective**: When execution fails after retries or assumptions break, request constrained, minimal re-plan.
+
+### Deliverables
+
+1. **Error Channel to LLM**
+
+   On Node failure (after NodeRunner retries), send:
+
+   ```json
+   {
+     "failure": {
+       "node": "retrieve_docs",
+       "args": {...},
+       "error_code": "Timeout",
+       "message": "...",
+       "suggestion": "reduce_k or pick alternate source"
+     }
+   }
+   ```
+
+   Prompt: "Propose revised next action that **respects budgets** and avoids failure cause."
+
+2. **Constraint Manager**
+
+   - Hard limits: wall-clock deadline, hop budget, token budget
+   - Planner refuses plans violating constraints; asks for another revision (max N)
+
+3. **Finish Conditions**
+
+   ```python
+   class PlannerFinish(BaseModel):
+       reason: Literal["answer_complete", "no_path", "budget_exhausted"]
+       payload: Any
+       metadata: dict
+   ```
+
+### Testing
+
+* Simulate transient and permanent failures; verify re-plan path changes (different node or args)
+* Verify constraints enforcement (deadline/hops) terminates gracefully with reason
+
+### Example
+
+`examples/react_replan/` — retrieval timeout → re-plan using cached index; completes
+
+### Acceptance
+
+* On failure, planner requests revised JSON action and succeeds where possible
+* Otherwise exits with typed final result + reason
+
+---
+
+## Phase D — Multi-Node Concurrency (Parallel Calls)
+
+**Objective**: Allow planner to propose *sets* of independent calls evaluated in parallel; then join results.
+
+### Deliverables
+
+1. **Parallel Action Schema**
+
+   LLM can return:
+
+   ```json
+   {
+     "plan": [
+       {"node": "retrieve_part", "args": {"id": 1}},
+       {"node": "retrieve_part", "args": {"id": 2}}
+     ],
+     "join": {"node": "merge_parts", "args": {"expect": 2}}
+   }
+   ```
+
+2. **Executor**
+
+   - Launch N nodes concurrently (`map_concurrent`) with bounded parallelism
+   - Collect observations; run join node
+   - Backoff/retries per node preserved; partial failures short-circuit or degrade gracefully per policy
+
+3. **Join-k Semantics**
+
+   - If `join.expect=k`, integrate with existing `join_k` helper
+
+### Testing
+
+* Parallel fan-out correctness; ordering independence; join determinism
+* Fault injection: one branch fails → re-plan or degrade according to policy
+
+### Example
+
+`examples/react_parallel/` — shard retrieval across 3 sources, merge and summarize
+
+### Acceptance
+
+* Planner can propose valid parallel sets
+* Executor runs them safely under existing reliability guarantees
+
+---
+
+## Public API (Final)
+
+```python
+from penguiflow.planner import ReactPlanner
+from penguiflow.planner.types import PlannerAction, PlannerPause, PlannerFinish
+
+class ReactPlanner:
+    def __init__(
+        self,
+        llm: str | dict,                        # LiteLLM model name or config
+        nodes: Sequence[Node] | None = None,    # will build catalog automatically
+        catalog: Sequence[NodeSpec] | None = None,  # or provide pre-built catalog
+        *,
+        max_iters: int = 8,
+        temperature: float = 0.0,
+        json_schema_mode: bool = True,
+        token_budget: int | None = None,
+        pause_enabled: bool = True,
+        state_store: Any | None = None,         # v2.1 StateStore for durability
+        registry: ModelRegistry | None = None,
+        summarizer_llm: str | dict | None = None,
+        system_prompt_extra: str | None = None,
+        planning_hints: dict | None = None,
+    ) -> None: ...
+
+    async def run(self, query: str, *, context_meta: dict | None = None) -> Any: ...
+    async def resume(self, token: str, user_input: str | None = None) -> Any: ...
+    async def step(self, trajectory: Trajectory) -> PlannerAction: ...
+
+class PlannerAction(BaseModel):
+    thought: str
+    next_node: str | None = None     # "finish" or None to stop
+    args: dict[str, Any] | None = None
+    plan: list[dict] | None = None   # Phase D parallel actions
+    join: dict | None = None         # join descriptor
+
+class PlannerPause(BaseModel):
+    reason: Literal["approval_required", "await_input", "external_event", "constraints_conflict"]
+    payload: dict
+    resume_token: str
+
+class PlannerFinish(BaseModel):
+    reason: Literal["answer_complete", "no_path", "budget_exhausted"]
+    payload: Any
+    metadata: dict
+```
+
+---
+
+## Prompting Strategy (JSON-only)
+
+**System Prompt** summarizes rules:
+- Tools = PF nodes; must output *valid JSON only* matching provided schemas
+- Use minimal text in `thought`
+- Respect constraints: `deadline_s`, hop budget, token budget, cost
+- Prefer plans that reduce token footprint (reuse summaries)
+
+**Tool Catalog**: list of nodes with name, description, side effects, and compact JSON Schemas
+
+**Repair Loop**: on schema violation, reply with short machine message: `"args did not validate: <error>. Return corrected JSON."`
 
 ---
 
 ## Testing Matrix
 
-| Area              | Unit                          | Integration                 | Fault injection               |
-| ----------------- | ----------------------------- | --------------------------- | ----------------------------- |
-| StateStore        | event shape, history order    | Postgres adapter            | restart mid-trace; resume     |
-| MessageBus        | put/get ordering              | Redis adapter, multi-worker | network delay; dup deliveries |
-| Streaming         | chunk seq/order, backpressure | SSE end-to-end              | slow consumer; drop chunk     |
-| Cancel            | raise in-flight, unwind       | A2A `tasks/cancel`          | cancel storms; lost SSE       |
-| Budgets/Deadlines | token/hop/wall limits         | long remote tasks           | deadline races                |
-
-(Streaming/cancel/budgets are already documented & tested in `dev-v2`, so we extend coverage across distributed/remote paths.) ([GitHub][1])
+| Area          | Unit                     | Integration            | Fault Injection                |
+| ------------- | ------------------------ | ---------------------- | ------------------------------ |
+| JSON I/O      | parse/repair/validate    | end-to-end example     | malformed tool args            |
+| Reliability   | backoff/timeouts honored | long node + cancel     | repeated transient failures    |
+| Summarization | compaction threshold     | quality after resume   | pathological long runs         |
+| Re-planning   | constraint enforcement   | recovery after failure | hard failure → graceful finish |
+| Concurrency   | join correctness         | mixed success paths    | one branch fails mid-fanout    |
 
 ---
 
-## Example Apps (expected)
+## Examples
 
-1. **Distributed Flow** (`examples/distributed_redis_pg/`):
+* `examples/react_minimal/` — Phase A, single-threaded loop
+* `examples/react_pause_resume/` — Phase B, approval & resume with hints
+* `examples/react_replan/` — Phase C, failure → constrained re-plan
+* `examples/react_parallel/` — Phase D, concurrent fan-out & join
 
-   * Redis `MessageBus`, Postgres `StateStore`, two workers via CLI; join_k across machines.
+Each example includes a README and runnable script:
 
-2. **Orchestrator → A2A Agents** (`examples/a2a_orchestrator/`):
+```bash
+uv run python examples/react_minimal/main.py
+```
 
-   * Main PF agent calls 2 specialty A2A agents via `RemoteTransport(A2A)`, streams partials, supports cancel/resubscribe.
-   * Uses A2A **message/stream** (SSE) and **tasks/cancel**. ([a2a-protocol.org][3])
+---
 
-3. **PF as A2A Server** (`examples/a2a_server/`) *(Phase 3)*:
+## Backwards Compatibility
 
-   * FastAPI wrapper, **Agent Card** generation, JSON-RPC endpoints. ([GitHub][2])
+* Purely **opt-in**; does not change Node, Flow, or Core APIs
+* Works in-proc today; later can use `StateStore` for durable pause/resume with zero breaking changes
+* No new mandatory dependencies; LiteLLM required only if you import/use the planner
 
 ---
 
 ## Risks & Mitigations
 
-* **Adapter sprawl** → keep core pure; adapters/examples live outside core; publish `extras` (`penguiflow[a2a]`).
-* **Backpressure under SSE** → reuse v2 per-trace capacity & ordered chunking in `emit_chunk`. ([GitHub][1])
-* **Inconsistent IDs** → persist `trace_id` ↔ `contextId/taskId` in `StateStore`. ([a2a-protocol.org][3])
-* **Security** → treat remote data as untrusted; validate with Pydantic; let users wire auth headers per A2A guidance. ([GitHub][2])
+* **LLM returns non-JSON** → strict response_format (where supported) + repair loop
+* **Hallucinated args** → Pydantic validation + corrective prompt, bounded retries
+* **Token sprawl** → structured summarization + budgets
+* **Complexity creep** → keep planner ~300–500 LOC; prompts/data contracts do the heavy lifting
+* **Vendor lock-in** → LiteLLM keeps providers swappable
 
 ---
 
-## Documentation ToC (what to add)
+## Definition of Done
 
-* **“Going Distributed”**: how to plug `MessageBus` & `StateStore`; sample Redis/Postgres adapters.
-* **“Calling Remote Agents”**: `RemoteTransport` concepts; A2A client adapter setup; streaming & cancel.
-* **“Exposing a PF Agent via A2A”** *(Phase 3)*: server adapter, Agent Card, auth notes.
-* **Troubleshooting**: chunk ordering, retries, cancel races, ID correlation.
-
----
-
-## Adoption Path
-
-* Start with Phase 1 to distribute current flows (no external agents).
-* Add Phase 2 to federate with existing A2A agents (no broker required).
-* Add Phase 3 if you need your PF orchestrator to be discoverable/callable by other A2A clients.
+* **Phase A**: JSON-only planner completes typical triage→retrieve→summarize flows with deterministic outputs
+* **Phase B**: Summarization keeps prompts within budget; pause/resume reliable; hints work as expected
+* **Phase C**: Re-planning succeeds on common failures or exits with typed "no_path/budget_exhausted"
+* **Phase D**: Parallel fan-out with join works; reliability preserved per branch
 
 ---
 
-### References (key protocol & repo facts)
+## Stretch Goals (post-v2.5)
 
-* PenguiFlow `dev-v2` features: streaming, cancel, budgets (README “Implemented v2 Features”). ([GitHub][1])
-* A2A **key features**: JSON-RPC over HTTP, Agent Cards, SSE streaming. ([GitHub][2])
-* A2A **JSON-RPC transport** & method naming (e.g., `message/send`, `tasks/get`). ([a2a-protocol.org][3])
-* A2A **SSE streaming** (`message/stream`, `tasks/resubscribe`). ([a2a-protocol.org][3])
-* A2A **message/stream** event payloads & updates. ([a2a-protocol.org][3])
-* A2A **tasks/cancel** semantics. ([a2a-protocol.org][3])
-* A2A **Agent Card** (discovery & capabilities). ([a2a-protocol.org][3])
+* Planner policies (cost ceilings per tenant)
+* Automatic tool selection from **Agent Cards (A2A)** when available
+* Cached tool arg priors (few-shot from past successful trajectories)
 
+---
+
+## Catalog System Benefits
+
+* **Ergonomic**: use decorator, wrapper, or external catalog—whatever fits your codebase
+* **Typed**: args/out schemas come straight from your Pydantic models (no duplicate typing)
+* **Lightweight**: no core API break; everything is additive
+* **Planner-ready**: clean, compact tool catalog with side-effects and hints the planner can use
+* **Side-effect-aware**: planner can apply rules ("avoid `write` unless approved"; "never call `stateful` in parallel")
+* **Cost/latency shaping**: use `cost_hint` and `latency_hint_ms` to penalize expensive/slow nodes
+* **Auth scopes**: if caller lacks scopes, planner blocks those nodes (hard constraint)
+* **Tags**: great for domain routing ("finance", "customer_support") and developer hints
+
+---
+
+**TL;DR**
+
+This planner stays true to PenguiFlow's DNA: **typed, reliable, lightweight**. It borrows the *good parts* of DSPy/Google/Pydantic—tool iteration, plan→act discipline, typed outputs—while avoiding heavy frameworks, free-form logs, and complex servers.

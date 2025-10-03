@@ -15,6 +15,8 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 class RegistryEntry:
     in_adapter: TypeAdapter[Any]
     out_adapter: TypeAdapter[Any]
+    in_model: type[BaseModel]
+    out_model: type[BaseModel]
 
 
 class ModelRegistry:
@@ -36,6 +38,8 @@ class ModelRegistry:
         self._entries[node_name] = RegistryEntry(
             TypeAdapter(in_model),
             TypeAdapter(out_model),
+            in_model,
+            out_model,
         )
 
     def adapters(self, node_name: str) -> tuple[TypeAdapter[Any], TypeAdapter[Any]]:
@@ -44,6 +48,23 @@ class ModelRegistry:
         except KeyError as exc:
             raise KeyError(f"Node '{node_name}' not registered") from exc
         return entry.in_adapter, entry.out_adapter
+
+    def models(
+        self, node_name: str
+    ) -> tuple[type[BaseModel], type[BaseModel]]:
+        """Return the registered models for ``node_name``.
+
+        Raises
+        ------
+        KeyError
+            If the node has not been registered.
+        """
+
+        try:
+            entry = self._entries[node_name]
+        except KeyError as exc:
+            raise KeyError(f"Node '{node_name}' not registered") from exc
+        return entry.in_model, entry.out_model
 
 
 __all__ = ["ModelRegistry"]

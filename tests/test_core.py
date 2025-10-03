@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 
 import pytest
 from pydantic import BaseModel
@@ -12,6 +13,7 @@ from penguiflow.core import CycleError, PenguiFlow, create
 from penguiflow.metrics import FlowEvent
 from penguiflow.node import Node, NodePolicy
 from penguiflow.registry import ModelRegistry
+from penguiflow.types import Headers, Message
 
 
 @pytest.mark.asyncio
@@ -486,6 +488,56 @@ async def test_fetch_nowait_queue_empty() -> None:
     if isinstance(rookery_ctx, Context):
         with pytest.raises(asyncio.QueueEmpty):
             rookery_ctx.fetch_nowait()
+
+    await flow.stop()
+
+
+@pytest.mark.asyncio
+async def test_message_to_message_warning_for_bare_payload() -> None:
+    registry = ModelRegistry()
+    registry.register("annotate", Message, Message)
+
+    async def bad(message: Message, _ctx) -> str:
+        return f"{message.payload}!"
+
+    node = Node(bad, name="annotate", policy=NodePolicy(validate="none"))
+    flow = create(node.to())
+    flow.run(registry=registry)
+
+    message = Message(payload="hello", headers=Headers(tenant="acme"))
+
+    with pytest.warns(RuntimeWarning) as record:
+        await flow.emit(message)
+        result = await flow.fetch()
+
+    assert result == "hello!"
+    assert any("Message -> Message" in str(w.message) for w in record)
+
+    await flow.stop()
+
+
+@pytest.mark.asyncio
+async def test_message_to_message_no_warning_when_envelope_preserved() -> None:
+    registry = ModelRegistry()
+    registry.register("annotate", Message, Message)
+
+    async def good(message: Message, _ctx) -> Message:
+        return message.model_copy(update={"payload": f"{message.payload}!"})
+
+    node = Node(good, name="annotate", policy=NodePolicy(validate="none"))
+    flow = create(node.to())
+    flow.run(registry=registry)
+
+    message = Message(payload="hello", headers=Headers(tenant="acme"))
+
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        await flow.emit(message)
+        result = await flow.fetch()
+
+    assert isinstance(result, Message)
+    assert result.payload == "hello!"
+    assert not record
 
     await flow.stop()
 

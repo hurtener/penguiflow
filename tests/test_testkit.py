@@ -1,15 +1,18 @@
+import logging
 from typing import Any
 
 import pytest
 
 from penguiflow import (
     FinalAnswer,
+    FlowError,
     FlowErrorCode,
     Headers,
     Message,
     Node,
     NodePolicy,
     create,
+    log_flow_events,
     testkit,
 )
 
@@ -89,4 +92,112 @@ def test_assert_node_sequence_without_run() -> None:
 def test_simulate_error_validation() -> None:
     with pytest.raises(ValueError):
         testkit.simulate_error("oops", FlowErrorCode.NODE_EXCEPTION, fail_times=0)
+
+
+@pytest.mark.asyncio
+async def test_assert_preserves_message_envelope_accepts_copy() -> None:
+    async def annotate(message: Message, _ctx: Any) -> Message:
+        return message.model_copy(update={"payload": f"{message.payload}!"})
+
+    message = Message(payload="hello", headers=Headers(tenant="acme"))
+
+    result = await testkit.assert_preserves_message_envelope(annotate, message=message)
+
+    assert isinstance(result, Message)
+    assert result.payload == "hello!"
+    assert result.headers == message.headers
+    assert result.trace_id == message.trace_id
+
+
+@pytest.mark.asyncio
+async def test_assert_preserves_message_envelope_rejects_bare_payload() -> None:
+    async def bad_node(message: Message, _ctx: Any) -> str:
+        return message.payload
+
+    message = Message(payload="hello", headers=Headers(tenant="acme"))
+
+    with pytest.raises(AssertionError) as excinfo:
+        await testkit.assert_preserves_message_envelope(bad_node, message=message)
+
+    assert "must return a Message" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_assert_preserves_message_envelope_rejects_header_mutation() -> None:
+    async def mutate_headers(message: Message, _ctx: Any) -> Message:
+        replacement = Headers(tenant="other")
+        return message.model_copy(update={"headers": replacement})
+
+    message = Message(payload="hello", headers=Headers(tenant="acme"))
+
+    with pytest.raises(AssertionError) as excinfo:
+        await testkit.assert_preserves_message_envelope(
+            mutate_headers, message=message
+        )
+
+    assert "headers" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_run_one_with_log_flow_events_records_error_payload(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    logger_name = "tests.testkit.log_flow_events"
+    caplog.set_level(logging.INFO, logger=logger_name)
+
+    latency_events: list[tuple[str, float]] = []
+
+    def capture_latency(event_type: str, latency_ms: float, event: Any) -> None:
+        latency_events.append((event_type, latency_ms))
+
+    async def always_fails(message: Message, _ctx: Any) -> Message:
+        raise ValueError("boom")
+
+    node = Node(
+        always_fails,
+        name="flaky",
+        policy=NodePolicy(validate="none", max_retries=0),
+    )
+    middleware = log_flow_events(
+        logging.getLogger(logger_name), latency_callback=capture_latency
+    )
+    flow = create(
+        node.to(),
+        middlewares=[middleware],
+        emit_errors_to_rookery=True,
+    )
+
+    message = Message(payload="hello", headers=Headers(tenant="acme"))
+
+    result = await testkit.run_one(flow, message)
+
+    assert isinstance(result, FlowError)
+    assert result.code == FlowErrorCode.NODE_EXCEPTION.value
+    assert "flaky" in (result.node_name or "")
+
+    events = testkit.get_recorded_events(message.trace_id)
+    event_types = [event.event_type for event in events]
+    assert "node_error" in event_types
+    assert "node_failed" in event_types
+
+    failed_event = next(event for event in events if event.event_type == "node_failed")
+    payload = failed_event.error_payload
+    assert payload is not None
+    assert payload["code"] == FlowErrorCode.NODE_EXCEPTION.value
+    assert payload["node_name"] == "flaky"
+    assert payload.get("exception_type") == "ValueError"
+
+    failure_logs = [
+        record
+        for record in caplog.records
+        if record.name == logger_name and record.getMessage() == "node_error"
+    ]
+    assert failure_logs, "expected node_error log from log_flow_events"
+    assert not any(
+        record.getMessage() == "node_success" and record.name == logger_name
+        for record in caplog.records
+    )
+
+    assert latency_events and latency_events[0][0] == "node_error"
+    assert latency_events[0][1] > 0.0
 

@@ -11,6 +11,9 @@
   <a href="https://github.com/penguiflow/penguiflow">
     <img src="https://img.shields.io/badge/coverage-85%25-brightgreen" alt="Coverage">
   </a>
+  <a href="https://nightly.link/penguiflow/penguiflow/workflows/benchmarks/main/benchmarks.json.zip">
+    <img src="https://img.shields.io/badge/benchmarks-latest-orange" alt="Benchmarks">
+  </a>
   <a href="https://pypi.org/project/penguiflow/">
     <img src="https://img.shields.io/pypi/v/penguiflow.svg" alt="PyPI version">
   </a>
@@ -51,6 +54,23 @@ It provides:
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
+
+## Gold Standard Scorecard
+
+| Area | Metric | Target | Current |
+| --- | --- | --- | --- |
+| Hop overhead | µs per hop | ≤ 500 | 398 |
+| Streaming order | gaps/dupes | 0 | 0 |
+| Cancel leakage | orphan tasks | 0 | 0 |
+| Coverage | lines | ≥85% | 87% |
+| Deps | count | ≤2 | 2 |
+| Import time | ms | ≤220 | 203 |
+
+## 📑 Core Behavior Spec
+
+* [Core Behavior Spec](docs/core_behavior_spec.md) — single-page rundown of ordering,
+  streaming, cancellation, deadline, and fan-in invariants with pointers to regression
+  tests.
 
 ---
 
@@ -300,6 +320,70 @@ The new `penguiflow.testkit` module keeps unit tests tiny:
 
 The harness is covered by `tests/test_testkit.py` and demonstrated in
 `examples/testkit_demo/`.
+
+### JSON-only ReAct planner (Phase A)
+
+Phase A introduces a lightweight planner loop that keeps PenguiFlow typed and
+deterministic:
+
+* `penguiflow.catalog.NodeSpec` + `build_catalog` turn registered nodes into
+  tool descriptors with JSON Schemas derived from your Pydantic models.
+* `penguiflow.planner.ReactPlanner` drives a JSON-only ReAct loop over those
+  descriptors, validating every LLM action with Pydantic and replaying invalid
+  steps to request corrections.
+* LiteLLM stays optional—install `penguiflow[planner]` or inject a custom
+  `llm_client` for deterministic/offline runs.
+
+See `examples/react_minimal/` for a stubbed end-to-end run.
+
+### Trajectory summarisation & pause/resume (Phase B)
+
+Phase B adds the tools you need for longer-running, approval-driven flows:
+
+* **Token-aware summaries** — `Trajectory.compress()` keeps a compact state and
+  the planner can route summaries through a cheaper `summarizer_llm` before
+  asking for the next action.
+* **`PlannerPause` contract** — nodes can call `await ctx.pause(...)` to return a
+  typed pause payload. Resume the run later with `ReactPlanner.resume(token, user_input=...)`.
+* **Developer hints** — pass `planning_hints={...}` to enforce disallowed tools,
+  preferred ordering, or parallelism ceilings.
+
+All three features are exercised in `examples/react_pause_resume/`, which runs
+entirely offline with stubbed LLM responses.
+
+### Adaptive re-planning & budgets (Phase C)
+
+Phase C closes the loop when things go sideways:
+
+* **Structured failure feedback** — if a tool raises after exhausting its retries,
+  the planner records `{failure: {node, args, error_code, suggestion}}` and feeds
+  it back to the LLM, prompting a constrained re-plan instead of aborting.
+* **Hard guardrails** — configure wall-clock deadlines and hop budgets directly
+  on `ReactPlanner`; attempts beyond the allotted hops surface deterministic
+  violations and ultimately finish with `reason="budget_exhausted"` alongside a
+  constraint snapshot.
+* **Typed exit reasons** — runs now finish with one of
+  `answer_complete`, `no_path`, or `budget_exhausted`, keeping downstream code
+  simple and machine-checkable.
+
+The new `examples/react_replan/` sample shows a retrieval timeout automatically
+recover via a cached index without leaving the JSON-only contract.
+
+### Parallel fan-out & joins (Phase D)
+
+Phase D lets the planner propose sets of independent tool calls and join them
+without leaving the typed surface area:
+
+* **Parallel `plan` blocks** — the LLM can return `{"plan": [...]}` actions
+  where each branch is validated against the catalog and executed concurrently.
+* **Typed joins** — provide a `{"join": {"node": ...}}` descriptor and the
+  planner will aggregate results, auto-populate fields like `expect`, `results`,
+  or `failures`, and feed branch metadata through `ctx.meta` for the join node.
+* **Deterministic telemetry** — branch errors, pauses, and joins are recorded as
+  structured observations so follow-up actions can re-plan or finish cleanly.
+
+See `examples/react_parallel/` for a shard fan-out that merges responses in one
+round-trip.
 
 
 ## 🧭 Repo Structure
@@ -581,6 +665,8 @@ pytest -q
 * `examples/streaming_llm/`: mock LLM emitting streaming chunks to an SSE sink.
 * `examples/metadata_propagation/`: attaching and consuming `Message.meta` context.
 * `examples/visualizer/`: exports Mermaid + DOT diagrams with loop/subflow annotations.
+* `examples/react_minimal/`: JSON-only ReactPlanner loop with a stubbed LLM.
+* `examples/react_pause_resume/`: Phase B planner features with pause/resume and developer hints.
 
 ---
 

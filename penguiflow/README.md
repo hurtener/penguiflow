@@ -13,6 +13,7 @@ contributors understand how the pieces fit together.
 | `state.py` | Protocols for pluggable state stores plus the `StoredEvent`/`RemoteBinding` dataclasses. |
 | `bus.py` | Message bus protocol used to fan out floe traffic to remote workers. |
 | `node.py` | `Node` wrapper and `NodePolicy` configuration (validation scope, timeout, retry/backoff). |
+| `catalog.py` | `NodeSpec` dataclass, tool decorator, and catalog builder feeding the planner. |
 | `remote.py` | RemoteTransport protocol plus the `RemoteNode` helper for opt-in agent-to-agent calls. |
 | `types.py` | Pydantic models for headers, messages (with `Message.meta` bag), and controller/state artifacts (`WM`, `Thought`, `FinalAnswer`). |
 | `registry.py` | `ModelRegistry` that caches `TypeAdapter`s for per-node validation. |
@@ -22,6 +23,7 @@ contributors understand how the pieces fit together.
 | `metrics.py` | `FlowEvent` model plus helpers for deriving metrics/tags. |
 | `viz.py` | Mermaid and DOT exporters with loop/subflow annotations. |
 | `testkit.py` | FlowTestKit helpers (`run_one`, `assert_node_sequence`, `simulate_error`). |
+| `planner/` | React planner loop (`ReactPlanner`, prompt helpers) building on catalog metadata. |
 | `__init__.py` | Public surface that re-exports the main primitives for consumers. |
 | `admin.py` | Developer CLI helpers (`penguiflow-admin`) for inspecting trace history. |
 
@@ -31,6 +33,9 @@ The `penguiflow_a2a` package ships separately and contains the FastAPI adapter u
 expose PenguiFlow graphs via the A2A protocol. Installing the `a2a-server` extra adds the
 `A2AServerAdapter`, request models, and the `create_a2a_app` helper without introducing
 FastAPI as a core dependency.
+
+Install the `planner` extra to pull in LiteLLM when you want the planner to call hosted
+models; otherwise you can inject a deterministic stub via the `llm_client` parameter.
 
 ## Key runtime behaviors
 
@@ -127,5 +132,7 @@ and `.metric_samples()` / `.tag_values()` for metrics sinks like MLflow.
   or `.venv/bin/python <path>` to execute them locally.
 * `examples/testkit_demo/` demonstrates the FlowTestKit harness in isolation so you can
   replicate the pattern inside your own repositories.
+* `examples/react_parallel/` showcases Phase D fan-out, join metadata, and the new
+  parallel planner semantics with auto-populated join arguments.
 
 For a conceptual overview and getting-started guide, see the repository root `README.md`.

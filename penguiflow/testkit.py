@@ -21,9 +21,15 @@ from weakref import WeakKeyDictionary
 from .core import PenguiFlow
 from .errors import FlowErrorCode
 from .metrics import FlowEvent
-from .types import Message
+from .types import Headers, Message
 
-__all__ = ["run_one", "assert_node_sequence", "simulate_error"]
+__all__ = [
+    "run_one",
+    "assert_node_sequence",
+    "get_recorded_events",
+    "simulate_error",
+    "assert_preserves_message_envelope",
+]
 
 
 _MAX_TRACE_HISTORY = 64
@@ -102,6 +108,20 @@ class _Recorder:
         await self._state.record(event)
 
 
+class _StubContext:
+    async def emit(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def emit_nowait(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def emit_chunk(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError(
+            "FlowTestKit stub context does not support emit_chunk; provide a custom"
+            " context via the 'ctx' parameter"
+        )
+
+
 def _get_state(flow: PenguiFlow) -> _RecorderState:
     state = _RECORDER_STATE.get(flow)
     if state is None:
@@ -150,6 +170,78 @@ async def run_one(
     return result
 
 
+async def assert_preserves_message_envelope(
+    node: Callable[[Message, Any], Awaitable[Any]] | Any,
+    *,
+    message: Message | None = None,
+    ctx: Any | None = None,
+) -> Message:
+    """Execute ``node`` and assert it preserves the ``Message`` envelope.
+
+    Parameters
+    ----------
+    node:
+        Either a bare async callable or a :class:`penguiflow.node.Node` whose
+        first parameter is a :class:`~penguiflow.types.Message` instance.
+    message:
+        Optional sample message. When omitted, a minimal envelope is
+        synthesised.
+    ctx:
+        Optional context object passed to the node. By default a stub context
+        is used that simply no-ops ``emit``/``emit_nowait``.
+
+    Returns
+    -------
+    Message
+        The resulting message from the node, allowing additional assertions.
+
+    Raises
+    ------
+    AssertionError
+        If the node does not return a ``Message`` or mutates core envelope
+        fields (headers or trace_id).
+    TypeError
+        If ``node`` is not awaitable.
+    """
+
+    from .node import Node  # Local import to avoid circular dependency
+
+    if isinstance(node, Node):
+        func = node.func
+        node_name = node.name or node.func.__name__
+    else:
+        func = node
+        node_name = getattr(node, "__name__", "<anonymous>")
+
+    if not inspect.iscoroutinefunction(func):
+        raise TypeError("assert_preserves_message_envelope expects an async node")
+
+    sample = message or Message(payload={}, headers=Headers(tenant="test"))
+    context = ctx if ctx is not None else _StubContext()
+
+    result = await func(sample, context)
+    if not isinstance(result, Message):
+        produced = type(result).__name__
+        raise AssertionError(
+            "Node "
+            f"'{node_name}' must return a Message but produced {produced}"
+        )
+
+    mismatches: list[str] = []
+    if result.headers != sample.headers:
+        mismatches.append("headers")
+    if result.trace_id != sample.trace_id:
+        mismatches.append("trace_id")
+
+    if mismatches:
+        joined = ", ".join(mismatches)
+        raise AssertionError(
+            f"Node '{node_name}' altered Message {joined}; preserve the envelope"
+        )
+
+    return result
+
+
 def assert_node_sequence(trace_id: str, expected: Sequence[str]) -> None:
     """Assert that ``expected`` matches the recorded node start order."""
 
@@ -173,6 +265,19 @@ def assert_node_sequence(trace_id: str, expected: Sequence[str]) -> None:
             f"  expected: {expected_nodes}\n"
             f"  actual:   {actual_nodes}"
         )
+
+
+def get_recorded_events(trace_id: str) -> tuple[FlowEvent, ...]:
+    """Return the recorded :class:`FlowEvent` history for ``trace_id``.
+
+    The FlowTestKit recorder maintains a bounded cache of trace histories.
+    This helper exposes the immutable snapshot so tests can assert on
+    diagnostics such as ``node_failed`` payloads or retry attempts without
+    touching the private cache directly.
+    """
+
+    events = _TRACE_HISTORY.get(trace_id, [])
+    return tuple(events)
 
 
 class _ErrorSimulation:

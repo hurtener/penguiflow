@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import warnings
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
@@ -686,6 +687,21 @@ class PenguiFlow:
                     trace_id,
                 )
 
+                if (
+                    result is not None
+                    and self._expects_message_output(node)
+                    and not isinstance(result, Message)
+                ):
+                    node_name = node.name or node.node_id
+                    warning_msg = (
+                        "Node "
+                        f"'{node_name}' is registered for Message -> Message outputs "
+                        f"but returned {type(result).__name__}. "
+                        "Return a penguiflow.types.Message to preserve headers, "
+                        "trace_id, and meta."
+                    )
+                    warnings.warn(warning_msg, RuntimeWarning, stacklevel=2)
+
                 if result is not None:
                     (
                         destination,
@@ -1209,6 +1225,29 @@ class PenguiFlow:
             return
         for waiter in waiters:
             waiter.set()
+
+    def _expects_message_output(self, node: Node) -> bool:
+        registry = self._registry
+        if registry is None:
+            return False
+
+        models = getattr(registry, "models", None)
+        if models is None:
+            return False
+
+        node_name = node.name
+        if not node_name:
+            return False
+
+        try:
+            _in_model, out_model = models(node_name)
+        except Exception:  # pragma: no cover - registry without entry
+            return False
+
+        try:
+            return issubclass(out_model, Message)
+        except TypeError:
+            return False
 
     def _controller_postprocess(
         self,
