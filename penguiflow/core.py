@@ -14,6 +14,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from types import TracebackType
 from typing import Any, cast
 
 from .bus import BusEnvelope, MessageBus
@@ -26,6 +27,14 @@ from .state import RemoteBinding, StateStore, StoredEvent
 from .types import WM, FinalAnswer, Message, StreamChunk
 
 logger = logging.getLogger("penguiflow.core")
+
+ExcInfo = tuple[type[BaseException], BaseException, TracebackType | None]
+
+
+def _capture_exc_info(exc: BaseException | None) -> ExcInfo | None:
+    if exc is None:
+        return None
+    return (type(exc), exc, exc.__traceback__)
 
 BUDGET_EXCEEDED_TEXT = "Hop budget exhausted"
 DEADLINE_EXCEEDED_TEXT = "Deadline exceeded"
@@ -750,6 +759,7 @@ class PenguiFlow:
                 raise
             except TimeoutError as exc:
                 latency = (time.perf_counter() - start) * 1000
+                exc_info = _capture_exc_info(exc)
                 await self._emit_event(
                     event="node_timeout",
                     node=node,
@@ -759,6 +769,7 @@ class PenguiFlow:
                     latency_ms=latency,
                     level=logging.WARNING,
                     extra={"exception": repr(exc)},
+                    exc_info=exc_info,
                 )
                 if attempt >= node.policy.max_retries:
                     timeout_message: str | None = None
@@ -783,6 +794,7 @@ class PenguiFlow:
                         flow_error=flow_error,
                         latency=latency,
                         attempt=attempt,
+                        exc_info=exc_info,
                     )
                     return
                 attempt += 1
@@ -801,6 +813,7 @@ class PenguiFlow:
                 continue
             except Exception as exc:  # noqa: BLE001
                 latency = (time.perf_counter() - start) * 1000
+                exc_info = _capture_exc_info(exc)
                 await self._emit_event(
                     event="node_error",
                     node=node,
@@ -810,6 +823,7 @@ class PenguiFlow:
                     latency_ms=latency,
                     level=logging.ERROR,
                     extra={"exception": repr(exc)},
+                    exc_info=exc_info,
                 )
                 if attempt >= node.policy.max_retries:
                     flow_error = self._create_flow_error(
@@ -830,6 +844,7 @@ class PenguiFlow:
                         flow_error=flow_error,
                         latency=latency,
                         attempt=attempt,
+                        exc_info=exc_info,
                     )
                     return
                 attempt += 1
@@ -890,6 +905,7 @@ class PenguiFlow:
         flow_error: FlowError,
         latency: float | None,
         attempt: int,
+        exc_info: ExcInfo | None,
     ) -> None:
         original = flow_error.unwrap()
         exception_repr = repr(original) if original is not None else flow_error.message
@@ -906,6 +922,7 @@ class PenguiFlow:
             latency_ms=latency,
             level=logging.ERROR,
             extra=extra,
+            exc_info=exc_info,
         )
         if self._emit_errors_to_rookery and flow_error.trace_id is not None:
             await self._emit_to_rookery(flow_error, source=context.owner)
@@ -1365,6 +1382,7 @@ class PenguiFlow:
         latency_ms: float | None,
         level: int,
         extra: dict[str, Any] | None = None,
+        exc_info: ExcInfo | None = None,
     ) -> None:
         node_name = getattr(node, "name", None)
         node_id = getattr(node, "node_id", node_name)
@@ -1398,7 +1416,12 @@ class PenguiFlow:
             extra=extra or {},
         )
 
-        logger.log(level, event, extra=event_obj.to_payload())
+        payload = event_obj.to_payload()
+        log_kwargs: dict[str, Any] = {"extra": payload}
+        if exc_info is not None:
+            log_kwargs["exc_info"] = exc_info
+
+        logger.log(level, event, **log_kwargs)
 
         if self._state_store is not None:
             stored_event = StoredEvent.from_flow_event(event_obj)

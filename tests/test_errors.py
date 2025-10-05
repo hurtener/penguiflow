@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -102,5 +103,41 @@ async def test_flow_error_metadata_for_timeouts() -> None:
     assert result.node_name == "sleepy"
     assert result.metadata["timeout_s"] == pytest.approx(0.01, rel=1e-6)
     assert result.metadata["attempt"] == 0
+
+    await flow.stop()
+
+
+@pytest.mark.asyncio
+async def test_node_error_logs_exc_info(caplog: pytest.LogCaptureFixture) -> None:
+    async def broken(_message: str, _ctx) -> None:
+        raise RuntimeError("dependency missing")
+
+    node = Node(
+        broken,
+        name="broken",
+        policy=NodePolicy(validate="none", max_retries=0),
+    )
+    flow = create(node.to(), emit_errors_to_rookery=True)
+    flow.run()
+
+    msg = Message(payload="payload", headers=Headers(tenant="demo"))
+
+    with caplog.at_level(logging.ERROR, logger="penguiflow.core"):
+        await flow.emit(msg)
+        await asyncio.wait_for(flow.fetch(), timeout=0.5)
+
+    node_error_records = [
+        record for record in caplog.records if record.message == "node_error"
+    ]
+    assert node_error_records, "expected node_error log entry"
+    assert node_error_records[0].exc_info is not None
+    assert isinstance(node_error_records[0].exc_info[1], RuntimeError)
+
+    node_failed_records = [
+        record for record in caplog.records if record.message == "node_failed"
+    ]
+    assert node_failed_records, "expected node_failed log entry"
+    assert node_failed_records[0].exc_info is not None
+    assert isinstance(node_failed_records[0].exc_info[1], RuntimeError)
 
     await flow.stop()
