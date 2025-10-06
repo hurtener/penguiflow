@@ -42,7 +42,7 @@ penguiflow-admin = "penguiflow.admin:main"
 Homepage = "https://github.com/penguiflow/penguiflow"
 
 [tool.setuptools]
-packages = { find = { include = ["penguiflow*", "penguiflow_a2a*"] } }
+packages = { find = { include = ["penguiflow*", "penguiflow_a2a*", "examples*"] } }
 
 [tool.uv]
 package = true
