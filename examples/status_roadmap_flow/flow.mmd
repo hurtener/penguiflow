@@ -1,0 +1,32 @@
+graph TD
+    code_plan["code_plan"]
+    code_parse["code_parse"]
+    data_collect["data_collect"]
+    data_prepare["data_prepare"]
+    OpenSea["OpenSea"]
+    announce_start["announce_start"]
+    code_inspect["code_inspect"]
+    code_finalize["code_finalize"]
+    dispatcher["dispatcher"]
+    data_plan["data_plan"]
+    data_finalize["data_finalize"]
+    triage["triage"]
+    synthesize["synthesize"]
+    Rookery["Rookery"]
+    classDef endpoint fill:#e0f2fe,stroke:#0369a1,stroke-width:1px
+    class OpenSea endpoint
+    class Rookery endpoint
+    code_plan --> code_parse
+    data_collect --> data_prepare
+    OpenSea -->|ingress| announce_start
+    code_inspect --> code_finalize
+    dispatcher --> data_plan
+    data_prepare --> data_finalize
+    announce_start --> triage
+    data_plan --> data_collect
+    synthesize -->|egress| Rookery
+    code_finalize --> synthesize
+    dispatcher --> code_plan
+    data_finalize --> synthesize
+    code_parse --> code_inspect
+    triage --> dispatcher
