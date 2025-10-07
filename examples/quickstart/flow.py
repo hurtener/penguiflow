@@ -6,7 +6,7 @@ import asyncio
 
 from pydantic import BaseModel
 
-from penguiflow import Headers, Message, ModelRegistry, Node, NodePolicy, create
+from penguiflow import ModelRegistry, Node, NodePolicy, create
 
 
 class TriageIn(BaseModel):
@@ -58,12 +58,9 @@ async def main() -> None:
     )
     flow.run(registry=registry)
 
-    message = Message(
-        payload=TriageIn(text="show marketing metrics"),
-        headers=Headers(tenant="acme"),
-    )
+    payload = TriageIn(text="show marketing metrics")
 
-    await flow.emit(message)
+    await flow.emit(payload)
     result = await flow.fetch()
     print(result.prompt)
 
