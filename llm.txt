@@ -1502,7 +1502,32 @@ async def my_tool(args: InputModel, ctx) -> OutputModel:
     return OutputModel(...)
 ```
 
-### Mistake 12: Not Handling PlannerPause
+### Mistake 12: Passing Bare Payloads to `ctx.call_playbook`
+
+**❌ WRONG:**
+```python
+async def caller(message: Message, ctx: Context):
+    # Drops trace_id/headers → subflow receives plain dict
+    result = await ctx.call_playbook(my_playbook, {"query": message.payload})
+```
+
+**Why bad:** The runtime forwards that dict directly to the subflow. Without the `Message` envelope the first node sees the wrong type, `ModelRegistry` validation raises `ValidationError`, and downstream only observes opaque `node_error`/`node_failed` logs.
+
+**✅ CORRECT:**
+```python
+async def caller(message: Message, ctx: Context):
+    request = Message(
+        payload=QueryInput(query=message.payload),
+        headers=message.headers,
+        trace_id=message.trace_id,
+        meta=message.meta,
+    )
+    return await ctx.call_playbook(my_playbook, request)
+```
+
+**Surface the details:** Attach `log_flow_events()` or call `get_recorded_events(trace_id)` to read `event.extra["flow_error"]`. The payload lists the failing node, `exception_type` (e.g. `ValidationError` or a missing dependency), and the exact schema error so downstream teams know what broke instead of only seeing `node_error` in stdout.
+
+### Mistake 13: Not Handling PlannerPause
 
 **❌ WRONG:**
 ```python
@@ -1522,7 +1547,7 @@ elif isinstance(result, PlannerFinish):
     print(result.payload)
 ```
 
-### Mistake 13: Forgetting to Register React Planner Tool Types
+### Mistake 14: Forgetting to Register React Planner Tool Types
 
 **❌ WRONG:**
 ```python

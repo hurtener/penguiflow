@@ -639,8 +639,11 @@ pytest -q
 * `examples/streaming_llm/`: mock LLM emitting streaming chunks to an SSE sink.
 * `examples/metadata_propagation/`: attaching and consuming `Message.meta` context.
 * `examples/visualizer/`: exports Mermaid + DOT diagrams with loop/subflow annotations.
+* `examples/roadmap_status_updates/`: roadmap-aware agent scaffold that streams status updates and final chunks.
+* `examples/status_roadmap_flow/`: roadmap-driven websocket status updates with FlowResponse scaffolding.
 * `examples/react_minimal/`: JSON-only ReactPlanner loop with a stubbed LLM.
 * `examples/react_pause_resume/`: Phase B planner features with pause/resume and developer hints.
+
 
 ---
 
