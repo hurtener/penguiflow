@@ -1284,6 +1284,37 @@ async def call_playbook(
 
 **Returns:** The **payload** of the first message emitted to the subflow's Rookery. If the result is a `Message`, the payload is automatically extracted.
 
+#### Message Envelope Requirements
+
+`parent_msg` must always be a full `Message`. The runtime forwards the exact object you provide into the subflow, so:
+
+- Re-use the inbound message when you just need to mirror it:
+
+  ```python
+  async def controller(message: Message, ctx: Context):
+      result = await ctx.call_playbook(child_factory, message)
+      ...
+  ```
+
+- Build a fresh envelope whenever the subflow expects a different payload:
+
+  ```python
+  async def controller(message: Message, ctx: Context):
+      query = QueryInput(query=message.payload["user_query"], top_k=5)
+      result = await ctx.call_playbook(
+          child_factory,
+          Message(
+              payload=query,
+              headers=message.headers,
+              trace_id=message.trace_id,
+              meta=message.meta,
+          ),
+      )
+      ...
+  ```
+
+Passing only a bare dict or Pydantic model drops metadata (trace, headers, deadlines) and is the most common reason for downstream validation failures.
+
 **Basic usage:**
 ```python
 async def controller(message: Message, ctx: Context):
@@ -1390,6 +1421,18 @@ async def caller_node(message: Message, ctx: Context):
 ```
 
 **Best practice:** Catch specific exceptions you expect from the subflow.
+
+When validation fails because the payload does not match the playbook's `ModelRegistry`, the underlying `pydantic.ValidationError` shows up as a `node_error` log and, once retries are exhausted, a `node_failed` log. The resulting `FlowError` (code `NODE_EXCEPTION`) contains the validation details in `flow_error["metadata"]`. Access it via:
+
+1. **Logging middleware** — attach `log_flow_events()` and inspect the structured JSON on the `node_failed` entry.
+2. **FlowTestKit** — call `penguiflow.testkit.get_recorded_events(trace_id)` and read `event.extra["flow_error"]`.
+3. **Rookery emission** — set `emit_errors_to_rookery=True` when creating the playbook so `fetch()` yields the `FlowError` object.
+
+These hooks also surface dependency mistakes (for example a node raising `RuntimeError("dependency missing")`): the console prints a generic `node_error`, but the attached `exc_info` and `flow_error["exception_type"]` make the root cause explicit.
+
+#### Registry Coverage Errors
+
+If a node enables validation but is missing from the playbook's `ModelRegistry`, `call_playbook()` raises `RuntimeError("ModelRegistry is missing entries for nodes requiring validation: ...")` before the subflow launches. Ensure every validated node name is registered in the factory result.
 
 #### Pre-Cancelled Traces
 
