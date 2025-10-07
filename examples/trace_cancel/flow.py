@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from penguiflow import Headers, Message, Node, NodePolicy, create
+from penguiflow import FlowEvent, Headers, Message, Node, NodePolicy, create
 
 _started = asyncio.Event()
 
@@ -32,14 +32,15 @@ async def sink(message: Message, _ctx) -> str:
     return str(message.payload)
 
 
-async def _metrics_printer(event: str, payload: dict[str, object]) -> None:
-    if event.startswith("trace_cancel"):
-        pending = payload["trace_pending"]
-        inflight = payload["trace_inflight"]
-        q_in = payload["q_depth_in"]
-        q_out = payload["q_depth_out"]
+async def _metrics_printer(event: FlowEvent) -> None:
+    if event.event_type.startswith("trace_cancel"):
+        payload = event.to_payload()
+        pending = payload.get("trace_pending")
+        inflight = payload.get("trace_inflight")
+        q_in = payload.get("q_depth_in")
+        q_out = payload.get("q_depth_out")
         print(
-            f"{event} pending={pending} inflight={inflight} "
+            f"{event.event_type} pending={pending} inflight={inflight} "
             f"q_in={q_in} q_out={q_out}"
         )
 
