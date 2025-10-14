@@ -39,7 +39,7 @@ class RemoteBinding:
     """Association between a trace and a remote worker/agent."""
 
     trace_id: str
-    context_id: str
+    context_id: str | None
     task_id: str
     agent_url: str
 

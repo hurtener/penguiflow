@@ -151,7 +151,7 @@ def RemoteNode(
         agent_url_override: str | None,
         base_extra: Mapping[str, Any],
     ) -> tuple[asyncio.Task[None], asyncio.Event] | None:
-        if context_id is None or task_id is None:
+        if task_id is None:
             return None
 
         agent_ref = agent_url_override or agent_url
@@ -288,7 +288,7 @@ def RemoteNode(
                 remote_agent_url_final = agent_url_override
             if binding_registered:
                 return
-            if context_id is None or task_id is None:
+            if task_id is None:
                 return
             record = await _record_binding(
                 runtime=runtime,
