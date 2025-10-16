@@ -113,6 +113,31 @@ class CancelAwareTransport(RemoteTransport):
         self._finish.set()
 
 
+class StreamingNoContextTransport(RemoteTransport):
+    def __init__(self) -> None:
+        self.requests: list[RemoteCallRequest] = []
+        self.cancelled: list[tuple[str, str]] = []
+        self._finish = asyncio.Event()
+        self.cancelled_event = asyncio.Event()
+
+    async def send(self, request: RemoteCallRequest):
+        raise AssertionError("send() should not be called")
+
+    async def stream(self, request: RemoteCallRequest):
+        self.requests.append(request)
+        yield RemoteStreamEvent(
+            text="no-context",
+            task_id="task-nocontext",
+            agent_url=request.agent_url,
+        )
+        await self._finish.wait()
+
+    async def cancel(self, *, agent_url: str, task_id: str) -> None:
+        self.cancelled.append((agent_url, task_id))
+        self.cancelled_event.set()
+        self._finish.set()
+
+
 @pytest.mark.asyncio
 async def test_remote_node_unary_call_records_binding() -> None:
     store = RecordingStateStore()
@@ -214,3 +239,39 @@ async def test_remote_node_cancels_remote_task_on_trace_cancel() -> None:
 
     assert transport.cancelled == [("https://agent.example", "task-cancel")]
     assert store.bindings and store.bindings[0].task_id == "task-cancel"
+
+
+@pytest.mark.asyncio
+async def test_remote_node_records_binding_without_context_id() -> None:
+    store = RecordingStateStore()
+    transport = StreamingNoContextTransport()
+    node = RemoteNode(
+        transport=transport,
+        skill="Planner.plan",
+        agent_url="https://agent.example",
+        name="remote-nocontext",
+        streaming=True,
+    )
+    flow = create(node.to(), state_store=store)
+    flow.run()
+
+    message = Message(payload={"goal": "nocontext"}, headers=Headers(tenant="acme"))
+
+    try:
+        await flow.emit(message)
+        first = await flow.fetch()
+        assert isinstance(first, Message)
+        chunk = first.payload
+        assert isinstance(chunk, StreamChunk)
+        assert chunk.text == "no-context"
+        cancelled = await flow.cancel(message.trace_id)
+        assert cancelled
+        await asyncio.wait_for(transport.cancelled_event.wait(), timeout=1.0)
+    finally:
+        await flow.stop()
+
+    assert transport.cancelled == [("https://agent.example", "task-nocontext")]
+    assert store.bindings
+    binding = store.bindings[0]
+    assert binding.task_id == "task-nocontext"
+    assert binding.context_id is None
