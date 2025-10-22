@@ -843,3 +843,200 @@ async def test_react_planner_parallel_plan_rejects_invalid_node() -> None:
 
     first_step = result.metadata["steps"][0]
     assert "Parallel plan invalid" in first_step["error"]
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_deadline_enforcement() -> None:
+    """Planner should respect deadline_s and return budget_exhausted."""
+    # Provide enough responses so stub doesn't run out
+    client = StubClient(
+        [
+            {
+                "thought": "step1",
+                "next_node": "triage",
+                "args": {"question": "step1"},
+            },
+            {
+                "thought": "step2",
+                "next_node": "triage",
+                "args": {"question": "step2"},
+            },
+            {
+                "thought": "step3",
+                "next_node": "triage",
+                "args": {"question": "step3"},
+            },
+        ]
+    )
+    registry = ModelRegistry()
+    registry.register("triage", Query, Intent)
+
+    # Use custom time source to control deadline precisely
+    start_time = time.monotonic()
+
+    def controlled_time() -> float:
+        # After first call, advance past deadline
+        if hasattr(controlled_time, "calls"):
+            controlled_time.calls += 1
+            if controlled_time.calls > 5:  # After a few calls, trigger deadline
+                return start_time + 10.0  # Way past 0.01s deadline
+        else:
+            controlled_time.calls = 0
+        return start_time
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog([Node(triage, name="triage")], registry),
+        deadline_s=0.01,  # 10ms deadline
+        max_iters=10,
+        time_source=controlled_time,
+    )
+
+    result = await planner.run("Test deadline")
+
+    assert result.reason == "budget_exhausted"
+    assert result.metadata["constraints"]["deadline_triggered"] is True
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_absolute_max_parallel_enforced() -> None:
+    """System-level max_parallel should prevent resource exhaustion."""
+    # Try to request more than the absolute limit
+    excessive_plan = [
+        {"node": "respond", "args": {"answer": f"branch_{i}"}}
+        for i in range(100)  # Way over default limit of 50
+    ]
+
+    client = StubClient(
+        [
+            {"thought": "excessive", "plan": excessive_plan},
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"answer": "done"},
+            },
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("respond", Answer, Answer)
+    nodes = [Node(respond, name="respond")]
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog(nodes, registry),
+        absolute_max_parallel=50,
+    )
+
+    result = await planner.run("test absolute limit")
+
+    # Should have error about parallel limit in the first step
+    steps = result.metadata["steps"]
+    assert len(steps) > 0
+    first_step = steps[0]
+    # The error should be present
+    assert first_step.get("error") is not None
+    assert "50" in first_step["error"]
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_event_callback_receives_events() -> None:
+    """Event callback should receive all planner events."""
+    from penguiflow.planner import PlannerEvent
+
+    events: list[PlannerEvent] = []
+
+    def callback(event: PlannerEvent) -> None:
+        events.append(event)
+
+    client = StubClient(
+        [
+            {
+                "thought": "triage",
+                "next_node": "triage",
+                "args": {"question": "Test"},
+            },
+            {"thought": "finish", "next_node": None, "args": {"answer": "done"}},
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("triage", Query, Intent)
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog([Node(triage, name="triage")], registry),
+        event_callback=callback,
+    )
+
+    await planner.run("Test events")
+
+    # Should have received events
+    assert len(events) > 0
+
+    event_types = {e.event_type for e in events}
+    # Expect at least step_start, step_complete, finish
+    assert "step_start" in event_types
+    assert "step_complete" in event_types
+    assert "finish" in event_types
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_improved_token_estimation() -> None:
+    """Token estimation should account for message structure overhead."""
+    client = StubClient(
+        [
+            {"thought": "finish", "next_node": None, "args": {"answer": "done"}},
+        ]
+    )
+
+    planner = make_planner(client)
+
+    # Create messages and estimate tokens
+    messages = [
+        {"role": "system", "content": "a" * 100},
+        {"role": "user", "content": "b" * 100},
+        {"role": "assistant", "content": "c" * 100},
+    ]
+
+    tokens = planner._estimate_size(messages)
+
+    # Should be approximately (300 chars + overhead) / 3.5
+    # Overhead = 3 * (role length + 20) ≈ 3 * 30 = 90
+    # Total ≈ 390 / 3.5 ≈ 111 tokens
+    assert 100 < tokens < 130
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_state_store_save_error_handled_gracefully() -> None:
+    """State store save errors should not crash pause operation."""
+
+    class FailingSaver:
+        def save_planner_state(self, token: str, payload: dict) -> None:
+            raise RuntimeError("Storage failed")
+
+    client = StubClient(
+        [
+            {
+                "thought": "approval",
+                "next_node": "approval",
+                "args": {"intent": "docs"},
+            },
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("approval", Intent, Intent)
+    nodes = [Node(approval_gate, name="approval")]
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog(nodes, registry),
+        pause_enabled=True,
+        state_store=FailingSaver(),
+    )
+
+    # Should still pause successfully despite state store failure
+    result = await planner.run("Test state store error")
+    assert isinstance(result, PlannerPause)
+    assert result.resume_token is not None
