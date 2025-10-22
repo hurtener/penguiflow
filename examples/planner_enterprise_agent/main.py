@@ -16,7 +16,6 @@ import asyncio
 import logging
 from collections import defaultdict
 
-from penguiflow import log_flow_events
 from penguiflow.catalog import build_catalog
 from penguiflow.node import Node
 from penguiflow.planner import ReactPlanner
@@ -27,22 +26,15 @@ from .nodes import (
     FinalAnswer,
     StatusUpdate,
     UserQuery,
+    analyze_documents_pipeline,  # Pattern A: Wrapped subflow
     answer_general_query,
-    chunk_sink_node,
-    collect_error_logs,
-    extract_metadata,
-    generate_document_summary,
-    initialize_bug_workflow,
-    initialize_document_workflow,
-    parse_documents,
-    recommend_bug_fix,
-    render_document_report,
-    run_diagnostics,
-    status_sink_node,
+    collect_error_logs,  # Pattern B: Individual node
+    initialize_bug_workflow,  # Pattern B: Individual node
+    recommend_bug_fix,  # Pattern B: Individual node
+    run_diagnostics,  # Pattern B: Individual node
     triage_query,
 )
 from .telemetry import AgentTelemetry
-
 
 # Global buffers for demonstration (in production: use message queue/websocket)
 STATUS_BUFFER: defaultdict[str, list[StatusUpdate]] = defaultdict(list)
@@ -100,48 +92,85 @@ class EnterpriseAgentOrchestrator:
         )
 
     def _build_nodes(self) -> list[Node]:
-        """Construct all planner-discoverable nodes."""
+        """Construct all planner-discoverable nodes.
+
+        This demonstrates TWO patterns for organizing workflows:
+
+        Pattern A - Wrapped Subflow (Document Analysis):
+            The entire document workflow is wrapped as a single tool that
+            internally executes a 5-node subflow. The planner sees ONE tool:
+            "analyze_documents_pipeline" that handles everything from parsing
+            to final report generation.
+
+            Benefits:
+            - Simpler for planner (1 tool vs 5 nodes)
+            - Lower LLM cost (1 decision vs 5 decisions)
+            - Better for deterministic pipelines
+            - Abstraction and reusability
+
+        Pattern B - Individual Nodes (Bug Triage):
+            Each step is exposed as a separate planner-discoverable node.
+            The planner can dynamically decide whether to collect logs,
+            run diagnostics, or skip steps based on context.
+
+            Benefits:
+            - Maximum flexibility and control
+            - Planner can adapt mid-workflow
+            - Better observability of each step
+            - Enables conditional/parallel execution
+
+        Use Pattern A when workflows are deterministic and linear.
+        Use Pattern B when workflows need dynamic decision-making.
+        """
         return [
-            # Router
+            # Router (always individual)
             Node(triage_query, name="triage_query"),
-            # Document workflow
-            Node(initialize_document_workflow, name="init_documents"),
-            Node(parse_documents, name="parse_documents"),
-            Node(extract_metadata, name="extract_metadata"),
-            Node(generate_document_summary, name="generate_summary"),
-            Node(render_document_report, name="render_report"),
-            # Bug workflow
+            # PATTERN A: Document workflow as wrapped subflow
+            Node(analyze_documents_pipeline, name="analyze_documents"),
+            # PATTERN B: Bug workflow as individual nodes
             Node(initialize_bug_workflow, name="init_bug"),
             Node(collect_error_logs, name="collect_logs"),
             Node(run_diagnostics, name="run_diagnostics"),
             Node(recommend_bug_fix, name="recommend_fix"),
-            # General
+            # General (individual node)
             Node(answer_general_query, name="answer_general"),
         ]
 
     def _build_registry(self) -> ModelRegistry:
-        """Register all type mappings for validation."""
+        """Register all type mappings for validation.
+
+        Note the difference in registrations:
+
+        Pattern A (Wrapped Subflow):
+            analyze_documents: RouteDecision → FinalAnswer
+            The planner sees this as a single-step transformation.
+            Internally it executes 5 nodes, but externally it's one tool.
+
+        Pattern B (Individual Nodes):
+            init_bug: RouteDecision → BugState
+            collect_logs: BugState → BugState
+            run_diagnostics: BugState → BugState
+            recommend_fix: BugState → FinalAnswer
+            The planner sees each step and can make decisions between them.
+        """
         registry = ModelRegistry()
 
         # Import types
         from .nodes import (
             BugState,
-            DocumentState,
-            GeneralResponse,
             RouteDecision,
         )
 
         # Router
         registry.register("triage_query", UserQuery, RouteDecision)
 
-        # Document workflow
-        registry.register("init_documents", RouteDecision, DocumentState)
-        registry.register("parse_documents", DocumentState, DocumentState)
-        registry.register("extract_metadata", DocumentState, DocumentState)
-        registry.register("generate_summary", DocumentState, DocumentState)
-        registry.register("render_report", DocumentState, FinalAnswer)
+        # PATTERN A: Document workflow as wrapped subflow
+        # Single registration: RouteDecision → FinalAnswer
+        # (Internal subflow nodes are NOT registered in planner catalog)
+        registry.register("analyze_documents", RouteDecision, FinalAnswer)
 
-        # Bug workflow
+        # PATTERN B: Bug workflow as individual nodes
+        # Each step registered separately for granular control
         registry.register("init_bug", RouteDecision, BugState)
         registry.register("collect_logs", BugState, BugState)
         registry.register("run_diagnostics", BugState, BugState)
@@ -206,8 +235,6 @@ class EnterpriseAgentOrchestrator:
             RuntimeError: If planner fails after retries
             ValueError: If query is invalid
         """
-        user_query = UserQuery(text=query, tenant_id=tenant_id)
-
         self.telemetry.logger.info(
             "execute_start",
             extra={"query": query, "tenant_id": tenant_id},
@@ -270,8 +297,8 @@ class EnterpriseAgentOrchestrator:
 
                 return FinalAnswer(
                     text=(
-                        f"Task interrupted due to resource constraints. "
-                        f"Partial results may be available."
+                        "Task interrupted due to resource constraints. "
+                        "Partial results may be available."
                     ),
                     route="error",
                     metadata={"error": "budget_exhausted", **result.metadata},
@@ -332,7 +359,7 @@ async def main() -> None:
             print(f"Answer: {result.text}")
 
             if result.artifacts:
-                print(f"\nArtifacts:")
+                print("\nArtifacts:")
                 for key, value in result.artifacts.items():
                     if isinstance(value, list) and len(value) > 3:
                         print(f"  {key}: [{len(value)} items]")
@@ -340,7 +367,7 @@ async def main() -> None:
                         print(f"  {key}: {value}")
 
             if result.metadata:
-                print(f"\nMetadata:")
+                print("\nMetadata:")
                 for key, value in result.metadata.items():
                     print(f"  {key}: {value}")
 

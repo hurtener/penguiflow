@@ -4,6 +4,7 @@
 
 This example demonstrates enterprise-grade patterns for building autonomous agents:
 - ✅ ReactPlanner for LLM-driven node orchestration
+- ✅ **Two workflow patterns:** Wrapped subflows (Pattern A) + Individual nodes (Pattern B)
 - ✅ Comprehensive telemetry middleware for error visibility
 - ✅ Environment-based configuration
 - ✅ Status update sinks for frontend integration
@@ -512,36 +513,152 @@ def _build_registry(self):
 
 4. **The planner will now auto-discover your node!**
 
-### Adding Subflows
+### Two Patterns for Workflow Organization
 
-For complex multi-step operations, create subflows:
+This example demonstrates **TWO different approaches** for exposing workflows to the ReactPlanner. Choose the pattern that best fits your use case:
 
+#### Pattern A: Wrapped Subflow (Document Analysis)
+
+**What it is:** Wrap an entire multi-step workflow as a single planner-discoverable tool. The planner sees ONE operation, but internally it executes a full subflow with multiple nodes.
+
+**When to use:**
+- ✅ Workflow is deterministic and linear
+- ✅ No mid-flight decision-making needed
+- ✅ Want to reduce LLM calls (cost optimization)
+- ✅ Want to abstract complexity from planner
+- ✅ Need reusable pipeline components
+
+**Example:** Document Analysis Pipeline
 ```python
-def build_my_subflow() -> tuple[PenguiFlow, ModelRegistry]:
-    """Create reusable subflow."""
+# 1. Build the subflow
+def build_document_analysis_subflow() -> PenguiFlow:
+    """Create 5-node pipeline: init → parse → extract → summarize → render"""
+    from penguiflow import Node, create
 
-    # Define nodes
-    step1_node = Node(step1_func, name="step1")
-    step2_node = Node(step2_func, name="step2")
+    init_node = Node(initialize_document_workflow, name="init_documents")
+    parse_node = Node(parse_documents, name="parse_documents")
+    extract_node = Node(extract_metadata, name="extract_metadata")
+    summarize_node = Node(generate_document_summary, name="generate_summary")
+    render_node = Node(render_document_report, name="render_report")
 
-    # Build flow
+    # Build linear pipeline using PenguiFlow's create() API
     flow = create(
-        step1_node.to(step2_node),
-        step2_node.to(),
+        init_node.to(parse_node),
+        parse_node.to(extract_node),
+        extract_node.to(summarize_node),
+        summarize_node.to(render_node),
+        render_node.to(),
     )
 
-    # Build registry
-    registry = ModelRegistry()
-    registry.register("step1", Input1, Output1)
-    registry.register("step2", Output1, Output2)
+    return flow
 
-    return flow, registry
-
-# Then call from a node:
-async def my_node(args: Args, ctx: Any) -> Result:
-    result = await ctx.call_playbook(build_my_subflow, message)
+# 2. Create wrapper tool that executes the subflow
+@tool(
+    desc="Complete document analysis pipeline (parse, extract, summarize, report)",
+    tags=["planner", "documents", "subflow"],
+    side_effects="read",
+    latency_hint_ms=2000,
+)
+async def analyze_documents_pipeline(args: RouteDecision, ctx: Any) -> FinalAnswer:
+    """Execute entire document workflow as single operation."""
+    subflow = build_document_analysis_subflow()
+    result = await subflow.run(entry_payload=args, context=ctx)
     return result
+
+# 3. Register ONCE (planner sees 1 tool, not 5 nodes)
+registry.register("analyze_documents", RouteDecision, FinalAnswer)
 ```
+
+**Planner perspective:**
+```
+Available tools:
+  - triage_query: RouteDecision → RouteDecision
+  - analyze_documents: RouteDecision → FinalAnswer  ← ONE tool for entire pipeline!
+  - answer_general: RouteDecision → FinalAnswer
+```
+
+#### Pattern B: Individual Nodes (Bug Triage)
+
+**What it is:** Expose each workflow step as a separate planner-discoverable node. The planner can see and control every step, making decisions between operations.
+
+**When to use:**
+- ✅ Workflow needs dynamic decision-making
+- ✅ Steps may be conditional or parallel
+- ✅ Want maximum observability
+- ✅ LLM should adapt mid-workflow
+- ✅ Steps can be reused in different combinations
+
+**Example:** Bug Triage Workflow
+```python
+# 1. Each step is a standalone @tool node
+@tool(desc="Initialize bug triage workflow", tags=["planner", "bugs"])
+async def initialize_bug_workflow(args: RouteDecision, ctx: Any) -> BugState:
+    return BugState(query=args.query, roadmap=list(BUG_ROADMAP))
+
+@tool(desc="Collect error logs from system", tags=["planner", "bugs"])
+async def collect_error_logs(args: BugState, ctx: Any) -> BugState:
+    logs = fetch_logs_from_system()  # External call
+    return args.model_copy(update={"logs": logs})
+
+@tool(desc="Run automated diagnostics", tags=["planner", "bugs"])
+async def run_diagnostics(args: BugState, ctx: Any) -> BugState:
+    diagnostics = execute_health_checks()  # May take time
+    return args.model_copy(update={"diagnostics": diagnostics})
+
+@tool(desc="Recommend remediation steps", tags=["planner", "bugs"])
+async def recommend_bug_fix(args: BugState, ctx: Any) -> FinalAnswer:
+    recommendation = analyze_with_llm(args.logs, args.diagnostics)
+    return FinalAnswer(text=recommendation, route="bug")
+
+# 2. Register EACH step separately
+registry.register("init_bug", RouteDecision, BugState)
+registry.register("collect_logs", BugState, BugState)
+registry.register("run_diagnostics", BugState, BugState)
+registry.register("recommend_fix", BugState, FinalAnswer)
+```
+
+**Planner perspective:**
+```
+Available tools:
+  - triage_query: RouteDecision → RouteDecision
+  - init_bug: RouteDecision → BugState
+  - collect_logs: BugState → BugState        ← Planner can decide whether to collect
+  - run_diagnostics: BugState → BugState     ← Planner can skip if logs are sufficient
+  - recommend_fix: BugState → FinalAnswer    ← Planner can go straight to recommendation
+```
+
+The planner can dynamically decide:
+- "Based on the error message, I don't need to collect full logs, just run diagnostics"
+- "The diagnostics failed, let me collect more logs before recommending a fix"
+- "This is a simple error, skip diagnostics and go straight to recommendation"
+
+#### Side-by-Side Comparison
+
+| Aspect | Pattern A: Wrapped Subflow | Pattern B: Individual Nodes |
+|--------|---------------------------|----------------------------|
+| **Planner visibility** | 1 tool | N separate tools |
+| **LLM calls** | 1 (decides once to use pipeline) | N (decides at each step) |
+| **Cost** | Lower (fewer LLM calls) | Higher (more decisions) |
+| **Control** | Planner commits to entire pipeline | Planner adapts mid-workflow |
+| **Observability** | Single PlannerEvent | Event per node |
+| **Reusability** | High (pipeline as component) | Medium (nodes as atoms) |
+| **Flexibility** | Low (must execute all steps) | High (conditional execution) |
+| **Complexity** | Hidden from planner | Exposed to planner |
+| **Best for** | Deterministic workflows | Dynamic workflows |
+| **Example use case** | ETL pipelines, report generation | Debugging, adaptive workflows |
+
+#### Hybrid Approach (Recommended)
+
+In practice, use **both patterns** in the same agent:
+
+- **Wrap deterministic pipelines** (data processing, report generation, ETL)
+- **Expose flexible workflows as individual nodes** (debugging, adaptive routing, conditional operations)
+
+This example uses:
+- ✅ **Pattern A** for document analysis (5-node pipeline → 1 tool)
+- ✅ **Pattern B** for bug triage (3 individual nodes)
+
+See `main.py::_build_nodes()` and `nodes.py::analyze_documents_pipeline()` for full implementation.
 
 ---
 

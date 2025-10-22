@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from penguiflow import Message, Node, NodePolicy, StreamChunk
+from penguiflow import Message, Node, NodePolicy, PenguiFlow, StreamChunk
 from penguiflow.catalog import tool
 
 # ============================================================================
@@ -328,7 +328,9 @@ async def recommend_bug_fix(args: BugState, ctx: Any) -> FinalAnswer:
     """Generate actionable fix recommendation."""
     # In production: use LLM to analyze logs + diagnostics
 
-    failed_checks = [k for k, v in args.diagnostics.items() if v in ("failed", "degraded")]
+    failed_checks = [
+        k for k, v in args.diagnostics.items() if v in ("failed", "degraded")
+    ]
 
     recommendation = (
         f"Root cause: Configuration validation failure. "
@@ -379,6 +381,105 @@ async def answer_general_query(args: RouteDecision, ctx: Any) -> FinalAnswer:
 
 
 # ============================================================================
+# Subflow Wrapper (Pattern A: Wrapped Multi-Node Pipeline)
+# ============================================================================
+
+
+def build_document_analysis_subflow() -> PenguiFlow:
+    """Build a 5-node subflow for document analysis.
+
+    This demonstrates Pattern A: Wrapping an entire multi-step workflow
+    as a reusable, composable subflow. The planner sees this as a single
+    tool, hiding internal complexity.
+
+    Pipeline:
+        RouteDecision → [init] → [parse] → [extract] →
+        [summarize] → [render] → FinalAnswer
+
+    Benefits:
+        - Abstraction: Planner doesn't need to know internal steps
+        - Reusability: Can be composed into larger flows
+        - Performance: All steps execute in single traversal
+        - Cost: LLM only called once for the entire pipeline
+
+    Tradeoffs:
+        - Less granular control: Planner can't intervene mid-pipeline
+        - Reduced observability: Internal steps not visible to planner
+    """
+    # Create individual nodes (reusing existing functions)
+    init_node = Node(initialize_document_workflow, name="init_documents")
+    parse_node = Node(parse_documents, name="parse_documents")
+    extract_node = Node(extract_metadata, name="extract_metadata")
+    summarize_node = Node(generate_document_summary, name="generate_summary")
+    render_node = Node(render_document_report, name="render_report")
+
+    # Build linear pipeline using PenguiFlow's create() API
+    from penguiflow import create
+
+    flow = create(
+        init_node.to(parse_node),
+        parse_node.to(extract_node),
+        extract_node.to(summarize_node),
+        summarize_node.to(render_node),
+        render_node.to(),
+    )
+
+    return flow
+
+
+@tool(
+    desc=(
+        "Complete document analysis pipeline "
+        "(parse, extract metadata, summarize, render report)"
+    ),
+    tags=["planner", "documents", "subflow"],
+    side_effects="read",
+    latency_hint_ms=2000,  # Entire pipeline latency
+    cost_hint="medium",  # Multiple internal operations
+)
+async def analyze_documents_pipeline(args: RouteDecision, ctx: Any) -> FinalAnswer:
+    """Execute complete document analysis workflow as a single operation.
+
+    This is a WRAPPER TOOL that executes a 4-node subflow internally.
+    The planner sees this as a single atomic operation, but under the hood
+    it orchestrates: initialization → parsing → metadata extraction →
+    summarization → report rendering.
+
+    This demonstrates Pattern A from the enterprise example: wrapping
+    complex multi-step workflows as single planner-discoverable tools.
+
+    Use this when:
+        - The workflow is deterministic and doesn't require mid-flight decisions
+        - You want to hide complexity from the planner
+        - Performance/cost optimization (single LLM call vs multiple)
+
+    Args:
+        args: RouteDecision with route="documents"
+        ctx: Execution context
+
+    Returns:
+        FinalAnswer with document analysis results and artifacts
+
+    Raises:
+        ValueError: If route is not "documents"
+    """
+    if args.route != "documents":
+        raise ValueError(f"Expected documents route, got {args.route}")
+
+    # Build the subflow
+    subflow = build_document_analysis_subflow()
+
+    # Execute the entire pipeline (all 5 nodes traverse in sequence)
+    result = await subflow.run(entry_payload=args, context=ctx)
+
+    # The terminal node (render_report) returns FinalAnswer
+    if not isinstance(result, FinalAnswer):
+        raise RuntimeError(f"Expected FinalAnswer from subflow, got {type(result)}")
+
+    return result
+
+
+# ============================================================================
 # Sink Nodes (for status updates and streaming)
 # ============================================================================
 
@@ -419,5 +520,9 @@ async def chunk_sink(message: Message, ctx: Any) -> None:
 
 
 # Create non-planner nodes for sinks (they don't need LLM discovery)
-status_sink_node = Node(status_sink, name="status_sink", policy=NodePolicy(validate="none"))
-chunk_sink_node = Node(chunk_sink, name="chunk_sink", policy=NodePolicy(validate="none"))
+status_sink_node = Node(
+    status_sink, name="status_sink", policy=NodePolicy(validate="none")
+)
+chunk_sink_node = Node(
+    chunk_sink, name="chunk_sink", policy=NodePolicy(validate="none")
+)
