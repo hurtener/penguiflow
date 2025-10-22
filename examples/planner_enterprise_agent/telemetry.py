@@ -14,10 +14,9 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from examples.planner_enterprise_agent.config import AgentConfig
 from penguiflow.metrics import FlowEvent
 from penguiflow.planner import PlannerEvent
-
-from .config import AgentConfig
 
 
 class AgentTelemetry:

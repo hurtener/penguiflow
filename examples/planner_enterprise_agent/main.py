@@ -13,16 +13,15 @@ demonstrating:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections import defaultdict
+from collections.abc import Iterator, Mapping
+from typing import Any
+from uuid import uuid4
 
-from penguiflow.catalog import build_catalog
-from penguiflow.node import Node
-from penguiflow.planner import ReactPlanner
-from penguiflow.registry import ModelRegistry
-
-from .config import AgentConfig
-from .nodes import (
+from examples.planner_enterprise_agent.config import AgentConfig
+from examples.planner_enterprise_agent.nodes import (
     FinalAnswer,
     StatusUpdate,
     UserQuery,
@@ -34,11 +33,57 @@ from .nodes import (
     run_diagnostics,  # Pattern B: Individual node
     triage_query,
 )
-from .telemetry import AgentTelemetry
+from examples.planner_enterprise_agent.telemetry import AgentTelemetry
+from penguiflow.catalog import build_catalog
+from penguiflow.node import Node
+from penguiflow.planner import DSPyLLMClient, PlannerPause, ReactPlanner
+from penguiflow.registry import ModelRegistry
 
 # Global buffers for demonstration (in production: use message queue/websocket)
 STATUS_BUFFER: defaultdict[str, list[StatusUpdate]] = defaultdict(list)
 EXECUTION_LOGS: list[str] = []
+
+
+class _SerializableContext(Mapping[str, Any]):
+    """Context wrapper that filters non-serializable values for JSON serialization.
+
+    This class allows passing both serializable and non-serializable objects
+    in context_meta. When the planner serializes context for the LLM prompt,
+    only JSON-serializable values are included. But nodes can still access
+    all values (including functions, loggers, etc.) via ctx.meta.
+    """
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+        self._serializable_keys = self._find_serializable_keys()
+
+    def _find_serializable_keys(self) -> set[str]:
+        """Identify which keys have JSON-serializable values."""
+        serializable = set()
+        for key, value in self._data.items():
+            try:
+                json.dumps(value)
+                serializable.add(key)
+            except (TypeError, ValueError):
+                # Skip non-serializable values
+                pass
+        return serializable
+
+    def __getitem__(self, key: str) -> Any:
+        """Allow access to all values (both serializable and non-serializable)."""
+        return self._data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        """Iterate only over serializable keys (for dict() and JSON conversion)."""
+        return iter(self._serializable_keys)
+
+    def __len__(self) -> int:
+        """Return count of serializable keys."""
+        return len(self._serializable_keys)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get value with default (allows access to all values)."""
+        return self._data.get(key, default)
 
 
 class EnterpriseAgentOrchestrator:
@@ -156,7 +201,7 @@ class EnterpriseAgentOrchestrator:
         registry = ModelRegistry()
 
         # Import types
-        from .nodes import (
+        from examples.planner_enterprise_agent.nodes import (
             BugState,
             RouteDecision,
         )
@@ -185,13 +230,33 @@ class EnterpriseAgentOrchestrator:
         """Construct ReactPlanner with enterprise configuration."""
         catalog = build_catalog(self._nodes, self._registry)
 
+        # Use DSPy for better structured output handling across providers
+        # DSPy is especially beneficial for models that don't support native
+        # JSON schema mode (like Databricks), but works well with all providers
+        use_dspy = self.config.llm_model.startswith("databricks/")
+
+        # Configure LLM client
+        llm_client = None
+        if use_dspy:
+            llm_client = DSPyLLMClient(
+                llm=self.config.llm_model,
+                temperature=self.config.llm_temperature,
+                max_retries=self.config.llm_max_retries,
+                timeout_s=self.config.llm_timeout_s,
+            )
+            self.telemetry.logger.info(
+                "using_dspy_client",
+                extra={"model": self.config.llm_model},
+            )
+
         # CRITICAL: Set event_callback for planner observability
         planner = ReactPlanner(
             llm=self.config.llm_model,
             catalog=catalog,
             max_iters=self.config.planner_max_iters,
             temperature=self.config.llm_temperature,
-            json_schema_mode=True,
+            json_schema_mode=True if not use_dspy else False,
+            llm_client=llm_client,
             token_budget=self.config.planner_token_budget,
             deadline_s=self.config.planner_deadline_s,
             hop_budget=self.config.planner_hop_budget,
@@ -214,114 +279,213 @@ class EnterpriseAgentOrchestrator:
 
         return planner
 
-    async def execute(self, query: str, *, tenant_id: str = "default") -> FinalAnswer:
+    async def execute(
+        self,
+        query: str,
+        *,
+        tenant_id: str = "default",
+        memories: list[dict[str, Any]] | None = None,
+    ) -> FinalAnswer:
         """Execute agent planning for a user query.
 
-        This is the main entry point for agent execution. It:
-        1. Creates a UserQuery from input
-        2. Runs the ReactPlanner to autonomously select and sequence nodes
-        3. Handles errors gracefully with detailed logging
-        4. Emits telemetry to observability backends
-        5. Returns structured final answer
+        Args:
+            query: The user's question or request
+            tenant_id: Tenant identifier for multi-tenancy
+            memories: Optional conversation history and context memories.
+                     Each memory can be a dict with fields like:
+                     - role: "user" | "assistant" | "system"
+                     - content: str
+                     - timestamp: str
+                     - metadata: dict
 
-        Parameters:
-            query: Natural language user query
-            tenant_id: Multi-tenant identifier for isolation
-
-        Returns:
-            FinalAnswer with results and metadata
-
-        Raises:
-            RuntimeError: If planner fails after retries
-            ValueError: If query is invalid
+        Example:
+            >>> memories = [
+            ...     {
+            ...         "role": "user",
+            ...         "content": "Deploy version 2.3.1",
+            ...         "timestamp": "2025-10-20",
+            ...     },
+            ...     {"role": "assistant", "content": "Deployed successfully to prod"},
+            ...     {"role": "system", "content": "User prefers verbose explanations"},
+            ... ]
+            >>> result = await agent.execute("What was deployed?", memories=memories)
         """
-        self.telemetry.logger.info(
-            "execute_start",
-            extra={"query": query, "tenant_id": tenant_id},
-        )
+        trace_id = uuid4().hex
+        status_history = STATUS_BUFFER[trace_id]
 
-        try:
-            # Run planner (LLM will autonomously select and sequence nodes)
-            result = await self._planner.run(
-                query=query,
-                context_meta={"tenant_id": tenant_id, "query": query},
+        def publish_status(update: StatusUpdate) -> None:
+            status_history.append(update)
+            message_text = update.message or ""
+            step_ref = (
+                str(update.roadmap_step_id)
+                if update.roadmap_step_id is not None
+                else "-"
+            )
+            EXECUTION_LOGS.append(
+                f"{trace_id}:{update.status}:{message_text}:{step_ref}"
+            )
+            self.telemetry.logger.debug(
+                "status_update_buffered",
+                extra={
+                    "trace_id": trace_id,
+                    "status": update.status,
+                    "message": update.message,
+                    "step_id": update.roadmap_step_id,
+                    "step_status": update.roadmap_step_status,
+                },
             )
 
-            # Check result type
-            if result.reason == "answer_complete":
-                final_answer = FinalAnswer.model_validate(result.payload)
+        # Use _SerializableContext to allow both serializable and non-serializable
+        # values. The planner will only see serializable values in the LLM prompt,
+        # but nodes can access all values via ctx.meta.
+        #
+        # Serializable values (sent to LLM):
+        # - tenant_id, query, trace_id: Basic metadata
+        # - memories: Conversation history and context (if provided)
+        # - status_history: Real-time execution updates
+        #
+        # Non-serializable values (only for nodes):
+        # - status_publisher: Function to publish status updates
+        # - telemetry: Telemetry object for metrics
+        # - status_logger: Logger instance
+        context_meta_dict = {
+            "tenant_id": tenant_id,
+            "query": query,
+            "trace_id": trace_id,
+            "status_publisher": publish_status,
+            "status_history": status_history,
+            "telemetry": self.telemetry,
+            "status_logger": self.telemetry.logger,
+        }
 
+        # Add memories if provided - these will be sent to the LLM!
+        if memories:
+            context_meta_dict["memories"] = memories
+
+        context_meta = _SerializableContext(context_meta_dict)
+
+        self.telemetry.logger.info(
+            "execute_start",
+            extra={"query": query, "tenant_id": tenant_id, "trace_id": trace_id},
+        )
+
+        finish: FinalAnswer | None = None
+
+        try:
+            planner_result = await self._planner.run(
+                query=query,
+                context_meta=context_meta,
+            )
+
+            if isinstance(planner_result, PlannerPause):
+                publish_status(
+                    StatusUpdate(
+                        status="thinking",
+                        message="Planner paused awaiting external input",
+                    )
+                )
+                finish = FinalAnswer(
+                    text="Workflow paused awaiting external input.",
+                    route="pause",
+                    metadata={
+                        "reason": planner_result.reason,
+                        "payload": dict(planner_result.payload),
+                        "resume_token": planner_result.resume_token,
+                    },
+                )
+            elif planner_result.reason == "answer_complete":
+                final_answer = FinalAnswer.model_validate(planner_result.payload)
+                metadata = dict(final_answer.metadata)
+                planner_meta = dict(planner_result.metadata)
+                metadata.setdefault("trace_id", trace_id)
+                if planner_meta:
+                    metadata.setdefault("planner", planner_meta)
+                final_answer = final_answer.model_copy(update={"metadata": metadata})
                 self.telemetry.logger.info(
                     "execute_success",
                     extra={
                         "route": final_answer.route,
-                        "step_count": result.metadata.get("step_count", 0),
+                        "trace_id": trace_id,
+                        "step_count": planner_meta.get("step_count", 0),
                     },
                 )
-
-                # Emit collected telemetry
-                if self.config.enable_telemetry:
-                    self.telemetry.emit_collected_events()
-
-                return final_answer
-
-            elif result.reason == "no_path":
-                # Planner couldn't find a solution
+                finish = final_answer
+            elif planner_result.reason == "no_path":
+                publish_status(
+                    StatusUpdate(
+                        status="error",
+                        message="Planner could not find a viable path",
+                    )
+                )
+                planner_meta = dict(planner_result.metadata)
+                meta = {"error": "no_path", "planner": planner_meta}
+                finish = FinalAnswer(
+                    text=(
+                        f"I couldn't complete the task. "
+                        f"Reason: {planner_meta.get('thought', 'Unknown')}"
+                    ),
+                    route="error",
+                    metadata=meta,
+                )
                 self.telemetry.logger.warning(
                     "execute_no_path",
                     extra={
-                        "reason": result.metadata.get("thought"),
-                        "step_count": result.metadata.get("step_count", 0),
+                        "trace_id": trace_id,
+                        "reason": planner_meta.get("thought"),
+                        "step_count": planner_meta.get("step_count", 0),
                     },
                 )
-
-                # Return fallback answer
-                return FinalAnswer(
-                    text=(
-                        f"I couldn't complete the task. "
-                        f"Reason: {result.metadata.get('thought', 'Unknown')}"
-                    ),
-                    route="error",
-                    metadata={"error": "no_path", **result.metadata},
+            elif planner_result.reason == "budget_exhausted":
+                publish_status(
+                    StatusUpdate(
+                        status="error",
+                        message="Budget exhausted before completion",
+                    )
                 )
-
-            elif result.reason == "budget_exhausted":
-                # Hit constraints (deadline, hop budget, etc.)
-                self.telemetry.logger.warning(
-                    "execute_budget_exhausted",
-                    extra={
-                        "constraints": result.metadata.get("constraints", {}),
-                        "step_count": result.metadata.get("step_count", 0),
-                    },
-                )
-
-                return FinalAnswer(
+                planner_meta = dict(planner_result.metadata)
+                meta = {"error": "budget_exhausted", "planner": planner_meta}
+                finish = FinalAnswer(
                     text=(
                         "Task interrupted due to resource constraints. "
                         "Partial results may be available."
                     ),
                     route="error",
-                    metadata={"error": "budget_exhausted", **result.metadata},
+                    metadata=meta,
+                )
+                self.telemetry.logger.warning(
+                    "execute_budget_exhausted",
+                    extra={
+                        "trace_id": trace_id,
+                        "constraints": planner_meta.get("constraints", {}),
+                        "step_count": planner_meta.get("step_count", 0),
+                    },
+                )
+            else:
+                raise RuntimeError(
+                    f"Unexpected planner result: {planner_result.reason}"
                 )
 
-            else:
-                # Unexpected result type
-                raise RuntimeError(f"Unexpected planner result: {result.reason}")
+            assert finish is not None
+            metadata = dict(finish.metadata)
+            metadata.setdefault("trace_id", trace_id)
+            finish = finish.model_copy(update={"metadata": metadata})
+            return finish
 
         except Exception as exc:
-            # Comprehensive error logging
             self.telemetry.logger.exception(
                 "execute_error",
                 extra={
                     "query": query,
                     "tenant_id": tenant_id,
+                    "trace_id": trace_id,
                     "error_class": exc.__class__.__name__,
                     "error_message": str(exc),
                 },
             )
-
-            # Re-raise for caller to handle
             raise
+        finally:
+            if self.config.enable_telemetry:
+                self.telemetry.emit_collected_events()
 
     def get_metrics(self) -> dict:
         """Return current telemetry metrics."""
@@ -334,6 +498,19 @@ class EnterpriseAgentOrchestrator:
 
 async def main() -> None:
     """Example usage of enterprise agent."""
+    # Load environment variables from .env file
+    from pathlib import Path
+
+    from dotenv import load_dotenv
+
+    # Try loading from example directory first, then project root
+    example_dir = Path(__file__).parent
+    project_root = example_dir.parent.parent
+    env_path = example_dir / ".env"
+    if not env_path.exists():
+        env_path = project_root / ".env"
+    load_dotenv(env_path)
+
     # Load configuration from environment
     config = AgentConfig.from_env()
 
@@ -347,13 +524,38 @@ async def main() -> None:
         "What's the status of the API service?",
     ]
 
+    # Example: Passing memories for context-aware planning
+    # In production, these would come from a conversation database
+    example_memories = [
+        {
+            "role": "user",
+            "content": "Deploy version 2.3.1 to production",
+            "timestamp": "2025-10-20T14:30:00Z",
+        },
+        {
+            "role": "assistant",
+            "content": "Deployed v2.3.1 to production successfully",
+            "timestamp": "2025-10-20T14:35:00Z",
+        },
+        {
+            "role": "system",
+            "content": "User prefers detailed explanations with code snippets",
+            "metadata": {"user_preference": "verbose"},
+        },
+    ]
+
     for i, query in enumerate(queries, 1):
         print(f"\n{'=' * 80}")
         print(f"Query {i}: {query}")
-        print('=' * 80)
+        print("=" * 80)
 
         try:
-            result = await agent.execute(query)
+            # Pass memories on the first query to demonstrate context awareness
+            memories = example_memories if i == 1 else None
+            if memories:
+                print(f"\n[Using {len(memories)} memories for context]")
+
+            result = await agent.execute(query, memories=memories)
 
             print(f"\nRoute: {result.route}")
             print(f"Answer: {result.text}")
@@ -377,7 +579,7 @@ async def main() -> None:
     # Show metrics
     print(f"\n{'=' * 80}")
     print("Telemetry Metrics")
-    print('=' * 80)
+    print("=" * 80)
     metrics = agent.get_metrics()
     for key, value in metrics.items():
         print(f"  {key}: {value}")

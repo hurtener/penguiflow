@@ -1,18 +1,39 @@
 """Planner-compatible nodes with comprehensive type safety and observability.
 
-All nodes are decorated with @tool to make them discoverable by the ReactPlanner.
-Each node includes structured metadata for LLM decision-making.
+All nodes follow PenguiFlow's production patterns:
+    * Typed Pydantic contracts for planner compatibility
+    * Status updates emitted through the shared status publisher
+    * FlowError semantics for deterministic error reporting
+    * Subflow wrappers that preserve envelopes and telemetry hooks
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Callable, MutableMapping, Sequence
+from types import SimpleNamespace
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from penguiflow import Message, Node, NodePolicy, PenguiFlow, StreamChunk
+from examples.planner_enterprise_agent.telemetry import AgentTelemetry
+from penguiflow import (
+    Headers,
+    Message,
+    ModelRegistry,
+    Node,
+    PenguiFlow,
+    call_playbook,
+    create,
+    log_flow_events,
+)
 from penguiflow.catalog import tool
+from penguiflow.errors import FlowError
+
+logger = logging.getLogger("penguiflow.examples.planner_enterprise")
+
 
 # ============================================================================
 # Pydantic Models (Shared Contracts)
@@ -66,14 +87,6 @@ class BugState(BaseModel):
     recommendation: str | None = None
 
 
-class GeneralResponse(BaseModel):
-    """Simple response for general queries."""
-
-    query: UserQuery
-    answer: str
-    confidence: float = Field(ge=0.0, le=1.0)
-
-
 class FinalAnswer(BaseModel):
     """Unified final response across all routes."""
 
@@ -108,6 +121,114 @@ BUG_ROADMAP = [
 ]
 
 
+StatusPublisher = Callable[[StatusUpdate], None]
+
+
+# ============================================================================
+# Helper utilities
+# ============================================================================
+
+
+def _resolve_meta(source: Any) -> MutableMapping[str, Any] | None:
+    """Return mutable metadata mapping from planner or flow context."""
+
+    if isinstance(source, MutableMapping):
+        return source
+
+    meta = getattr(source, "meta", None)
+    if isinstance(meta, MutableMapping):
+        return meta
+    return None
+
+
+def _trace_id_from_ctx(source: Any) -> str | None:
+    meta = _resolve_meta(source)
+    if not meta:
+        return None
+    trace_id = meta.get("trace_id")
+    if isinstance(trace_id, str):
+        return trace_id
+    return None
+
+
+def _status_logger(meta: MutableMapping[str, Any] | None) -> logging.Logger:
+    if meta is None:
+        return logger
+    override = meta.get("status_logger")
+    if isinstance(override, logging.Logger):
+        return override
+    return logger
+
+
+def _publish_status(
+    ctx_or_meta: Any,
+    *,
+    status: Literal["thinking", "ok", "error"],
+    message: str | None = None,
+    roadmap_step_id: int | None = None,
+    roadmap_step_status: Literal["running", "ok", "error"] | None = None,
+    roadmap: Sequence[RoadmapStep] | None = None,
+) -> None:
+    meta = _resolve_meta(ctx_or_meta)
+    if meta is None:
+        return
+
+    publisher = meta.get("status_publisher")
+    if not callable(publisher):
+        return
+
+    update = StatusUpdate(
+        status=status,
+        message=message,
+        roadmap_step_id=roadmap_step_id,
+        roadmap_step_status=roadmap_step_status,
+        roadmap=list(roadmap) if roadmap is not None else None,
+    )
+    publisher(update)
+
+    status_log = _status_logger(meta)
+    status_log.debug(
+        "status_update",
+        extra={
+            "trace_id": meta.get("trace_id"),
+            "status": update.status,
+            "message": update.message,
+            "step_id": update.roadmap_step_id,
+            "step_status": update.roadmap_step_status,
+        },
+    )
+
+
+def _clone_roadmap(template: Sequence[RoadmapStep]) -> list[RoadmapStep]:
+    return [step.model_copy() for step in template]
+
+
+def _mark_step_status(
+    roadmap: list[RoadmapStep],
+    *,
+    step_id: int,
+    status: Literal["pending", "running", "ok", "error"],
+) -> RoadmapStep | None:
+    for idx, step in enumerate(roadmap):
+        if step.id == step_id:
+            updated = step.model_copy(update={"status": status})
+            roadmap[idx] = updated
+            return updated
+    return None
+
+
+def _flow_ctx(meta: MutableMapping[str, Any]) -> SimpleNamespace:
+    """Create a lightweight context wrapper for subflow nodes."""
+
+    return SimpleNamespace(meta=meta, logger=_status_logger(meta))
+
+
+def _ensure_message(message: Any) -> Message:
+    if isinstance(message, Message):
+        return message
+    return Message.model_validate(message)
+
+
 # ============================================================================
 # Planner-Discoverable Nodes
 # ============================================================================
@@ -120,6 +241,12 @@ BUG_ROADMAP = [
 )
 async def triage_query(args: UserQuery, ctx: Any) -> RouteDecision:
     """Intelligent routing based on query content analysis."""
+    _publish_status(
+        ctx,
+        status="thinking",
+        message="Classifying query intent",
+    )
+
     text_lower = args.text.lower()
 
     # Pattern-based routing (in production: use LLM classifier)
@@ -136,9 +263,13 @@ async def triage_query(args: UserQuery, ctx: Any) -> RouteDecision:
         confidence = 0.75
         reason = "General query - no specific workflow match"
 
-    return RouteDecision(
-        query=args, route=route, confidence=confidence, reason=reason
+    _publish_status(
+        ctx,
+        status="thinking",
+        message=f"Routed query to {route} workflow",
     )
+
+    return RouteDecision(query=args, route=route, confidence=confidence, reason=reason)
 
 
 @tool(
@@ -146,14 +277,30 @@ async def triage_query(args: UserQuery, ctx: Any) -> RouteDecision:
     tags=["planner", "documents"],
     side_effects="stateful",
 )
-async def initialize_document_workflow(
-    args: RouteDecision, ctx: Any
-) -> DocumentState:
+async def initialize_document_workflow(args: RouteDecision, ctx: Any) -> DocumentState:
     """Set up document analysis pipeline."""
     if args.route != "documents":
-        raise ValueError(f"Expected documents route, got {args.route}")
+        raise FlowError(
+            trace_id=_trace_id_from_ctx(ctx),
+            node_name="init_documents",
+            code="INVALID_ROUTE",
+            message=f"Expected documents route, got {args.route}",
+        )
 
-    return DocumentState(query=args.query, roadmap=list(DOCUMENT_ROADMAP))
+    roadmap = _clone_roadmap(DOCUMENT_ROADMAP)
+    current = _mark_step_status(
+        roadmap, step_id=DOCUMENT_ROADMAP[0].id, status="running"
+    )
+    _publish_status(
+        ctx,
+        status="thinking",
+        message="Document workflow initialised",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="running",
+        roadmap=roadmap,
+    )
+
+    return DocumentState(query=args.query, roadmap=roadmap)
 
 
 @tool(
@@ -163,11 +310,20 @@ async def initialize_document_workflow(
 )
 async def parse_documents(args: DocumentState, ctx: Any) -> DocumentState:
     """Extract document references from query."""
-    # In production: use LLM to extract file paths, URLs, or search queries
-    # For example: parse file paths from query, enumerate directory, etc.
+    roadmap = list(args.roadmap)
+    current = _mark_step_status(
+        roadmap, step_id=DOCUMENT_ROADMAP[0].id, status="running"
+    )
+    _publish_status(
+        ctx,
+        status="thinking",
+        message="Parsing candidate document sources",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="running",
+        roadmap=roadmap,
+    )
 
-    # Simulate parsing
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.05)  # Simulate parsing
 
     sources = [
         "README.md",
@@ -176,8 +332,15 @@ async def parse_documents(args: DocumentState, ctx: Any) -> DocumentState:
         "docs/deployment.md",
     ]
 
-    roadmap = list(args.roadmap)
-    roadmap[0] = roadmap[0].model_copy(update={"status": "ok"})
+    current = _mark_step_status(roadmap, step_id=DOCUMENT_ROADMAP[0].id, status="ok")
+    _publish_status(
+        ctx,
+        status="ok",
+        message="Document sources identified",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="ok",
+        roadmap=roadmap,
+    )
 
     return args.model_copy(update={"sources": sources, "roadmap": roadmap})
 
@@ -186,13 +349,12 @@ async def parse_documents(args: DocumentState, ctx: Any) -> DocumentState:
     desc="Extract structured metadata from documents in parallel",
     tags=["planner", "documents"],
     side_effects="read",
-    latency_hint_ms=1000  # High latency,
+    latency_hint_ms=1000,  # High latency,
 )
 async def extract_metadata(args: DocumentState, ctx: Any) -> DocumentState:
     """Concurrent metadata extraction from document sources."""
 
     async def analyze_file(source: str) -> dict[str, Any]:
-        """Analyze single document (simulated)."""
         await asyncio.sleep(0.02)
         return {
             "source": source,
@@ -201,14 +363,33 @@ async def extract_metadata(args: DocumentState, ctx: Any) -> DocumentState:
             "checksum": hash(source) % 10000,
         }
 
-    # Simulate parallel processing
+    roadmap = list(args.roadmap)
+    current = _mark_step_status(
+        roadmap, step_id=DOCUMENT_ROADMAP[1].id, status="running"
+    )
+    _publish_status(
+        ctx,
+        status="thinking",
+        message="Extracting document metadata",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="running",
+        roadmap=roadmap,
+    )
+
     metadata = []
     for source in args.sources:
         meta = await analyze_file(source)
         metadata.append(meta)
 
-    roadmap = list(args.roadmap)
-    roadmap[1] = roadmap[1].model_copy(update={"status": "ok"})
+    current = _mark_step_status(roadmap, step_id=DOCUMENT_ROADMAP[1].id, status="ok")
+    _publish_status(
+        ctx,
+        status="ok",
+        message="Metadata extraction complete",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="ok",
+        roadmap=roadmap,
+    )
 
     return args.model_copy(update={"metadata": metadata, "roadmap": roadmap})
 
@@ -220,7 +401,18 @@ async def extract_metadata(args: DocumentState, ctx: Any) -> DocumentState:
 )
 async def generate_document_summary(args: DocumentState, ctx: Any) -> DocumentState:
     """Synthesize findings into natural language summary."""
-    # In production: use LLM to generate summary from metadata
+    roadmap = list(args.roadmap)
+    current = _mark_step_status(
+        roadmap, step_id=DOCUMENT_ROADMAP[2].id, status="running"
+    )
+    _publish_status(
+        ctx,
+        status="thinking",
+        message="Generating document summary",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="running",
+        roadmap=roadmap,
+    )
 
     summary = (
         f"Analyzed {len(args.sources)} documents. "
@@ -228,8 +420,15 @@ async def generate_document_summary(args: DocumentState, ctx: Any) -> DocumentSt
         f"Key files: {', '.join(args.sources[:3])}."
     )
 
-    roadmap = list(args.roadmap)
-    roadmap[2] = roadmap[2].model_copy(update={"status": "ok"})
+    current = _mark_step_status(roadmap, step_id=DOCUMENT_ROADMAP[2].id, status="ok")
+    _publish_status(
+        ctx,
+        status="ok",
+        message="Document summary generated",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="ok",
+        roadmap=roadmap,
+    )
 
     return args.model_copy(update={"summary": summary, "roadmap": roadmap})
 
@@ -242,7 +441,30 @@ async def generate_document_summary(args: DocumentState, ctx: Any) -> DocumentSt
 async def render_document_report(args: DocumentState, ctx: Any) -> FinalAnswer:
     """Package results into structured final answer."""
     roadmap = list(args.roadmap)
-    roadmap[3] = roadmap[3].model_copy(update={"status": "ok"})
+    current = _mark_step_status(
+        roadmap, step_id=DOCUMENT_ROADMAP[3].id, status="running"
+    )
+    _publish_status(
+        ctx,
+        status="thinking",
+        message="Rendering document analysis report",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="running",
+        roadmap=roadmap,
+    )
+
+    roadmap_complete = all(s.status == "ok" for s in roadmap)
+    trace_id = _trace_id_from_ctx(ctx) or uuid4().hex
+
+    current = _mark_step_status(roadmap, step_id=DOCUMENT_ROADMAP[3].id, status="ok")
+    _publish_status(
+        ctx,
+        status="ok",
+        message="Document workflow complete",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="ok",
+        roadmap=roadmap,
+    )
 
     return FinalAnswer(
         text=args.summary or "No summary available",
@@ -253,7 +475,8 @@ async def render_document_report(args: DocumentState, ctx: Any) -> FinalAnswer:
         },
         metadata={
             "source_count": len(args.sources),
-            "roadmap_complete": all(s.status == "ok" for s in roadmap),
+            "roadmap_complete": roadmap_complete,
+            "trace_id": trace_id,
         },
     )
 
@@ -266,9 +489,25 @@ async def render_document_report(args: DocumentState, ctx: Any) -> FinalAnswer:
 async def initialize_bug_workflow(args: RouteDecision, ctx: Any) -> BugState:
     """Set up bug triage pipeline."""
     if args.route != "bug":
-        raise ValueError(f"Expected bug route, got {args.route}")
+        raise FlowError(
+            trace_id=_trace_id_from_ctx(ctx),
+            node_name="init_bug",
+            code="INVALID_ROUTE",
+            message=f"Expected bug route, got {args.route}",
+        )
 
-    return BugState(query=args.query, roadmap=list(BUG_ROADMAP))
+    roadmap = _clone_roadmap(BUG_ROADMAP)
+    current = _mark_step_status(roadmap, step_id=BUG_ROADMAP[0].id, status="running")
+    _publish_status(
+        ctx,
+        status="thinking",
+        message="Bug triage workflow initialised",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="running",
+        roadmap=roadmap,
+    )
+
+    return BugState(query=args.query, roadmap=roadmap)
 
 
 @tool(
@@ -278,7 +517,16 @@ async def initialize_bug_workflow(args: RouteDecision, ctx: Any) -> BugState:
 )
 async def collect_error_logs(args: BugState, ctx: Any) -> BugState:
     """Gather diagnostic logs from error context."""
-    # In production: query logging infrastructure, parse stack traces
+    roadmap = list(args.roadmap)
+    current = _mark_step_status(roadmap, step_id=BUG_ROADMAP[0].id, status="running")
+    _publish_status(
+        ctx,
+        status="thinking",
+        message="Collecting error logs",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="running",
+        roadmap=roadmap,
+    )
 
     logs = [
         "ERROR: ValueError: Invalid configuration",
@@ -288,8 +536,15 @@ async def collect_error_logs(args: BugState, ctx: Any) -> BugState:
         "ValueError: Missing required field: api_key",
     ]
 
-    roadmap = list(args.roadmap)
-    roadmap[0] = roadmap[0].model_copy(update={"status": "ok"})
+    current = _mark_step_status(roadmap, step_id=BUG_ROADMAP[0].id, status="ok")
+    _publish_status(
+        ctx,
+        status="ok",
+        message="Logs collected",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="ok",
+        roadmap=roadmap,
+    )
 
     return args.model_copy(update={"logs": logs, "roadmap": roadmap})
 
@@ -298,11 +553,20 @@ async def collect_error_logs(args: BugState, ctx: Any) -> BugState:
     desc="Run automated diagnostics and health checks",
     tags=["planner", "bugs"],
     side_effects="external",
-    latency_hint_ms=1000  # High latency,
+    latency_hint_ms=1000,  # High latency,
 )
 async def run_diagnostics(args: BugState, ctx: Any) -> BugState:
     """Execute validation suite to isolate failure."""
-    # In production: run actual health checks, integration tests, etc.
+    roadmap = list(args.roadmap)
+    current = _mark_step_status(roadmap, step_id=BUG_ROADMAP[1].id, status="running")
+    _publish_status(
+        ctx,
+        status="thinking",
+        message="Running automated diagnostics",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="running",
+        roadmap=roadmap,
+    )
 
     await asyncio.sleep(0.1)  # Simulate diagnostic execution
 
@@ -313,8 +577,15 @@ async def run_diagnostics(args: BugState, ctx: Any) -> BugState:
         "config_validation": "failed",
     }
 
-    roadmap = list(args.roadmap)
-    roadmap[1] = roadmap[1].model_copy(update={"status": "ok"})
+    current = _mark_step_status(roadmap, step_id=BUG_ROADMAP[1].id, status="ok")
+    _publish_status(
+        ctx,
+        status="ok",
+        message="Diagnostics captured",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="ok",
+        roadmap=roadmap,
+    )
 
     return args.model_copy(update={"diagnostics": diagnostics, "roadmap": roadmap})
 
@@ -326,7 +597,16 @@ async def run_diagnostics(args: BugState, ctx: Any) -> BugState:
 )
 async def recommend_bug_fix(args: BugState, ctx: Any) -> FinalAnswer:
     """Generate actionable fix recommendation."""
-    # In production: use LLM to analyze logs + diagnostics
+    roadmap = list(args.roadmap)
+    current = _mark_step_status(roadmap, step_id=BUG_ROADMAP[2].id, status="running")
+    _publish_status(
+        ctx,
+        status="thinking",
+        message="Preparing remediation advice",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="running",
+        roadmap=roadmap,
+    )
 
     failed_checks = [
         k for k, v in args.diagnostics.items() if v in ("failed", "degraded")
@@ -338,8 +618,17 @@ async def recommend_bug_fix(args: BugState, ctx: Any) -> FinalAnswer:
         f"Action: Review environment variables and ensure api_key is set."
     )
 
-    roadmap = list(args.roadmap)
-    roadmap[2] = roadmap[2].model_copy(update={"status": "ok"})
+    current = _mark_step_status(roadmap, step_id=BUG_ROADMAP[2].id, status="ok")
+    _publish_status(
+        ctx,
+        status="ok",
+        message="Bug remediation plan ready",
+        roadmap_step_id=current.id if current else None,
+        roadmap_step_status="ok",
+        roadmap=roadmap,
+    )
+
+    trace_id = _trace_id_from_ctx(ctx) or uuid4().hex
 
     return FinalAnswer(
         text=recommendation,
@@ -351,6 +640,7 @@ async def recommend_bug_fix(args: BugState, ctx: Any) -> FinalAnswer:
         metadata={
             "failed_checks": failed_checks,
             "roadmap_complete": all(s.status == "ok" for s in roadmap),
+            "trace_id": trace_id,
         },
     )
 
@@ -359,11 +649,15 @@ async def recommend_bug_fix(args: BugState, ctx: Any) -> FinalAnswer:
     desc="Handle simple general queries with direct LLM response",
     tags=["planner", "general"],
     side_effects="read",
-    latency_hint_ms=500  # Medium latency,
+    latency_hint_ms=500,  # Medium latency,
 )
 async def answer_general_query(args: RouteDecision, ctx: Any) -> FinalAnswer:
     """Direct LLM answer for queries not requiring specialized workflows."""
-    # In production: call LLM with query
+    _publish_status(
+        ctx,
+        status="thinking",
+        message="Handling general query",
+    )
 
     await asyncio.sleep(0.05)
 
@@ -373,48 +667,101 @@ async def answer_general_query(args: RouteDecision, ctx: Any) -> FinalAnswer:
         f"invoke an LLM to generate a contextual response."
     )
 
+    trace_id = _trace_id_from_ctx(ctx) or uuid4().hex
+
+    _publish_status(
+        ctx,
+        status="ok",
+        message="General response ready",
+    )
+
     return FinalAnswer(
         text=answer,
         route="general",
-        metadata={"confidence": args.confidence},
+        metadata={"confidence": args.confidence, "trace_id": trace_id},
     )
 
 
 # ============================================================================
-# Subflow Wrapper (Pattern A: Wrapped Multi-Node Pipeline)
+# Subflow Wrappers (Pattern A: Wrapped Multi-Node Pipeline)
 # ============================================================================
 
 
-def build_document_analysis_subflow() -> PenguiFlow:
-    """Build a 5-node subflow for document analysis.
+async def _init_documents_flow(message: Message, ctx: Any) -> Message:
+    base = _ensure_message(message)
+    payload = base.payload
+    decision = (
+        payload
+        if isinstance(payload, RouteDecision)
+        else RouteDecision.model_validate(payload)
+    )
+    proxy_ctx = _flow_ctx(base.meta)
+    state = await initialize_document_workflow(decision, proxy_ctx)
+    return base.model_copy(update={"payload": state})
 
-    This demonstrates Pattern A: Wrapping an entire multi-step workflow
-    as a reusable, composable subflow. The planner sees this as a single
-    tool, hiding internal complexity.
 
-    Pipeline:
-        RouteDecision → [init] → [parse] → [extract] →
-        [summarize] → [render] → FinalAnswer
+async def _parse_documents_flow(message: Message, ctx: Any) -> Message:
+    base = _ensure_message(message)
+    payload = base.payload
+    state = (
+        payload
+        if isinstance(payload, DocumentState)
+        else DocumentState.model_validate(payload)
+    )
+    proxy_ctx = _flow_ctx(base.meta)
+    updated = await parse_documents(state, proxy_ctx)
+    return base.model_copy(update={"payload": updated})
 
-    Benefits:
-        - Abstraction: Planner doesn't need to know internal steps
-        - Reusability: Can be composed into larger flows
-        - Performance: All steps execute in single traversal
-        - Cost: LLM only called once for the entire pipeline
 
-    Tradeoffs:
-        - Less granular control: Planner can't intervene mid-pipeline
-        - Reduced observability: Internal steps not visible to planner
-    """
-    # Create individual nodes (reusing existing functions)
-    init_node = Node(initialize_document_workflow, name="init_documents")
-    parse_node = Node(parse_documents, name="parse_documents")
-    extract_node = Node(extract_metadata, name="extract_metadata")
-    summarize_node = Node(generate_document_summary, name="generate_summary")
-    render_node = Node(render_document_report, name="render_report")
+async def _extract_metadata_flow(message: Message, ctx: Any) -> Message:
+    base = _ensure_message(message)
+    payload = base.payload
+    state = (
+        payload
+        if isinstance(payload, DocumentState)
+        else DocumentState.model_validate(payload)
+    )
+    proxy_ctx = _flow_ctx(base.meta)
+    updated = await extract_metadata(state, proxy_ctx)
+    return base.model_copy(update={"payload": updated})
 
-    # Build linear pipeline using PenguiFlow's create() API
-    from penguiflow import create
+
+async def _generate_summary_flow(message: Message, ctx: Any) -> Message:
+    base = _ensure_message(message)
+    payload = base.payload
+    state = (
+        payload
+        if isinstance(payload, DocumentState)
+        else DocumentState.model_validate(payload)
+    )
+    proxy_ctx = _flow_ctx(base.meta)
+    updated = await generate_document_summary(state, proxy_ctx)
+    return base.model_copy(update={"payload": updated})
+
+
+async def _render_report_flow(message: Message, ctx: Any) -> Message:
+    base = _ensure_message(message)
+    payload = base.payload
+    state = (
+        payload
+        if isinstance(payload, DocumentState)
+        else DocumentState.model_validate(payload)
+    )
+    proxy_ctx = _flow_ctx(base.meta)
+    final = await render_document_report(state, proxy_ctx)
+    return base.model_copy(update={"payload": final})
+
+
+def build_document_analysis_subflow(
+    telemetry: AgentTelemetry | None = None,
+) -> tuple[PenguiFlow, ModelRegistry]:
+    """Build a 5-node subflow for document analysis."""
+
+    init_node = Node(_init_documents_flow, name="init_documents")
+    parse_node = Node(_parse_documents_flow, name="parse_documents")
+    extract_node = Node(_extract_metadata_flow, name="extract_metadata")
+    summarize_node = Node(_generate_summary_flow, name="generate_summary")
+    render_node = Node(_render_report_flow, name="render_report")
 
     flow = create(
         init_node.to(parse_node),
@@ -424,7 +771,19 @@ def build_document_analysis_subflow() -> PenguiFlow:
         render_node.to(),
     )
 
-    return flow
+    registry = ModelRegistry()
+    registry.register("init_documents", Message, Message)
+    registry.register("parse_documents", Message, Message)
+    registry.register("extract_metadata", Message, Message)
+    registry.register("generate_summary", Message, Message)
+    registry.register("render_report", Message, Message)
+
+    status_log = logging.getLogger("penguiflow.examples.document_flow")
+    flow.add_middleware(log_flow_events(status_log))
+    if telemetry is not None:
+        flow.add_middleware(telemetry.record_flow_event)
+
+    return flow, registry
 
 
 @tool(
@@ -438,91 +797,86 @@ def build_document_analysis_subflow() -> PenguiFlow:
     cost_hint="medium",  # Multiple internal operations
 )
 async def analyze_documents_pipeline(args: RouteDecision, ctx: Any) -> FinalAnswer:
-    """Execute complete document analysis workflow as a single operation.
-
-    This is a WRAPPER TOOL that executes a 4-node subflow internally.
-    The planner sees this as a single atomic operation, but under the hood
-    it orchestrates: initialization → parsing → metadata extraction →
-    summarization → report rendering.
-
-    This demonstrates Pattern A from the enterprise example: wrapping
-    complex multi-step workflows as single planner-discoverable tools.
-
-    Use this when:
-        - The workflow is deterministic and doesn't require mid-flight decisions
-        - You want to hide complexity from the planner
-        - Performance/cost optimization (single LLM call vs multiple)
-
-    Args:
-        args: RouteDecision with route="documents"
-        ctx: Execution context
-
-    Returns:
-        FinalAnswer with document analysis results and artifacts
-
-    Raises:
-        ValueError: If route is not "documents"
-    """
+    """Execute complete document analysis workflow as a single operation."""
     if args.route != "documents":
-        raise ValueError(f"Expected documents route, got {args.route}")
+        raise FlowError(
+            trace_id=_trace_id_from_ctx(ctx),
+            node_name="analyze_documents",
+            code="INVALID_ROUTE",
+            message=f"Expected documents route, got {args.route}",
+        )
 
-    # Build the subflow
-    subflow = build_document_analysis_subflow()
+    meta = _resolve_meta(ctx) or {}
+    telemetry = meta.get("telemetry")
 
-    # Execute the entire pipeline (all 5 nodes traverse in sequence)
-    result = await subflow.run(entry_payload=args, context=ctx)
+    def _playbook() -> tuple[PenguiFlow, ModelRegistry]:
+        return build_document_analysis_subflow(telemetry)
 
-    # The terminal node (render_report) returns FinalAnswer
+    trace_id = meta.get("trace_id")
+    if not isinstance(trace_id, str):
+        trace_id = uuid4().hex
+
+    headers = Headers(tenant=args.query.tenant_id, topic="documents")
+    message_meta = dict(meta)
+    message_meta.setdefault("route", "documents")
+
+    message = Message(
+        payload=args,
+        headers=headers,
+        trace_id=trace_id,
+        meta=message_meta,
+    )
+
+    try:
+        result = await call_playbook(_playbook, message)
+    except Exception as exc:  # pragma: no cover - defensive
+        _publish_status(
+            message_meta,
+            status="error",
+            message="Document workflow failed",
+            roadmap_step_status="error",
+        )
+        raise FlowError(
+            trace_id=trace_id,
+            node_name="analyze_documents",
+            code="DOCUMENT_PIPELINE_FAILED",
+            message=str(exc) or exc.__class__.__name__,
+            original_exc=exc,
+        ) from exc
+
     if not isinstance(result, FinalAnswer):
-        raise RuntimeError(f"Expected FinalAnswer from subflow, got {type(result)}")
+        raise FlowError(
+            trace_id=trace_id,
+            node_name="analyze_documents",
+            code="DOCUMENT_PIPELINE_INVALID_OUTPUT",
+            message=f"Subflow returned {type(result).__name__}",
+        )
 
-    return result
-
-
-# ============================================================================
-# Sink Nodes (for status updates and streaming)
-# ============================================================================
-
-
-async def status_sink(message: Message, ctx: Any) -> None:
-    """Collect status updates for frontend websocket delivery."""
-    # In production: send to websocket, SSE endpoint, or message queue
-    payload = message.payload
-    if isinstance(payload, StatusUpdate):
-        # Stub: log for visibility
-        ctx_logger = getattr(ctx, "logger", None)
-        if ctx_logger:
-            ctx_logger.debug(
-                "status_update",
-                extra={
-                    "trace_id": message.trace_id,
-                    "status": payload.status,
-                    "message": payload.message,
-                },
-            )
+    metadata = dict(result.metadata)
+    metadata.setdefault("trace_id", trace_id)
+    return result.model_copy(update={"metadata": metadata})
 
 
-async def chunk_sink(message: Message, ctx: Any) -> None:
-    """Collect streaming chunks for real-time frontend updates."""
-    # In production: send to websocket for progressive rendering
-    payload = message.payload
-    if isinstance(payload, StreamChunk):
-        ctx_logger = getattr(ctx, "logger", None)
-        if ctx_logger:
-            ctx_logger.debug(
-                "stream_chunk",
-                extra={
-                    "trace_id": message.trace_id,
-                    "text": payload.text[:50],  # Truncate for logging
-                    "done": payload.done,
-                },
-            )
-
-
-# Create non-planner nodes for sinks (they don't need LLM discovery)
-status_sink_node = Node(
-    status_sink, name="status_sink", policy=NodePolicy(validate="none")
-)
-chunk_sink_node = Node(
-    chunk_sink, name="chunk_sink", policy=NodePolicy(validate="none")
-)
+__all__ = [
+    "UserQuery",
+    "RouteDecision",
+    "DocumentState",
+    "BugState",
+    "FinalAnswer",
+    "StatusUpdate",
+    "DOCUMENT_ROADMAP",
+    "BUG_ROADMAP",
+    "triage_query",
+    "initialize_document_workflow",
+    "parse_documents",
+    "extract_metadata",
+    "generate_document_summary",
+    "render_document_report",
+    "initialize_bug_workflow",
+    "collect_error_logs",
+    "run_diagnostics",
+    "recommend_bug_fix",
+    "answer_general_query",
+    "analyze_documents_pipeline",
+    "build_document_analysis_subflow",
+]

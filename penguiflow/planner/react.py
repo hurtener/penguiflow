@@ -462,7 +462,7 @@ class _LiteLLMJSONClient:
 
                     # Log successful LLM call with cost if available
                     cost = response.get("_hidden_params", {}).get("response_cost", 0)
-                    if cost > 0:
+                    if cost and cost > 0:
                         logger.debug(
                             "llm_call_success",
                             extra={"attempt": attempt + 1, "cost_usd": cost},
@@ -674,17 +674,15 @@ class ReactPlanner:
         self._time_source = time_source or time.monotonic
         self._event_callback = event_callback
         self._absolute_max_parallel = absolute_max_parallel
-        self._response_format = (
-            {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "planner_action",
-                    "schema": PlannerAction.model_json_schema(),
-                },
-            }
-            if json_schema_mode
-            else None
-        )
+        action_schema = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "planner_action",
+                "schema": PlannerAction.model_json_schema(),
+            },
+        }
+        self._action_schema: Mapping[str, Any] = action_schema
+        self._response_format = action_schema if json_schema_mode else None
         self._summarizer_client: JSONLLMClient | None = None
         if llm_client is not None:
             self._client = llm_client
@@ -1002,9 +1000,15 @@ class ReactPlanner:
                     }
                 ]
 
+            response_format: Mapping[str, Any] | None = self._response_format
+            if response_format is None and getattr(
+                self._client, "expects_json_schema", False
+            ):
+                response_format = self._action_schema
+
             raw = await self._client.complete(
                 messages=messages,
-                response_format=self._response_format,
+                response_format=response_format,
             )
 
             try:
@@ -1707,7 +1711,7 @@ class ReactPlanner:
             metadata["error"] = error
 
         # Emit finish event
-        extra_data = {"reason": reason}
+        extra_data: dict[str, Any] = {"reason": reason}
         if error:
             extra_data["error"] = error
         self._emit_event(
