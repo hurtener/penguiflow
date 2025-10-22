@@ -469,7 +469,7 @@ class _LiteLLMJSONClient:
                         )
 
                     return content
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 last_error = exc
                 logger.warning(
                     "llm_timeout",
@@ -500,7 +500,8 @@ class _LiteLLMJSONClient:
             "llm_retries_exhausted",
             extra={"max_retries": self._max_retries, "last_error": str(last_error)},
         )
-        raise RuntimeError(f"LLM call failed after {self._max_retries} retries") from last_error
+        msg = f"LLM call failed after {self._max_retries} retries"
+        raise RuntimeError(msg) from last_error
 
 
 class _PlannerContext:
@@ -1439,7 +1440,7 @@ class ReactPlanner:
                 trajectory.summary = summary
                 logger.debug("trajectory_summarized", extra={"method": "llm"})
                 return summary
-            except (ValidationError, RuntimeError, asyncio.TimeoutError) as exc:
+            except (TimeoutError, ValidationError, RuntimeError) as exc:
                 # Log specific summarizer failure but fallback gracefully
                 logger.warning(
                     "summarizer_failed_fallback",
@@ -1706,13 +1707,16 @@ class ReactPlanner:
             metadata["error"] = error
 
         # Emit finish event
+        extra_data = {"reason": reason}
+        if error:
+            extra_data["error"] = error
         self._emit_event(
             PlannerEvent(
                 event_type="finish",
                 ts=self._time_source(),
                 trajectory_step=len(trajectory.steps),
                 thought=thought,
-                extra={"reason": reason, "error": error} if error else {"reason": reason},
+                extra=extra_data,
             )
         )
 
