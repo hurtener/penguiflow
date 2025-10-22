@@ -12,9 +12,11 @@ demonstrating:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
+import sys
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
 from typing import Any
@@ -496,8 +498,97 @@ class EnterpriseAgentOrchestrator:
         self.telemetry.reset_metrics()
 
 
+def _format_status_for_terminal(update: StatusUpdate, trace_id: str) -> str:
+    """Format status update for terminal display (simulating WebSocket/SSE)."""
+    status_icon = {
+        "thinking": "🤔",
+        "ok": "✅",
+        "error": "❌",
+    }.get(update.status, "ℹ️")
+
+    step_status_icon = {
+        "running": "▶️ ",
+        "ok": "✓ ",
+        "error": "✗ ",
+    }.get(update.roadmap_step_status or "", "")
+
+    parts = [f"{status_icon} [{update.status.upper()}]"]
+
+    if update.roadmap_step_id is not None:
+        parts.append(f"[Step {update.roadmap_step_id}]")
+
+    if update.roadmap_step_status:
+        parts.append(f"{step_status_icon}{update.roadmap_step_status}")
+
+    if update.message:
+        parts.append(f"{update.message}")
+
+    if update.roadmap_step_id is None and update.roadmap_step_list:
+        parts.append(f"Roadmap: {len(update.roadmap_step_list)} steps")
+
+    return " ".join(parts)
+
+
+async def _monitor_and_stream_status(stream_enabled: bool = False) -> str | None:
+    """Monitor STATUS_BUFFER for new trace_ids and stream updates in real-time."""
+    if not stream_enabled:
+        return None
+
+    seen_traces = set(STATUS_BUFFER.keys())
+    trace_counts: dict[str, int] = {
+        tid: len(updates) for tid, updates in STATUS_BUFFER.items()
+    }
+
+    while True:
+        # Check for new trace IDs
+        current_traces = set(STATUS_BUFFER.keys())
+        new_traces = current_traces - seen_traces
+
+        if new_traces:
+            # Found a new trace - this is the one we're tracking
+            trace_id = list(new_traces)[0]
+            seen_traces.add(trace_id)
+            trace_counts[trace_id] = 0
+
+        # Stream updates for all active traces
+        for trace_id in list(current_traces):
+            updates = STATUS_BUFFER.get(trace_id, [])
+            last_count = trace_counts.get(trace_id, 0)
+
+            if len(updates) > last_count:
+                for update in updates[last_count:]:
+                    formatted = _format_status_for_terminal(update, trace_id)
+                    print(f"  │ {formatted}", file=sys.stderr, flush=True)
+                trace_counts[trace_id] = len(updates)
+
+        await asyncio.sleep(0.05)  # Check every 50ms
+
+
 async def main() -> None:
     """Example usage of enterprise agent."""
+    # Parse CLI arguments
+    parser = argparse.ArgumentParser(
+        description="Enterprise Agent with ReactPlanner",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py                    # Run without streaming
+  python main.py --stream          # Show real-time status updates
+  python main.py --query "Analyze logs"  # Custom query
+        """,
+    )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Display real-time status updates (simulates WebSocket/SSE feed)",
+    )
+    parser.add_argument(
+        "--query",
+        type=str,
+        help="Run a single custom query instead of examples",
+    )
+    args = parser.parse_args()
+
     # Load environment variables from .env file
     from pathlib import Path
 
@@ -517,12 +608,15 @@ async def main() -> None:
     # Create orchestrator
     agent = EnterpriseAgentOrchestrator(config)
 
-    # Run example queries
-    queries = [
-        "Analyze the latest deployment logs and summarize findings",
-        "We're seeing a ValueError in production, help diagnose",
-        "What's the status of the API service?",
-    ]
+    # Determine which queries to run
+    if args.query:
+        queries = [args.query]
+    else:
+        queries = [
+            "Analyze the latest deployment logs and summarize findings",
+            "We're seeing a ValueError in production, help diagnose",
+            "What's the status of the API service?",
+        ]
 
     # Example: Passing memories for context-aware planning
     # In production, these would come from a conversation database
@@ -544,18 +638,34 @@ async def main() -> None:
         },
     ]
 
+    # Start global streaming monitor if enabled
+    stream_task = None
+    if args.stream:
+        stream_task = asyncio.create_task(_monitor_and_stream_status(args.stream))
+
     for i, query in enumerate(queries, 1):
         print(f"\n{'=' * 80}")
         print(f"Query {i}: {query}")
         print("=" * 80)
 
+        if args.stream:
+            print("\n  ┌─ Real-time Status Stream ─────────────")
+
         try:
             # Pass memories on the first query to demonstrate context awareness
-            memories = example_memories if i == 1 else None
+            memories = example_memories if i == 1 and not args.query else None
             if memories:
                 print(f"\n[Using {len(memories)} memories for context]")
 
+            # Execute query
             result = await agent.execute(query, memories=memories)
+
+            # Wait a bit for any final status updates
+            if stream_task and not stream_task.done():
+                await asyncio.sleep(0.2)
+
+            if args.stream:
+                print("  └───────────────────────────────────────\n")
 
             print(f"\nRoute: {result.route}")
             print(f"Answer: {result.text}")
@@ -574,7 +684,17 @@ async def main() -> None:
                     print(f"  {key}: {value}")
 
         except Exception as exc:
+            if args.stream:
+                print("  └───────────────────────────────────────\n")
             print(f"\nError: {exc.__class__.__name__}: {exc}")
+
+    # Clean up global streaming task
+    if stream_task and not stream_task.done():
+        stream_task.cancel()
+        try:
+            await stream_task
+        except asyncio.CancelledError:
+            pass
 
     # Show metrics
     print(f"\n{'=' * 80}")
