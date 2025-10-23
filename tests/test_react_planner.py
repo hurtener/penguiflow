@@ -426,7 +426,7 @@ async def test_react_planner_enforces_hop_budget_limits() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_litellm_guard_raises_runtime_error() -> None:
-    import litellm
+    litellm = pytest.importorskip("litellm")
 
     registry = ModelRegistry()
     registry.register("triage", Query, Intent)
