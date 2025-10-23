@@ -1444,8 +1444,9 @@ class ReactPlanner:
                 trajectory.summary = summary
                 logger.debug("trajectory_summarized", extra={"method": "llm"})
                 return summary
-            except (TimeoutError, ValidationError, RuntimeError) as exc:
-                # Log specific summarizer failure but fallback gracefully
+            except Exception as exc:
+                # Catch all exceptions to prevent summarizer failures from crashing
+                # the planner. Summarization is non-critical; always fall back.
                 logger.warning(
                     "summarizer_failed_fallback",
                     extra={"error": str(exc), "error_type": exc.__class__.__name__},
