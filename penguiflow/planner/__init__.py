@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from .dspy_client import DSPyLLMClient
 from .react import (
     ParallelCall,
     ParallelJoin,
     PlannerAction,
+    PlannerEvent,
+    PlannerEventCallback,
     PlannerFinish,
     PlannerPause,
     ReactPlanner,
@@ -15,9 +18,12 @@ from .react import (
 )
 
 __all__ = [
+    "DSPyLLMClient",
     "ParallelCall",
     "ParallelJoin",
     "PlannerAction",
+    "PlannerEvent",
+    "PlannerEventCallback",
     "PlannerFinish",
     "PlannerPause",
     "ReactPlanner",
