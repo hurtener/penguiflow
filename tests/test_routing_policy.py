@@ -172,7 +172,9 @@ def test_dict_policy_update_and_set_default() -> None:
     # Test set_default
     policy.set_default("new-default")
     request_unknown = RoutingRequest(
-        message=Message(payload="p", headers=Headers(tenant="acme"), trace_id="unknown"),
+        message=Message(
+            payload="p", headers=Headers(tenant="acme"), trace_id="unknown"
+        ),
         context=cast(Context, object()),
         node=node,
         proposed=(node,),

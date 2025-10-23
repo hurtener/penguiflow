@@ -437,7 +437,10 @@ async def test_react_planner_litellm_guard_raises_runtime_error() -> None:
     with pytest.raises((RuntimeError, litellm.exceptions.BadRequestError)) as exc:
         await planner.step(trajectory)
     # Accept either error message
-    assert "LiteLLM is not installed" in str(exc.value) or "LLM Provider NOT provided" in str(exc.value)
+    assert (
+        "LiteLLM is not installed" in str(exc.value)
+        or "LLM Provider NOT provided" in str(exc.value)
+    )
 
 
 @pytest.mark.asyncio()
