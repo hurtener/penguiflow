@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -17,6 +18,49 @@ from ..catalog import NodeSpec, build_catalog
 from ..node import Node
 from ..registry import ModelRegistry
 from . import prompts
+
+# Planner-specific logger
+logger = logging.getLogger("penguiflow.planner")
+
+
+@dataclass(frozen=True, slots=True)
+class PlannerEvent:
+    """Structured event emitted during planner execution for observability."""
+
+    event_type: str  # step_start, step_complete, llm_call, pause, resume, finish
+    ts: float
+    trajectory_step: int
+    thought: str | None = None
+    node_name: str | None = None
+    latency_ms: float | None = None
+    token_estimate: int | None = None
+    error: str | None = None
+    extra: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_payload(self) -> dict[str, Any]:
+        """Render a dictionary payload suitable for structured logging."""
+        payload: dict[str, Any] = {
+            "event": self.event_type,
+            "ts": self.ts,
+            "step": self.trajectory_step,
+        }
+        if self.thought is not None:
+            payload["thought"] = self.thought
+        if self.node_name is not None:
+            payload["node_name"] = self.node_name
+        if self.latency_ms is not None:
+            payload["latency_ms"] = self.latency_ms
+        if self.token_estimate is not None:
+            payload["token_estimate"] = self.token_estimate
+        if self.error is not None:
+            payload["error"] = self.error
+        if self.extra:
+            payload.update(self.extra)
+        return payload
+
+
+# Observability callback type
+PlannerEventCallback = Callable[[PlannerEvent], None]
 
 
 class JSONLLMClient(Protocol):
@@ -372,10 +416,14 @@ class _LiteLLMJSONClient:
         *,
         temperature: float,
         json_schema_mode: bool,
+        max_retries: int = 3,
+        timeout_s: float = 60.0,
     ) -> None:
         self._llm = llm
         self._temperature = temperature
         self._json_schema_mode = json_schema_mode
+        self._max_retries = max_retries
+        self._timeout_s = timeout_s
 
     async def complete(
         self,
@@ -401,12 +449,59 @@ class _LiteLLMJSONClient:
         if self._json_schema_mode and response_format is not None:
             params["response_format"] = response_format
 
-        response = await litellm.acompletion(**params)
-        choice = response["choices"][0]
-        content = choice["message"]["content"]
-        if content is None:
-            raise RuntimeError("LiteLLM returned empty content")
-        return content
+        last_error: Exception | None = None
+        for attempt in range(self._max_retries):
+            try:
+                # Add timeout protection
+                async with asyncio.timeout(self._timeout_s):
+                    response = await litellm.acompletion(**params)
+                    choice = response["choices"][0]
+                    content = choice["message"]["content"]
+                    if content is None:
+                        raise RuntimeError("LiteLLM returned empty content")
+
+                    # Log successful LLM call with cost if available
+                    cost = response.get("_hidden_params", {}).get("response_cost", 0)
+                    if cost and cost > 0:
+                        logger.debug(
+                            "llm_call_success",
+                            extra={"attempt": attempt + 1, "cost_usd": cost},
+                        )
+
+                    return content
+            except TimeoutError as exc:
+                last_error = exc
+                logger.warning(
+                    "llm_timeout",
+                    extra={"attempt": attempt + 1, "timeout_s": self._timeout_s},
+                )
+            except Exception as exc:
+                last_error = exc
+                # Check if it's a retryable error (network, rate limit, etc.)
+                error_type = exc.__class__.__name__
+                if "RateLimit" in error_type or "ServiceUnavailable" in error_type:
+                    backoff_s = 2 ** attempt
+                    logger.warning(
+                        "llm_retry",
+                        extra={
+                            "attempt": attempt + 1,
+                            "error": str(exc),
+                            "backoff_s": backoff_s,
+                        },
+                    )
+                    if attempt < self._max_retries - 1:
+                        await asyncio.sleep(backoff_s)
+                        continue
+                # Non-retryable error, raise immediately
+                raise
+
+        # All retries exhausted
+        logger.error(
+            "llm_retries_exhausted",
+            extra={"max_retries": self._max_retries, "last_error": str(last_error)},
+        )
+        msg = f"LLM call failed after {self._max_retries} retries"
+        raise RuntimeError(msg) from last_error
 
 
 class _PlannerContext:
@@ -430,7 +525,93 @@ class _PlannerContext:
 
 
 class ReactPlanner:
-    """Minimal JSON-only ReAct loop."""
+    """JSON-only ReAct planner for autonomous multi-step workflows.
+
+    The ReactPlanner orchestrates a loop where an LLM selects and sequences
+    PenguiFlow nodes/tools based on structured JSON contracts. It supports
+    pause/resume for approvals, adaptive re-planning on failures, parallel
+    execution, and trajectory compression for long-running sessions.
+
+    Thread Safety
+    -------------
+    NOT thread-safe. Create separate planner instances per task.
+
+    Parameters
+    ----------
+    llm : str | Mapping[str, Any] | None
+        LiteLLM model name (e.g., "gpt-4") or config dict. Required if
+        llm_client is not provided.
+    nodes : Sequence[Node] | None
+        Sequence of PenguiFlow nodes to make available as tools. Either
+        (nodes + registry) or catalog must be provided.
+    catalog : Sequence[NodeSpec] | None
+        Pre-built tool catalog. If provided, nodes and registry are ignored.
+    registry : ModelRegistry | None
+        Model registry for type resolution. Required if nodes is provided.
+    llm_client : JSONLLMClient | None
+        Custom LLM client implementation. If provided, llm is ignored.
+    max_iters : int
+        Maximum planning iterations before returning no_path. Default: 8.
+    temperature : float
+        LLM sampling temperature. Default: 0.0 for deterministic output.
+    json_schema_mode : bool
+        Enable strict JSON schema enforcement via LLM response_format.
+        Default: True.
+    system_prompt_extra : str | None
+        Additional guidance appended to system prompt.
+    token_budget : int | None
+        If set, triggers trajectory summarization when history exceeds limit.
+        Token count is estimated by character length (approx).
+    pause_enabled : bool
+        Allow nodes to trigger pause/resume flow. Default: True.
+    state_store : StateStore | None
+        Optional durable state adapter for pause/resume persistence.
+    summarizer_llm : str | Mapping[str, Any] | None
+        Separate (cheaper) LLM for trajectory compression. Falls back to
+        main LLM if not set.
+    planning_hints : Mapping[str, Any] | None
+        Structured constraints and preferences (ordering, disallowed nodes,
+        max_parallel, etc.). See plan.md for schema.
+    repair_attempts : int
+        Max attempts to repair invalid JSON from LLM. Default: 3.
+    deadline_s : float | None
+        Wall-clock deadline for planning session (seconds from start).
+    hop_budget : int | None
+        Maximum tool invocations allowed.
+    time_source : Callable[[], float] | None
+        Override time.monotonic for testing.
+    event_callback : PlannerEventCallback | None
+        Optional callback receiving PlannerEvent instances for observability.
+    llm_timeout_s : float
+        Per-LLM-call timeout in seconds. Default: 60.0.
+    llm_max_retries : int
+        Max retry attempts for transient LLM failures. Default: 3.
+    absolute_max_parallel : int
+        System-level safety limit on parallel execution regardless of hints.
+        Default: 50.
+
+    Raises
+    ------
+    ValueError
+        If neither (nodes + registry) nor catalog is provided, or if neither
+        llm nor llm_client is provided.
+    RuntimeError
+        If LiteLLM is not installed and llm_client is not provided.
+
+    Examples
+    --------
+    >>> planner = ReactPlanner(
+    ...     llm="gpt-4",
+    ...     nodes=[triage_node, retrieve_node, summarize_node],
+    ...     registry=my_registry,
+    ...     max_iters=10,
+    ... )
+    >>> result = await planner.run("Explain PenguiFlow's architecture")
+    >>> print(result.reason)  # "answer_complete", "no_path", or "budget_exhausted"
+    """
+
+    # Default system-level safety limit for parallel execution
+    DEFAULT_MAX_PARALLEL = 50
 
     def __init__(
         self,
@@ -453,6 +634,10 @@ class ReactPlanner:
         deadline_s: float | None = None,
         hop_budget: int | None = None,
         time_source: Callable[[], float] | None = None,
+        event_callback: PlannerEventCallback | None = None,
+        llm_timeout_s: float = 60.0,
+        llm_max_retries: int = 3,
+        absolute_max_parallel: int = 50,
     ) -> None:
         if catalog is None:
             if nodes is None or registry is None:
@@ -487,17 +672,17 @@ class ReactPlanner:
         self._deadline_s = deadline_s
         self._hop_budget = hop_budget
         self._time_source = time_source or time.monotonic
-        self._response_format = (
-            {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "planner_action",
-                    "schema": PlannerAction.model_json_schema(),
-                },
-            }
-            if json_schema_mode
-            else None
-        )
+        self._event_callback = event_callback
+        self._absolute_max_parallel = absolute_max_parallel
+        action_schema = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "planner_action",
+                "schema": PlannerAction.model_json_schema(),
+            },
+        }
+        self._action_schema: Mapping[str, Any] = action_schema
+        self._response_format = action_schema if json_schema_mode else None
         self._summarizer_client: JSONLLMClient | None = None
         if llm_client is not None:
             self._client = llm_client
@@ -508,12 +693,16 @@ class ReactPlanner:
                 llm,
                 temperature=temperature,
                 json_schema_mode=json_schema_mode,
+                max_retries=llm_max_retries,
+                timeout_s=llm_timeout_s,
             )
         if summarizer_llm is not None:
             self._summarizer_client = _LiteLLMJSONClient(
                 summarizer_llm,
                 temperature=temperature,
                 json_schema_mode=True,
+                max_retries=llm_max_retries,
+                timeout_s=llm_timeout_s,
             )
 
     async def run(
@@ -522,6 +711,27 @@ class ReactPlanner:
         *,
         context_meta: Mapping[str, Any] | None = None,
     ) -> PlannerFinish | PlannerPause:
+        """Execute planner on a query until completion or pause.
+
+        Parameters
+        ----------
+        query : str
+            Natural language task description.
+        context_meta : Mapping[str, Any] | None
+            Optional metadata passed to nodes via ctx.meta.
+
+        Returns
+        -------
+        PlannerFinish | PlannerPause
+            PlannerFinish if task completed/failed, PlannerPause if paused
+            for human intervention.
+
+        Raises
+        ------
+        RuntimeError
+            If LLM client fails after all retries.
+        """
+        logger.info("planner_run_start", extra={"query": query})
         trajectory = Trajectory(query=query, context_meta=context_meta)
         return await self._run_loop(trajectory, tracker=None)
 
@@ -530,6 +740,26 @@ class ReactPlanner:
         token: str,
         user_input: str | None = None,
     ) -> PlannerFinish | PlannerPause:
+        """Resume a paused planning session.
+
+        Parameters
+        ----------
+        token : str
+            Resume token from a previous PlannerPause.
+        user_input : str | None
+            Optional user response to the pause (e.g., approval decision).
+
+        Returns
+        -------
+        PlannerFinish | PlannerPause
+            Updated result after resuming execution.
+
+        Raises
+        ------
+        KeyError
+            If resume token is invalid or expired.
+        """
+        logger.info("planner_resume", extra={"token": token[:8] + "..."})
         record = await self._load_pause_record(token)
         trajectory = record.trajectory
         trajectory.context_meta = trajectory.context_meta or {}
@@ -541,6 +771,17 @@ class ReactPlanner:
                 record.constraints,
                 time_source=self._time_source,
             )
+
+        # Emit resume event
+        self._emit_event(
+            PlannerEvent(
+                event_type="resume",
+                ts=self._time_source(),
+                trajectory_step=len(trajectory.steps),
+                extra={"user_input": user_input} if user_input else {},
+            )
+        )
+
         return await self._run_loop(trajectory, tracker=tracker)
 
     async def _run_loop(
@@ -562,6 +803,10 @@ class ReactPlanner:
             while len(trajectory.steps) < self._max_iters:
                 deadline_message = tracker.check_deadline()
                 if deadline_message is not None:
+                    logger.warning(
+                        "deadline_exhausted",
+                        extra={"step": len(trajectory.steps)},
+                    )
                     return self._finish(
                         trajectory,
                         reason="budget_exhausted",
@@ -570,7 +815,39 @@ class ReactPlanner:
                         constraints=tracker,
                     )
 
+                # Emit step start event
+                step_start_ts = self._time_source()
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="step_start",
+                        ts=step_start_ts,
+                        trajectory_step=len(trajectory.steps),
+                    )
+                )
+
                 action = await self.step(trajectory)
+
+                # Log the action received from LLM
+                logger.info(
+                    "planner_action",
+                    extra={
+                        "step": len(trajectory.steps),
+                        "thought": action.thought,
+                        "next_node": action.next_node,
+                        "has_plan": action.plan is not None,
+                    },
+                )
+
+                # Check constraints BEFORE executing parallel plan or any action
+                constraint_error = self._check_action_constraints(
+                    action, trajectory, tracker
+                )
+                if constraint_error is not None:
+                    trajectory.steps.append(
+                        TrajectoryStep(action=action, error=constraint_error)
+                    )
+                    trajectory.summary = None
+                    continue
 
                 if action.plan:
                     parallel_observation, pause = await self._execute_parallel_plan(
@@ -592,16 +869,6 @@ class ReactPlanner:
                         thought=action.thought,
                         constraints=tracker,
                     )
-
-                constraint_error = self._check_action_constraints(
-                    action, trajectory, tracker
-                )
-                if constraint_error is not None:
-                    trajectory.steps.append(
-                        TrajectoryStep(action=action, error=constraint_error)
-                    )
-                    trajectory.summary = None
-                    continue
 
                 spec = self._spec_by_name.get(action.next_node)
                 if spec is None:
@@ -682,6 +949,19 @@ class ReactPlanner:
                 self._record_hint_progress(spec.name, trajectory)
                 trajectory.resume_user_input = None
 
+                # Emit step complete event
+                step_latency = (self._time_source() - step_start_ts) * 1000  # ms
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="step_complete",
+                        ts=self._time_source(),
+                        trajectory_step=len(trajectory.steps) - 1,
+                        thought=action.thought,
+                        node_name=spec.name,
+                        latency_ms=step_latency,
+                    )
+                )
+
             if tracker.deadline_triggered or tracker.hop_exhausted:
                 thought = (
                     prompts.render_deadline_exhausted()
@@ -720,9 +1000,15 @@ class ReactPlanner:
                     }
                 ]
 
+            response_format: Mapping[str, Any] | None = self._response_format
+            if response_format is None and getattr(
+                self._client, "expects_json_schema", False
+            ):
+                response_format = self._action_schema
+
             raw = await self._client.complete(
                 messages=messages,
-                response_format=self._response_format,
+                response_format=response_format,
             )
 
             try:
@@ -1095,7 +1381,33 @@ class ReactPlanner:
         return condensed
 
     def _estimate_size(self, messages: Sequence[Mapping[str, str]]) -> int:
-        return sum(len(item.get("content", "")) for item in messages)
+        """Estimate token count for messages.
+
+        Uses a heuristic formula that accounts for JSON structure and
+        typical token-to-character ratios for English text with JSON.
+
+        Returns approximately 4 characters = 1 token for GPT models.
+        This is conservative to avoid context overflow.
+        """
+        total_chars = 0
+        for item in messages:
+            content = item.get("content", "")
+            role = item.get("role", "")
+            # Count content characters
+            total_chars += len(content)
+            # Add overhead for message structure (role, JSON wrapping, etc.)
+            total_chars += len(role) + 20  # Approx overhead per message
+
+        # Conservative estimate: 3.5 chars = 1 token (slightly aggressive)
+        # This ensures we trigger summarization before hitting actual limits
+        estimated_tokens = int(total_chars / 3.5)
+
+        logger.debug(
+            "token_estimate",
+            extra={"chars": total_chars, "estimated_tokens": estimated_tokens},
+        )
+
+        return estimated_tokens
 
     async def _summarise_trajectory(
         self, trajectory: Trajectory
@@ -1130,10 +1442,18 @@ class ReactPlanner:
                 summary = TrajectorySummary.model_validate_json(raw)
                 summary.note = summary.note or "llm"
                 trajectory.summary = summary
+                logger.debug("trajectory_summarized", extra={"method": "llm"})
                 return summary
-            except Exception:
+            except Exception as exc:
+                # Catch all exceptions to prevent summarizer failures from crashing
+                # the planner. Summarization is non-critical; always fall back.
+                logger.warning(
+                    "summarizer_failed_fallback",
+                    extra={"error": str(exc), "error_type": exc.__class__.__name__},
+                )
                 base_summary.note = "rule_based_fallback"
         trajectory.summary = base_summary
+        logger.debug("trajectory_summarized", extra={"method": "rule_based"})
         return base_summary
 
     def _check_action_constraints(
@@ -1149,8 +1469,21 @@ class ReactPlanner:
             return prompts.render_hop_budget_violation(limit)
         if node_name and node_name in hints.disallow_nodes:
             return prompts.render_disallowed_node(node_name)
-        if hints.max_parallel is not None and action.plan:
-            if len(action.plan) > hints.max_parallel:
+
+        # Check parallel execution limits
+        if action.plan:
+            # Absolute system-level safety limit
+            if len(action.plan) > self._absolute_max_parallel:
+                logger.warning(
+                    "parallel_limit_absolute",
+                    extra={
+                        "requested": len(action.plan),
+                        "limit": self._absolute_max_parallel,
+                    },
+                )
+                return prompts.render_parallel_limit(self._absolute_max_parallel)
+            # Hint-based limit
+            if hints.max_parallel is not None and len(action.plan) > hints.max_parallel:
                 return prompts.render_parallel_limit(hints.max_parallel)
         if hints.sequential_only and action.plan:
             for item in action.plan:
@@ -1263,34 +1596,70 @@ class ReactPlanner:
             return
         saver = getattr(self._state_store, "save_planner_state", None)
         if saver is None:
+            logger.debug(
+                "state_store_no_save_method",
+                extra={"token": token[:8] + "..."},
+            )
             return
-        payload = self._serialise_pause_record(record)
-        result = saver(token, payload)
-        if inspect.isawaitable(result):
-            await result
+
+        try:
+            payload = self._serialise_pause_record(record)
+            result = saver(token, payload)
+            if inspect.isawaitable(result):
+                await result
+            logger.debug("pause_record_saved", extra={"token": token[:8] + "..."})
+        except Exception as exc:
+            # Log error but don't fail the pause operation
+            # In-memory fallback already succeeded
+            logger.error(
+                "state_store_save_failed",
+                extra={
+                    "token": token[:8] + "...",
+                    "error": str(exc),
+                    "error_type": exc.__class__.__name__,
+                },
+            )
 
     async def _load_pause_record(self, token: str) -> _PauseRecord:
         record = self._pause_records.pop(token, None)
         if record is not None:
+            logger.debug("pause_record_loaded", extra={"source": "memory"})
             return record
+
         if self._state_store is not None:
             loader = getattr(self._state_store, "load_planner_state", None)
             if loader is not None:
-                result = loader(token)
-                if inspect.isawaitable(result):
-                    result = await result
-                if result is None:
-                    raise KeyError(token)
-                trajectory = Trajectory.from_serialised(result["trajectory"])
-                payload = dict(result.get("payload", {}))
-                reason = result.get("reason", "await_input")
-                constraints = result.get("constraints")
-                return _PauseRecord(
-                    trajectory=trajectory,
-                    reason=reason,
-                    payload=payload,
-                    constraints=constraints,
-                )
+                try:
+                    result = loader(token)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    if result is None:
+                        raise KeyError(token)
+                    trajectory = Trajectory.from_serialised(result["trajectory"])
+                    payload = dict(result.get("payload", {}))
+                    reason = result.get("reason", "await_input")
+                    constraints = result.get("constraints")
+                    logger.debug("pause_record_loaded", extra={"source": "state_store"})
+                    return _PauseRecord(
+                        trajectory=trajectory,
+                        reason=reason,
+                        payload=payload,
+                        constraints=constraints,
+                    )
+                except KeyError:
+                    raise
+                except Exception as exc:
+                    # Log error and re-raise as KeyError with context
+                    logger.error(
+                        "state_store_load_failed",
+                        extra={
+                            "token": token[:8] + "...",
+                            "error": str(exc),
+                            "error_type": exc.__class__.__name__,
+                        },
+                    )
+                    raise KeyError(f"Failed to load pause record: {exc}") from exc
+
         raise KeyError(token)
 
     def _serialise_pause_record(self, record: _PauseRecord) -> dict[str, Any]:
@@ -1302,6 +1671,24 @@ class ReactPlanner:
             if record.constraints is not None
             else None,
         }
+
+    def _emit_event(self, event: PlannerEvent) -> None:
+        """Emit a planner event for observability."""
+        # Log the event
+        logger.info(event.event_type, extra=event.to_payload())
+
+        # Invoke callback if provided
+        if self._event_callback is not None:
+            try:
+                self._event_callback(event)
+            except Exception:
+                logger.exception(
+                    "event_callback_error",
+                    extra={
+                        "event_type": event.event_type,
+                        "step": event.trajectory_step,
+                    },
+                )
 
     def _finish(
         self,
@@ -1323,6 +1710,30 @@ class ReactPlanner:
             metadata["constraints"] = constraints.snapshot()
         if error is not None:
             metadata["error"] = error
+
+        # Emit finish event
+        extra_data: dict[str, Any] = {"reason": reason}
+        if error:
+            extra_data["error"] = error
+        self._emit_event(
+            PlannerEvent(
+                event_type="finish",
+                ts=self._time_source(),
+                trajectory_step=len(trajectory.steps),
+                thought=thought,
+                extra=extra_data,
+            )
+        )
+
+        logger.info(
+            "planner_finish",
+            extra={
+                "reason": reason,
+                "step_count": len(trajectory.steps),
+                "thought": thought,
+            },
+        )
+
         return PlannerFinish(reason=reason, payload=payload, metadata=metadata)
 
 
@@ -1330,6 +1741,8 @@ __all__ = [
     "ParallelCall",
     "ParallelJoin",
     "PlannerAction",
+    "PlannerEvent",
+    "PlannerEventCallback",
     "PlannerFinish",
     "PlannerPause",
     "ReactPlanner",

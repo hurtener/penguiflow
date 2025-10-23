@@ -7287,10 +7287,10 @@ Association between a trace and a remote worker/agent:
 ```python
 @dataclass(slots=True)
 class RemoteBinding:
-    trace_id: str      # PenguiFlow trace identifier
-    context_id: str    # Remote agent's context identifier
-    task_id: str       # Remote agent's task identifier
-    agent_url: str     # Remote agent URL for correlation
+    trace_id: str           # PenguiFlow trace identifier
+    context_id: str | None  # Remote agent context (may be unavailable)
+    task_id: str            # Remote agent task identifier
+    agent_url: str          # Remote agent URL for correlation
 ```
 
 **Usage:** When a `RemoteNode` invokes a remote agent (Section 18), the runtime calls `save_remote_binding` to persist the correlation. Dashboards can query this to link PenguiFlow traces to external task IDs.
@@ -7439,7 +7439,7 @@ class PostgresStateStore(StateStore):
 # CREATE TABLE remote_bindings (
 #     id BIGSERIAL PRIMARY KEY,
 #     trace_id TEXT NOT NULL,
-#     context_id TEXT NOT NULL,
+#     context_id TEXT,
 #     task_id TEXT NOT NULL,
 #     agent_url TEXT NOT NULL,
 #     created_at TIMESTAMP DEFAULT NOW(),

@@ -33,6 +33,7 @@ a2a-server = [
 ]
 planner = [
     "litellm>=1.77.3",
+    "dspy>=3.0.3",
 ]
 
 [project.scripts]
