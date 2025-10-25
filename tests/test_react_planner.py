@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
 from penguiflow.planner import PlannerPause, ReactPlanner
-from penguiflow.planner.react import Trajectory
+from penguiflow.planner.react import ReflectionConfig, Trajectory
 from penguiflow.registry import ModelRegistry
 
 
@@ -25,6 +25,10 @@ class Intent(BaseModel):
 
 
 class Documents(BaseModel):
+    documents: list[str]
+
+
+class SearchResult(BaseModel):
     documents: list[str]
 
 
@@ -60,6 +64,11 @@ async def triage(args: Query, ctx: object) -> Intent:
 @tool(desc="Search knowledge base", side_effects="read")
 async def retrieve(args: Intent, ctx: object) -> Documents:
     return Documents(documents=[f"Answering about {args.intent}"])
+
+
+@tool(desc="Search knowledge base (cost tracking)")
+async def search(args: Query, ctx: object) -> SearchResult:
+    return SearchResult(documents=[f"Results for {args.question}"])
 
 
 @tool(desc="Compose final answer")
@@ -132,11 +141,11 @@ class StubClient:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, object] | None = None,
-    ) -> str:
+    ) -> tuple[str, float]:
         self.calls.append(list(messages))
         if not self._responses:
             raise AssertionError("No stub responses left")
-        return self._responses.pop(0)
+        return self._responses.pop(0), 0.0
 
 
 class SummarizerStub:
@@ -148,17 +157,43 @@ class SummarizerStub:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, object] | None = None,
-    ) -> str:
+    ) -> tuple[str, float]:
         self.calls.append(list(messages))
-        return json.dumps(
-            {
-                "goals": ["stub"],
-                "facts": {"note": "compact"},
-                "pending": [],
-                "last_output_digest": "stub",
-                "note": "stub",
-            }
+        return (
+            json.dumps(
+                {
+                    "goals": ["stub"],
+                    "facts": {"note": "compact"},
+                    "pending": [],
+                    "last_output_digest": "stub",
+                    "note": "stub",
+                }
+            ),
+            0.0,
         )
+
+
+class CostStubClient:
+    """Stub client that also tracks synthetic cost values."""
+
+    def __init__(self, responses: list[tuple[Mapping[str, object], float]]) -> None:
+        self._responses = [
+            (json.dumps(payload, ensure_ascii=False), float(cost))
+            for payload, cost in responses
+        ]
+        self.calls: list[list[Mapping[str, str]]] = []
+
+    async def complete(
+        self,
+        *,
+        messages: list[Mapping[str, str]],
+        response_format: Mapping[str, object] | None = None,
+    ) -> tuple[str, float]:
+        del response_format
+        self.calls.append(list(messages))
+        if not self._responses:
+            raise AssertionError("No stub responses left")
+        return self._responses.pop(0)
 
 
 def make_planner(client: StubClient, **kwargs: object) -> ReactPlanner:
@@ -1047,3 +1082,170 @@ async def test_react_planner_state_store_save_error_handled_gracefully() -> None
     result = await planner.run("Test state store error")
     assert isinstance(result, PlannerPause)
     assert result.resume_token is not None
+
+
+@pytest.mark.asyncio()
+async def test_planner_tracks_llm_costs() -> None:
+    """Planner should accumulate cost across main LLM calls."""
+
+    client = CostStubClient(
+        [
+            (
+                {
+                    "thought": "Search",
+                    "next_node": "search",
+                    "args": {"question": "test"},
+                },
+                0.0015,
+            ),
+            (
+                {"thought": "Done", "next_node": None, "args": {"answer": "Result"}},
+                0.0020,
+            ),
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("search", Query, SearchResult)
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog([Node(search, name="search")], registry),
+    )
+
+    result = await planner.run("Test query")
+
+    assert result.reason == "answer_complete"
+    cost_info = result.metadata["cost"]
+    assert cost_info["total_cost_usd"] == pytest.approx(0.0035)
+    assert cost_info["main_llm_calls"] == 2
+    assert cost_info["reflection_llm_calls"] == 0
+    assert cost_info["summarizer_llm_calls"] == 0
+
+
+@pytest.mark.asyncio()
+async def test_cost_tracking_with_reflection_and_summarizer() -> None:
+    """Costs should be tracked per call type, including reflection and summariser."""
+
+    main_client = CostStubClient(
+        [
+            (
+                {
+                    "thought": "Search",
+                    "next_node": "search",
+                    "args": {"question": "test"},
+                },
+                0.001,
+            ),
+            (
+                {
+                    "thought": "Answer",
+                    "next_node": None,
+                    "args": {"answer": "First"},
+                },
+                0.002,
+            ),
+            (
+                {
+                    "thought": "Revised",
+                    "next_node": None,
+                    "args": {"answer": "Better"},
+                },
+                0.002,
+            ),
+        ]
+    )
+
+    reflection_client = CostStubClient(
+        [
+            (
+                {
+                    "score": 0.5,
+                    "passed": False,
+                    "feedback": "Bad",
+                    "issues": [],
+                    "suggestions": [],
+                },
+                0.0005,
+            ),
+            (
+                {
+                    "score": 0.9,
+                    "passed": True,
+                    "feedback": "Good",
+                    "issues": [],
+                    "suggestions": [],
+                },
+                0.0005,
+            ),
+        ]
+    )
+
+    summarizer_client = CostStubClient(
+        [
+            (
+                {
+                    "goals": ["stub"],
+                    "facts": {},
+                    "pending": [],
+                    "last_output_digest": "stub",
+                    "note": "stub",
+                },
+                0.0002,
+            )
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("search", Query, SearchResult)
+
+    planner = ReactPlanner(
+        llm_client=main_client,
+        catalog=build_catalog([Node(search, name="search")], registry),
+        reflection_config=ReflectionConfig(
+            enabled=True,
+            max_revisions=2,
+            use_separate_llm=True,
+        ),
+        token_budget=1,
+        reflection_llm="stub-reflection",
+    )
+    planner._reflection_client = reflection_client
+    planner._summarizer_client = summarizer_client
+
+    result = await planner.run("Test")
+
+    cost_info = result.metadata["cost"]
+    expected_total = pytest.approx(0.001 + 0.002 + 0.002 + 0.0005 + 0.0005 + 0.0002)
+    assert cost_info["total_cost_usd"] == expected_total
+    assert cost_info["main_llm_calls"] == 3
+    assert cost_info["reflection_llm_calls"] == 2
+    assert cost_info["summarizer_llm_calls"] == 1
+
+
+@pytest.mark.asyncio()
+async def test_cost_tracking_graceful_when_unavailable() -> None:
+    """Planner should gracefully handle clients without cost support."""
+
+    class NoCostClient:
+        async def complete(
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+        ) -> str:
+            del messages, response_format
+            return json.dumps(
+                {"thought": "Done", "next_node": None, "args": {"answer": "OK"}}
+            )
+
+    planner = ReactPlanner(
+        llm_client=NoCostClient(),
+        catalog=build_catalog([], ModelRegistry()),
+    )
+
+    result = await planner.run("Test")
+
+    cost_info = result.metadata["cost"]
+    assert cost_info["total_cost_usd"] == 0.0
+    assert cost_info["main_llm_calls"] == 1

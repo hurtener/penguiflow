@@ -385,6 +385,48 @@ print(result.metadata["reflection"])  # => {'score': 0.92, 'revisions': 1, 'pass
 * ✅ Cost-aware — reuse the main LLM or provide a cheaper `reflection_llm` for critiques
 * ✅ Budget-safe — revisions respect hop and deadline budgets; no runaway loops
 
+### Cost Tracking
+
+ReactPlanner automatically records LLM spend for every planning session. Costs are split across planner actions, reflection calls, and trajectory summarisation so you can monitor budgets in production.
+
+```python
+from penguiflow.planner import ReactPlanner, ReflectionConfig
+
+planner = ReactPlanner(
+    llm="gpt-4o",
+    catalog=build_catalog([search_docs, summarize], registry),
+    reflection_config=ReflectionConfig(enabled=True, max_revisions=2),
+    reflection_llm="gpt-4o-mini",  # cheaper critique model
+)
+
+result = await planner.run("Analyse onboarding friction across regions")
+
+cost = result.metadata["cost"]
+print(f"Total cost: ${cost['total_cost_usd']:.4f}")
+print(f"Planner calls: {cost['main_llm_calls']}")
+print(f"Reflections: {cost['reflection_llm_calls']}")
+print(f"Summaries: {cost['summarizer_llm_calls']}")
+```
+
+Hook into planner events to emit metrics or alerts when sessions exceed your budget:
+
+```python
+from penguiflow.planner.react import PlannerEvent
+
+def track_costs(event: PlannerEvent) -> None:
+    if event.event_type != "finish":
+        return
+    session_cost = event.extra.get("cost", {}).get("total_cost_usd", 0.0)
+    if session_cost > 0.10:
+        logger.warning("high_cost_session", extra={"cost_usd": session_cost})
+
+planner = ReactPlanner(
+    llm="gpt-4o",
+    catalog=build_catalog([search_docs, summarize], registry),
+    event_callback=track_costs,
+)
+```
+
 **Model support:**
 * Install `penguiflow[planner]` for LiteLLM integration (100+ models: OpenAI, Anthropic, Azure, etc.)
 * Or inject a custom `llm_client` for deterministic/offline testing

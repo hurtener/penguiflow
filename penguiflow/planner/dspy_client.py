@@ -170,7 +170,7 @@ class DSPyLLMClient:
         *,
         messages: Sequence[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
-    ) -> str:
+    ) -> tuple[str, float]:
         """Generate completion with structured output via DSPy.
 
         Args:
@@ -178,7 +178,7 @@ class DSPyLLMClient:
             response_format: Optional JSON schema for structured output
 
         Returns:
-            JSON string containing the structured response
+            Tuple of JSON string response and cost in USD (DSPy cost is 0.0)
 
         Raises:
             RuntimeError: If all retry attempts fail
@@ -230,9 +230,9 @@ class DSPyLLMClient:
                                     "json_length": len(json_output),
                                 },
                             )
-                            return json_output
+                            return json_output, 0.0
                         elif isinstance(response_obj, dict):
-                            return json.dumps(response_obj)
+                            return json.dumps(response_obj), 0.0
                         else:
                             # DSPy sometimes returns string - normalise to JSON
                             response_str = str(response_obj)
@@ -243,7 +243,7 @@ class DSPyLLMClient:
                             normalised = self._normalise_json(response_str)
                             if normalised is not None:
                                 logger.debug("dspy_json_normalised_success")
-                                return normalised
+                                return normalised, 0.0
                             logger.warning(
                                 "dspy_invalid_json",
                                 extra={"response": response_str[:500]},

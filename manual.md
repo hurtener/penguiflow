@@ -9231,8 +9231,8 @@ class JSONLLMClient(Protocol):
         *,
         messages: Sequence[Mapping[str, Any]],
         response_format: Mapping[str, Any] | None = None,
-    ) -> str:
-        """Return raw JSON string."""
+    ) -> str | tuple[str, float]:
+        """Return raw JSON string and optional USD cost."""
         ...
 
 # Example: Stub client for testing
