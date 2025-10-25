@@ -219,11 +219,25 @@ class Trajectory:
         )
         for step_data in payload.get("steps", []):
             action = PlannerAction.model_validate(step_data["action"])
+            streams_payload = step_data.get("streams")
+            normalised_streams: dict[str, tuple[Mapping[str, Any], ...]] | None = None
+            if isinstance(streams_payload, Mapping):
+                normalised_streams = {}
+                for stream_id, chunk_list in streams_payload.items():
+                    if not isinstance(chunk_list, Sequence):
+                        continue
+                    chunks: list[Mapping[str, Any]] = []
+                    for chunk in chunk_list:
+                        if isinstance(chunk, Mapping):
+                            chunks.append(dict(chunk))
+                    if chunks:
+                        normalised_streams[str(stream_id)] = tuple(chunks)
             step = TrajectoryStep(
                 action=action,
                 observation=step_data.get("observation"),
                 error=step_data.get("error"),
                 failure=step_data.get("failure"),
+                streams=normalised_streams,
             )
             trajectory.steps.append(step)
         summary_data = payload.get("summary")

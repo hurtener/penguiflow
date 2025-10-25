@@ -12,7 +12,12 @@ from pydantic import BaseModel
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
 from penguiflow.planner import PlannerPause, ReactPlanner
-from penguiflow.planner.react import ReflectionConfig, Trajectory
+from penguiflow.planner.react import (
+    PlannerAction,
+    ReflectionConfig,
+    Trajectory,
+    TrajectoryStep,
+)
 from penguiflow.registry import ModelRegistry
 
 
@@ -1081,6 +1086,40 @@ async def test_react_planner_captures_stream_chunks() -> None:
         assert chunk["seq"] == index
         assert chunk["text"] == f"token_{index} "
         assert chunk["done"] == (index == 4)
+
+
+def test_trajectory_serialisation_preserves_stream_chunks() -> None:
+    """Trajectory serialisation should retain stream chunk history."""
+    action = PlannerAction(
+        thought="thinking",
+        next_node="stream_tool",
+        args={"question": "test"},
+    )
+    step = TrajectoryStep(
+        action=action,
+        streams={
+            "test_stream": (
+                {"seq": 0, "text": "token_0 ", "done": False},
+                {"seq": 1, "text": "token_1 ", "done": True},
+            )
+        },
+    )
+
+    trajectory = Trajectory(query="Test streaming persistence")
+    trajectory.steps.append(step)
+
+    payload = trajectory.serialise()
+    hydrated = Trajectory.from_serialised(payload)
+
+    assert hydrated.steps, "Expected at least one step after hydration"
+    hydrated_streams = hydrated.steps[0].streams
+    assert hydrated_streams is not None
+    assert "test_stream" in hydrated_streams
+    hydrated_chunks = [dict(chunk) for chunk in hydrated_streams["test_stream"]]
+    assert hydrated_chunks == [
+        {"seq": 0, "text": "token_0 ", "done": False},
+        {"seq": 1, "text": "token_1 ", "done": True},
+    ]
 
 
 @pytest.mark.asyncio()
