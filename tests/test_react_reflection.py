@@ -41,12 +41,12 @@ class ReflectionStubClient:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, object] | None = None,
-    ) -> str:
+    ) -> tuple[str, float]:
         del response_format
         self.calls.append(list(messages))
         if not self._responses:
             raise AssertionError("No stub responses left")
-        return self._responses.pop(0)
+        return self._responses.pop(0), 0.0
 
 
 @pytest.mark.asyncio()

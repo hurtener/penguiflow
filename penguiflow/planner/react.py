@@ -69,7 +69,7 @@ class JSONLLMClient(Protocol):
         *,
         messages: Sequence[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
-    ) -> str:
+    ) -> str | tuple[str, float]:
         ...
 
 
@@ -423,10 +423,65 @@ class _ConstraintTracker:
         return tracker
 
 
+@dataclass(slots=True)
+class _CostTracker:
+    """Track LLM costs across a planning session."""
+
+    _total_cost_usd: float = 0.0
+    _main_llm_calls: int = 0
+    _reflection_llm_calls: int = 0
+    _summarizer_llm_calls: int = 0
+
+    def record_main_call(self, cost: float) -> None:
+        """Record a planner step LLM invocation."""
+
+        self._total_cost_usd += cost
+        self._main_llm_calls += 1
+
+    def record_reflection_call(self, cost: float) -> None:
+        """Record a reflection LLM invocation."""
+
+        self._total_cost_usd += cost
+        self._reflection_llm_calls += 1
+
+    def record_summarizer_call(self, cost: float) -> None:
+        """Record a summariser LLM invocation."""
+
+        self._total_cost_usd += cost
+        self._summarizer_llm_calls += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        """Render a rounded snapshot suitable for metadata."""
+
+        return {
+            "total_cost_usd": round(self._total_cost_usd, 6),
+            "main_llm_calls": self._main_llm_calls,
+            "reflection_llm_calls": self._reflection_llm_calls,
+            "summarizer_llm_calls": self._summarizer_llm_calls,
+        }
+
+
 class _PlannerPauseSignal(Exception):
     def __init__(self, pause: PlannerPause) -> None:
         super().__init__(pause.reason)
         self.pause = pause
+
+
+def _coerce_llm_response(
+    result: str | tuple[str, float]
+) -> tuple[str, float]:
+    """Normalise JSON LLM client responses to ``(content, cost)`` tuples."""
+
+    if isinstance(result, tuple):
+        content, cost = result
+        return content, float(cost)
+    if isinstance(result, str):
+        return result, 0.0
+    msg = (
+        "Expected JSONLLMClient to return a string or (string, float) tuple, "
+        f"received {type(result)!r}"
+    )
+    raise TypeError(msg)
 
 
 @dataclass(slots=True)
@@ -458,7 +513,7 @@ class _LiteLLMJSONClient:
         *,
         messages: Sequence[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
-    ) -> str:
+    ) -> tuple[str, float]:
         try:
             import litellm
         except ModuleNotFoundError as exc:  # pragma: no cover - import guard
@@ -489,14 +544,20 @@ class _LiteLLMJSONClient:
                         raise RuntimeError("LiteLLM returned empty content")
 
                     # Log successful LLM call with cost if available
-                    cost = response.get("_hidden_params", {}).get("response_cost", 0)
-                    if cost and cost > 0:
-                        logger.debug(
-                            "llm_call_success",
-                            extra={"attempt": attempt + 1, "cost_usd": cost},
-                        )
+                    cost = float(
+                        response.get("_hidden_params", {}).get("response_cost", 0.0)
+                        or 0.0
+                    )
+                    logger.debug(
+                        "llm_call_success",
+                        extra={
+                            "attempt": attempt + 1,
+                            "cost_usd": cost,
+                            "tokens": response.get("usage", {}).get("total_tokens", 0),
+                        },
+                    )
 
-                    return content
+                    return content, cost
             except TimeoutError as exc:
                 last_error = exc
                 logger.warning(
@@ -705,6 +766,7 @@ class ReactPlanner:
         self._pause_records: dict[str, _PauseRecord] = {}
         self._active_trajectory: Trajectory | None = None
         self._active_tracker: _ConstraintTracker | None = None
+        self._cost_tracker = _CostTracker()
         self._deadline_s = deadline_s
         self._hop_budget = hop_budget
         self._time_source = time_source or time.monotonic
@@ -782,6 +844,7 @@ class ReactPlanner:
             If LLM client fails after all retries.
         """
         logger.info("planner_run_start", extra={"query": query})
+        self._cost_tracker = _CostTracker()
         trajectory = Trajectory(query=query, context_meta=context_meta)
         return await self._run_loop(trajectory, tracker=None)
 
@@ -1166,10 +1229,12 @@ class ReactPlanner:
             ):
                 response_format = self._action_schema
 
-            raw = await self._client.complete(
+            llm_result = await self._client.complete(
                 messages=messages,
                 response_format=response_format,
             )
+            raw, cost = _coerce_llm_response(llm_result)
+            self._cost_tracker.record_main_call(cost)
 
             try:
                 return PlannerAction.model_validate_json(raw)
@@ -1595,10 +1660,12 @@ class ReactPlanner:
                 },
             }
             try:
-                raw = await self._summarizer_client.complete(
+                llm_result = await self._summarizer_client.complete(
                     messages=messages,
                     response_format=response_format,
                 )
+                raw, cost = _coerce_llm_response(llm_result)
+                self._cost_tracker.record_summarizer_call(cost)
                 summary = TrajectorySummary.model_validate_json(raw)
                 summary.note = summary.note or "llm"
                 trajectory.summary = summary
@@ -1658,7 +1725,11 @@ class ReactPlanner:
             },
         }
 
-        raw = await client.complete(messages=messages, response_format=response_format)
+        llm_result = await client.complete(
+            messages=messages, response_format=response_format
+        )
+        raw, cost = _coerce_llm_response(llm_result)
+        self._cost_tracker.record_reflection_call(cost)
         critique = ReflectionCritique.model_validate_json(raw)
 
         if (
@@ -1687,10 +1758,12 @@ class ReactPlanner:
         messages = list(base_messages)
         messages.append({"role": "user", "content": revision_prompt})
 
-        raw = await self._client.complete(
+        llm_result = await self._client.complete(
             messages=messages,
             response_format=self._response_format,
         )
+        raw, cost = _coerce_llm_response(llm_result)
+        self._cost_tracker.record_main_call(cost)
         return PlannerAction.model_validate_json(raw)
 
     def _check_action_constraints(
@@ -1944,6 +2017,7 @@ class ReactPlanner:
             "steps": trajectory.to_history(),
             "step_count": len(trajectory.steps),
         }
+        metadata["cost"] = self._cost_tracker.snapshot()
         if constraints is not None:
             metadata["constraints"] = constraints.snapshot()
         if error is not None:
@@ -1952,7 +2026,7 @@ class ReactPlanner:
             metadata.update(metadata_extra)
 
         # Emit finish event
-        extra_data: dict[str, Any] = {"reason": reason}
+        extra_data: dict[str, Any] = {"reason": reason, "cost": metadata["cost"]}
         if error:
             extra_data["error"] = error
         self._emit_event(
