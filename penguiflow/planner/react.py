@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import time
+from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
@@ -164,14 +165,21 @@ class TrajectoryStep:
     observation: Any | None = None
     error: str | None = None
     failure: Mapping[str, Any] | None = None
+    streams: Mapping[str, Sequence[Mapping[str, Any]]] | None = None
 
     def dump(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "action": self.action.model_dump(mode="json"),
             "observation": self._serialise_observation(),
             "error": self.error,
             "failure": dict(self.failure) if self.failure else None,
         }
+        if self.streams:
+            payload["streams"] = {
+                stream_id: [dict(chunk) for chunk in chunks]
+                for stream_id, chunks in self.streams.items()
+            }
+        return payload
 
     def _serialise_observation(self) -> Any:
         if isinstance(self.observation, BaseModel):
@@ -211,11 +219,25 @@ class Trajectory:
         )
         for step_data in payload.get("steps", []):
             action = PlannerAction.model_validate(step_data["action"])
+            streams_payload = step_data.get("streams")
+            normalised_streams: dict[str, tuple[Mapping[str, Any], ...]] | None = None
+            if isinstance(streams_payload, Mapping):
+                normalised_streams = {}
+                for stream_id, chunk_list in streams_payload.items():
+                    if not isinstance(chunk_list, Sequence):
+                        continue
+                    chunks: list[Mapping[str, Any]] = []
+                    for chunk in chunk_list:
+                        if isinstance(chunk, Mapping):
+                            chunks.append(dict(chunk))
+                    if chunks:
+                        normalised_streams[str(stream_id)] = tuple(chunks)
             step = TrajectoryStep(
                 action=action,
                 observation=step_data.get("observation"),
                 error=step_data.get("error"),
                 failure=step_data.get("failure"),
+                streams=normalised_streams,
             )
             trajectory.steps.append(step)
         summary_data = payload.get("summary")
@@ -593,13 +615,85 @@ class _LiteLLMJSONClient:
         raise RuntimeError(msg) from last_error
 
 
+@dataclass(slots=True)
+class _StreamChunk:
+    """Streaming chunk captured during planning."""
+
+    stream_id: str
+    seq: int
+    text: str
+    done: bool
+    meta: Mapping[str, Any]
+    ts: float
+
+
 class _PlannerContext:
-    __slots__ = ("meta", "_planner", "_trajectory")
+    __slots__ = ("meta", "_planner", "_trajectory", "_chunks")
 
     def __init__(self, planner: ReactPlanner, trajectory: Trajectory) -> None:
         self.meta = dict(trajectory.context_meta or {})
         self._planner = planner
         self._trajectory = trajectory
+        self._chunks: list[_StreamChunk] = []
+
+    async def emit_chunk(
+        self,
+        stream_id: str,
+        seq: int,
+        text: str,
+        *,
+        done: bool = False,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Emit streaming chunk during tool execution."""
+
+        chunk = _StreamChunk(
+            stream_id=stream_id,
+            seq=seq,
+            text=text,
+            done=done,
+            meta=dict(meta or {}),
+            ts=self._planner._time_source(),
+        )
+        self._chunks.append(chunk)
+
+        self._planner._emit_event(
+            PlannerEvent(
+                event_type="stream_chunk",
+                ts=chunk.ts,
+                trajectory_step=len(self._trajectory.steps),
+                extra={
+                    "stream_id": stream_id,
+                    "seq": seq,
+                    "text": text,
+                    "done": done,
+                    "meta": dict(meta or {}),
+                },
+            )
+        )
+
+    def _collect_chunks(self) -> dict[str, list[dict[str, Any]]]:
+        """Collect streaming chunks grouped by stream identifier."""
+
+        if not self._chunks:
+            return {}
+
+        streams: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for chunk in self._chunks:
+            streams[chunk.stream_id].append(
+                {
+                    "seq": chunk.seq,
+                    "text": chunk.text,
+                    "done": chunk.done,
+                    "meta": dict(chunk.meta),
+                    "ts": chunk.ts,
+                }
+            )
+
+        for stream_chunks in streams.values():
+            stream_chunks.sort(key=lambda payload: payload["seq"])
+
+        return dict(streams)
 
     async def pause(
         self,
@@ -1119,6 +1213,7 @@ class ReactPlanner:
                     result = await spec.node.func(parsed_args, ctx)
                 except _PlannerPauseSignal as signal:
                     tracker.record_hop()
+                    pause_chunks = ctx._collect_chunks()
                     trajectory.steps.append(
                         TrajectoryStep(
                             action=action,
@@ -1126,6 +1221,7 @@ class ReactPlanner:
                                 "pause": signal.pause.reason,
                                 "payload": signal.pause.payload,
                             },
+                            streams=pause_chunks or None,
                         )
                     )
                     trajectory.summary = None
@@ -1138,17 +1234,21 @@ class ReactPlanner:
                     error = (
                         f"tool '{spec.name}' raised {exc.__class__.__name__}: {exc}"
                     )
+                    failure_chunks = ctx._collect_chunks()
                     trajectory.steps.append(
                         TrajectoryStep(
                             action=action,
                             error=error,
                             failure=failure_payload,
+                            streams=failure_chunks or None,
                         )
                     )
                     tracker.record_hop()
                     trajectory.summary = None
                     last_observation = None
                     continue
+
+                step_chunks = ctx._collect_chunks()
 
                 try:
                     observation = spec.out_model.model_validate(result)
@@ -1158,13 +1258,23 @@ class ReactPlanner:
                         json.dumps(exc.errors(), ensure_ascii=False),
                     )
                     tracker.record_hop()
-                    trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                    trajectory.steps.append(
+                        TrajectoryStep(
+                            action=action,
+                            error=error,
+                            streams=step_chunks or None,
+                        )
+                    )
                     trajectory.summary = None
                     last_observation = None
                     continue
 
                 trajectory.steps.append(
-                    TrajectoryStep(action=action, observation=observation)
+                    TrajectoryStep(
+                        action=action,
+                        observation=observation,
+                        streams=step_chunks or None,
+                    )
                 )
                 tracker.record_hop()
                 trajectory.summary = None

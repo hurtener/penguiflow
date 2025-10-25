@@ -12,7 +12,12 @@ from pydantic import BaseModel
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
 from penguiflow.planner import PlannerPause, ReactPlanner
-from penguiflow.planner.react import ReflectionConfig, Trajectory
+from penguiflow.planner.react import (
+    PlannerAction,
+    ReflectionConfig,
+    Trajectory,
+    TrajectoryStep,
+)
 from penguiflow.registry import ModelRegistry
 
 
@@ -1021,6 +1026,100 @@ async def test_react_planner_event_callback_receives_events() -> None:
     assert "step_start" in event_types
     assert "step_complete" in event_types
     assert "finish" in event_types
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_captures_stream_chunks() -> None:
+    """Streaming chunks should be emitted as events and persisted."""
+    from penguiflow.planner import PlannerEvent
+
+    chunk_events: list[dict[str, Any]] = []
+
+    def event_callback(event: PlannerEvent) -> None:
+        if event.event_type == "stream_chunk":
+            chunk_events.append(dict(event.extra))
+
+    @tool(desc="Stream partial answer")
+    async def stream_tool(args: Query, ctx: Any) -> Answer:
+        for i in range(5):
+            await ctx.emit_chunk("test_stream", i, f"token_{i} ", done=i == 4)
+        return Answer(answer="Complete")
+
+    registry = ModelRegistry()
+    registry.register("stream_tool", Query, Answer)
+
+    client = StubClient(
+        [
+            {
+                "thought": "stream",
+                "next_node": "stream_tool",
+                "args": {"question": "test"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"answer": "Complete"},
+            },
+        ]
+    )
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog([Node(stream_tool, name="stream_tool")], registry),
+        event_callback=event_callback,
+    )
+
+    result = await planner.run("Test streaming")
+
+    assert len(chunk_events) == 5
+    for index, event_payload in enumerate(chunk_events):
+        assert event_payload["stream_id"] == "test_stream"
+        assert event_payload["seq"] == index
+        assert event_payload["text"] == f"token_{index} "
+        assert event_payload["done"] == (index == 4)
+
+    steps = result.metadata["steps"]
+    assert len(steps) >= 1
+    first_step_streams = steps[0]["streams"]["test_stream"]
+    assert len(first_step_streams) == 5
+    for index, chunk in enumerate(first_step_streams):
+        assert chunk["seq"] == index
+        assert chunk["text"] == f"token_{index} "
+        assert chunk["done"] == (index == 4)
+
+
+def test_trajectory_serialisation_preserves_stream_chunks() -> None:
+    """Trajectory serialisation should retain stream chunk history."""
+    action = PlannerAction(
+        thought="thinking",
+        next_node="stream_tool",
+        args={"question": "test"},
+    )
+    step = TrajectoryStep(
+        action=action,
+        streams={
+            "test_stream": (
+                {"seq": 0, "text": "token_0 ", "done": False},
+                {"seq": 1, "text": "token_1 ", "done": True},
+            )
+        },
+    )
+
+    trajectory = Trajectory(query="Test streaming persistence")
+    trajectory.steps.append(step)
+
+    payload = trajectory.serialise()
+    hydrated = Trajectory.from_serialised(payload)
+
+    assert hydrated.steps, "Expected at least one step after hydration"
+    hydrated_streams = hydrated.steps[0].streams
+    assert hydrated_streams is not None
+    assert "test_stream" in hydrated_streams
+    hydrated_chunks = [dict(chunk) for chunk in hydrated_streams["test_stream"]]
+    assert hydrated_chunks == [
+        {"seq": 0, "text": "token_0 ", "done": False},
+        {"seq": 1, "text": "token_1 ", "done": True},
+    ]
 
 
 @pytest.mark.asyncio()

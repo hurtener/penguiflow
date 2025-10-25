@@ -427,6 +427,60 @@ planner = ReactPlanner(
 )
 ```
 
+### Streaming Planner Responses
+
+ReactPlanner tools can emit **streaming chunks** mid-execution. Each call to
+`ctx.emit_chunk` is persisted on the trajectory and surfaced through
+`PlannerEvent(event_type="stream_chunk")`, so downstream UIs can render partial
+progress as soon as it is available.
+
+```python
+from pydantic import BaseModel
+
+from penguiflow.catalog import build_catalog, tool
+from penguiflow.planner import PlannerEvent, ReactPlanner
+from penguiflow.registry import ModelRegistry
+
+
+class Query(BaseModel):
+    question: str
+
+
+class Answer(BaseModel):
+    answer: str
+
+
+@tool(desc="Stream answer token-by-token")
+async def stream_answer(args: Query, ctx) -> Answer:
+    tokens = ["PenguiFlow", "is", "a", "typed", "async", "planner"]
+    for index, token in enumerate(tokens):
+        await ctx.emit_chunk("answer_stream", index, f"{token} ", done=False)
+
+    await ctx.emit_chunk("answer_stream", len(tokens), "", done=True)
+    return Answer(answer=" ".join(tokens))
+
+
+def handle_stream(event: PlannerEvent) -> None:
+    if event.event_type == "stream_chunk":
+        print(event.extra["text"], end="", flush=True)
+        if event.extra["done"]:
+            print()
+
+
+registry = ModelRegistry()
+registry.register("stream_answer", Query, Answer)
+
+
+planner = ReactPlanner(
+    llm="gpt-4o-mini",
+    catalog=build_catalog([stream_answer], registry),
+    event_callback=handle_stream,
+)
+
+result = await planner.run("Tell me about PenguiFlow")
+print(result.metadata["steps"][0]["streams"]["answer_stream"])  # structured chunks
+```
+
 **Model support:**
 * Install `penguiflow[planner]` for LiteLLM integration (100+ models: OpenAI, Anthropic, Azure, etc.)
 * Or inject a custom `llm_client` for deterministic/offline testing

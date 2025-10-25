@@ -31,3 +31,23 @@ final: Penguins huddle to stay warm
 The sink receives every `StreamChunk` in order, prints SSE-compatible lines, and
 returns the assembled string to the Rookery once `done=True`, demonstrating
 backpressure-friendly streaming end-to-end.
+
+## ReactPlanner streaming demo
+
+The directory also includes `stream_answer.py`, showcasing how `ReactPlanner`
+captures streaming chunks and surfaces them via `PlannerEvent` callbacks while a
+tool is running.
+
+```bash
+uv run python examples/streaming_llm/stream_answer.py
+```
+
+Example output:
+
+```
+Streaming answer: PenguiFlow is a lightweight async agent orchestrator with typed nodes, reliable retries, and a JSON-only ReAct planner.
+Final payload: {"answer": "PenguiFlow is a lightweight agent orchestrator."}
+```
+
+Each streamed token triggers a `stream_chunk` event, prints immediately, and is
+stored on the resulting trajectory (`result.metadata["steps"][0]["streams"]`).
