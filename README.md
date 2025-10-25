@@ -346,6 +346,36 @@ print(result.payload)  # LLM orchestrated search → summarize automatically
 * **Adaptive replanning** — Tool failures feed structured error suggestions back to LLM for recovery
 * **Constraint enforcement** — Set hop budgets, deadlines, and token limits to prevent runaway execution
 * **Planning hints** — Guide LLM behavior with ordering preferences, parallel groups, and tool filters
+* **Policy-based tool filtering** — Restrict catalog visibility per tenant, role, or safety requirement with `ToolPolicy`
+
+### Policy-Based Tool Filtering
+
+Apply runtime guardrails to the planner's tool catalog using `ToolPolicy`. This
+lets you tailor availability by tenant tier, user permissions, or safety
+tags without modifying the underlying nodes.
+
+```python
+from penguiflow.planner import ReactPlanner, ToolPolicy
+
+policy_free = ToolPolicy(allowed_tools={"search_public", "summarise"})
+policy_premium = ToolPolicy(denied_tools={"delete_user"}, require_tags={"safe"})
+
+planner_free = ReactPlanner(..., tool_policy=policy_free)
+planner_premium = ReactPlanner(..., tool_policy=policy_premium)
+
+print(planner_free._spec_by_name.keys())   # {'search_public', 'summarise'}
+print(planner_premium._spec_by_name.keys())  # filtered catalog
+```
+
+Policies evaluate in the following order:
+
+1. `denied_tools`
+2. `allowed_tools` (if provided)
+3. `require_tags` (must be present on the tool)
+
+Any tool failing these checks is removed before prompt construction, and the
+planner logs the filtered names for observability. Combine this with stored
+tenant settings or role metadata to enforce enterprise-grade boundaries.
 
 ### Reflection Loop (Quality Assurance)
 
@@ -777,6 +807,7 @@ pytest -q
 * `examples/status_roadmap_flow/`: roadmap-driven websocket status updates with FlowResponse scaffolding.
 * `examples/react_minimal/`: JSON-only ReactPlanner loop with a stubbed LLM.
 * `examples/react_pause_resume/`: Phase B planner features with pause/resume and developer hints.
+* `examples/policy_filtering/`: tenant-aware planner with runtime `ToolPolicy` filtering.
 
 
 ---

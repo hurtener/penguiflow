@@ -18,6 +18,7 @@ from .react import (
     Trajectory,
     TrajectoryStep,
     TrajectorySummary,
+    ToolPolicy,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "Trajectory",
     "TrajectoryStep",
     "TrajectorySummary",
+    "ToolPolicy",
 ]
