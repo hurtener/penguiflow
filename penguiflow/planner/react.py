@@ -112,6 +112,51 @@ class PlannerFinish(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ToolPolicy(BaseModel):
+    """Runtime policy for tool availability and permissions.
+
+    Use :class:`ToolPolicy` to scope which tools are visible to a planner
+    instance at runtime. Policies can be derived from tenant entitlements,
+    user roles, safety requirements, or cost controls.
+
+    Examples
+    --------
+    >>> ToolPolicy(allowed_tools={"search", "summarise"})  # whitelist only
+    ToolPolicy(allowed_tools={'search', 'summarise'}, denied_tools=set(), require_tags=set())
+
+    >>> ToolPolicy(denied_tools={"gpt4_analysis"})  # blacklist specific tools
+    ToolPolicy(allowed_tools=None, denied_tools={'gpt4_analysis'}, require_tags=set())
+
+    >>> ToolPolicy(require_tags={"safe", "read-only"})  # enforce safety tags
+    ToolPolicy(allowed_tools=None, denied_tools=set(), require_tags={'safe', 'read-only'})
+    """
+
+    allowed_tools: set[str] | None = None
+    """If set, only these tools are available (whitelist)."""
+
+    denied_tools: set[str] = Field(default_factory=set)
+    """Tools that are explicitly forbidden (blacklist)."""
+
+    require_tags: set[str] = Field(default_factory=set)
+    """Tools must include **all** of these tags to be available."""
+
+    def is_allowed(self, node_name: str, node_tags: Mapping[str, Any] | Sequence[str]) -> bool:
+        """Return ``True`` when a tool passes the policy filters."""
+
+        tags = set(node_tags)
+
+        if node_name in self.denied_tools:
+            return False
+
+        if self.allowed_tools is not None and node_name not in self.allowed_tools:
+            return False
+
+        if self.require_tags and not self.require_tags.issubset(tags):
+            return False
+
+        return True
+
+
 class ReflectionCriteria(BaseModel):
     """Quality criteria used when critiquing an answer."""
 
@@ -761,6 +806,9 @@ class ReactPlanner:
     planning_hints : Mapping[str, Any] | None
         Structured constraints and preferences (ordering, disallowed nodes,
         max_parallel, etc.). See plan.md for schema.
+    tool_policy : ToolPolicy | None
+        Optional runtime policy that filters the tool catalog (whitelists,
+        blacklists, or tag requirements) for multi-tenant and safety use cases.
     repair_attempts : int
         Max attempts to repair invalid JSON from LLM. Default: 3.
     deadline_s : float | None
@@ -829,6 +877,7 @@ class ReactPlanner:
         absolute_max_parallel: int = 50,
         reflection_config: ReflectionConfig | None = None,
         reflection_llm: str | Mapping[str, Any] | None = None,
+        tool_policy: ToolPolicy | None = None,
     ) -> None:
         if catalog is None:
             if nodes is None or registry is None:
@@ -837,7 +886,34 @@ class ReactPlanner:
                 )
             catalog = build_catalog(nodes, registry)
 
-        self._specs = list(catalog)
+        self._tool_policy = tool_policy
+        specs = list(catalog)
+        if tool_policy is not None:
+            filtered_specs: list[NodeSpec] = []
+            removed: list[str] = []
+            for spec in specs:
+                if tool_policy.is_allowed(spec.name, spec.tags):
+                    filtered_specs.append(spec)
+                else:
+                    removed.append(spec.name)
+
+            if removed:
+                logger.info(
+                    "planner_tool_policy_filtered",
+                    extra={
+                        "removed": removed,
+                        "original_count": len(specs),
+                        "filtered_count": len(filtered_specs),
+                    },
+                )
+            if not filtered_specs:
+                logger.warning(
+                    "planner_tool_policy_empty",
+                    extra={"original_count": len(specs)},
+                )
+            specs = filtered_specs
+
+        self._specs = specs
         self._spec_by_name = {spec.name: spec for spec in self._specs}
         self._catalog_records = [spec.to_tool_record() for spec in self._specs]
         self._planning_hints = _PlanningHints.from_mapping(planning_hints)
