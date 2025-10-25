@@ -347,6 +347,44 @@ print(result.payload)  # LLM orchestrated search → summarize automatically
 * **Constraint enforcement** — Set hop budgets, deadlines, and token limits to prevent runaway execution
 * **Planning hints** — Guide LLM behavior with ordering preferences, parallel groups, and tool filters
 
+### Reflection Loop (Quality Assurance)
+
+PenguiFlow's ReactPlanner now includes an optional **reflection loop** that critiques candidate answers before finishing. This
+prevents the LLM from prematurely declaring success when critical requirements remain unsatisfied.
+
+Enable the loop with a `ReflectionConfig`:
+
+```python
+from penguiflow.planner import ReactPlanner, ReflectionConfig, ReflectionCriteria
+
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=build_catalog([search_docs, summarize], registry),
+    reflection_config=ReflectionConfig(
+        enabled=True,
+        criteria=ReflectionCriteria(
+            completeness="Addresses all aspects of the user's query",
+            accuracy="Grounds statements in verified observations",
+            clarity="Explains reasoning clearly",
+        ),
+        quality_threshold=0.85,
+        max_revisions=2,
+        use_separate_llm=True,
+    ),
+    reflection_llm="gpt-4o-mini",
+)
+
+result = await planner.run("Explain how PenguiFlow handles errors in parallel execution")
+print(result.metadata["reflection"])  # => {'score': 0.92, 'revisions': 1, 'passed': True, 'feedback': '...'}
+```
+
+**Benefits:**
+
+* ✅ Prevents incomplete answers — planner loops until the critique score meets your threshold or max revisions are reached
+* ✅ Observable — every critique emits a `PlannerEvent` with score, pass flag, and truncated feedback
+* ✅ Cost-aware — reuse the main LLM or provide a cheaper `reflection_llm` for critiques
+* ✅ Budget-safe — revisions respect hop and deadline budgets; no runaway loops
+
 **Model support:**
 * Install `penguiflow[planner]` for LiteLLM integration (100+ models: OpenAI, Anthropic, Azure, etc.)
 * Or inject a custom `llm_client` for deterministic/offline testing
