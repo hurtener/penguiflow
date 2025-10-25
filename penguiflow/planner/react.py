@@ -111,6 +111,34 @@ class PlannerFinish(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ReflectionCriteria(BaseModel):
+    """Quality criteria used when critiquing an answer."""
+
+    completeness: str = "Addresses all parts of the query"
+    accuracy: str = "Factually correct based on observations"
+    clarity: str = "Well-explained and coherent"
+
+
+class ReflectionCritique(BaseModel):
+    """Structured critique returned by the reflection LLM."""
+
+    score: float = Field(ge=0.0, le=1.0)
+    passed: bool
+    feedback: str
+    issues: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+
+
+class ReflectionConfig(BaseModel):
+    """Configuration controlling the reflection loop behaviour."""
+
+    enabled: bool = False
+    criteria: ReflectionCriteria = Field(default_factory=ReflectionCriteria)
+    quality_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
+    max_revisions: int = Field(default=2, ge=1, le=10)
+    use_separate_llm: bool = False
+
+
 class TrajectorySummary(BaseModel):
     goals: list[str] = Field(default_factory=list)
     facts: dict[str, Any] = Field(default_factory=dict)
@@ -569,6 +597,12 @@ class ReactPlanner:
     summarizer_llm : str | Mapping[str, Any] | None
         Separate (cheaper) LLM for trajectory compression. Falls back to
         main LLM if not set.
+    reflection_config : ReflectionConfig | None
+        Optional configuration enabling automatic answer critique before
+        finishing. Disabled by default.
+    reflection_llm : str | Mapping[str, Any] | None
+        Optional LiteLLM identifier used for critique when
+        ``reflection_config.use_separate_llm`` is ``True``.
     planning_hints : Mapping[str, Any] | None
         Structured constraints and preferences (ordering, disallowed nodes,
         max_parallel, etc.). See plan.md for schema.
@@ -638,6 +672,8 @@ class ReactPlanner:
         llm_timeout_s: float = 60.0,
         llm_max_retries: int = 3,
         absolute_max_parallel: int = 50,
+        reflection_config: ReflectionConfig | None = None,
+        reflection_llm: str | Mapping[str, Any] | None = None,
     ) -> None:
         if catalog is None:
             if nodes is None or registry is None:
@@ -699,6 +735,20 @@ class ReactPlanner:
         if summarizer_llm is not None:
             self._summarizer_client = _LiteLLMJSONClient(
                 summarizer_llm,
+                temperature=temperature,
+                json_schema_mode=True,
+                max_retries=llm_max_retries,
+                timeout_s=llm_timeout_s,
+            )
+        self._reflection_config = reflection_config
+        self._reflection_client: JSONLLMClient | None = None
+        if reflection_config and reflection_config.use_separate_llm:
+            if reflection_llm is None:
+                raise ValueError(
+                    "reflection_llm required when use_separate_llm=True"
+                )
+            self._reflection_client = _LiteLLMJSONClient(
+                reflection_llm,
                 temperature=temperature,
                 json_schema_mode=True,
                 max_retries=llm_max_retries,
@@ -861,13 +911,123 @@ class ReactPlanner:
                     continue
 
                 if action.next_node is None:
-                    payload = action.args or last_observation
+                    candidate_answer = action.args or last_observation
+                    metadata_reflection: dict[str, Any] | None = None
+
+                    if (
+                        candidate_answer is not None
+                        and self._reflection_config
+                        and self._reflection_config.enabled
+                    ):
+                        critique: ReflectionCritique | None = None
+                        metadata_reflection = {}
+                        for revision_idx in range(
+                            self._reflection_config.max_revisions + 1
+                        ):
+                            critique = await self._critique_answer(
+                                trajectory, candidate_answer
+                            )
+
+                            self._emit_event(
+                                PlannerEvent(
+                                    event_type="reflection_critique",
+                                    ts=self._time_source(),
+                                    trajectory_step=len(trajectory.steps),
+                                    thought=action.thought,
+                                    extra={
+                                        "score": critique.score,
+                                        "passed": critique.passed,
+                                        "revision": revision_idx,
+                                        "feedback": critique.feedback[:200],
+                                    },
+                                )
+                            )
+
+                            if (
+                                critique.passed
+                                or critique.score
+                                >= self._reflection_config.quality_threshold
+                            ):
+                                logger.info(
+                                    "reflection_passed",
+                                    extra={
+                                        "score": critique.score,
+                                        "revisions": revision_idx,
+                                    },
+                                )
+                                break
+
+                            if revision_idx >= self._reflection_config.max_revisions:
+                                threshold = (
+                                    self._reflection_config.quality_threshold
+                                )
+                                logger.warning(
+                                    "reflection_max_revisions",
+                                    extra={
+                                        "score": critique.score,
+                                        "threshold": threshold,
+                                    },
+                                )
+                                break
+
+                            if not tracker.has_budget_for_next_tool():
+                                snapshot = tracker.snapshot()
+                                logger.warning(
+                                    "reflection_budget_exhausted",
+                                    extra={
+                                        "score": critique.score,
+                                        "hops_used": snapshot.get("hops_used"),
+                                    },
+                                )
+                                break
+
+                            logger.debug(
+                                "reflection_requesting_revision",
+                                extra={
+                                    "revision": revision_idx + 1,
+                                    "score": critique.score,
+                                },
+                            )
+
+                            revision_action = await self._request_revision(
+                                trajectory,
+                                critique,
+                            )
+                            candidate_answer = (
+                                revision_action.args or revision_action.model_dump()
+                            )
+                            trajectory.steps.append(
+                                TrajectoryStep(
+                                    action=revision_action,
+                                    observation={"status": "revision_requested"},
+                                )
+                            )
+                            trajectory.summary = None
+
+                        if critique is not None:
+                            metadata_reflection = {
+                                "score": critique.score,
+                                "revisions": min(
+                                    revision_idx,
+                                    self._reflection_config.max_revisions,
+                                ),
+                                "passed": critique.passed,
+                            }
+                            if critique.feedback:
+                                metadata_reflection["feedback"] = critique.feedback
+
+                    payload = candidate_answer
+                    metadata_extra: dict[str, Any] | None = None
+                    if metadata_reflection is not None:
+                        metadata_extra = {"reflection": metadata_reflection}
+
                     return self._finish(
                         trajectory,
                         reason="answer_complete",
                         payload=payload,
                         thought=action.thought,
                         constraints=tracker,
+                        metadata_extra=metadata_extra,
                     )
 
                 spec = self._spec_by_name.get(action.next_node)
@@ -1456,6 +1616,83 @@ class ReactPlanner:
         logger.debug("trajectory_summarized", extra={"method": "rule_based"})
         return base_summary
 
+    async def _critique_answer(
+        self,
+        trajectory: Trajectory,
+        candidate: Any,
+    ) -> ReflectionCritique:
+        """Call the critique LLM to assess the candidate answer."""
+
+        if self._reflection_config is None:
+            raise RuntimeError("Reflection not configured")
+
+        client = (
+            self._reflection_client
+            if self._reflection_config.use_separate_llm
+            and self._reflection_client is not None
+            else self._client
+        )
+        if client is None:
+            raise RuntimeError("Reflection client unavailable")
+
+        from . import reflection_prompts
+
+        system_prompt = reflection_prompts.build_critique_system_prompt(
+            self._reflection_config.criteria
+        )
+        user_prompt = reflection_prompts.build_critique_user_prompt(
+            trajectory.query,
+            candidate,
+            trajectory,
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "reflection_critique",
+                "schema": ReflectionCritique.model_json_schema(),
+            },
+        }
+
+        raw = await client.complete(messages=messages, response_format=response_format)
+        critique = ReflectionCritique.model_validate_json(raw)
+
+        if (
+            critique.score >= self._reflection_config.quality_threshold
+            and not critique.passed
+        ):
+            critique.passed = True
+
+        return critique
+
+    async def _request_revision(
+        self,
+        trajectory: Trajectory,
+        critique: ReflectionCritique,
+    ) -> PlannerAction:
+        """Request a revised answer from the main planner LLM."""
+
+        from . import reflection_prompts
+
+        base_messages = await self._build_messages(trajectory)
+        revision_prompt = reflection_prompts.build_revision_prompt(
+            trajectory.steps[-1].action.thought if trajectory.steps else "",
+            critique,
+        )
+
+        messages = list(base_messages)
+        messages.append({"role": "user", "content": revision_prompt})
+
+        raw = await self._client.complete(
+            messages=messages,
+            response_format=self._response_format,
+        )
+        return PlannerAction.model_validate_json(raw)
+
     def _check_action_constraints(
         self,
         action: PlannerAction,
@@ -1699,6 +1936,7 @@ class ReactPlanner:
         thought: str,
         constraints: _ConstraintTracker | None = None,
         error: str | None = None,
+        metadata_extra: Mapping[str, Any] | None = None,
     ) -> PlannerFinish:
         metadata = {
             "reason": reason,
@@ -1710,6 +1948,8 @@ class ReactPlanner:
             metadata["constraints"] = constraints.snapshot()
         if error is not None:
             metadata["error"] = error
+        if metadata_extra:
+            metadata.update(metadata_extra)
 
         # Emit finish event
         extra_data: dict[str, Any] = {"reason": reason}
@@ -1745,6 +1985,9 @@ __all__ = [
     "PlannerEventCallback",
     "PlannerFinish",
     "PlannerPause",
+    "ReflectionConfig",
+    "ReflectionCriteria",
+    "ReflectionCritique",
     "ReactPlanner",
     "Trajectory",
     "TrajectoryStep",
