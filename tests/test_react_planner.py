@@ -1024,6 +1024,66 @@ async def test_react_planner_event_callback_receives_events() -> None:
 
 
 @pytest.mark.asyncio()
+async def test_react_planner_captures_stream_chunks() -> None:
+    """Streaming chunks should be emitted as events and persisted."""
+    from penguiflow.planner import PlannerEvent
+
+    chunk_events: list[dict[str, Any]] = []
+
+    def event_callback(event: PlannerEvent) -> None:
+        if event.event_type == "stream_chunk":
+            chunk_events.append(dict(event.extra))
+
+    @tool(desc="Stream partial answer")
+    async def stream_tool(args: Query, ctx: Any) -> Answer:
+        for i in range(5):
+            await ctx.emit_chunk("test_stream", i, f"token_{i} ", done=i == 4)
+        return Answer(answer="Complete")
+
+    registry = ModelRegistry()
+    registry.register("stream_tool", Query, Answer)
+
+    client = StubClient(
+        [
+            {
+                "thought": "stream",
+                "next_node": "stream_tool",
+                "args": {"question": "test"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"answer": "Complete"},
+            },
+        ]
+    )
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog([Node(stream_tool, name="stream_tool")], registry),
+        event_callback=event_callback,
+    )
+
+    result = await planner.run("Test streaming")
+
+    assert len(chunk_events) == 5
+    for index, event_payload in enumerate(chunk_events):
+        assert event_payload["stream_id"] == "test_stream"
+        assert event_payload["seq"] == index
+        assert event_payload["text"] == f"token_{index} "
+        assert event_payload["done"] == (index == 4)
+
+    steps = result.metadata["steps"]
+    assert len(steps) >= 1
+    first_step_streams = steps[0]["streams"]["test_stream"]
+    assert len(first_step_streams) == 5
+    for index, chunk in enumerate(first_step_streams):
+        assert chunk["seq"] == index
+        assert chunk["text"] == f"token_{index} "
+        assert chunk["done"] == (index == 4)
+
+
+@pytest.mark.asyncio()
 async def test_react_planner_improved_token_estimation() -> None:
     """Token estimation should account for message structure overhead."""
     client = StubClient(
