@@ -15,10 +15,10 @@ from .react import (
     ReflectionConfig,
     ReflectionCriteria,
     ReflectionCritique,
+    ToolPolicy,
     Trajectory,
     TrajectoryStep,
     TrajectorySummary,
-    ToolPolicy,
 )
 
 __all__ = [
@@ -34,8 +34,8 @@ __all__ = [
     "ReflectionCriteria",
     "ReflectionCritique",
     "ReactPlanner",
+    "ToolPolicy",
     "Trajectory",
     "TrajectoryStep",
     "TrajectorySummary",
-    "ToolPolicy",
 ]

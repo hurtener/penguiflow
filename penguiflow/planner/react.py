@@ -122,13 +122,25 @@ class ToolPolicy(BaseModel):
     Examples
     --------
     >>> ToolPolicy(allowed_tools={"search", "summarise"})  # whitelist only
-    ToolPolicy(allowed_tools={'search', 'summarise'}, denied_tools=set(), require_tags=set())
+    ToolPolicy(
+    ...     allowed_tools={'search', 'summarise'},
+    ...     denied_tools=set(),
+    ...     require_tags=set(),
+    ... )
 
     >>> ToolPolicy(denied_tools={"gpt4_analysis"})  # blacklist specific tools
-    ToolPolicy(allowed_tools=None, denied_tools={'gpt4_analysis'}, require_tags=set())
+    ToolPolicy(
+    ...     allowed_tools=None,
+    ...     denied_tools={'gpt4_analysis'},
+    ...     require_tags=set(),
+    ... )
 
     >>> ToolPolicy(require_tags={"safe", "read-only"})  # enforce safety tags
-    ToolPolicy(allowed_tools=None, denied_tools=set(), require_tags={'safe', 'read-only'})
+    ToolPolicy(
+    ...     allowed_tools=None,
+    ...     denied_tools=set(),
+    ...     require_tags={'safe', 'read-only'},
+    ... )
     """
 
     allowed_tools: set[str] | None = None
@@ -140,7 +152,11 @@ class ToolPolicy(BaseModel):
     require_tags: set[str] = Field(default_factory=set)
     """Tools must include **all** of these tags to be available."""
 
-    def is_allowed(self, node_name: str, node_tags: Mapping[str, Any] | Sequence[str]) -> bool:
+    def is_allowed(
+        self,
+        node_name: str,
+        node_tags: Mapping[str, Any] | Sequence[str],
+    ) -> bool:
         """Return ``True`` when a tool passes the policy filters."""
 
         tags = set(node_tags)

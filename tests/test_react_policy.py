@@ -42,7 +42,10 @@ class StubClient:
         return self._responses.pop(0), 0.0
 
 
-def _register(registry: ModelRegistry, *pairs: tuple[str, type[BaseModel], type[BaseModel]]) -> None:
+def _register(
+    registry: ModelRegistry,
+    *pairs: tuple[str, type[BaseModel], type[BaseModel]],
+) -> None:
     for name, args_model, out_model in pairs:
         registry.register(name, args_model, out_model)
 
@@ -80,9 +83,11 @@ async def test_tool_policy_filters_catalog() -> None:
     catalog = build_catalog(nodes, registry)
 
     policy = ToolPolicy(allowed_tools={"tool_a", "tool_b"})
-    client = StubClient([
-        {"thought": "Done", "next_node": None, "args": {"answer": "OK"}},
-    ])
+    client = StubClient(
+        [
+            {"thought": "Done", "next_node": None, "args": {"answer": "OK"}},
+        ]
+    )
 
     planner = ReactPlanner(
         llm_client=client,
@@ -117,9 +122,11 @@ async def test_tool_policy_denies_tools() -> None:
         allowed_tools={"good_tool", "bad_tool"},
         denied_tools={"bad_tool"},
     )
-    client = StubClient([
-        {"thought": "Done", "next_node": None, "args": {"answer": "OK"}},
-    ])
+    client = StubClient(
+        [
+            {"thought": "Done", "next_node": None, "args": {"answer": "OK"}},
+        ]
+    )
 
     planner = ReactPlanner(llm_client=client, catalog=catalog, tool_policy=policy)
 
@@ -181,9 +188,21 @@ async def test_tool_policy_llm_error_on_forbidden_tool() -> None:
     policy = ToolPolicy(allowed_tools={"allowed"})
     client = StubClient(
         [
-            {"thought": "Try forbidden", "next_node": "forbidden", "args": {"question": "test"}},
-            {"thought": "Use allowed", "next_node": "allowed", "args": {"question": "test"}},
-            {"thought": "Done", "next_node": None, "args": {"answer": "OK"}},
+            {
+                "thought": "Try forbidden",
+                "next_node": "forbidden",
+                "args": {"question": "test"},
+            },
+            {
+                "thought": "Use allowed",
+                "next_node": "allowed",
+                "args": {"question": "test"},
+            },
+            {
+                "thought": "Done",
+                "next_node": None,
+                "args": {"answer": "OK"},
+            },
         ]
     )
 
