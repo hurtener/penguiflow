@@ -627,6 +627,68 @@ class _BranchExecutionResult:
     pause: PlannerPause | None = None
 
 
+def _sanitize_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Remove advanced JSON schema constraints for broader provider compatibility.
+
+    Many LLM providers (Databricks, Cerebras, Groq, etc.) don't support advanced
+    JSON schema features like:
+    - minimum, maximum, exclusiveMinimum, exclusiveMaximum (number constraints)
+    - minLength, maxLength (string constraints)
+    - minItems, maxItems, uniqueItems (array constraints)
+    - pattern (regex patterns)
+    - format (string formats like 'email', 'date-time')
+
+    This function recursively removes these constraints while preserving the core
+    schema structure (types, properties, required fields, etc.).
+
+    Args:
+        schema: JSON schema dict (potentially with unsupported constraints)
+
+    Returns:
+        Sanitized schema dict compatible with more LLM providers
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    # Create a copy to avoid mutating the original
+    sanitized = {}
+
+    # List of constraint keys to remove
+    unsupported_constraints = {
+        "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",  # number constraints
+        "minLength", "maxLength",  # string constraints
+        "minItems", "maxItems", "uniqueItems",  # array constraints
+        "pattern",  # regex pattern matching
+        "format",  # string formats (email, date-time, etc.)
+    }
+
+    for key, value in schema.items():
+        # Skip unsupported constraint keys
+        if key in unsupported_constraints:
+            continue
+
+        # Recursively sanitize nested objects
+        if key == "properties" and isinstance(value, dict):
+            sanitized[key] = {
+                prop_name: _sanitize_json_schema(prop_schema)
+                for prop_name, prop_schema in value.items()
+            }
+        elif key == "items" and isinstance(value, dict):
+            sanitized[key] = _sanitize_json_schema(value)
+        elif key == "additionalProperties" and isinstance(value, dict):
+            sanitized[key] = _sanitize_json_schema(value)
+        elif key == "allOf" and isinstance(value, list):
+            sanitized[key] = [_sanitize_json_schema(item) for item in value]
+        elif key == "anyOf" and isinstance(value, list):
+            sanitized[key] = [_sanitize_json_schema(item) for item in value]
+        elif key == "oneOf" and isinstance(value, list):
+            sanitized[key] = [_sanitize_json_schema(item) for item in value]
+        else:
+            sanitized[key] = value
+
+    return sanitized
+
+
 class _LiteLLMJSONClient:
     def __init__(
         self,
@@ -665,7 +727,31 @@ class _LiteLLMJSONClient:
         params.setdefault("temperature", self._temperature)
         params["messages"] = list(messages)
         if self._json_schema_mode and response_format is not None:
-            params["response_format"] = response_format
+            # Detect providers that don't support advanced JSON schema constraints
+            model_name = self._llm if isinstance(self._llm, str) else self._llm.get("model", "")
+            needs_sanitization = (
+                model_name.startswith("databricks/")
+                or "databricks" in model_name.lower()
+                or "groq" in model_name.lower()
+                or "cerebras" in model_name.lower()
+            )
+
+            if needs_sanitization and "json_schema" in response_format:
+                # Sanitize the schema to remove unsupported constraints
+                sanitized_format = dict(response_format)
+                sanitized_format["json_schema"] = {
+                    "name": response_format["json_schema"]["name"],
+                    "schema": _sanitize_json_schema(
+                        response_format["json_schema"]["schema"]
+                    ),
+                }
+                params["response_format"] = sanitized_format
+                logger.debug(
+                    "json_schema_sanitized",
+                    extra={"model": model_name, "reason": "provider_compatibility"},
+                )
+            else:
+                params["response_format"] = response_format
 
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
@@ -1334,7 +1420,13 @@ class ReactPlanner:
 
                                         # Ensure required fields are present
                                         if "route" not in candidate_answer:
-                                            candidate_answer["route"] = trajectory.steps[0].observation.get("route", "unknown") if trajectory.steps and trajectory.steps[0].observation else "unknown"
+                                            # Extract route from first step observation if available
+                                            route = "unknown"
+                                            if trajectory.steps and trajectory.steps[0].observation:
+                                                route = trajectory.steps[0].observation.get(
+                                                    "route", "unknown"
+                                                )
+                                            candidate_answer["route"] = route
                                         if "artifacts" not in candidate_answer:
                                             candidate_answer["artifacts"] = {}
                                         if "metadata" not in candidate_answer:
@@ -2247,18 +2339,36 @@ Be transparent, helpful, and guide the user toward providing what's needed."""
         clarification = ClarificationResponse.model_validate_json(raw)
 
         # Format into user-friendly text
+        attempts_list = chr(10).join([
+            f'  {i+1}. {approach}'
+            for i, approach in enumerate(clarification.attempted_approaches)
+        ])
+        questions_list = chr(10).join([
+            f'  - {q}' for q in clarification.clarifying_questions
+        ])
+        suggestions_list = chr(10).join([
+            f'  - {s}' for s in clarification.suggestions
+        ])
+
+        # Build metadata line (split to avoid line length issues)
+        score_line = (
+            f"[Confidence: {clarification.confidence} | "
+            f"Quality Score: {clarification.reflection_score:.2f}/1.0 | "
+            f"Revision Attempts: {clarification.revision_attempts}]"
+        )
+
         formatted_text = f"""{clarification.text}
 
 **What I Tried:**
-{chr(10).join([f'  {i+1}. {approach}' for i, approach in enumerate(clarification.attempted_approaches)])}
+{attempts_list}
 
 **To Help Me Answer This:**
-{chr(10).join([f'  - {q}' for q in clarification.clarifying_questions])}
+{questions_list}
 
 **Suggestions:**
-{chr(10).join([f'  - {s}' for s in clarification.suggestions])}
+{suggestions_list}
 
-[Confidence: {clarification.confidence} | Quality Score: {clarification.reflection_score:.2f}/1.0 | Revision Attempts: {clarification.revision_attempts}]"""
+{score_line}"""
 
         return formatted_text
 

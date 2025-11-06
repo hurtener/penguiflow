@@ -1348,3 +1348,107 @@ async def test_cost_tracking_graceful_when_unavailable() -> None:
     cost_info = result.metadata["cost"]
     assert cost_info["total_cost_usd"] == 0.0
     assert cost_info["main_llm_calls"] == 1
+
+
+def test_json_schema_sanitizer_removes_constraints():
+    """Test that the JSON schema sanitizer removes advanced constraints for compatibility."""
+    from penguiflow.planner.react import _sanitize_json_schema
+
+    # Schema with unsupported constraints
+    schema = {
+        "type": "object",
+        "properties": {
+            "score": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+            },
+            "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "^[a-z]+$",
+                "format": "email",
+            },
+            "items": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 10,
+                "uniqueItems": True,
+            },
+            "nested": {
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "exclusiveMaximum": 100,
+                    }
+                },
+            },
+        },
+        "required": ["score", "name"],
+    }
+
+    sanitized = _sanitize_json_schema(schema)
+
+    # Verify top-level structure preserved
+    assert sanitized["type"] == "object"
+    assert "properties" in sanitized
+    assert "required" in sanitized
+    assert sanitized["required"] == ["score", "name"]
+
+    # Verify number constraints removed
+    score_schema = sanitized["properties"]["score"]
+    assert score_schema["type"] == "number"
+    assert "minimum" not in score_schema
+    assert "maximum" not in score_schema
+
+    # Verify string constraints removed
+    name_schema = sanitized["properties"]["name"]
+    assert name_schema["type"] == "string"
+    assert "minLength" not in name_schema
+    assert "maxLength" not in name_schema
+    assert "pattern" not in name_schema
+    assert "format" not in name_schema
+
+    # Verify array constraints removed
+    items_schema = sanitized["properties"]["items"]
+    assert items_schema["type"] == "array"
+    assert "items" in items_schema  # items definition preserved
+    assert "minItems" not in items_schema
+    assert "maxItems" not in items_schema
+    assert "uniqueItems" not in items_schema
+
+    # Verify nested constraints removed
+    nested_count = sanitized["properties"]["nested"]["properties"]["count"]
+    assert nested_count["type"] == "integer"
+    assert "minimum" not in nested_count
+    assert "exclusiveMaximum" not in nested_count
+
+
+def test_json_schema_sanitizer_preserves_structure():
+    """Test that sanitizer preserves essential schema structure."""
+    from penguiflow.planner.react import _sanitize_json_schema
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "data": {"type": "string"},
+            "nested": {
+                "type": "object",
+                "properties": {
+                    "value": {"type": "number"},
+                },
+                "required": ["value"],
+            },
+        },
+        "required": ["data"],
+        "additionalProperties": False,
+    }
+
+    sanitized = _sanitize_json_schema(schema)
+
+    # All essential structure preserved
+    assert sanitized == schema  # Should be identical since no constraints to remove
