@@ -80,9 +80,9 @@ class DSPyLLMClient:
     @classmethod
     def from_base_client(
         cls,
-        base_client: "DSPyLLMClient",
+        base_client: DSPyLLMClient,
         output_schema: type[BaseModel],
-    ) -> "DSPyLLMClient":
+    ) -> DSPyLLMClient:
         """Create a new DSPy client with a different output schema.
 
         This factory method allows creating separate clients for different tasks
