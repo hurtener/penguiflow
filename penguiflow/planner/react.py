@@ -678,11 +678,11 @@ def _sanitize_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
         elif key == "additionalProperties" and isinstance(value, dict):
             sanitized[key] = _sanitize_json_schema(value)
         elif key == "allOf" and isinstance(value, list):
-            sanitized[key] = [_sanitize_json_schema(item) for item in value]
+            sanitized[key] = [_sanitize_json_schema(item) for item in value]  # type: ignore[assignment]
         elif key == "anyOf" and isinstance(value, list):
-            sanitized[key] = [_sanitize_json_schema(item) for item in value]
+            sanitized[key] = [_sanitize_json_schema(item) for item in value]  # type: ignore[assignment]
         elif key == "oneOf" and isinstance(value, list):
-            sanitized[key] = [_sanitize_json_schema(item) for item in value]
+            sanitized[key] = [_sanitize_json_schema(item) for item in value]  # type: ignore[assignment]
         else:
             sanitized[key] = value
 
@@ -1122,6 +1122,7 @@ class ReactPlanner:
 
             # Create DSPy reflection client if reflection enabled
             if is_dspy and reflection_config and reflection_config.enabled:
+                assert isinstance(llm_client, DSPyLLMClient)  # for mypy
                 logger.info(
                     "dspy_reflection_client_creation",
                     extra={"schema": "ReflectionCritique"},
@@ -1141,6 +1142,7 @@ class ReactPlanner:
 
             # Create DSPy summarizer client if summarization enabled
             if is_dspy and token_budget is not None and token_budget > 0:
+                assert isinstance(llm_client, DSPyLLMClient)  # for mypy
                 logger.info(
                     "dspy_summarizer_client_creation",
                     extra={"schema": "TrajectorySummary"},
@@ -2231,7 +2233,7 @@ class ReactPlanner:
     async def _generate_clarification(
         self,
         trajectory: Trajectory,
-        failed_answer: str,
+        failed_answer: str | dict[str, Any] | Any,
         critique: ReflectionCritique,
         revision_attempts: int,
     ) -> str:
@@ -2246,7 +2248,7 @@ class ReactPlanner:
 
         Args:
             trajectory: Current planning trajectory
-            failed_answer: The low-quality answer that failed reflection
+            failed_answer: The low-quality answer that failed reflection (str or dict)
             critique: Final reflection critique with feedback
             revision_attempts: How many revisions were attempted
 
