@@ -346,6 +346,170 @@ print(result.payload)  # LLM orchestrated search → summarize automatically
 * **Adaptive replanning** — Tool failures feed structured error suggestions back to LLM for recovery
 * **Constraint enforcement** — Set hop budgets, deadlines, and token limits to prevent runaway execution
 * **Planning hints** — Guide LLM behavior with ordering preferences, parallel groups, and tool filters
+* **Policy-based tool filtering** — Restrict catalog visibility per tenant, role, or safety requirement with `ToolPolicy`
+
+### Policy-Based Tool Filtering
+
+Apply runtime guardrails to the planner's tool catalog using `ToolPolicy`. This
+lets you tailor availability by tenant tier, user permissions, or safety
+tags without modifying the underlying nodes.
+
+```python
+from penguiflow.planner import ReactPlanner, ToolPolicy
+
+policy_free = ToolPolicy(allowed_tools={"search_public", "summarise"})
+policy_premium = ToolPolicy(denied_tools={"delete_user"}, require_tags={"safe"})
+
+planner_free = ReactPlanner(..., tool_policy=policy_free)
+planner_premium = ReactPlanner(..., tool_policy=policy_premium)
+
+print(planner_free._spec_by_name.keys())   # {'search_public', 'summarise'}
+print(planner_premium._spec_by_name.keys())  # filtered catalog
+```
+
+Policies evaluate in the following order:
+
+1. `denied_tools`
+2. `allowed_tools` (if provided)
+3. `require_tags` (must be present on the tool)
+
+Any tool failing these checks is removed before prompt construction, and the
+planner logs the filtered names for observability. Combine this with stored
+tenant settings or role metadata to enforce enterprise-grade boundaries.
+
+### Reflection Loop (Quality Assurance)
+
+PenguiFlow's ReactPlanner now includes an optional **reflection loop** that critiques candidate answers before finishing. This
+prevents the LLM from prematurely declaring success when critical requirements remain unsatisfied.
+
+Enable the loop with a `ReflectionConfig`:
+
+```python
+from penguiflow.planner import ReactPlanner, ReflectionConfig, ReflectionCriteria
+
+planner = ReactPlanner(
+    llm="gpt-4",
+    catalog=build_catalog([search_docs, summarize], registry),
+    reflection_config=ReflectionConfig(
+        enabled=True,
+        criteria=ReflectionCriteria(
+            completeness="Addresses all aspects of the user's query",
+            accuracy="Grounds statements in verified observations",
+            clarity="Explains reasoning clearly",
+        ),
+        quality_threshold=0.85,
+        max_revisions=2,
+        use_separate_llm=True,
+    ),
+    reflection_llm="gpt-4o-mini",
+)
+
+result = await planner.run("Explain how PenguiFlow handles errors in parallel execution")
+print(result.metadata["reflection"])  # => {'score': 0.92, 'revisions': 1, 'passed': True, 'feedback': '...'}
+```
+
+**Benefits:**
+
+* ✅ Prevents incomplete answers — planner loops until the critique score meets your threshold or max revisions are reached
+* ✅ Observable — every critique emits a `PlannerEvent` with score, pass flag, and truncated feedback
+* ✅ Cost-aware — reuse the main LLM or provide a cheaper `reflection_llm` for critiques
+* ✅ Budget-safe — revisions respect hop and deadline budgets; no runaway loops
+
+### Cost Tracking
+
+ReactPlanner automatically records LLM spend for every planning session. Costs are split across planner actions, reflection calls, and trajectory summarisation so you can monitor budgets in production.
+
+```python
+from penguiflow.planner import ReactPlanner, ReflectionConfig
+
+planner = ReactPlanner(
+    llm="gpt-4o",
+    catalog=build_catalog([search_docs, summarize], registry),
+    reflection_config=ReflectionConfig(enabled=True, max_revisions=2),
+    reflection_llm="gpt-4o-mini",  # cheaper critique model
+)
+
+result = await planner.run("Analyse onboarding friction across regions")
+
+cost = result.metadata["cost"]
+print(f"Total cost: ${cost['total_cost_usd']:.4f}")
+print(f"Planner calls: {cost['main_llm_calls']}")
+print(f"Reflections: {cost['reflection_llm_calls']}")
+print(f"Summaries: {cost['summarizer_llm_calls']}")
+```
+
+Hook into planner events to emit metrics or alerts when sessions exceed your budget:
+
+```python
+from penguiflow.planner.react import PlannerEvent
+
+def track_costs(event: PlannerEvent) -> None:
+    if event.event_type != "finish":
+        return
+    session_cost = event.extra.get("cost", {}).get("total_cost_usd", 0.0)
+    if session_cost > 0.10:
+        logger.warning("high_cost_session", extra={"cost_usd": session_cost})
+
+planner = ReactPlanner(
+    llm="gpt-4o",
+    catalog=build_catalog([search_docs, summarize], registry),
+    event_callback=track_costs,
+)
+```
+
+### Streaming Planner Responses
+
+ReactPlanner tools can emit **streaming chunks** mid-execution. Each call to
+`ctx.emit_chunk` is persisted on the trajectory and surfaced through
+`PlannerEvent(event_type="stream_chunk")`, so downstream UIs can render partial
+progress as soon as it is available.
+
+```python
+from pydantic import BaseModel
+
+from penguiflow.catalog import build_catalog, tool
+from penguiflow.planner import PlannerEvent, ReactPlanner
+from penguiflow.registry import ModelRegistry
+
+
+class Query(BaseModel):
+    question: str
+
+
+class Answer(BaseModel):
+    answer: str
+
+
+@tool(desc="Stream answer token-by-token")
+async def stream_answer(args: Query, ctx) -> Answer:
+    tokens = ["PenguiFlow", "is", "a", "typed", "async", "planner"]
+    for index, token in enumerate(tokens):
+        await ctx.emit_chunk("answer_stream", index, f"{token} ", done=False)
+
+    await ctx.emit_chunk("answer_stream", len(tokens), "", done=True)
+    return Answer(answer=" ".join(tokens))
+
+
+def handle_stream(event: PlannerEvent) -> None:
+    if event.event_type == "stream_chunk":
+        print(event.extra["text"], end="", flush=True)
+        if event.extra["done"]:
+            print()
+
+
+registry = ModelRegistry()
+registry.register("stream_answer", Query, Answer)
+
+
+planner = ReactPlanner(
+    llm="gpt-4o-mini",
+    catalog=build_catalog([stream_answer], registry),
+    event_callback=handle_stream,
+)
+
+result = await planner.run("Tell me about PenguiFlow")
+print(result.metadata["steps"][0]["streams"]["answer_stream"])  # structured chunks
+```
 
 **Model support:**
 * Install `penguiflow[planner]` for LiteLLM integration (100+ models: OpenAI, Anthropic, Azure, etc.)
@@ -643,6 +807,7 @@ pytest -q
 * `examples/status_roadmap_flow/`: roadmap-driven websocket status updates with FlowResponse scaffolding.
 * `examples/react_minimal/`: JSON-only ReactPlanner loop with a stubbed LLM.
 * `examples/react_pause_resume/`: Phase B planner features with pause/resume and developer hints.
+* `examples/policy_filtering/`: tenant-aware planner with runtime `ToolPolicy` filtering.
 
 
 ---

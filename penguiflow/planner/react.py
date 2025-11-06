@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import time
+from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
@@ -69,7 +70,7 @@ class JSONLLMClient(Protocol):
         *,
         messages: Sequence[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
-    ) -> str:
+    ) -> str | tuple[str, float]:
         ...
 
 
@@ -111,6 +112,147 @@ class PlannerFinish(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ToolPolicy(BaseModel):
+    """Runtime policy for tool availability and permissions.
+
+    Use :class:`ToolPolicy` to scope which tools are visible to a planner
+    instance at runtime. Policies can be derived from tenant entitlements,
+    user roles, safety requirements, or cost controls.
+
+    Examples
+    --------
+    >>> ToolPolicy(allowed_tools={"search", "summarise"})  # whitelist only
+    ToolPolicy(
+    ...     allowed_tools={'search', 'summarise'},
+    ...     denied_tools=set(),
+    ...     require_tags=set(),
+    ... )
+
+    >>> ToolPolicy(denied_tools={"gpt4_analysis"})  # blacklist specific tools
+    ToolPolicy(
+    ...     allowed_tools=None,
+    ...     denied_tools={'gpt4_analysis'},
+    ...     require_tags=set(),
+    ... )
+
+    >>> ToolPolicy(require_tags={"safe", "read-only"})  # enforce safety tags
+    ToolPolicy(
+    ...     allowed_tools=None,
+    ...     denied_tools=set(),
+    ...     require_tags={'safe', 'read-only'},
+    ... )
+    """
+
+    allowed_tools: set[str] | None = None
+    """If set, only these tools are available (whitelist)."""
+
+    denied_tools: set[str] = Field(default_factory=set)
+    """Tools that are explicitly forbidden (blacklist)."""
+
+    require_tags: set[str] = Field(default_factory=set)
+    """Tools must include **all** of these tags to be available."""
+
+    def is_allowed(
+        self,
+        node_name: str,
+        node_tags: Mapping[str, Any] | Sequence[str],
+    ) -> bool:
+        """Return ``True`` when a tool passes the policy filters."""
+
+        tags = set(node_tags)
+
+        if node_name in self.denied_tools:
+            return False
+
+        if self.allowed_tools is not None and node_name not in self.allowed_tools:
+            return False
+
+        if self.require_tags and not self.require_tags.issubset(tags):
+            return False
+
+        return True
+
+
+class ReflectionCriteria(BaseModel):
+    """Quality criteria used when critiquing an answer."""
+
+    completeness: str = "Addresses all parts of the query"
+    accuracy: str = "Factually correct based on observations"
+    clarity: str = "Well-explained and coherent"
+
+
+class ReflectionCritique(BaseModel):
+    """Structured critique returned by the reflection LLM."""
+
+    score: float = Field(ge=0.0, le=1.0)
+    passed: bool
+    feedback: str
+    issues: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+
+
+class ReflectionConfig(BaseModel):
+    """Configuration controlling the reflection loop behaviour."""
+
+    enabled: bool = False
+    criteria: ReflectionCriteria = Field(default_factory=ReflectionCriteria)
+    quality_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
+    max_revisions: int = Field(default=2, ge=1, le=10)
+    use_separate_llm: bool = False
+
+
+class ClarificationResponse(BaseModel):
+    """Response when planner cannot satisfy query after reflection failures.
+
+    This structured response is generated when:
+    1. Reflection loop exhausts max_revisions
+    2. Quality score remains below threshold
+    3. System transforms low-quality answer into honest clarification
+
+    The goal is to be transparent with users about limitations and guide
+    them toward providing the information needed for a proper answer.
+    """
+
+    # Main response text (required)
+    text: str = Field(
+        description="Honest explanation of what was tried and why it didn't work"
+    )
+
+    # Query satisfaction status (required)
+    confidence: Literal["satisfied", "unsatisfied"] = Field(
+        description="Whether the query was satisfactorily answered"
+    )
+
+    # What was attempted (optional but recommended)
+    attempted_approaches: list[str] = Field(
+        default_factory=list,
+        description="List of approaches/tools tried to answer the query",
+    )
+
+    # Clarifying questions to ask user (optional but recommended)
+    clarifying_questions: list[str] = Field(
+        default_factory=list,
+        description="Questions to ask user to better understand their needs",
+    )
+
+    # Suggestions for improvement (optional)
+    suggestions: list[str] = Field(
+        default_factory=list,
+        description="What would help answer this query (data sources, tools, context)",
+    )
+
+    # Diagnostic metadata (optional)
+    reflection_score: float | None = Field(
+        default=None,
+        description="Final reflection quality score that triggered clarification",
+    )
+
+    revision_attempts: int | None = Field(
+        default=None,
+        description="How many revision attempts were made before giving up",
+    )
+
+
 class TrajectorySummary(BaseModel):
     goals: list[str] = Field(default_factory=list)
     facts: dict[str, Any] = Field(default_factory=dict)
@@ -136,14 +278,21 @@ class TrajectoryStep:
     observation: Any | None = None
     error: str | None = None
     failure: Mapping[str, Any] | None = None
+    streams: Mapping[str, Sequence[Mapping[str, Any]]] | None = None
 
     def dump(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "action": self.action.model_dump(mode="json"),
             "observation": self._serialise_observation(),
             "error": self.error,
             "failure": dict(self.failure) if self.failure else None,
         }
+        if self.streams:
+            payload["streams"] = {
+                stream_id: [dict(chunk) for chunk in chunks]
+                for stream_id, chunks in self.streams.items()
+            }
+        return payload
 
     def _serialise_observation(self) -> Any:
         if isinstance(self.observation, BaseModel):
@@ -183,11 +332,25 @@ class Trajectory:
         )
         for step_data in payload.get("steps", []):
             action = PlannerAction.model_validate(step_data["action"])
+            streams_payload = step_data.get("streams")
+            normalised_streams: dict[str, tuple[Mapping[str, Any], ...]] | None = None
+            if isinstance(streams_payload, Mapping):
+                normalised_streams = {}
+                for stream_id, chunk_list in streams_payload.items():
+                    if not isinstance(chunk_list, Sequence):
+                        continue
+                    chunks: list[Mapping[str, Any]] = []
+                    for chunk in chunk_list:
+                        if isinstance(chunk, Mapping):
+                            chunks.append(dict(chunk))
+                    if chunks:
+                        normalised_streams[str(stream_id)] = tuple(chunks)
             step = TrajectoryStep(
                 action=action,
                 observation=step_data.get("observation"),
                 error=step_data.get("error"),
                 failure=step_data.get("failure"),
+                streams=normalised_streams,
             )
             trajectory.steps.append(step)
         summary_data = payload.get("summary")
@@ -395,10 +558,65 @@ class _ConstraintTracker:
         return tracker
 
 
+@dataclass(slots=True)
+class _CostTracker:
+    """Track LLM costs across a planning session."""
+
+    _total_cost_usd: float = 0.0
+    _main_llm_calls: int = 0
+    _reflection_llm_calls: int = 0
+    _summarizer_llm_calls: int = 0
+
+    def record_main_call(self, cost: float) -> None:
+        """Record a planner step LLM invocation."""
+
+        self._total_cost_usd += cost
+        self._main_llm_calls += 1
+
+    def record_reflection_call(self, cost: float) -> None:
+        """Record a reflection LLM invocation."""
+
+        self._total_cost_usd += cost
+        self._reflection_llm_calls += 1
+
+    def record_summarizer_call(self, cost: float) -> None:
+        """Record a summariser LLM invocation."""
+
+        self._total_cost_usd += cost
+        self._summarizer_llm_calls += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        """Render a rounded snapshot suitable for metadata."""
+
+        return {
+            "total_cost_usd": round(self._total_cost_usd, 6),
+            "main_llm_calls": self._main_llm_calls,
+            "reflection_llm_calls": self._reflection_llm_calls,
+            "summarizer_llm_calls": self._summarizer_llm_calls,
+        }
+
+
 class _PlannerPauseSignal(Exception):
     def __init__(self, pause: PlannerPause) -> None:
         super().__init__(pause.reason)
         self.pause = pause
+
+
+def _coerce_llm_response(
+    result: str | tuple[str, float]
+) -> tuple[str, float]:
+    """Normalise JSON LLM client responses to ``(content, cost)`` tuples."""
+
+    if isinstance(result, tuple):
+        content, cost = result
+        return content, float(cost)
+    if isinstance(result, str):
+        return result, 0.0
+    msg = (
+        "Expected JSONLLMClient to return a string or (string, float) tuple, "
+        f"received {type(result)!r}"
+    )
+    raise TypeError(msg)
 
 
 @dataclass(slots=True)
@@ -407,6 +625,68 @@ class _BranchExecutionResult:
     error: str | None = None
     failure: Mapping[str, Any] | None = None
     pause: PlannerPause | None = None
+
+
+def _sanitize_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Remove advanced JSON schema constraints for broader provider compatibility.
+
+    Many LLM providers (Databricks, Cerebras, Groq, etc.) don't support advanced
+    JSON schema features like:
+    - minimum, maximum, exclusiveMinimum, exclusiveMaximum (number constraints)
+    - minLength, maxLength (string constraints)
+    - minItems, maxItems, uniqueItems (array constraints)
+    - pattern (regex patterns)
+    - format (string formats like 'email', 'date-time')
+
+    This function recursively removes these constraints while preserving the core
+    schema structure (types, properties, required fields, etc.).
+
+    Args:
+        schema: JSON schema dict (potentially with unsupported constraints)
+
+    Returns:
+        Sanitized schema dict compatible with more LLM providers
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    # Create a copy to avoid mutating the original
+    sanitized = {}
+
+    # List of constraint keys to remove
+    unsupported_constraints = {
+        "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",  # number constraints
+        "minLength", "maxLength",  # string constraints
+        "minItems", "maxItems", "uniqueItems",  # array constraints
+        "pattern",  # regex pattern matching
+        "format",  # string formats (email, date-time, etc.)
+    }
+
+    for key, value in schema.items():
+        # Skip unsupported constraint keys
+        if key in unsupported_constraints:
+            continue
+
+        # Recursively sanitize nested objects
+        if key == "properties" and isinstance(value, dict):
+            sanitized[key] = {
+                prop_name: _sanitize_json_schema(prop_schema)
+                for prop_name, prop_schema in value.items()
+            }
+        elif key == "items" and isinstance(value, dict):
+            sanitized[key] = _sanitize_json_schema(value)
+        elif key == "additionalProperties" and isinstance(value, dict):
+            sanitized[key] = _sanitize_json_schema(value)
+        elif key == "allOf" and isinstance(value, list):
+            sanitized[key] = [_sanitize_json_schema(item) for item in value]  # type: ignore[assignment]
+        elif key == "anyOf" and isinstance(value, list):
+            sanitized[key] = [_sanitize_json_schema(item) for item in value]  # type: ignore[assignment]
+        elif key == "oneOf" and isinstance(value, list):
+            sanitized[key] = [_sanitize_json_schema(item) for item in value]  # type: ignore[assignment]
+        else:
+            sanitized[key] = value
+
+    return sanitized
 
 
 class _LiteLLMJSONClient:
@@ -430,7 +710,7 @@ class _LiteLLMJSONClient:
         *,
         messages: Sequence[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
-    ) -> str:
+    ) -> tuple[str, float]:
         try:
             import litellm
         except ModuleNotFoundError as exc:  # pragma: no cover - import guard
@@ -447,7 +727,31 @@ class _LiteLLMJSONClient:
         params.setdefault("temperature", self._temperature)
         params["messages"] = list(messages)
         if self._json_schema_mode and response_format is not None:
-            params["response_format"] = response_format
+            # Detect providers that don't support advanced JSON schema constraints
+            model_name = self._llm if isinstance(self._llm, str) else self._llm.get("model", "")
+            needs_sanitization = (
+                model_name.startswith("databricks/")
+                or "databricks" in model_name.lower()
+                or "groq" in model_name.lower()
+                or "cerebras" in model_name.lower()
+            )
+
+            if needs_sanitization and "json_schema" in response_format:
+                # Sanitize the schema to remove unsupported constraints
+                sanitized_format = dict(response_format)
+                sanitized_format["json_schema"] = {
+                    "name": response_format["json_schema"]["name"],
+                    "schema": _sanitize_json_schema(
+                        response_format["json_schema"]["schema"]
+                    ),
+                }
+                params["response_format"] = sanitized_format
+                logger.debug(
+                    "json_schema_sanitized",
+                    extra={"model": model_name, "reason": "provider_compatibility"},
+                )
+            else:
+                params["response_format"] = response_format
 
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
@@ -461,14 +765,20 @@ class _LiteLLMJSONClient:
                         raise RuntimeError("LiteLLM returned empty content")
 
                     # Log successful LLM call with cost if available
-                    cost = response.get("_hidden_params", {}).get("response_cost", 0)
-                    if cost and cost > 0:
-                        logger.debug(
-                            "llm_call_success",
-                            extra={"attempt": attempt + 1, "cost_usd": cost},
-                        )
+                    cost = float(
+                        response.get("_hidden_params", {}).get("response_cost", 0.0)
+                        or 0.0
+                    )
+                    logger.debug(
+                        "llm_call_success",
+                        extra={
+                            "attempt": attempt + 1,
+                            "cost_usd": cost,
+                            "tokens": response.get("usage", {}).get("total_tokens", 0),
+                        },
+                    )
 
-                    return content
+                    return content, cost
             except TimeoutError as exc:
                 last_error = exc
                 logger.warning(
@@ -504,13 +814,85 @@ class _LiteLLMJSONClient:
         raise RuntimeError(msg) from last_error
 
 
+@dataclass(slots=True)
+class _StreamChunk:
+    """Streaming chunk captured during planning."""
+
+    stream_id: str
+    seq: int
+    text: str
+    done: bool
+    meta: Mapping[str, Any]
+    ts: float
+
+
 class _PlannerContext:
-    __slots__ = ("meta", "_planner", "_trajectory")
+    __slots__ = ("meta", "_planner", "_trajectory", "_chunks")
 
     def __init__(self, planner: ReactPlanner, trajectory: Trajectory) -> None:
         self.meta = dict(trajectory.context_meta or {})
         self._planner = planner
         self._trajectory = trajectory
+        self._chunks: list[_StreamChunk] = []
+
+    async def emit_chunk(
+        self,
+        stream_id: str,
+        seq: int,
+        text: str,
+        *,
+        done: bool = False,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Emit streaming chunk during tool execution."""
+
+        chunk = _StreamChunk(
+            stream_id=stream_id,
+            seq=seq,
+            text=text,
+            done=done,
+            meta=dict(meta or {}),
+            ts=self._planner._time_source(),
+        )
+        self._chunks.append(chunk)
+
+        self._planner._emit_event(
+            PlannerEvent(
+                event_type="stream_chunk",
+                ts=chunk.ts,
+                trajectory_step=len(self._trajectory.steps),
+                extra={
+                    "stream_id": stream_id,
+                    "seq": seq,
+                    "text": text,
+                    "done": done,
+                    "meta": dict(meta or {}),
+                },
+            )
+        )
+
+    def _collect_chunks(self) -> dict[str, list[dict[str, Any]]]:
+        """Collect streaming chunks grouped by stream identifier."""
+
+        if not self._chunks:
+            return {}
+
+        streams: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for chunk in self._chunks:
+            streams[chunk.stream_id].append(
+                {
+                    "seq": chunk.seq,
+                    "text": chunk.text,
+                    "done": chunk.done,
+                    "meta": dict(chunk.meta),
+                    "ts": chunk.ts,
+                }
+            )
+
+        for stream_chunks in streams.values():
+            stream_chunks.sort(key=lambda payload: payload["seq"])
+
+        return dict(streams)
 
     async def pause(
         self,
@@ -569,9 +951,18 @@ class ReactPlanner:
     summarizer_llm : str | Mapping[str, Any] | None
         Separate (cheaper) LLM for trajectory compression. Falls back to
         main LLM if not set.
+    reflection_config : ReflectionConfig | None
+        Optional configuration enabling automatic answer critique before
+        finishing. Disabled by default.
+    reflection_llm : str | Mapping[str, Any] | None
+        Optional LiteLLM identifier used for critique when
+        ``reflection_config.use_separate_llm`` is ``True``.
     planning_hints : Mapping[str, Any] | None
         Structured constraints and preferences (ordering, disallowed nodes,
         max_parallel, etc.). See plan.md for schema.
+    tool_policy : ToolPolicy | None
+        Optional runtime policy that filters the tool catalog (whitelists,
+        blacklists, or tag requirements) for multi-tenant and safety use cases.
     repair_attempts : int
         Max attempts to repair invalid JSON from LLM. Default: 3.
     deadline_s : float | None
@@ -638,6 +1029,9 @@ class ReactPlanner:
         llm_timeout_s: float = 60.0,
         llm_max_retries: int = 3,
         absolute_max_parallel: int = 50,
+        reflection_config: ReflectionConfig | None = None,
+        reflection_llm: str | Mapping[str, Any] | None = None,
+        tool_policy: ToolPolicy | None = None,
     ) -> None:
         if catalog is None:
             if nodes is None or registry is None:
@@ -646,7 +1040,34 @@ class ReactPlanner:
                 )
             catalog = build_catalog(nodes, registry)
 
-        self._specs = list(catalog)
+        self._tool_policy = tool_policy
+        specs = list(catalog)
+        if tool_policy is not None:
+            filtered_specs: list[NodeSpec] = []
+            removed: list[str] = []
+            for spec in specs:
+                if tool_policy.is_allowed(spec.name, spec.tags):
+                    filtered_specs.append(spec)
+                else:
+                    removed.append(spec.name)
+
+            if removed:
+                logger.info(
+                    "planner_tool_policy_filtered",
+                    extra={
+                        "removed": removed,
+                        "original_count": len(specs),
+                        "filtered_count": len(filtered_specs),
+                    },
+                )
+            if not filtered_specs:
+                logger.warning(
+                    "planner_tool_policy_empty",
+                    extra={"original_count": len(specs)},
+                )
+            specs = filtered_specs
+
+        self._specs = specs
         self._spec_by_name = {spec.name: spec for spec in self._specs}
         self._catalog_records = [spec.to_tool_record() for spec in self._specs]
         self._planning_hints = _PlanningHints.from_mapping(planning_hints)
@@ -669,6 +1090,7 @@ class ReactPlanner:
         self._pause_records: dict[str, _PauseRecord] = {}
         self._active_trajectory: Trajectory | None = None
         self._active_tracker: _ConstraintTracker | None = None
+        self._cost_tracker = _CostTracker()
         self._deadline_s = deadline_s
         self._hop_budget = hop_budget
         self._time_source = time_source or time.monotonic
@@ -684,8 +1106,50 @@ class ReactPlanner:
         self._action_schema: Mapping[str, Any] = action_schema
         self._response_format = action_schema if json_schema_mode else None
         self._summarizer_client: JSONLLMClient | None = None
+        self._reflection_client: JSONLLMClient | None = None
+        self._clarification_client: JSONLLMClient | None = None
+        self._reflection_config = reflection_config
+
         if llm_client is not None:
             self._client = llm_client
+
+            # CRITICAL: Detect DSPy client and create separate instances for multi-schema support
+            # DSPyLLMClient is hardcoded to a single output schema, so we need separate
+            # instances for reflection (ReflectionCritique), summarization (TrajectorySummary),
+            # and clarification (ClarificationResponse)
+            from .dspy_client import DSPyLLMClient
+            is_dspy = isinstance(llm_client, DSPyLLMClient)
+
+            # Create DSPy reflection client if reflection enabled
+            if is_dspy and reflection_config and reflection_config.enabled:
+                assert isinstance(llm_client, DSPyLLMClient)  # for mypy
+                logger.info(
+                    "dspy_reflection_client_creation",
+                    extra={"schema": "ReflectionCritique"},
+                )
+                self._reflection_client = DSPyLLMClient.from_base_client(
+                    llm_client, ReflectionCritique
+                )
+
+                # Create DSPy clarification client (used when reflection fails)
+                logger.info(
+                    "dspy_clarification_client_creation",
+                    extra={"schema": "ClarificationResponse"},
+                )
+                self._clarification_client = DSPyLLMClient.from_base_client(
+                    llm_client, ClarificationResponse
+                )
+
+            # Create DSPy summarizer client if summarization enabled
+            if is_dspy and token_budget is not None and token_budget > 0:
+                assert isinstance(llm_client, DSPyLLMClient)  # for mypy
+                logger.info(
+                    "dspy_summarizer_client_creation",
+                    extra={"schema": "TrajectorySummary"},
+                )
+                self._summarizer_client = DSPyLLMClient.from_base_client(
+                    llm_client, TrajectorySummary
+                )
         else:
             if llm is None:
                 raise ValueError("llm or llm_client must be provided")
@@ -696,6 +1160,8 @@ class ReactPlanner:
                 max_retries=llm_max_retries,
                 timeout_s=llm_timeout_s,
             )
+
+        # LiteLLM-based separate clients (override DSPy if explicitly provided)
         if summarizer_llm is not None:
             self._summarizer_client = _LiteLLMJSONClient(
                 summarizer_llm,
@@ -704,6 +1170,21 @@ class ReactPlanner:
                 max_retries=llm_max_retries,
                 timeout_s=llm_timeout_s,
             )
+
+        # Only set reflection client from reflection_llm if not already set by DSPy
+        if self._reflection_client is None:
+            if reflection_config and reflection_config.use_separate_llm:
+                if reflection_llm is None:
+                    raise ValueError(
+                        "reflection_llm required when use_separate_llm=True"
+                    )
+                self._reflection_client = _LiteLLMJSONClient(
+                    reflection_llm,
+                    temperature=temperature,
+                    json_schema_mode=True,
+                    max_retries=llm_max_retries,
+                    timeout_s=llm_timeout_s,
+                )
 
     async def run(
         self,
@@ -732,6 +1213,7 @@ class ReactPlanner:
             If LLM client fails after all retries.
         """
         logger.info("planner_run_start", extra={"query": query})
+        self._cost_tracker = _CostTracker()
         trajectory = Trajectory(query=query, context_meta=context_meta)
         return await self._run_loop(trajectory, tracker=None)
 
@@ -861,13 +1343,210 @@ class ReactPlanner:
                     continue
 
                 if action.next_node is None:
-                    payload = action.args or last_observation
+                    candidate_answer = action.args or last_observation
+                    metadata_reflection: dict[str, Any] | None = None
+
+                    if (
+                        candidate_answer is not None
+                        and self._reflection_config
+                        and self._reflection_config.enabled
+                    ):
+                        critique: ReflectionCritique | None = None
+                        metadata_reflection = {}
+                        for revision_idx in range(
+                            self._reflection_config.max_revisions + 1
+                        ):
+                            critique = await self._critique_answer(
+                                trajectory, candidate_answer
+                            )
+
+                            self._emit_event(
+                                PlannerEvent(
+                                    event_type="reflection_critique",
+                                    ts=self._time_source(),
+                                    trajectory_step=len(trajectory.steps),
+                                    thought=action.thought,
+                                    extra={
+                                        "score": critique.score,
+                                        "passed": critique.passed,
+                                        "revision": revision_idx,
+                                        "feedback": critique.feedback[:200],
+                                    },
+                                )
+                            )
+
+                            if (
+                                critique.passed
+                                or critique.score
+                                >= self._reflection_config.quality_threshold
+                            ):
+                                logger.info(
+                                    "reflection_passed",
+                                    extra={
+                                        "score": critique.score,
+                                        "revisions": revision_idx,
+                                    },
+                                )
+                                break
+
+                            if revision_idx >= self._reflection_config.max_revisions:
+                                threshold = (
+                                    self._reflection_config.quality_threshold
+                                )
+
+                                # Check if quality is still below threshold
+                                if critique.score < threshold:
+                                    # Quality remains poor - transform into honest clarification
+                                    logger.warning(
+                                        "reflection_honest_failure",
+                                        extra={
+                                            "score": critique.score,
+                                            "threshold": threshold,
+                                            "revisions": revision_idx,
+                                        },
+                                    )
+
+                                    # Generate clarification instead of returning low-quality answer
+                                    clarification_text = await self._generate_clarification(
+                                        trajectory=trajectory,
+                                        failed_answer=candidate_answer,
+                                        critique=critique,
+                                        revision_attempts=revision_idx,
+                                    )
+
+                                    # Replace candidate answer with clarification
+                                    # Ensure proper structure for downstream consumers (like FinalAnswer model)
+                                    if isinstance(candidate_answer, dict):
+                                        # Update existing dict with clarification
+                                        candidate_answer["text"] = clarification_text
+
+                                        # Ensure required fields are present
+                                        if "route" not in candidate_answer:
+                                            # Extract route from first step observation if available
+                                            route = "unknown"
+                                            if trajectory.steps and trajectory.steps[0].observation:
+                                                obs = trajectory.steps[0].observation
+                                                # Handle both dict and Pydantic model observations
+                                                if isinstance(obs, dict):
+                                                    route = obs.get("route", "unknown")
+                                                else:
+                                                    route = getattr(obs, "route", "unknown")
+                                            candidate_answer["route"] = route
+                                        if "artifacts" not in candidate_answer:
+                                            candidate_answer["artifacts"] = {}
+                                        if "metadata" not in candidate_answer:
+                                            candidate_answer["metadata"] = {}
+
+                                        # Mark as unsatisfied in metadata
+                                        candidate_answer["metadata"]["confidence"] = "unsatisfied"
+                                        candidate_answer["metadata"]["reflection_score"] = critique.score
+                                        candidate_answer["metadata"]["revision_attempts"] = revision_idx
+                                    else:
+                                        # Create structured answer from scratch
+                                        route = "unknown"
+                                        if trajectory.steps and trajectory.steps[0].observation:
+                                            obs = trajectory.steps[0].observation
+                                            # Handle both dict and Pydantic model observations
+                                            if isinstance(obs, dict):
+                                                route = obs.get("route", "unknown")
+                                            else:
+                                                route = getattr(obs, "route", "unknown")
+
+                                        candidate_answer = {
+                                            "text": clarification_text,
+                                            "route": route,
+                                            "artifacts": {},
+                                            "metadata": {
+                                                "confidence": "unsatisfied",
+                                                "reflection_score": critique.score,
+                                                "revision_attempts": revision_idx,
+                                            },
+                                        }
+
+                                    # Emit telemetry event
+                                    self._emit_event(
+                                        PlannerEvent(
+                                            event_type="reflection_clarification_generated",
+                                            ts=self._time_source(),
+                                            trajectory_step=len(trajectory.steps),
+                                            thought="Generated clarification for unsatisfiable query",
+                                            extra={
+                                                "original_score": critique.score,
+                                                "threshold": threshold,
+                                                "revisions": revision_idx,
+                                            },
+                                        )
+                                    )
+                                else:
+                                    # Quality improved enough, just log warning
+                                    logger.warning(
+                                        "reflection_max_revisions",
+                                        extra={
+                                            "score": critique.score,
+                                            "threshold": threshold,
+                                        },
+                                    )
+
+                                break
+
+                            if not tracker.has_budget_for_next_tool():
+                                snapshot = tracker.snapshot()
+                                logger.warning(
+                                    "reflection_budget_exhausted",
+                                    extra={
+                                        "score": critique.score,
+                                        "hops_used": snapshot.get("hops_used"),
+                                    },
+                                )
+                                break
+
+                            logger.debug(
+                                "reflection_requesting_revision",
+                                extra={
+                                    "revision": revision_idx + 1,
+                                    "score": critique.score,
+                                },
+                            )
+
+                            revision_action = await self._request_revision(
+                                trajectory,
+                                critique,
+                            )
+                            candidate_answer = (
+                                revision_action.args or revision_action.model_dump()
+                            )
+                            trajectory.steps.append(
+                                TrajectoryStep(
+                                    action=revision_action,
+                                    observation={"status": "revision_requested"},
+                                )
+                            )
+                            trajectory.summary = None
+
+                        if critique is not None:
+                            metadata_reflection = {
+                                "score": critique.score,
+                                "revisions": min(
+                                    revision_idx,
+                                    self._reflection_config.max_revisions,
+                                ),
+                                "passed": critique.passed,
+                            }
+                            if critique.feedback:
+                                metadata_reflection["feedback"] = critique.feedback
+
+                    payload = candidate_answer
+                    metadata_extra: dict[str, Any] | None = None
+                    if metadata_reflection is not None:
+                        metadata_extra = {"reflection": metadata_reflection}
+
                     return self._finish(
                         trajectory,
                         reason="answer_complete",
                         payload=payload,
                         thought=action.thought,
                         constraints=tracker,
+                        metadata_extra=metadata_extra,
                     )
 
                 spec = self._spec_by_name.get(action.next_node)
@@ -896,6 +1575,7 @@ class ReactPlanner:
                     result = await spec.node.func(parsed_args, ctx)
                 except _PlannerPauseSignal as signal:
                     tracker.record_hop()
+                    pause_chunks = ctx._collect_chunks()
                     trajectory.steps.append(
                         TrajectoryStep(
                             action=action,
@@ -903,6 +1583,7 @@ class ReactPlanner:
                                 "pause": signal.pause.reason,
                                 "payload": signal.pause.payload,
                             },
+                            streams=pause_chunks or None,
                         )
                     )
                     trajectory.summary = None
@@ -915,17 +1596,21 @@ class ReactPlanner:
                     error = (
                         f"tool '{spec.name}' raised {exc.__class__.__name__}: {exc}"
                     )
+                    failure_chunks = ctx._collect_chunks()
                     trajectory.steps.append(
                         TrajectoryStep(
                             action=action,
                             error=error,
                             failure=failure_payload,
+                            streams=failure_chunks or None,
                         )
                     )
                     tracker.record_hop()
                     trajectory.summary = None
                     last_observation = None
                     continue
+
+                step_chunks = ctx._collect_chunks()
 
                 try:
                     observation = spec.out_model.model_validate(result)
@@ -935,13 +1620,23 @@ class ReactPlanner:
                         json.dumps(exc.errors(), ensure_ascii=False),
                     )
                     tracker.record_hop()
-                    trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                    trajectory.steps.append(
+                        TrajectoryStep(
+                            action=action,
+                            error=error,
+                            streams=step_chunks or None,
+                        )
+                    )
                     trajectory.summary = None
                     last_observation = None
                     continue
 
                 trajectory.steps.append(
-                    TrajectoryStep(action=action, observation=observation)
+                    TrajectoryStep(
+                        action=action,
+                        observation=observation,
+                        streams=step_chunks or None,
+                    )
                 )
                 tracker.record_hop()
                 trajectory.summary = None
@@ -1006,10 +1701,12 @@ class ReactPlanner:
             ):
                 response_format = self._action_schema
 
-            raw = await self._client.complete(
+            llm_result = await self._client.complete(
                 messages=messages,
                 response_format=response_format,
             )
+            raw, cost = _coerce_llm_response(llm_result)
+            self._cost_tracker.record_main_call(cost)
 
             try:
                 return PlannerAction.model_validate_json(raw)
@@ -1435,10 +2132,12 @@ class ReactPlanner:
                 },
             }
             try:
-                raw = await self._summarizer_client.complete(
+                llm_result = await self._summarizer_client.complete(
                     messages=messages,
                     response_format=response_format,
                 )
+                raw, cost = _coerce_llm_response(llm_result)
+                self._cost_tracker.record_summarizer_call(cost)
                 summary = TrajectorySummary.model_validate_json(raw)
                 summary.note = summary.note or "llm"
                 trajectory.summary = summary
@@ -1455,6 +2154,233 @@ class ReactPlanner:
         trajectory.summary = base_summary
         logger.debug("trajectory_summarized", extra={"method": "rule_based"})
         return base_summary
+
+    async def _critique_answer(
+        self,
+        trajectory: Trajectory,
+        candidate: Any,
+    ) -> ReflectionCritique:
+        """Call the critique LLM to assess the candidate answer."""
+
+        if self._reflection_config is None:
+            raise RuntimeError("Reflection not configured")
+
+        client = (
+            self._reflection_client
+            if self._reflection_config.use_separate_llm
+            and self._reflection_client is not None
+            else self._client
+        )
+        if client is None:
+            raise RuntimeError("Reflection client unavailable")
+
+        from . import reflection_prompts
+
+        system_prompt = reflection_prompts.build_critique_system_prompt(
+            self._reflection_config.criteria
+        )
+        user_prompt = reflection_prompts.build_critique_user_prompt(
+            trajectory.query,
+            candidate,
+            trajectory,
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "reflection_critique",
+                "schema": ReflectionCritique.model_json_schema(),
+            },
+        }
+
+        llm_result = await client.complete(
+            messages=messages, response_format=response_format
+        )
+        raw, cost = _coerce_llm_response(llm_result)
+        self._cost_tracker.record_reflection_call(cost)
+        critique = ReflectionCritique.model_validate_json(raw)
+
+        if (
+            critique.score >= self._reflection_config.quality_threshold
+            and not critique.passed
+        ):
+            critique.passed = True
+
+        return critique
+
+    async def _request_revision(
+        self,
+        trajectory: Trajectory,
+        critique: ReflectionCritique,
+    ) -> PlannerAction:
+        """Request a revised answer from the main planner LLM."""
+
+        from . import reflection_prompts
+
+        base_messages = await self._build_messages(trajectory)
+        revision_prompt = reflection_prompts.build_revision_prompt(
+            trajectory.steps[-1].action.thought if trajectory.steps else "",
+            critique,
+        )
+
+        messages = list(base_messages)
+        messages.append({"role": "user", "content": revision_prompt})
+
+        llm_result = await self._client.complete(
+            messages=messages,
+            response_format=self._response_format,
+        )
+        raw, cost = _coerce_llm_response(llm_result)
+        self._cost_tracker.record_main_call(cost)
+        return PlannerAction.model_validate_json(raw)
+
+    async def _generate_clarification(
+        self,
+        trajectory: Trajectory,
+        failed_answer: str | dict[str, Any] | Any,
+        critique: ReflectionCritique,
+        revision_attempts: int,
+    ) -> str:
+        """Generate honest clarification when reflection fails after max revisions.
+
+        This transforms a low-quality answer into a transparent response that:
+        1. Explains what was tried and why it didn't work
+        2. Asks clarifying questions to understand user needs
+        3. Suggests what would help answer the query properly
+
+        Uses the main planner LLM (not reflection LLM) to maintain "the voice".
+
+        Args:
+            trajectory: Current planning trajectory
+            failed_answer: The low-quality answer that failed reflection (str or dict)
+            critique: Final reflection critique with feedback
+            revision_attempts: How many revisions were attempted
+
+        Returns:
+            Formatted clarification text asking user for guidance
+        """
+        # Build prompt for clarification generation
+        system_prompt = """You are a helpful assistant that is transparent about limitations.
+
+When you cannot satisfactorily answer a query with available tools/data, you should:
+1. Honestly explain what you tried and why it didn't fully address the query
+2. Ask specific clarifying questions to better understand what the user needs
+3. Suggest what additional information, tools, or context would help you provide a proper answer
+
+Your goal is to guide the user toward providing what you need to answer their query properly."""
+
+        # Extract attempted approaches from trajectory
+        attempted_tools = [step.action.next_node for step in trajectory.steps if step.action.next_node]
+        attempts_summary = "\n".join([f"- {tool}" for tool in attempted_tools]) if attempted_tools else "None recorded"
+
+        user_prompt = f"""The query was: "{trajectory.query}"
+
+I attempted to answer this query but the quality was deemed unsatisfactory (score: {critique.score:.2f}/1.0).
+
+**What I tried:**
+{attempts_summary}
+
+**My attempted answer:**
+{failed_answer}
+
+**Quality feedback received:**
+{critique.feedback}
+
+**Issues identified:**
+{chr(10).join([f'- {issue}' for issue in critique.issues]) if critique.issues else 'None specified'}
+
+Given this situation, generate a STRUCTURED clarification response with:
+1. `text`: Honest explanation of limitations and what was tried
+2. `confidence`: Set to "unsatisfied"
+3. `attempted_approaches`: List of tools/approaches I tried
+4. `clarifying_questions`: 2-4 specific questions to ask the user
+5. `suggestions`: What would help me answer this properly (data sources, tools, context)
+6. `reflection_score`: {critique.score}
+7. `revision_attempts`: {revision_attempts}
+
+Be transparent, helpful, and guide the user toward providing what's needed."""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        # Determine which client to use (handle DSPy multi-schema)
+        client: JSONLLMClient
+        response_format: Mapping[str, Any]
+
+        from .dspy_client import DSPyLLMClient
+        if isinstance(self._client, DSPyLLMClient):
+            # DSPy requires separate client instance for ClarificationResponse schema
+            if self._clarification_client is None:
+                # Shouldn't happen (initialized in __init__), but handle gracefully
+                logger.warning(
+                    "clarification_client_missing",
+                    extra={"client_type": "DSPy"}
+                )
+                # Create on-the-fly
+                self._clarification_client = DSPyLLMClient.from_base_client(
+                    self._client, ClarificationResponse
+                )
+            client = self._clarification_client
+        else:
+            # LiteLLM uses same client with different response_format
+            client = self._client
+
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "clarification_response",
+                "schema": ClarificationResponse.model_json_schema(),
+            },
+        }
+
+        llm_result = await client.complete(
+            messages=messages,
+            response_format=response_format,
+        )
+        raw, cost = _coerce_llm_response(llm_result)
+        self._cost_tracker.record_main_call(cost)
+
+        clarification = ClarificationResponse.model_validate_json(raw)
+
+        # Format into user-friendly text
+        attempts_list = chr(10).join([
+            f'  {i+1}. {approach}'
+            for i, approach in enumerate(clarification.attempted_approaches)
+        ])
+        questions_list = chr(10).join([
+            f'  - {q}' for q in clarification.clarifying_questions
+        ])
+        suggestions_list = chr(10).join([
+            f'  - {s}' for s in clarification.suggestions
+        ])
+
+        # Build metadata line (split to avoid line length issues)
+        score_line = (
+            f"[Confidence: {clarification.confidence} | "
+            f"Quality Score: {clarification.reflection_score:.2f}/1.0 | "
+            f"Revision Attempts: {clarification.revision_attempts}]"
+        )
+
+        formatted_text = f"""{clarification.text}
+
+**What I Tried:**
+{attempts_list}
+
+**To Help Me Answer This:**
+{questions_list}
+
+**Suggestions:**
+{suggestions_list}
+
+{score_line}"""
+
+        return formatted_text
 
     def _check_action_constraints(
         self,
@@ -1699,6 +2625,7 @@ class ReactPlanner:
         thought: str,
         constraints: _ConstraintTracker | None = None,
         error: str | None = None,
+        metadata_extra: Mapping[str, Any] | None = None,
     ) -> PlannerFinish:
         metadata = {
             "reason": reason,
@@ -1706,13 +2633,16 @@ class ReactPlanner:
             "steps": trajectory.to_history(),
             "step_count": len(trajectory.steps),
         }
+        metadata["cost"] = self._cost_tracker.snapshot()
         if constraints is not None:
             metadata["constraints"] = constraints.snapshot()
         if error is not None:
             metadata["error"] = error
+        if metadata_extra:
+            metadata.update(metadata_extra)
 
         # Emit finish event
-        extra_data: dict[str, Any] = {"reason": reason}
+        extra_data: dict[str, Any] = {"reason": reason, "cost": metadata["cost"]}
         if error:
             extra_data["error"] = error
         self._emit_event(
@@ -1745,6 +2675,9 @@ __all__ = [
     "PlannerEventCallback",
     "PlannerFinish",
     "PlannerPause",
+    "ReflectionConfig",
+    "ReflectionCriteria",
+    "ReflectionCritique",
     "ReactPlanner",
     "Trajectory",
     "TrajectoryStep",

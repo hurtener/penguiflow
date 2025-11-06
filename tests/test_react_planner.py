@@ -12,7 +12,12 @@ from pydantic import BaseModel
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
 from penguiflow.planner import PlannerPause, ReactPlanner
-from penguiflow.planner.react import Trajectory
+from penguiflow.planner.react import (
+    PlannerAction,
+    ReflectionConfig,
+    Trajectory,
+    TrajectoryStep,
+)
 from penguiflow.registry import ModelRegistry
 
 
@@ -25,6 +30,10 @@ class Intent(BaseModel):
 
 
 class Documents(BaseModel):
+    documents: list[str]
+
+
+class SearchResult(BaseModel):
     documents: list[str]
 
 
@@ -60,6 +69,11 @@ async def triage(args: Query, ctx: object) -> Intent:
 @tool(desc="Search knowledge base", side_effects="read")
 async def retrieve(args: Intent, ctx: object) -> Documents:
     return Documents(documents=[f"Answering about {args.intent}"])
+
+
+@tool(desc="Search knowledge base (cost tracking)")
+async def search(args: Query, ctx: object) -> SearchResult:
+    return SearchResult(documents=[f"Results for {args.question}"])
 
 
 @tool(desc="Compose final answer")
@@ -132,11 +146,11 @@ class StubClient:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, object] | None = None,
-    ) -> str:
+    ) -> tuple[str, float]:
         self.calls.append(list(messages))
         if not self._responses:
             raise AssertionError("No stub responses left")
-        return self._responses.pop(0)
+        return self._responses.pop(0), 0.0
 
 
 class SummarizerStub:
@@ -148,17 +162,43 @@ class SummarizerStub:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, object] | None = None,
-    ) -> str:
+    ) -> tuple[str, float]:
         self.calls.append(list(messages))
-        return json.dumps(
-            {
-                "goals": ["stub"],
-                "facts": {"note": "compact"},
-                "pending": [],
-                "last_output_digest": "stub",
-                "note": "stub",
-            }
+        return (
+            json.dumps(
+                {
+                    "goals": ["stub"],
+                    "facts": {"note": "compact"},
+                    "pending": [],
+                    "last_output_digest": "stub",
+                    "note": "stub",
+                }
+            ),
+            0.0,
         )
+
+
+class CostStubClient:
+    """Stub client that also tracks synthetic cost values."""
+
+    def __init__(self, responses: list[tuple[Mapping[str, object], float]]) -> None:
+        self._responses = [
+            (json.dumps(payload, ensure_ascii=False), float(cost))
+            for payload, cost in responses
+        ]
+        self.calls: list[list[Mapping[str, str]]] = []
+
+    async def complete(
+        self,
+        *,
+        messages: list[Mapping[str, str]],
+        response_format: Mapping[str, object] | None = None,
+    ) -> tuple[str, float]:
+        del response_format
+        self.calls.append(list(messages))
+        if not self._responses:
+            raise AssertionError("No stub responses left")
+        return self._responses.pop(0)
 
 
 def make_planner(client: StubClient, **kwargs: object) -> ReactPlanner:
@@ -989,6 +1029,100 @@ async def test_react_planner_event_callback_receives_events() -> None:
 
 
 @pytest.mark.asyncio()
+async def test_react_planner_captures_stream_chunks() -> None:
+    """Streaming chunks should be emitted as events and persisted."""
+    from penguiflow.planner import PlannerEvent
+
+    chunk_events: list[dict[str, Any]] = []
+
+    def event_callback(event: PlannerEvent) -> None:
+        if event.event_type == "stream_chunk":
+            chunk_events.append(dict(event.extra))
+
+    @tool(desc="Stream partial answer")
+    async def stream_tool(args: Query, ctx: Any) -> Answer:
+        for i in range(5):
+            await ctx.emit_chunk("test_stream", i, f"token_{i} ", done=i == 4)
+        return Answer(answer="Complete")
+
+    registry = ModelRegistry()
+    registry.register("stream_tool", Query, Answer)
+
+    client = StubClient(
+        [
+            {
+                "thought": "stream",
+                "next_node": "stream_tool",
+                "args": {"question": "test"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"answer": "Complete"},
+            },
+        ]
+    )
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog([Node(stream_tool, name="stream_tool")], registry),
+        event_callback=event_callback,
+    )
+
+    result = await planner.run("Test streaming")
+
+    assert len(chunk_events) == 5
+    for index, event_payload in enumerate(chunk_events):
+        assert event_payload["stream_id"] == "test_stream"
+        assert event_payload["seq"] == index
+        assert event_payload["text"] == f"token_{index} "
+        assert event_payload["done"] == (index == 4)
+
+    steps = result.metadata["steps"]
+    assert len(steps) >= 1
+    first_step_streams = steps[0]["streams"]["test_stream"]
+    assert len(first_step_streams) == 5
+    for index, chunk in enumerate(first_step_streams):
+        assert chunk["seq"] == index
+        assert chunk["text"] == f"token_{index} "
+        assert chunk["done"] == (index == 4)
+
+
+def test_trajectory_serialisation_preserves_stream_chunks() -> None:
+    """Trajectory serialisation should retain stream chunk history."""
+    action = PlannerAction(
+        thought="thinking",
+        next_node="stream_tool",
+        args={"question": "test"},
+    )
+    step = TrajectoryStep(
+        action=action,
+        streams={
+            "test_stream": (
+                {"seq": 0, "text": "token_0 ", "done": False},
+                {"seq": 1, "text": "token_1 ", "done": True},
+            )
+        },
+    )
+
+    trajectory = Trajectory(query="Test streaming persistence")
+    trajectory.steps.append(step)
+
+    payload = trajectory.serialise()
+    hydrated = Trajectory.from_serialised(payload)
+
+    assert hydrated.steps, "Expected at least one step after hydration"
+    hydrated_streams = hydrated.steps[0].streams
+    assert hydrated_streams is not None
+    assert "test_stream" in hydrated_streams
+    hydrated_chunks = [dict(chunk) for chunk in hydrated_streams["test_stream"]]
+    assert hydrated_chunks == [
+        {"seq": 0, "text": "token_0 ", "done": False},
+        {"seq": 1, "text": "token_1 ", "done": True},
+    ]
+
+
+@pytest.mark.asyncio()
 async def test_react_planner_improved_token_estimation() -> None:
     """Token estimation should account for message structure overhead."""
     client = StubClient(
@@ -1047,3 +1181,274 @@ async def test_react_planner_state_store_save_error_handled_gracefully() -> None
     result = await planner.run("Test state store error")
     assert isinstance(result, PlannerPause)
     assert result.resume_token is not None
+
+
+@pytest.mark.asyncio()
+async def test_planner_tracks_llm_costs() -> None:
+    """Planner should accumulate cost across main LLM calls."""
+
+    client = CostStubClient(
+        [
+            (
+                {
+                    "thought": "Search",
+                    "next_node": "search",
+                    "args": {"question": "test"},
+                },
+                0.0015,
+            ),
+            (
+                {"thought": "Done", "next_node": None, "args": {"answer": "Result"}},
+                0.0020,
+            ),
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("search", Query, SearchResult)
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog([Node(search, name="search")], registry),
+    )
+
+    result = await planner.run("Test query")
+
+    assert result.reason == "answer_complete"
+    cost_info = result.metadata["cost"]
+    assert cost_info["total_cost_usd"] == pytest.approx(0.0035)
+    assert cost_info["main_llm_calls"] == 2
+    assert cost_info["reflection_llm_calls"] == 0
+    assert cost_info["summarizer_llm_calls"] == 0
+
+
+@pytest.mark.asyncio()
+async def test_cost_tracking_with_reflection_and_summarizer() -> None:
+    """Costs should be tracked per call type, including reflection and summariser."""
+
+    main_client = CostStubClient(
+        [
+            (
+                {
+                    "thought": "Search",
+                    "next_node": "search",
+                    "args": {"question": "test"},
+                },
+                0.001,
+            ),
+            (
+                {
+                    "thought": "Answer",
+                    "next_node": None,
+                    "args": {"answer": "First"},
+                },
+                0.002,
+            ),
+            (
+                {
+                    "thought": "Revised",
+                    "next_node": None,
+                    "args": {"answer": "Better"},
+                },
+                0.002,
+            ),
+        ]
+    )
+
+    reflection_client = CostStubClient(
+        [
+            (
+                {
+                    "score": 0.5,
+                    "passed": False,
+                    "feedback": "Bad",
+                    "issues": [],
+                    "suggestions": [],
+                },
+                0.0005,
+            ),
+            (
+                {
+                    "score": 0.9,
+                    "passed": True,
+                    "feedback": "Good",
+                    "issues": [],
+                    "suggestions": [],
+                },
+                0.0005,
+            ),
+        ]
+    )
+
+    summarizer_client = CostStubClient(
+        [
+            (
+                {
+                    "goals": ["stub"],
+                    "facts": {},
+                    "pending": [],
+                    "last_output_digest": "stub",
+                    "note": "stub",
+                },
+                0.0002,
+            )
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("search", Query, SearchResult)
+
+    planner = ReactPlanner(
+        llm_client=main_client,
+        catalog=build_catalog([Node(search, name="search")], registry),
+        reflection_config=ReflectionConfig(
+            enabled=True,
+            max_revisions=2,
+            use_separate_llm=True,
+        ),
+        token_budget=1,
+        reflection_llm="stub-reflection",
+    )
+    planner._reflection_client = reflection_client
+    planner._summarizer_client = summarizer_client
+
+    result = await planner.run("Test")
+
+    cost_info = result.metadata["cost"]
+    expected_total = pytest.approx(0.001 + 0.002 + 0.002 + 0.0005 + 0.0005 + 0.0002)
+    assert cost_info["total_cost_usd"] == expected_total
+    assert cost_info["main_llm_calls"] == 3
+    assert cost_info["reflection_llm_calls"] == 2
+    assert cost_info["summarizer_llm_calls"] == 1
+
+
+@pytest.mark.asyncio()
+async def test_cost_tracking_graceful_when_unavailable() -> None:
+    """Planner should gracefully handle clients without cost support."""
+
+    class NoCostClient:
+        async def complete(
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+        ) -> str:
+            del messages, response_format
+            return json.dumps(
+                {"thought": "Done", "next_node": None, "args": {"answer": "OK"}}
+            )
+
+    planner = ReactPlanner(
+        llm_client=NoCostClient(),
+        catalog=build_catalog([], ModelRegistry()),
+    )
+
+    result = await planner.run("Test")
+
+    cost_info = result.metadata["cost"]
+    assert cost_info["total_cost_usd"] == 0.0
+    assert cost_info["main_llm_calls"] == 1
+
+
+def test_json_schema_sanitizer_removes_constraints():
+    """Test that the JSON schema sanitizer removes advanced constraints for compatibility."""
+    from penguiflow.planner.react import _sanitize_json_schema
+
+    # Schema with unsupported constraints
+    schema = {
+        "type": "object",
+        "properties": {
+            "score": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+            },
+            "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "^[a-z]+$",
+                "format": "email",
+            },
+            "items": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 10,
+                "uniqueItems": True,
+            },
+            "nested": {
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "exclusiveMaximum": 100,
+                    }
+                },
+            },
+        },
+        "required": ["score", "name"],
+    }
+
+    sanitized = _sanitize_json_schema(schema)
+
+    # Verify top-level structure preserved
+    assert sanitized["type"] == "object"
+    assert "properties" in sanitized
+    assert "required" in sanitized
+    assert sanitized["required"] == ["score", "name"]
+
+    # Verify number constraints removed
+    score_schema = sanitized["properties"]["score"]
+    assert score_schema["type"] == "number"
+    assert "minimum" not in score_schema
+    assert "maximum" not in score_schema
+
+    # Verify string constraints removed
+    name_schema = sanitized["properties"]["name"]
+    assert name_schema["type"] == "string"
+    assert "minLength" not in name_schema
+    assert "maxLength" not in name_schema
+    assert "pattern" not in name_schema
+    assert "format" not in name_schema
+
+    # Verify array constraints removed
+    items_schema = sanitized["properties"]["items"]
+    assert items_schema["type"] == "array"
+    assert "items" in items_schema  # items definition preserved
+    assert "minItems" not in items_schema
+    assert "maxItems" not in items_schema
+    assert "uniqueItems" not in items_schema
+
+    # Verify nested constraints removed
+    nested_count = sanitized["properties"]["nested"]["properties"]["count"]
+    assert nested_count["type"] == "integer"
+    assert "minimum" not in nested_count
+    assert "exclusiveMaximum" not in nested_count
+
+
+def test_json_schema_sanitizer_preserves_structure():
+    """Test that sanitizer preserves essential schema structure."""
+    from penguiflow.planner.react import _sanitize_json_schema
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "data": {"type": "string"},
+            "nested": {
+                "type": "object",
+                "properties": {
+                    "value": {"type": "number"},
+                },
+                "required": ["value"],
+            },
+        },
+        "required": ["data"],
+        "additionalProperties": False,
+    }
+
+    sanitized = _sanitize_json_schema(schema)
+
+    # All essential structure preserved
+    assert sanitized == schema  # Should be identical since no constraints to remove

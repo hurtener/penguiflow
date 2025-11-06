@@ -1,5 +1,4 @@
-"""Core runtime primitives for PenguiFlow (Phase 1).
-
+"""
 Implements Context, Floe, and PenguiFlow runtime with backpressure-aware
 queues, cycle detection, and graceful shutdown semantics.
 """
@@ -35,6 +34,7 @@ def _capture_exc_info(exc: BaseException | None) -> ExcInfo | None:
     if exc is None:
         return None
     return (type(exc), exc, exc.__traceback__)
+
 
 BUDGET_EXCEEDED_TEXT = "Hop budget exhausted"
 DEADLINE_EXCEEDED_TEXT = "Deadline exceeded"
@@ -95,9 +95,7 @@ class Context:
         "_runtime",
     )
 
-    def __init__(
-        self, owner: Node | Endpoint, runtime: PenguiFlow | None = None
-    ) -> None:
+    def __init__(self, owner: Node | Endpoint, runtime: PenguiFlow | None = None) -> None:
         self._owner = owner
         self._incoming: dict[Node | Endpoint, Floe] = {}
         self._outgoing: dict[Node | Endpoint, Floe] = {}
@@ -149,17 +147,13 @@ class Context:
             resolved.append(floe)
         return resolved
 
-    async def emit(
-        self, msg: Any, to: Node | Endpoint | Sequence[Node | Endpoint] | None = None
-    ) -> None:
+    async def emit(self, msg: Any, to: Node | Endpoint | Sequence[Node | Endpoint] | None = None) -> None:
         if self._runtime is None:
             raise RuntimeError("Context is not attached to a running flow")
         for floe in self._resolve_targets(to, self._outgoing):
             await self._runtime._send_to_floe(floe, msg)
 
-    def emit_nowait(
-        self, msg: Any, to: Node | Endpoint | Sequence[Node | Endpoint] | None = None
-    ) -> None:
+    def emit_nowait(self, msg: Any, to: Node | Endpoint | Sequence[Node | Endpoint] | None = None) -> None:
         if self._runtime is None:
             raise RuntimeError("Context is not attached to a running flow")
         for floe in self._resolve_targets(to, self._outgoing):
@@ -226,9 +220,7 @@ class Context:
 
         return chunk
 
-    def fetch_nowait(
-        self, from_: Node | Endpoint | Sequence[Node | Endpoint] | None = None
-    ) -> Any:
+    def fetch_nowait(self, from_: Node | Endpoint | Sequence[Node | Endpoint] | None = None) -> Any:
         if self._buffer:
             return self._buffer.popleft()
         for floe in self._resolve_targets(from_, self._incoming):
@@ -238,9 +230,7 @@ class Context:
                 continue
         raise asyncio.QueueEmpty("no messages available")
 
-    async def fetch(
-        self, from_: Node | Endpoint | Sequence[Node | Endpoint] | None = None
-    ) -> Any:
+    async def fetch(self, from_: Node | Endpoint | Sequence[Node | Endpoint] | None = None) -> Any:
         if self._buffer:
             return self._buffer.popleft()
 
@@ -251,9 +241,7 @@ class Context:
             return await floes[0].queue.get()
         return await self.fetch_any(from_)
 
-    async def fetch_any(
-        self, from_: Node | Endpoint | Sequence[Node | Endpoint] | None = None
-    ) -> Any:
+    async def fetch_any(self, from_: Node | Endpoint | Sequence[Node | Endpoint] | None = None) -> Any:
         if self._buffer:
             return self._buffer.popleft()
 
@@ -361,9 +349,7 @@ class PenguiFlow:
         self._contexts[OPEN_SEA] = Context(OPEN_SEA, self)
         self._contexts[ROOKERY] = Context(ROOKERY, self)
 
-        incoming: dict[Node, set[Node | Endpoint]] = {
-            node: set() for node in self._nodes
-        }
+        incoming: dict[Node, set[Node | Endpoint]] = {node: set() for node in self._nodes}
         for parent, children in self._adjacency.items():
             for child in children:
                 if not (parent is child and parent.allow_cycle):
@@ -394,9 +380,7 @@ class PenguiFlow:
         if self._allow_cycles:
             return
 
-        adjacency: dict[Node, set[Node]] = {
-            node: set(children) for node, children in self._adjacency.items()
-        }
+        adjacency: dict[Node, set[Node]] = {node: set(children) for node, children in self._adjacency.items()}
 
         for node, children in adjacency.items():
             if node.allow_cycle:
@@ -432,9 +416,7 @@ class PenguiFlow:
 
         for node in self._nodes:
             context = self._contexts[node]
-            task = loop.create_task(
-                self._node_worker(node, context), name=f"penguiflow:{node.name}"
-            )
+            task = loop.create_task(self._node_worker(node, context), name=f"penguiflow:{node.name}")
             self._tasks.append(task)
 
     async def _node_worker(self, node: Node, context: Context) -> None:
@@ -696,11 +678,7 @@ class PenguiFlow:
                     trace_id,
                 )
 
-                if (
-                    result is not None
-                    and self._expects_message_output(node)
-                    and not isinstance(result, Message)
-                ):
+                if result is not None and self._expects_message_output(node) and not isinstance(result, Message):
                     node_name = node.name or node.node_id
                     warning_msg = (
                         "Node "
@@ -717,27 +695,17 @@ class PenguiFlow:
                         prepared,
                         targets,
                         deliver_rookery,
-                    ) = self._controller_postprocess(
-                        node, context, message, result
-                    )
+                    ) = self._controller_postprocess(node, context, message, result)
 
                     if deliver_rookery:
-                        rookery_msg = (
-                            prepared.model_copy(deep=True)
-                            if isinstance(prepared, Message)
-                            else prepared
-                        )
-                        await self._emit_to_rookery(
-                            rookery_msg, source=context.owner
-                        )
+                        rookery_msg = prepared.model_copy(deep=True) if isinstance(prepared, Message) else prepared
+                        await self._emit_to_rookery(rookery_msg, source=context.owner)
 
                     if destination == "skip":
                         continue
 
                     if destination == "rookery":
-                        await self._emit_to_rookery(
-                            prepared, source=context.owner
-                        )
+                        await self._emit_to_rookery(prepared, source=context.owner)
                         continue
 
                     await context.emit(prepared, to=targets)
@@ -774,10 +742,7 @@ class PenguiFlow:
                 if attempt >= node.policy.max_retries:
                     timeout_message: str | None = None
                     if node.policy.timeout_s is not None:
-                        timeout_message = (
-                            f"Node '{node.name}' timed out after"
-                            f" {node.policy.timeout_s:.2f}s"
-                        )
+                        timeout_message = f"Node '{node.name}' timed out after {node.policy.timeout_s:.2f}s"
                     flow_error = self._create_flow_error(
                         node=node,
                         trace_id=trace_id,
@@ -833,9 +798,7 @@ class PenguiFlow:
                         exc=exc,
                         attempt=attempt,
                         latency_ms=latency,
-                        message=(
-                            f"Node '{node.name}' raised {type(exc).__name__}: {exc}"
-                        ),
+                        message=(f"Node '{node.name}' raised {type(exc).__name__}: {exc}"),
                         metadata={"exception_repr": repr(exc)},
                     )
                     await self._handle_flow_error(
@@ -863,7 +826,7 @@ class PenguiFlow:
 
     def _backoff_delay(self, policy: NodePolicy, attempt: int) -> float:
         exponent = max(attempt - 1, 0)
-        delay = policy.backoff_base * (policy.backoff_mult ** exponent)
+        delay = policy.backoff_base * (policy.backoff_mult**exponent)
         if policy.max_backoff is not None:
             delay = min(delay, policy.max_backoff)
         return delay
@@ -944,9 +907,7 @@ class PenguiFlow:
 
         return await self._await_invocation(node, invocation, trace_id, timeout)
 
-    def _register_invocation_task(
-        self, trace_id: str, task: asyncio.Task[Any]
-    ) -> None:
+    def _register_invocation_task(self, trace_id: str, task: asyncio.Task[Any]) -> None:
         tasks = self._trace_invocations.get(trace_id)
         if tasks is None:
             tasks = set[asyncio.Task[Any]]()
@@ -990,9 +951,7 @@ class PenguiFlow:
 
         pending: set[asyncio.Future[Any]] = set()
         try:
-            done, pending = await asyncio.wait(
-                wait_tasks, return_when=asyncio.FIRST_COMPLETED
-            )
+            done, pending = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
 
             if invocation_task in done:
                 if invocation_task.cancelled():
@@ -1025,9 +984,7 @@ class PenguiFlow:
         finally:
             for task in pending:
                 task.cancel()
-            watchers = [
-                task for task in (cancel_waiter, timeout_task) if task is not None
-            ]
+            watchers = [task for task in (cancel_waiter, timeout_task) if task is not None]
             for watcher in watchers:
                 watcher.cancel()
             if watchers:
@@ -1282,19 +1239,13 @@ class PenguiFlow:
                     final_msg = result.model_copy(update={"payload": final})
                     return "rookery", final_msg, None, False
 
-                if (
-                    payload.budget_tokens is not None
-                    and payload.tokens_used >= payload.budget_tokens
-                ):
+                if payload.budget_tokens is not None and payload.tokens_used >= payload.budget_tokens:
                     final = FinalAnswer(text=TOKEN_BUDGET_EXCEEDED_TEXT)
                     final_msg = result.model_copy(update={"payload": final})
                     return "rookery", final_msg, None, False
 
                 incoming_hops: int | None = None
-                if (
-                    isinstance(incoming, Message)
-                    and isinstance(incoming.payload, WM)
-                ):
+                if isinstance(incoming, Message) and isinstance(incoming.payload, WM):
                     incoming_hops = incoming.payload.hops
 
                 current_hops = payload.hops
@@ -1303,10 +1254,7 @@ class PenguiFlow:
                 else:
                     next_hops = current_hops
 
-                if (
-                    payload.budget_hops is not None
-                    and next_hops >= payload.budget_hops
-                ):
+                if payload.budget_hops is not None and next_hops >= payload.budget_hops:
                     final = FinalAnswer(text=BUDGET_EXCEEDED_TEXT)
                     final_msg = result.model_copy(update={"payload": final})
                     return "rookery", final_msg, None, False
@@ -1317,10 +1265,7 @@ class PenguiFlow:
                 else:
                     prepared = result
 
-                stream_updates = (
-                    payload.budget_hops is None
-                    and payload.budget_tokens is None
-                )
+                stream_updates = payload.budget_hops is None and payload.budget_tokens is None
                 return "context", prepared, [node], stream_updates
 
             if isinstance(payload, FinalAnswer):
@@ -1333,18 +1278,14 @@ class PenguiFlow:
             return time.time() > message.deadline_s
         return False
 
-    async def _handle_deadline_expired(
-        self, context: Context, message: Message
-    ) -> None:
+    async def _handle_deadline_expired(self, context: Context, message: Message) -> None:
         payload = message.payload
         if not isinstance(payload, FinalAnswer):
             payload = FinalAnswer(text=DEADLINE_EXCEEDED_TEXT)
         final_msg = message.model_copy(update={"payload": payload})
         await self._emit_to_rookery(final_msg, source=context.owner)
 
-    async def _emit_to_rookery(
-        self, message: Any, *, source: Node | Endpoint | None = None
-    ) -> None:
+    async def _emit_to_rookery(self, message: Any, *, source: Node | Endpoint | None = None) -> None:
         """Route ``message`` to the Rookery sink regardless of graph edges."""
 
         rookery_context = self._contexts[ROOKERY]
@@ -1467,10 +1408,7 @@ class PenguiFlow:
 
         if missing:
             formatted = ", ".join(sorted(missing))
-            raise RuntimeError(
-                "ModelRegistry is missing entries for nodes requiring validation: "
-                f"{formatted}"
-            )
+            raise RuntimeError(f"ModelRegistry is missing entries for nodes requiring validation: {formatted}")
 
 
 PlaybookFactory = Callable[[], tuple["PenguiFlow", ModelRegistry | None]]
