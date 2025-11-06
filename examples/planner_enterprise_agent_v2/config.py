@@ -24,6 +24,7 @@ class AgentConfig:
     llm_temperature: float
     llm_max_retries: int
     llm_timeout_s: float
+    llm_max_tokens: int
 
     # Planner Configuration
     planner_max_iters: int
@@ -63,6 +64,9 @@ class AgentConfig:
     telemetry_backend: Literal["logging", "mlflow", "datadog"]
     mlflow_tracking_uri: str | None
 
+    # LLM Client Configuration
+    use_dspy_client: bool  # Explicitly use DSPy for structured outputs (better for non-OpenAI models)
+
     # Application Settings
     environment: Literal["development", "staging", "production"]
     agent_name: str
@@ -93,6 +97,7 @@ class AgentConfig:
             llm_temperature=float(os.getenv("LLM_TEMPERATURE", "0.0")),
             llm_max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
             llm_timeout_s=float(os.getenv("LLM_TIMEOUT_S", "60.0")),
+            llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", "4096")),
             # Planner settings
             planner_max_iters=int(os.getenv("PLANNER_MAX_ITERS", "15")),
             planner_token_budget=int(os.getenv("PLANNER_TOKEN_BUDGET", "8000")),
@@ -143,6 +148,8 @@ class AgentConfig:
             enable_telemetry=os.getenv("ENABLE_TELEMETRY", "true").lower() == "true",
             telemetry_backend=os.getenv("TELEMETRY_BACKEND", "logging"),  # type: ignore
             mlflow_tracking_uri=os.getenv("MLFLOW_TRACKING_URI"),
+            # LLM Client
+            use_dspy_client=os.getenv("DSPY_CLIENT", "false").lower() == "true",
             # Application
             environment=os.getenv("AGENT_ENVIRONMENT", "development"),  # type: ignore
             agent_name=os.getenv("AGENT_NAME", "enterprise_agent_v2"),

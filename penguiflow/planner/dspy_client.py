@@ -62,16 +62,53 @@ class DSPyLLMClient:
         self,
         llm: str | dict[str, Any],
         *,
+        output_schema: type[BaseModel] | None = None,
         temperature: float = 0.0,
         max_retries: int = 3,
         timeout_s: float = 60.0,
+        max_tokens: int = 4096,
     ) -> None:
         self._llm = llm
+        self._output_schema = output_schema  # Will default to PlannerAction if None
         self._temperature = temperature
         self._max_retries = max_retries
         self._timeout_s = timeout_s
+        self._max_tokens = max_tokens
         self._dspy_module: Any = None
         self._lm: Any = None
+
+    @classmethod
+    def from_base_client(
+        cls,
+        base_client: "DSPyLLMClient",
+        output_schema: type[BaseModel],
+    ) -> "DSPyLLMClient":
+        """Create a new DSPy client with a different output schema.
+
+        This factory method allows creating separate clients for different tasks
+        (e.g., reflection, summarization) while reusing the same LLM configuration.
+
+        Args:
+            base_client: Existing DSPy client to clone configuration from
+            output_schema: New output schema for the cloned client
+
+        Returns:
+            New DSPyLLMClient instance with same config but different output schema
+
+        Example:
+            >>> planner_client = DSPyLLMClient(llm="gpt-4o")
+            >>> reflection_client = DSPyLLMClient.from_base_client(
+            ...     planner_client, ReflectionCritique
+            ... )
+        """
+        return cls(
+            llm=base_client._llm,
+            output_schema=output_schema,
+            temperature=base_client._temperature,
+            max_retries=base_client._max_retries,
+            timeout_s=base_client._timeout_s,
+            max_tokens=base_client._max_tokens,
+        )
 
     def _ensure_dspy_initialized(self) -> None:
         """Lazy-initialize DSPy to avoid import overhead."""
@@ -93,7 +130,7 @@ class DSPyLLMClient:
         self._lm = dspy.LM(
             model=model_name,
             temperature=self._temperature,
-            max_tokens=4096,
+            max_tokens=self._max_tokens,
         )
 
         logger.info(
@@ -102,18 +139,21 @@ class DSPyLLMClient:
         )
 
     def _create_signature(self, response_format: Mapping[str, Any] | None) -> type[Any]:
-        """Create a DSPy signature for PlannerAction output.
+        """Create a DSPy signature with dynamic output schema.
 
         Args:
             response_format: OpenAI-style response_format (used to detect schema mode)
 
         Returns:
-            DSPy Signature class with PlannerAction as output type
+            DSPy Signature class with output type from self._output_schema
         """
         import dspy
 
         # Import at runtime to avoid circular dependency
         from penguiflow.planner.react import PlannerAction
+
+        # Determine output schema: use provided schema or default to PlannerAction
+        output_schema = self._output_schema if self._output_schema is not None else PlannerAction
 
         if not response_format or "json_schema" not in response_format:
             # Fallback: simple string output for non-schema requests
@@ -125,22 +165,20 @@ class DSPyLLMClient:
             }
             return type("TextOutputSignature", (dspy.Signature,), attrs)
 
-        # Use PlannerAction directly - no schema conversion needed!
+        # Use output_schema directly - no schema conversion needed!
         # DSPy will handle the Pydantic model → JSON → Pydantic validation
+        schema_name = output_schema.__name__
         attrs = {
-            "__doc__": "Generate a structured planner action with proper type safety.",
-            "__annotations__": {"messages": str, "response": PlannerAction},
+            "__doc__": f"Generate a structured {schema_name} output with proper type safety.",
+            "__annotations__": {"messages": str, "response": output_schema},
             "messages": dspy.InputField(
-                desc="Conversation history and user query requiring a planner action"
+                desc="Conversation history and user query requiring structured output"
             ),
             "response": dspy.OutputField(
-                desc=(
-                    "Structured planner action with thought, next_node, "
-                    "args, plan, or join"
-                )
+                desc=f"Structured {schema_name} output"
             ),
         }
-        return type("PlannerActionSignature", (dspy.Signature,), attrs)
+        return type(f"{schema_name}Signature", (dspy.Signature,), attrs)
 
     def _messages_to_text(self, messages: Sequence[Mapping[str, str]]) -> str:
         """Convert OpenAI-style messages to a single text prompt.

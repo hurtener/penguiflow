@@ -201,6 +201,58 @@ class ReflectionConfig(BaseModel):
     use_separate_llm: bool = False
 
 
+class ClarificationResponse(BaseModel):
+    """Response when planner cannot satisfy query after reflection failures.
+
+    This structured response is generated when:
+    1. Reflection loop exhausts max_revisions
+    2. Quality score remains below threshold
+    3. System transforms low-quality answer into honest clarification
+
+    The goal is to be transparent with users about limitations and guide
+    them toward providing the information needed for a proper answer.
+    """
+
+    # Main response text (required)
+    text: str = Field(
+        description="Honest explanation of what was tried and why it didn't work"
+    )
+
+    # Query satisfaction status (required)
+    confidence: Literal["satisfied", "unsatisfied"] = Field(
+        description="Whether the query was satisfactorily answered"
+    )
+
+    # What was attempted (optional but recommended)
+    attempted_approaches: list[str] = Field(
+        default_factory=list,
+        description="List of approaches/tools tried to answer the query",
+    )
+
+    # Clarifying questions to ask user (optional but recommended)
+    clarifying_questions: list[str] = Field(
+        default_factory=list,
+        description="Questions to ask user to better understand their needs",
+    )
+
+    # Suggestions for improvement (optional)
+    suggestions: list[str] = Field(
+        default_factory=list,
+        description="What would help answer this query (data sources, tools, context)",
+    )
+
+    # Diagnostic metadata (optional)
+    reflection_score: float | None = Field(
+        default=None,
+        description="Final reflection quality score that triggered clarification",
+    )
+
+    revision_attempts: int | None = Field(
+        default=None,
+        description="How many revision attempts were made before giving up",
+    )
+
+
 class TrajectorySummary(BaseModel):
     goals: list[str] = Field(default_factory=list)
     facts: dict[str, Any] = Field(default_factory=dict)
@@ -968,8 +1020,48 @@ class ReactPlanner:
         self._action_schema: Mapping[str, Any] = action_schema
         self._response_format = action_schema if json_schema_mode else None
         self._summarizer_client: JSONLLMClient | None = None
+        self._reflection_client: JSONLLMClient | None = None
+        self._clarification_client: JSONLLMClient | None = None
+        self._reflection_config = reflection_config
+
         if llm_client is not None:
             self._client = llm_client
+
+            # CRITICAL: Detect DSPy client and create separate instances for multi-schema support
+            # DSPyLLMClient is hardcoded to a single output schema, so we need separate
+            # instances for reflection (ReflectionCritique), summarization (TrajectorySummary),
+            # and clarification (ClarificationResponse)
+            from .dspy_client import DSPyLLMClient
+            is_dspy = isinstance(llm_client, DSPyLLMClient)
+
+            # Create DSPy reflection client if reflection enabled
+            if is_dspy and reflection_config and reflection_config.enabled:
+                logger.info(
+                    "dspy_reflection_client_creation",
+                    extra={"schema": "ReflectionCritique"},
+                )
+                self._reflection_client = DSPyLLMClient.from_base_client(
+                    llm_client, ReflectionCritique
+                )
+
+                # Create DSPy clarification client (used when reflection fails)
+                logger.info(
+                    "dspy_clarification_client_creation",
+                    extra={"schema": "ClarificationResponse"},
+                )
+                self._clarification_client = DSPyLLMClient.from_base_client(
+                    llm_client, ClarificationResponse
+                )
+
+            # Create DSPy summarizer client if summarization enabled
+            if is_dspy and token_budget is not None and token_budget > 0:
+                logger.info(
+                    "dspy_summarizer_client_creation",
+                    extra={"schema": "TrajectorySummary"},
+                )
+                self._summarizer_client = DSPyLLMClient.from_base_client(
+                    llm_client, TrajectorySummary
+                )
         else:
             if llm is None:
                 raise ValueError("llm or llm_client must be provided")
@@ -980,6 +1072,8 @@ class ReactPlanner:
                 max_retries=llm_max_retries,
                 timeout_s=llm_timeout_s,
             )
+
+        # LiteLLM-based separate clients (override DSPy if explicitly provided)
         if summarizer_llm is not None:
             self._summarizer_client = _LiteLLMJSONClient(
                 summarizer_llm,
@@ -988,20 +1082,21 @@ class ReactPlanner:
                 max_retries=llm_max_retries,
                 timeout_s=llm_timeout_s,
             )
-        self._reflection_config = reflection_config
-        self._reflection_client: JSONLLMClient | None = None
-        if reflection_config and reflection_config.use_separate_llm:
-            if reflection_llm is None:
-                raise ValueError(
-                    "reflection_llm required when use_separate_llm=True"
+
+        # Only set reflection client from reflection_llm if not already set by DSPy
+        if self._reflection_client is None:
+            if reflection_config and reflection_config.use_separate_llm:
+                if reflection_llm is None:
+                    raise ValueError(
+                        "reflection_llm required when use_separate_llm=True"
+                    )
+                self._reflection_client = _LiteLLMJSONClient(
+                    reflection_llm,
+                    temperature=temperature,
+                    json_schema_mode=True,
+                    max_retries=llm_max_retries,
+                    timeout_s=llm_timeout_s,
                 )
-            self._reflection_client = _LiteLLMJSONClient(
-                reflection_llm,
-                temperature=temperature,
-                json_schema_mode=True,
-                max_retries=llm_max_retries,
-                timeout_s=llm_timeout_s,
-            )
 
     async def run(
         self,
@@ -1210,13 +1305,86 @@ class ReactPlanner:
                                 threshold = (
                                     self._reflection_config.quality_threshold
                                 )
-                                logger.warning(
-                                    "reflection_max_revisions",
-                                    extra={
-                                        "score": critique.score,
-                                        "threshold": threshold,
-                                    },
-                                )
+
+                                # Check if quality is still below threshold
+                                if critique.score < threshold:
+                                    # Quality remains poor - transform into honest clarification
+                                    logger.warning(
+                                        "reflection_honest_failure",
+                                        extra={
+                                            "score": critique.score,
+                                            "threshold": threshold,
+                                            "revisions": revision_idx,
+                                        },
+                                    )
+
+                                    # Generate clarification instead of returning low-quality answer
+                                    clarification_text = await self._generate_clarification(
+                                        trajectory=trajectory,
+                                        failed_answer=candidate_answer,
+                                        critique=critique,
+                                        revision_attempts=revision_idx,
+                                    )
+
+                                    # Replace candidate answer with clarification
+                                    # Ensure proper structure for downstream consumers (like FinalAnswer model)
+                                    if isinstance(candidate_answer, dict):
+                                        # Update existing dict with clarification
+                                        candidate_answer["text"] = clarification_text
+
+                                        # Ensure required fields are present
+                                        if "route" not in candidate_answer:
+                                            candidate_answer["route"] = trajectory.steps[0].observation.get("route", "unknown") if trajectory.steps and trajectory.steps[0].observation else "unknown"
+                                        if "artifacts" not in candidate_answer:
+                                            candidate_answer["artifacts"] = {}
+                                        if "metadata" not in candidate_answer:
+                                            candidate_answer["metadata"] = {}
+
+                                        # Mark as unsatisfied in metadata
+                                        candidate_answer["metadata"]["confidence"] = "unsatisfied"
+                                        candidate_answer["metadata"]["reflection_score"] = critique.score
+                                        candidate_answer["metadata"]["revision_attempts"] = revision_idx
+                                    else:
+                                        # Create structured answer from scratch
+                                        route = "unknown"
+                                        if trajectory.steps and trajectory.steps[0].observation:
+                                            route = trajectory.steps[0].observation.get("route", "unknown")
+
+                                        candidate_answer = {
+                                            "text": clarification_text,
+                                            "route": route,
+                                            "artifacts": {},
+                                            "metadata": {
+                                                "confidence": "unsatisfied",
+                                                "reflection_score": critique.score,
+                                                "revision_attempts": revision_idx,
+                                            },
+                                        }
+
+                                    # Emit telemetry event
+                                    self._emit_event(
+                                        PlannerEvent(
+                                            event_type="reflection_clarification_generated",
+                                            ts=self._time_source(),
+                                            trajectory_step=len(trajectory.steps),
+                                            thought="Generated clarification for unsatisfiable query",
+                                            extra={
+                                                "original_score": critique.score,
+                                                "threshold": threshold,
+                                                "revisions": revision_idx,
+                                            },
+                                        )
+                                    )
+                                else:
+                                    # Quality improved enough, just log warning
+                                    logger.warning(
+                                        "reflection_max_revisions",
+                                        extra={
+                                            "score": critique.score,
+                                            "threshold": threshold,
+                                        },
+                                    )
+
                                 break
 
                             if not tracker.has_budget_for_next_tool():
@@ -1967,6 +2135,132 @@ class ReactPlanner:
         raw, cost = _coerce_llm_response(llm_result)
         self._cost_tracker.record_main_call(cost)
         return PlannerAction.model_validate_json(raw)
+
+    async def _generate_clarification(
+        self,
+        trajectory: Trajectory,
+        failed_answer: str,
+        critique: ReflectionCritique,
+        revision_attempts: int,
+    ) -> str:
+        """Generate honest clarification when reflection fails after max revisions.
+
+        This transforms a low-quality answer into a transparent response that:
+        1. Explains what was tried and why it didn't work
+        2. Asks clarifying questions to understand user needs
+        3. Suggests what would help answer the query properly
+
+        Uses the main planner LLM (not reflection LLM) to maintain "the voice".
+
+        Args:
+            trajectory: Current planning trajectory
+            failed_answer: The low-quality answer that failed reflection
+            critique: Final reflection critique with feedback
+            revision_attempts: How many revisions were attempted
+
+        Returns:
+            Formatted clarification text asking user for guidance
+        """
+        # Build prompt for clarification generation
+        system_prompt = """You are a helpful assistant that is transparent about limitations.
+
+When you cannot satisfactorily answer a query with available tools/data, you should:
+1. Honestly explain what you tried and why it didn't fully address the query
+2. Ask specific clarifying questions to better understand what the user needs
+3. Suggest what additional information, tools, or context would help you provide a proper answer
+
+Your goal is to guide the user toward providing what you need to answer their query properly."""
+
+        # Extract attempted approaches from trajectory
+        attempted_tools = [step.action.next_node for step in trajectory.steps if step.action.next_node]
+        attempts_summary = "\n".join([f"- {tool}" for tool in attempted_tools]) if attempted_tools else "None recorded"
+
+        user_prompt = f"""The query was: "{trajectory.query}"
+
+I attempted to answer this query but the quality was deemed unsatisfactory (score: {critique.score:.2f}/1.0).
+
+**What I tried:**
+{attempts_summary}
+
+**My attempted answer:**
+{failed_answer}
+
+**Quality feedback received:**
+{critique.feedback}
+
+**Issues identified:**
+{chr(10).join([f'- {issue}' for issue in critique.issues]) if critique.issues else 'None specified'}
+
+Given this situation, generate a STRUCTURED clarification response with:
+1. `text`: Honest explanation of limitations and what was tried
+2. `confidence`: Set to "unsatisfied"
+3. `attempted_approaches`: List of tools/approaches I tried
+4. `clarifying_questions`: 2-4 specific questions to ask the user
+5. `suggestions`: What would help me answer this properly (data sources, tools, context)
+6. `reflection_score`: {critique.score}
+7. `revision_attempts`: {revision_attempts}
+
+Be transparent, helpful, and guide the user toward providing what's needed."""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        # Determine which client to use (handle DSPy multi-schema)
+        client: JSONLLMClient
+        response_format: Mapping[str, Any]
+
+        from .dspy_client import DSPyLLMClient
+        if isinstance(self._client, DSPyLLMClient):
+            # DSPy requires separate client instance for ClarificationResponse schema
+            if self._clarification_client is None:
+                # Shouldn't happen (initialized in __init__), but handle gracefully
+                logger.warning(
+                    "clarification_client_missing",
+                    extra={"client_type": "DSPy"}
+                )
+                # Create on-the-fly
+                self._clarification_client = DSPyLLMClient.from_base_client(
+                    self._client, ClarificationResponse
+                )
+            client = self._clarification_client
+        else:
+            # LiteLLM uses same client with different response_format
+            client = self._client
+
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "clarification_response",
+                "schema": ClarificationResponse.model_json_schema(),
+            },
+        }
+
+        llm_result = await client.complete(
+            messages=messages,
+            response_format=response_format,
+        )
+        raw, cost = _coerce_llm_response(llm_result)
+        self._cost_tracker.record_main_call(cost)
+
+        clarification = ClarificationResponse.model_validate_json(raw)
+
+        # Format into user-friendly text
+        formatted_text = f"""{clarification.text}
+
+**What I Tried:**
+{chr(10).join([f'  {i+1}. {approach}' for i, approach in enumerate(clarification.attempted_approaches)])}
+
+**To Help Me Answer This:**
+{chr(10).join([f'  - {q}' for q in clarification.clarifying_questions])}
+
+**Suggestions:**
+{chr(10).join([f'  - {s}' for s in clarification.suggestions])}
+
+[Confidence: {clarification.confidence} | Quality Score: {clarification.reflection_score:.2f}/1.0 | Revision Attempts: {clarification.revision_attempts}]"""
+
+        return formatted_text
 
     def _check_action_constraints(
         self,

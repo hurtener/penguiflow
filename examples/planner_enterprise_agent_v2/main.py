@@ -249,8 +249,9 @@ class EnterpriseAgentOrchestrator:
 
         # Use DSPy for better structured output handling across providers
         # DSPy is especially beneficial for models that don't support native
-        # JSON schema mode (like Databricks), but works well with all providers
-        use_dspy = self.config.llm_model.startswith("databricks/")
+        # JSON schema mode (like Databricks, Cerebras), but works well with all providers
+        # Can be explicitly enabled via DSPY_CLIENT=true env var
+        use_dspy = self.config.use_dspy_client or self.config.llm_model.startswith("databricks/")
 
         # Configure LLM client
         llm_client = None
@@ -260,6 +261,7 @@ class EnterpriseAgentOrchestrator:
                 temperature=self.config.llm_temperature,
                 max_retries=self.config.llm_max_retries,
                 timeout_s=self.config.llm_timeout_s,
+                max_tokens=self.config.llm_max_tokens,
             )
             self.telemetry.logger.info(
                 "using_dspy_client",
