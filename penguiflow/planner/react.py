@@ -1425,9 +1425,12 @@ class ReactPlanner:
                                             # Extract route from first step observation if available
                                             route = "unknown"
                                             if trajectory.steps and trajectory.steps[0].observation:
-                                                route = trajectory.steps[0].observation.get(
-                                                    "route", "unknown"
-                                                )
+                                                obs = trajectory.steps[0].observation
+                                                # Handle both dict and Pydantic model observations
+                                                if isinstance(obs, dict):
+                                                    route = obs.get("route", "unknown")
+                                                else:
+                                                    route = getattr(obs, "route", "unknown")
                                             candidate_answer["route"] = route
                                         if "artifacts" not in candidate_answer:
                                             candidate_answer["artifacts"] = {}
@@ -1442,7 +1445,12 @@ class ReactPlanner:
                                         # Create structured answer from scratch
                                         route = "unknown"
                                         if trajectory.steps and trajectory.steps[0].observation:
-                                            route = trajectory.steps[0].observation.get("route", "unknown")
+                                            obs = trajectory.steps[0].observation
+                                            # Handle both dict and Pydantic model observations
+                                            if isinstance(obs, dict):
+                                                route = obs.get("route", "unknown")
+                                            else:
+                                                route = getattr(obs, "route", "unknown")
 
                                         candidate_answer = {
                                             "text": clarification_text,

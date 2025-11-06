@@ -162,6 +162,16 @@ async def test_reflection_stops_after_max_revisions() -> None:
                 "next_node": None,
                 "args": {"answer": "Still not good"},
             },
+            # Clarification response after max revisions exceeded
+            {
+                "text": "Unable to provide satisfactory answer",
+                "confidence": "unsatisfied",
+                "attempted_approaches": ["search"],
+                "clarifying_questions": ["What exactly are you looking for?"],
+                "suggestions": ["More context needed"],
+                "reflection_score": 0.5,
+                "revision_attempts": 2,
+            },
         ]
     )
 
