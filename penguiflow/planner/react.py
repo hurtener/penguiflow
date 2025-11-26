@@ -303,7 +303,7 @@ class TrajectoryStep:
 @dataclass(slots=True)
 class Trajectory:
     query: str
-    context_meta: Mapping[str, Any] | None = None
+    llm_context: Mapping[str, Any] | None = None
     steps: list[TrajectoryStep] = field(default_factory=list)
     summary: TrajectorySummary | None = None
     hint_state: dict[str, Any] = field(default_factory=dict)
@@ -315,7 +315,7 @@ class Trajectory:
     def serialise(self) -> dict[str, Any]:
         return {
             "query": self.query,
-            "context_meta": dict(self.context_meta or {}),
+            "llm_context": dict(self.llm_context or {}),
             "steps": self.to_history(),
             "summary": self.summary.model_dump(mode="json")
             if self.summary
@@ -326,9 +326,11 @@ class Trajectory:
 
     @classmethod
     def from_serialised(cls, payload: Mapping[str, Any]) -> Trajectory:
+        # Support both llm_context (new) and context_meta (old) for backward compatibility
+        llm_context = payload.get("llm_context") or payload.get("context_meta")
         trajectory = cls(
             query=payload["query"],
-            context_meta=payload.get("context_meta"),
+            llm_context=llm_context,
         )
         for step_data in payload.get("steps", []):
             action = PlannerAction.model_validate(step_data["action"])
@@ -830,7 +832,7 @@ class _PlannerContext:
     __slots__ = ("meta", "_planner", "_trajectory", "_chunks")
 
     def __init__(self, planner: ReactPlanner, trajectory: Trajectory) -> None:
-        self.meta = dict(trajectory.context_meta or {})
+        self.meta = dict(trajectory.llm_context or {})
         self._planner = planner
         self._trajectory = trajectory
         self._chunks: list[_StreamChunk] = []
@@ -940,7 +942,15 @@ class ReactPlanner:
         Enable strict JSON schema enforcement via LLM response_format.
         Default: True.
     system_prompt_extra : str | None
-        Additional guidance appended to system prompt.
+        Optional instructions for interpreting custom context (e.g., memory format).
+        Use this to specify how the planner should use structured data passed via
+        llm_context. The library provides baseline injection; this parameter lets
+        you define format-specific semantics.
+
+        Examples:
+        - "memories contains JSON with user preferences; respect them when planning"
+        - "context.knowledge is a flat list of facts; cite relevant ones"
+        - "Use context.history to avoid repeating failed approaches"
     token_budget : int | None
         If set, triggers trajectory summarization when history exceeds limit.
         Token count is estimated by character length (approx).
@@ -1190,7 +1200,8 @@ class ReactPlanner:
         self,
         query: str,
         *,
-        context_meta: Mapping[str, Any] | None = None,
+        llm_context: Mapping[str, Any] | None = None,
+        context_meta: Mapping[str, Any] | None = None,  # Deprecated
     ) -> PlannerFinish | PlannerPause:
         """Execute planner on a query until completion or pause.
 
@@ -1198,8 +1209,12 @@ class ReactPlanner:
         ----------
         query : str
             Natural language task description.
+        llm_context : Mapping[str, Any] | None
+            Optional context visible to LLM (memories, status_history, etc.).
+            Should NOT include internal metadata like tenant_id or trace_id.
         context_meta : Mapping[str, Any] | None
-            Optional metadata passed to nodes via ctx.meta.
+            **Deprecated**: Use llm_context instead. This parameter is kept for
+            backward compatibility but will be removed in a future version.
 
         Returns
         -------
@@ -1212,9 +1227,19 @@ class ReactPlanner:
         RuntimeError
             If LLM client fails after all retries.
         """
+        # Handle backward compatibility
+        if context_meta is not None and llm_context is None:
+            import warnings
+            warnings.warn(
+                "context_meta parameter is deprecated. Use llm_context instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            llm_context = context_meta
+
         logger.info("planner_run_start", extra={"query": query})
         self._cost_tracker = _CostTracker()
-        trajectory = Trajectory(query=query, context_meta=context_meta)
+        trajectory = Trajectory(query=query, llm_context=llm_context)
         return await self._run_loop(trajectory, tracker=None)
 
     async def resume(
@@ -1244,7 +1269,7 @@ class ReactPlanner:
         logger.info("planner_resume", extra={"token": token[:8] + "..."})
         record = await self._load_pause_record(token)
         trajectory = record.trajectory
-        trajectory.context_meta = trajectory.context_meta or {}
+        trajectory.llm_context = trajectory.llm_context or {}
         if user_input is not None:
             trajectory.resume_user_input = user_input
         tracker: _ConstraintTracker | None = None
@@ -1997,7 +2022,7 @@ class ReactPlanner:
                 "role": "user",
                 "content": prompts.build_user_prompt(
                     trajectory.query,
-                    trajectory.context_meta,
+                    trajectory.llm_context,
                 ),
             },
         ]

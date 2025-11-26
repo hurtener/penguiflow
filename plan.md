@@ -1,661 +1,661 @@
-# PenguiFlow v2.5 — ReAct Planner (LiteLLM)
+# PenguiFlow v2.4  API Refinement & Production Hardening
 
-*A lightweight, typed, product-agnostic planner that chooses & sequences PenguiFlow nodes/recipes using a JSON-only protocol.*
+## Overview
 
-## Vision
+Version 2.4 focuses on **API clarity**, **developer experience**, and **documentation completeness**. This release addresses accumulated technical debt before broader agent migration, ensuring a stable foundation for production deployments.
 
-Add intelligent planning to PenguiFlow without compromising its core DNA: **typed, reliable, lightweight**.
+### Goals
 
-## Goals
+1. **Clean API Surface**: Eliminate confusion between context types, remove deprecated parameters
+2. **Type Safety**: Proper typed context for tools, eliminating `ctx: Any`
+3. **Explicit over Implicit**: Remove magic field injection, make parallel join explicit
+4. **Maintainable Codebase**: Break up monolithic modules, improve separation of concerns
+5. **Documentation Parity**: Every feature documented with examples before release
+6. **Example Quality**: All examples use current best practices, no deprecated APIs
 
-* **Planner chooses PenguiFlow Nodes/Recipes** (tools) at runtime
-* **Typed I/O**: strict JSON contracts from your Node schemas (Pydantic v2)
-* **Reliability**: use existing NodeRunner semantics (retries, exponential backoff, timeouts, cancellation)
-* **Pause/Resume**: approvals / deferred work (persisted via v2.1 `StateStore` hook; in-proc fallback)
-* **Adaptive re-planning**: detect failures/assumption breaks and request constrained plan updates
-* **Token-aware**: compact trajectory state with structured summaries
-* **LLM-agnostic** via **LiteLLM**; JSON-only responses (no free-form ReAct logs)
-* **Library-only**: no endpoints, UI, or storage; provide hooks only
+### Non-Goals
 
-## Non-Goals
-
-* Not a DSL or training framework (no DSPy-style signature graph)
-* No built-in database, broker, or scheduler (use v2.1 `StateStore` / `MessageBus` when present)
-* No endpoint/UI scaffolding (samples may show FastAPI glue in `examples/` only)
+- No new major features (focus on refinement)
+- No breaking changes to core flow execution (only planner APIs)
+- No external dependencies added
 
 ---
 
-## Architecture Overview
+## Current State Assessment
+
+### Issues to Address
+
+| Issue | Severity | Phase |
+|-------|----------|-------|
+| `_SerializableContext` workaround needed | High | 1 |
+| `ctx: Any` in all tools | High | 2 |
+| Magic join field injection | Medium | 3 |
+| `react.py` monolith (2500+ lines) | Medium | 4 |
+| Deprecated `context_meta` in examples | High | 5 |
+| Missing documentation for features | High | 5 |
+| Confusing context terminology | Medium | 5 |
+
+### Files Requiring Changes
 
 ```
-User Query
-   └─► ReactPlanner (LiteLLM JSON)
-         ├─ Catalog: [NodeSpec...]  ← (auto from Node + registry)
-         ├─ Trajectory: [Step{node,args,observation,summary}]
-         ├─ Policies: budgets, max_iters, parallelism
-         └─► NodeRunner
-               ├─ retries / backoff / timeouts
-               └─ emits observations (+ StreamChunks)
+penguiflow/
+  planner/
+    react.py          # Split into modules (Phase 4)
+    context.py        # NEW: ToolContext type (Phase 2)
+    parallel.py       # NEW: Parallel execution logic (Phase 4)
+    trajectory.py     # NEW: Trajectory management (Phase 4)
+    join.py           # NEW: Explicit join configuration (Phase 3)
+  types.py            # Add ToolContext protocol (Phase 2)
+
+examples/
+  planner_enterprise_agent_v2/  # Update all deprecated APIs (Phase 5)
+  react_memory_context/          # Update context patterns (Phase 5)
+  react_pause_resume/            # Verify current (Phase 5)
+  NEW: react_parallel_join/      # Explicit join example (Phase 5)
+
+docs/
+  REACT_PLANNER_INTEGRATION_GUIDE.md  # Already updated, verify (Phase 5)
+  MIGRATION_V24.md                     # NEW: Migration guide (Phase 5)
 ```
 
-### Key Components
+---
 
-**NodeSpec** (derived from existing Nodes):
+## Phase 1  Context API Separation
 
-```json
+**Goal**: Eliminate the `_SerializableContext` workaround by providing first-class API separation.
+
+### Problem
+
+Currently, users must merge LLM-visible and tool-only context, then wrap in `_SerializableContext`:
+
+```python
+# Current (confusing)
+combined = {**llm_visible, **tool_only}
+safe = _SerializableContext(combined)
+result = await planner.run(query=query, llm_context=safe)
+```
+
+### Solution
+
+Introduce explicit `tool_context` parameter alongside `llm_context`:
+
+```python
+# New (clear)
+result = await planner.run(
+    query=query,
+    llm_context={"memories": [...], "preferences": {...}},  # Sent to LLM
+    tool_context={"trace_id": "...", "publisher": fn},       # Tools only
+)
+```
+
+### Deliverables
+
+1. **Add `tool_context` parameter to `ReactPlanner.run()`**
+   - `llm_context`: JSON-serializable, included in LLM prompt
+   - `tool_context`: Any objects, only accessible via `ctx.tool_context`
+   - Validation: `llm_context` must be JSON-serializable (fail fast)
+
+2. **Update `_PlannerContext`**
+   ```python
+   class _PlannerContext:
+       @property
+       def llm_context(self) -> dict[str, Any]:
+           """Context visible to LLM (read-only view)."""
+
+       @property
+       def tool_context(self) -> dict[str, Any]:
+           """Tool-only context (callbacks, loggers, etc.)."""
+
+       @property
+       def meta(self) -> dict[str, Any]:
+           """Combined context (deprecated, for backward compat)."""
+   ```
+
+3. **Deprecate `_SerializableContext`**
+   - Keep for one version with deprecation warning
+   - Document migration path
+
+4. **Update `prompts.build_user_prompt()`**
+   - Only receives `llm_context` (never tool_context)
+   - Add JSON serialization validation
+
+### Acceptance Criteria
+
+- [ ] `tool_context` parameter accepted by `run()` and `resume()`
+- [ ] `ctx.tool_context` accessible in tools
+- [ ] `ctx.llm_context` accessible in tools (read-only)
+- [ ] `ctx.meta` still works (deprecated warning)
+- [ ] Passing non-serializable in `llm_context` raises `TypeError` immediately
+- [ ] Tests cover all new paths
+- [ ] Backward compatible: old code still works with deprecation warnings
+
+### Migration Example
+
+```python
+# Before (v2.3)
+context = _SerializableContext({
+    "memories": memories,           # LLM sees
+    "status_publisher": publisher,  # LLM shouldn't see
+})
+result = await planner.run(query=q, llm_context=context)
+
+# After (v2.4)
+result = await planner.run(
+    query=q,
+    llm_context={"memories": memories},
+    tool_context={"status_publisher": publisher},
+)
+```
+
+---
+
+## Phase 2  Typed Tool Context
+
+**Goal**: Replace `ctx: Any` with a proper typed protocol for IDE support and type checking.
+
+### Problem
+
+```python
+# Current - no type hints, no autocomplete
+async def my_tool(args: MyArgs, ctx: Any) -> MyResult:
+    meta = ctx.meta  # Hope this exists!
+    await ctx.pause(...)  # Is this even a method?
+```
+
+### Solution
+
+Introduce `ToolContext` protocol:
+
+```python
+# New - full type support
+from penguiflow.planner import ToolContext
+
+async def my_tool(args: MyArgs, ctx: ToolContext) -> MyResult:
+    trace_id = ctx.tool_context.get("trace_id")  # Autocomplete works!
+    await ctx.pause("await_input", {"q": "?"})    # Type checked!
+```
+
+### Deliverables
+
+1. **Create `penguiflow/planner/context.py`**
+   ```python
+   from typing import Protocol, Any, Mapping
+
+   class ToolContext(Protocol):
+       """Protocol for tool execution context.
+
+       This is the typed interface available to all planner tools.
+       """
+
+       @property
+       def llm_context(self) -> Mapping[str, Any]:
+           """Context visible to LLM (read-only)."""
+           ...
+
+       @property
+       def tool_context(self) -> dict[str, Any]:
+           """Tool-only context (callbacks, telemetry, etc.)."""
+           ...
+
+       @property
+       def meta(self) -> dict[str, Any]:
+           """Combined context. Deprecated: use llm_context/tool_context."""
+           ...
+
+       async def pause(
+           self,
+           reason: PlannerPauseReason,
+           payload: Mapping[str, Any] | None = None,
+       ) -> None:
+           """Pause execution for human input."""
+           ...
+
+       def emit_chunk(
+           self,
+           text: str,
+           *,
+           stream_id: str | None = None,
+           done: bool = False,
+           meta: dict[str, Any] | None = None,
+       ) -> None:
+           """Emit a streaming chunk."""
+           ...
+   ```
+
+2. **Export from `penguiflow.planner`**
+   ```python
+   from penguiflow.planner import ToolContext
+   ```
+
+3. **Update `_PlannerContext` to satisfy protocol**
+
+4. **Create helper type for flow context compatibility**
+   ```python
+   from typing import Union
+   from penguiflow.planner import ToolContext
+   from penguiflow.core import Context
+
+   # For tools that work in both flow and planner
+   AnyContext = Union[ToolContext, Context]
+   ```
+
+### Acceptance Criteria
+
+- [ ] `ToolContext` protocol defined and exported
+- [ ] `_PlannerContext` implements `ToolContext`
+- [ ] mypy passes with `ctx: ToolContext` annotations
+- [ ] IDE autocomplete works for all methods
+- [ ] Documentation updated with type hints
+- [ ] Helper functions updated to use `ToolContext | Any` for backward compat
+
+---
+
+## Phase 3  Explicit Join Configuration
+
+**Goal**: Replace magic field name injection with explicit, discoverable configuration.
+
+### Problem
+
+```python
+# Current - magic field names
+class JoinArgs(BaseModel):
+    results: list[T]  # Magically injected if named "results"
+    expect: int       # Magically injected if named "expect"
+    # What if I name it "data"? Nothing happens. Surprise!
+```
+
+### Solution
+
+Explicit join configuration in the action:
+
+```python
+# New - explicit mapping
 {
-  "name": "retrieve_docs",
-  "description": "Fetch k docs by topic",
-  "side_effects": "read",
-  "input_schema": { ... JSON Schema from Pydantic ... },
-  "output_schema": { ... }
+    "plan": [...],
+    "join": {
+        "node": "merge_results",
+        "inject": {
+            "branch_results": "$results",     # Explicit: inject results into this field
+            "total_branches": "$expect",       # Explicit: inject count into this field
+            "all_outcomes": "$branches",       # Explicit: inject all branch data
+        },
+        "args": {
+            "custom_param": "value"            # Additional static args
+        }
+    }
 }
 ```
 
-**Planner contract** (LLM output):
-
-```json
-{"thought":"...", "next_node":"retrieve_docs", "args":{"topic":"metrics", "k":5}}
-```
-
----
-
-## Tool Catalog System
-
-Before diving into phases, let's establish how nodes become discoverable tools for the planner.
-
-### NodeSpec Dataclass
-
-New module: `penguiflow/catalog.py`
-
-```python
-from dataclasses import dataclass, field
-from typing import Any, Literal, Mapping, Optional, Sequence, Type
-from pydantic import BaseModel
-from penguiflow.node import Node
-
-SideEffect = Literal["pure", "read", "write", "external", "stateful"]
-
-@dataclass(frozen=True)
-class NodeSpec:
-    node: Node
-    name: str
-    desc: str
-    args_model: Type[BaseModel]
-    out_model: Type[BaseModel]
-    side_effects: SideEffect = "pure"
-    tags: Sequence[str] = ()
-    auth_scopes: Sequence[str] = ()
-    cost_hint: Optional[str] = None         # "low", "med", "high" or "$$"
-    latency_hint_ms: Optional[int] = None   # rough typical latency
-    safety_notes: Optional[str] = None
-    extra: Mapping[str, Any] = field(default_factory=dict)
-
-    def to_tool_record(self) -> dict[str, Any]:
-        """Used by planner to render compact tool descriptor + JSON schemas."""
-        return {
-            "name": self.name,
-            "desc": self.desc,
-            "side_effects": self.side_effects,
-            "tags": list(self.tags),
-            "auth_scopes": list(self.auth_scopes),
-            "cost_hint": self.cost_hint,
-            "latency_hint_ms": self.latency_hint_ms,
-            "safety_notes": self.safety_notes,
-            "args_schema": self.args_model.model_json_schema(),
-            "out_schema": self.out_model.model_json_schema(),
-            "extra": dict(self.extra),
-        }
-```
-
-### Three Ergonomic Ways to Annotate Nodes
-
-#### A) Decorator (Preferred)
-
-```python
-from penguiflow.catalog import tool
-
-@tool(desc="KB search over internal docs", side_effects="read", tags=["search","docs"])
-async def search_docs(msg: SearchArgs, ctx) -> SearchOut:
-    """Search the internal knowledge base for relevant documents."""
-    ...
-
-search_node = Node(search_docs, name="search_docs")
-```
-
-#### B) Node Wrapper
-
-```python
-from penguiflow.catalog import describe_node
-
-search_node = describe_node(
-    Node(search_docs, name="search_docs"),
-    desc="KB search over internal docs",
-    side_effects="read",
-    tags=["search","docs"],
-)
-```
-
-#### C) External Catalog
-
-```python
-from penguiflow.catalog import NodeSpec
-
-specs = [
-    NodeSpec(
-        node=search_node,
-        name="search_docs",
-        desc="KB search",
-        args_model=SearchArgs,
-        out_model=SearchOut,
-        side_effects="read",
-    ),
-]
-```
-
-### Catalog Builder
-
-```python
-from penguiflow.catalog import build_catalog
-
-catalog = build_catalog(
-    nodes=[search_node, triage_node, summarize_node],
-    registry=my_registry,
-    overrides={"search_docs": {"cost_hint": "low"}}
-)
-```
-
-**Fallback behavior**:
-- If no `desc` provided: use function docstring → Pydantic Field descriptions → `"{name} (no description)"`
-- I/O models from `ModelRegistry` if provided, otherwise from Node's adapters
-
----
-
-## Phase A — JSON-only ReAct Loop
-
-**Objective**: Implement minimal, deterministic loop: *user query → choose node (JSON) → run node → record observation → repeat (bounded)*.
-
 ### Deliverables
 
-1. **`penguiflow/planner/react.py`**
-
+1. **Extend `ParallelJoin` schema**
    ```python
-   class ReactPlanner:
-       def __init__(
-           self,
-           llm: str | dict,                      # LiteLLM model name or config
-           nodes: Sequence[Node] | None = None,  # or provide catalog directly
-           catalog: Sequence[NodeSpec] | None = None,
-           *,
-           max_iters: int = 8,
-           temperature: float = 0.0,
-           json_schema_mode: bool = True,
-           registry: ModelRegistry | None = None,
-       ) -> None: ...
+   class JoinInjection(BaseModel):
+       """Mapping of target field -> injection source."""
+       # Target field name -> source (prefixed with $)
+       # Sources: $results, $expect, $branches, $failures, $success_count, $failure_count
+       mapping: dict[str, str] = Field(default_factory=dict)
 
-       async def run(self, query: str, *, context_meta: dict | None = None) -> Any: ...
-       async def step(self, trajectory: Trajectory) -> PlannerAction: ...
-   ```
-
-   - JSON coercion & validation (Pydantic) for `PlannerAction`
-   - Catalog builder: introspect Node/Recipe → `NodeSpec` → tool descriptor
-   - LiteLLM client shim (strict JSON response via `response_format={"type": "json_object"}` where supported)
-
-2. **Prompt Templates** (`planner/prompts.py`)
-
-   - System prompt: objectives, rules, JSON-only format, available nodes with compact schemas
-   - Few-shot mini examples (optional) demonstrating valid outputs & failure cases
-
-3. **Trajectory Model** (`planner/types.py`)
-
-   ```python
-   class TrajectoryStep(BaseModel):
-       thought: str
+   class ParallelJoin(BaseModel):
        node: str
-       args: dict[str, Any]
-       observation: Any
-       error: Optional[str] = None
-       tokens: Optional[int] = None
-       latency_ms: Optional[float] = None
-
-   class Trajectory(BaseModel):
-       steps: list[TrajectoryStep]
-       # ... stats methods
+       args: dict[str, Any] = Field(default_factory=dict)
+       inject: JoinInjection | None = None  # NEW: explicit injection config
    ```
 
-### Algorithm
+2. **Update parallel execution logic**
+   - If `inject` is provided, use explicit mapping
+   - If `inject` is None, fall back to magic names (backward compat, with deprecation warning)
+   - Log warning when using magic injection: "Implicit join injection is deprecated. Use explicit 'inject' mapping."
 
-1. Build catalog from nodes (via `build_catalog`)
-2. Seed trajectory with user query
-3. Ask LLM for `{thought, next_node, args}` (JSON only)
-4. Validate `args` against Node's **input schema**; if invalid, repair (max 2 attempts)
-5. Execute Node via NodeRunner (inherits retries/backoff/timeouts)
-6. Append observation (validated against `out` schema); loop until `finish`/`stop`/`max_iters`
+3. **Update prompts to explain injection**
+   - System prompt should document available injection sources
+   - Error messages should suggest using `inject`
 
-### Testing
+4. **Create `penguiflow/planner/join.py`**
+   - Extract join logic from `react.py`
+   - Clean implementation with explicit injection
 
-**Unit**:
-- JSON parsing & schema validation (good/invalid/repair)
-- Node failures: ensure NodeRunner backoff kicks in; observation records error
-- Deterministic output with temperature=0
+### Acceptance Criteria
 
-**Integration**:
-- Example flow: `triage → retrieve → summarize`
-- Streaming: if a node emits `StreamChunk`, planner surfaces partials (pass through or aggregate)
+- [ ] `inject` field accepted in `ParallelJoin`
+- [ ] Explicit mapping works correctly
+- [ ] Magic injection still works with deprecation warning
+- [ ] Prompts updated with injection documentation
+- [ ] Tests cover explicit and implicit injection
+- [ ] Error messages guide users to explicit injection
 
 ### Example
 
-`examples/react_minimal/` — 3 nodes + planner; run once; prints final result & trajectory
+```python
+# Before (magic)
+class MergeArgs(BaseModel):
+    results: list[T]  # Must be named exactly "results"
 
-### Acceptance
+# After (explicit)
+class MergeArgs(BaseModel):
+    branch_outputs: list[T]  # Can be named anything
 
-* Planner completes within `max_iters` for happy-path scenario
-* On invalid args, it self-repairs JSON and proceeds
-* No free-form tool logs: planner and LLM exchange **strict JSON**
+# LLM action:
+{
+    "plan": [...],
+    "join": {
+        "node": "merge",
+        "inject": {"branch_outputs": "$results"}
+    }
+}
+```
 
 ---
 
-## Phase B — Trajectory Summarization + Pause/Resume + Developer Hints
+## Phase 4  Modularize react.py
 
-**Objective**: Keep token footprint low, enable approvals / long-running handoffs, and let developers inject domain knowledge.
+**Goal**: Break the 2500+ line monolith into focused, maintainable modules.
+
+### Current Structure
+
+```
+react.py (2500+ lines)
+   PlannerAction, PlannerPause, PlannerFinish (models)
+   _PlannerContext (context)
+   Trajectory, TrajectoryStep (state)
+   _ConstraintTracker (budgets)
+   _PlanningHints (hints)
+   _BranchExecutionResult (parallel)
+   ReactPlanner (main class)
+      __init__, run, resume
+      _run_loop (main loop)
+      _execute_parallel_plan (parallel)
+      _run_parallel_branch (parallel)
+      _build_messages (prompts)
+      _check_action_constraints (constraints)
+      _record_pause, _load_pause_record (pause)
+      ... many more
+   Helper functions
+```
+
+### Target Structure
+
+```
+penguiflow/planner/
+   __init__.py           # Public exports
+   react.py              # ReactPlanner class (slim coordinator)
+   models.py             # PlannerAction, PlannerPause, PlannerFinish, etc.
+   context.py            # ToolContext protocol, _PlannerContext (Phase 2)
+   trajectory.py         # Trajectory, TrajectoryStep, serialization
+   constraints.py        # _ConstraintTracker, budget/deadline logic
+   hints.py              # _PlanningHints, hint parsing
+   parallel.py           # Parallel execution, branching, joining
+   pause.py              # Pause/resume logic, state storage
+   llm.py                # LLM interaction, message building
+   prompts.py            # (existing) prompt templates
+```
 
 ### Deliverables
 
-1. **Token-aware Summarizer**
+1. **Create `models.py`**
+   - Move: `PlannerAction`, `ParallelCall`, `ParallelJoin`, `PlannerPause`, `PlannerFinish`
+   - Move: `PlannerPauseReason`, `PlannerEvent`
 
-   - `Trajectory.compress()` creates structured mini-state:
+2. **Create `trajectory.py`**
+   - Move: `Trajectory`, `TrajectoryStep`
+   - Move: Serialization/deserialization logic
 
-     ```json
-     {
-       "goals": ["..."],
-       "facts": {"topic": "metrics", "k": 5, "docs_seen": 12},
-       "pending": ["call summarize(topic, docs)"],
-       "last_output_digest": "…"
-     }
-     ```
+3. **Create `constraints.py`**
+   - Move: `_ConstraintTracker`
+   - Move: Budget and deadline enforcement
 
-   - **Optional cheaper LLM** for summarization:
-     - Planner accepts `summarizer_llm` separate from main `llm`
-     - If unset: (a) rule-based compressor first (deterministic truncation), then (b) fall back to `llm` when necessary
-     - Summarizer prompt: **short**, **schema-bound**, JSON-only output
+4. **Create `hints.py`**
+   - Move: `_PlanningHints`
+   - Move: Hint parsing from dict/config
 
-   - Prompts include **summary** instead of full logs when over budget
+5. **Create `parallel.py`**
+   - Move: `_BranchExecutionResult`
+   - Move: `_execute_parallel_plan`, `_run_parallel_branch`
+   - Move: Join logic (from Phase 3)
 
-2. **Pause/Resume Hooks**
+6. **Create `pause.py`**
+   - Move: `_PauseRecord`
+   - Move: `_record_pause`, `_load_pause_record`
+   - Move: State store integration
 
-   ```python
-   class PlannerPause(BaseModel):
-       reason: Literal["approval_required", "await_input", "external_event", "constraints_conflict"]
-       payload: dict
-       resume_token: str
+7. **Create `llm.py`**
+   - Move: `_build_messages`, `_call_llm`
+   - Move: Response parsing, repair logic
 
-   # API methods:
-   async def pause(self, reason: str, payload: dict) -> PlannerPause: ...
-   async def resume(self, token: str, user_input: str | None = None) -> Any: ...
-   ```
+8. **Slim down `react.py`**
+   - Keep: `ReactPlanner` class
+   - Coordinator that imports from other modules
+   - Target: < 500 lines
 
-   - Storage: in-proc dict; if v2.1 `StateStore` provided, use it for durability (opt-in)
+### Acceptance Criteria
 
-3. **Approvals Pattern**
+- [ ] All modules created with clear responsibilities
+- [ ] No circular imports
+- [ ] All tests pass without modification
+- [ ] `react.py` under 500 lines
+- [ ] Public API unchanged (imports from `penguiflow.planner` work)
+- [ ] mypy passes on new module structure
 
-   - Inject "policy node" requiring human approval on high-risk actions
-   - Planner yields `PlannerPause(approval_required)`
-
-4. **Developer Prompt Hints**
-
-   Configurable **system prompt extension** + **structured hints**:
-
-   ```python
-   class ReactPlanner:
-       def __init__(
-           self,
-           llm: str | dict,
-           nodes: Sequence[Node] | None = None,
-           catalog: Sequence[NodeSpec] | None = None,
-           *,
-           max_iters: int = 8,
-           temperature: float = 0.0,
-           json_schema_mode: bool = True,
-           token_budget: int | None = None,
-           pause_enabled: bool = True,
-           state_store: Any | None = None,
-           registry: ModelRegistry | None = None,
-           # NEW in Phase B:
-           summarizer_llm: str | dict | None = None,       # cheaper model for compaction
-           system_prompt_extra: str | None = None,         # append-only dev guidance
-           planning_hints: dict | None = None,             # structured constraints/guidance
-       ) -> None: ...
-   ```
-
-   **Planning Hints Schema**:
-
-   ```json
-   {
-     "ordering_hints": ["triage", "retrieve_docs", "rerank", "summarize"],
-     "parallel_groups": [["retrieve_docs_A", "retrieve_docs_B"], ["rerank"]],
-     "sequential_only": ["apply_compliance", "send_email"],
-     "disallow_nodes": ["expensive_tool_v1"],
-     "prefer_nodes": ["cached_search"],
-     "budget_hints": {"max_parallel": 3, "max_cost_usd": 0.10}
-   }
-   ```
-
-   **Execution Semantics**:
-
-   - **Hard constraints enforced in code**:
-     - `disallow_nodes`: reject actions referencing these nodes, ask for corrected plan
-     - `max_parallel`: cap concurrent actions at executor level
-     - `sequential_only`: prevent nodes from appearing in parallel groups; auto-rewrite or request revision
-
-   - **Soft preferences** (prompt-level nudges):
-     - `prefer_nodes`, `ordering_hints`: if violated, do **one** corrective iteration before proceeding
-
-   **Prompting Changes**:
-
-   - Planner system prompt now appends:
-     - `system_prompt_extra` (verbatim, if provided)
-     - Compact rendering of `planning_hints`:
-       - "**Respect** the following constraints: …"
-       - "Preferred order (if applicable): …"
-       - "Allowed parallel groups: …; do not exceed `max_parallel`."
-       - "Disallowed tools: … (never call)."
-
-   - Summarizer prompt (when compaction needed):
-     - Ultra-brief instructions, JSON-only output, keep **facts/pending/goals**
-     - If `summarizer_llm` not set, try rule-based compressor first; if still too long, use main `llm`
-
-### Testing
-
-**Summarizer**:
-- Uses cheaper model when set; falls back to main LLM only if summarizer fails
-- Rule-based shrink first → summarizer second; ensure output remains valid and helpful for re-planning
-
-**Pause/Resume**:
-- Serialize → restore → continue; deterministic outcome
-
-**Prompt Hints**:
-- Plans follow `ordering_hints` when feasible; if not, we get a single correction pass
-- `disallow_nodes` never executed (guard tested)
-- `max_parallel` enforced even if LLM proposes larger fan-out
-
-### Example
-
-`examples/react_pause_resume/`:
+### Import Structure
 
 ```python
-planner = ReactPlanner(
-    llm="gpt-4o",
-    summarizer_llm="gpt-4o-mini",
-    nodes=[triage, retrieve_docs, rerank, summarize, apply_compliance, send_email],
-    system_prompt_extra="Break the query into minimal steps. Prefer cached_search when available.",
-    planning_hints={
-        "ordering_hints": ["triage", "retrieve_docs", "rerank", "summarize"],
-        "parallel_groups": [["retrieve_docs_A", "retrieve_docs_B"]],
-        "sequential_only": ["apply_compliance", "send_email"],
-        "disallow_nodes": ["expensive_tool_v1"],
-        "prefer_nodes": ["cached_search"],
-        "budget_hints": {"max_parallel": 2, "max_cost_usd": 0.05}
-    }
+# Public API (unchanged)
+from penguiflow.planner import (
+    ReactPlanner,
+    PlannerPause,
+    PlannerFinish,
+    PlannerEvent,
+    ToolContext,  # NEW from Phase 2
 )
 
-result = await planner.run("Share last month's metrics to Slack")
-```
-
-### Error Handling & Fallbacks
-
-- If summarizer returns invalid JSON:
-  - 1–2 JSON repair attempts; then fall back to rule-based truncation with clear `summary_note`
-
-- If hints produce impossible plan (e.g., required node is disallowed):
-  - Planner returns `PlannerPause(reason="constraints_conflict")`, or falls back to safe, minimal path if allowed
-
-### Acceptance
-
-* Prompts stay under configurable token budget
-* Resumed runs preserve constraints and state
-* Cheaper summarizer slashes cost for iterative sessions
-* Developer hints yield faster, cheaper, more reliable plans without hardcoding flows
-
----
-
-## Phase C — Adaptive Re-Planning (Error Feedback)
-
-**Objective**: When execution fails after retries or assumptions break, request constrained, minimal re-plan.
-
-### Deliverables
-
-1. **Error Channel to LLM**
-
-   On Node failure (after NodeRunner retries), send:
-
-   ```json
-   {
-     "failure": {
-       "node": "retrieve_docs",
-       "args": {...},
-       "error_code": "Timeout",
-       "message": "...",
-       "suggestion": "reduce_k or pick alternate source"
-     }
-   }
-   ```
-
-   Prompt: "Propose revised next action that **respects budgets** and avoids failure cause."
-
-2. **Constraint Manager**
-
-   - Hard limits: wall-clock deadline, hop budget, token budget
-   - Planner refuses plans violating constraints; asks for another revision (max N)
-
-3. **Finish Conditions**
-
-   ```python
-   class PlannerFinish(BaseModel):
-       reason: Literal["answer_complete", "no_path", "budget_exhausted"]
-       payload: Any
-       metadata: dict
-   ```
-
-### Testing
-
-* Simulate transient and permanent failures; verify re-plan path changes (different node or args)
-* Verify constraints enforcement (deadline/hops) terminates gracefully with reason
-
-### Example
-
-`examples/react_replan/` — retrieval timeout → re-plan using cached index; completes
-
-### Acceptance
-
-* On failure, planner requests revised JSON action and succeeds where possible
-* Otherwise exits with typed final result + reason
-
----
-
-## Phase D — Multi-Node Concurrency (Parallel Calls)
-
-**Objective**: Allow planner to propose *sets* of independent calls evaluated in parallel; then join results.
-
-### Deliverables
-
-1. **Parallel Action Schema**
-
-   LLM can return:
-
-   ```json
-   {
-     "plan": [
-       {"node": "retrieve_part", "args": {"id": 1}},
-       {"node": "retrieve_part", "args": {"id": 2}}
-     ],
-     "join": {"node": "merge_parts", "args": {"expect": 2}}
-   }
-   ```
-
-2. **Executor**
-
-   - Launch N nodes concurrently (`map_concurrent`) with bounded parallelism
-   - Collect observations; run join node
-   - Backoff/retries per node preserved; partial failures short-circuit or degrade gracefully per policy
-
-3. **Join-k Semantics**
-
-   - If `join.expect=k`, integrate with existing `join_k` helper
-
-### Testing
-
-* Parallel fan-out correctness; ordering independence; join determinism
-* Fault injection: one branch fails → re-plan or degrade according to policy
-
-### Example
-
-`examples/react_parallel/` — shard retrieval across 3 sources, merge and summarize
-
-### Acceptance
-
-* Planner can propose valid parallel sets
-* Executor runs them safely under existing reliability guarantees
-
----
-
-## Public API (Final)
-
-```python
-from penguiflow.planner import ReactPlanner
-from penguiflow.planner.types import PlannerAction, PlannerPause, PlannerFinish
-
-class ReactPlanner:
-    def __init__(
-        self,
-        llm: str | dict,                        # LiteLLM model name or config
-        nodes: Sequence[Node] | None = None,    # will build catalog automatically
-        catalog: Sequence[NodeSpec] | None = None,  # or provide pre-built catalog
-        *,
-        max_iters: int = 8,
-        temperature: float = 0.0,
-        json_schema_mode: bool = True,
-        token_budget: int | None = None,
-        pause_enabled: bool = True,
-        state_store: Any | None = None,         # v2.1 StateStore for durability
-        registry: ModelRegistry | None = None,
-        summarizer_llm: str | dict | None = None,
-        system_prompt_extra: str | None = None,
-        planning_hints: dict | None = None,
-    ) -> None: ...
-
-    async def run(self, query: str, *, context_meta: dict | None = None) -> Any: ...
-    async def resume(self, token: str, user_input: str | None = None) -> Any: ...
-    async def step(self, trajectory: Trajectory) -> PlannerAction: ...
-
-class PlannerAction(BaseModel):
-    thought: str
-    next_node: str | None = None     # "finish" or None to stop
-    args: dict[str, Any] | None = None
-    plan: list[dict] | None = None   # Phase D parallel actions
-    join: dict | None = None         # join descriptor
-
-class PlannerPause(BaseModel):
-    reason: Literal["approval_required", "await_input", "external_event", "constraints_conflict"]
-    payload: dict
-    resume_token: str
-
-class PlannerFinish(BaseModel):
-    reason: Literal["answer_complete", "no_path", "budget_exhausted"]
-    payload: Any
-    metadata: dict
+# Internal imports (new)
+from penguiflow.planner.models import PlannerAction
+from penguiflow.planner.trajectory import Trajectory
+from penguiflow.planner.parallel import execute_parallel_plan
 ```
 
 ---
 
-## Prompting Strategy (JSON-only)
+## Phase 5  Documentation & Examples Update
 
-**System Prompt** summarizes rules:
-- Tools = PF nodes; must output *valid JSON only* matching provided schemas
-- Use minimal text in `thought`
-- Respect constraints: `deadline_s`, hop budget, token budget, cost
-- Prefer plans that reduce token footprint (reuse summaries)
+**Goal**: Every feature documented, all examples using best practices.
 
-**Tool Catalog**: list of nodes with name, description, side effects, and compact JSON Schemas
+### Documentation Updates
 
-**Repair Loop**: on schema violation, reply with short machine message: `"args did not validate: <error>. Return corrected JSON."`
+1. **REACT_PLANNER_INTEGRATION_GUIDE.md**
+   - [x] Already updated with parallel execution
+   - [ ] Update Section 4 for new `tool_context` parameter
+   - [ ] Update Section 5 orchestrator example
+   - [ ] Update Section 11 for explicit join injection
+   - [ ] Add deprecation notices for `_SerializableContext`, `ctx.meta`
+
+2. **Create MIGRATION_V24.md**
+   ```markdown
+   # Migrating to PenguiFlow v2.4
+
+   ## Breaking Changes
+   - None (fully backward compatible)
+
+   ## Deprecations
+   - `context_meta` parameter � use `llm_context`
+   - `_SerializableContext` � use separate `llm_context` + `tool_context`
+   - `ctx.meta` � use `ctx.llm_context` or `ctx.tool_context`
+   - Magic join field injection � use explicit `inject` mapping
+
+   ## Migration Steps
+   1. Update `planner.run()` calls...
+   2. Update tool signatures...
+   3. Update join configurations...
+   ```
+
+3. **Update CLAUDE.md**
+   - Add v2.4 to version history
+   - Update any outdated patterns
+
+4. **API Reference** (if exists)
+   - Document `ToolContext` protocol
+   - Document new parameters
+
+### Example Updates
+
+1. **planner_enterprise_agent_v2/**
+   - [ ] Replace `context_meta` with `llm_context` + `tool_context`
+   - [ ] Remove `_SerializableContext` usage
+   - [ ] Update tool signatures to use `ToolContext`
+   - [ ] Add explicit join injection if using parallel
+   - [ ] Verify all tests pass
+
+2. **react_memory_context/**
+   - [ ] Update to new context pattern
+   - [ ] Add `ToolContext` type hints
+
+3. **react_pause_resume/**
+   - [ ] Verify current patterns
+   - [ ] Update if needed
+
+4. **NEW: react_parallel_join/**
+   - [ ] Create example demonstrating:
+     - Parallel fan-out
+     - Explicit join injection
+     - Failure handling
+     - Partial result processing
+   - [ ] Include README.md
+
+5. **NEW: react_typed_tools/**
+   - [ ] Create example demonstrating:
+     - `ToolContext` protocol usage
+     - Proper type hints throughout
+     - IDE autocomplete benefits
+
+### Acceptance Criteria
+
+- [ ] All deprecated APIs have warnings in docs
+- [ ] Migration guide complete with before/after examples
+- [ ] All examples run without deprecation warnings
+- [ ] All examples use `ToolContext` type hints
+- [ ] New examples created for new features
+- [ ] README updated with v2.4 highlights
 
 ---
 
-## Testing Matrix
+## Phase 6  Cleanup & Release
 
-| Area          | Unit                     | Integration            | Fault Injection                |
-| ------------- | ------------------------ | ---------------------- | ------------------------------ |
-| JSON I/O      | parse/repair/validate    | end-to-end example     | malformed tool args            |
-| Reliability   | backoff/timeouts honored | long node + cancel     | repeated transient failures    |
-| Summarization | compaction threshold     | quality after resume   | pathological long runs         |
-| Re-planning   | constraint enforcement   | recovery after failure | hard failure → graceful finish |
-| Concurrency   | join correctness         | mixed success paths    | one branch fails mid-fanout    |
+**Goal**: Final polish, remove deprecated code paths, release v2.4.
+
+### Tasks
+
+1. **Code Cleanup**
+   - Remove `# type: ignore` comments where possible
+   - Fix any remaining mypy issues
+   - Run ruff with strict settings
+
+2. **Test Coverage**
+   - Ensure e85% coverage maintained
+   - Add edge case tests for new features
+   - Add deprecation warning tests
+
+3. **Performance Validation**
+   - Benchmark parallel execution
+   - Ensure no regression from modularization
+   - Profile memory usage
+
+4. **Release Checklist**
+   - [ ] All phases complete
+   - [ ] All tests pass (Python 3.11, 3.12, 3.13)
+   - [ ] Coverage e85%
+   - [ ] No mypy errors
+   - [ ] No ruff errors
+   - [ ] CHANGELOG.md updated
+   - [ ] Version bumped to 2.4.0
+   - [ ] Git tag created
+
+### Deprecation Timeline
+
+| Deprecated | Warning in | Removed in |
+|------------|------------|------------|
+| `context_meta` | v2.3 | v2.5 |
+| `_SerializableContext` | v2.4 | v2.6 |
+| `ctx.meta` (direct access) | v2.4 | v2.6 |
+| Magic join injection | v2.4 | v2.6 |
 
 ---
 
-## Examples
+## Implementation Order
 
-* `examples/react_minimal/` — Phase A, single-threaded loop
-* `examples/react_pause_resume/` — Phase B, approval & resume with hints
-* `examples/react_replan/` — Phase C, failure → constrained re-plan
-* `examples/react_parallel/` — Phase D, concurrent fan-out & join
+```
+Phase 1: Context API Separation     [~3 days]
+    �
+Phase 2: Typed Tool Context         [~2 days]
+    �
+Phase 3: Explicit Join Config       [~2 days]
+    �
+Phase 4: Modularize react.py        [~4 days]
+    �
+Phase 5: Docs & Examples            [~3 days]
+    �
+Phase 6: Cleanup & Release          [~2 days]
 
-Each example includes a README and runnable script:
-
-```bash
-uv run python examples/react_minimal/main.py
+Total: ~16 days of focused work
 ```
 
 ---
 
-## Backwards Compatibility
+## Success Metrics
 
-* Purely **opt-in**; does not change Node, Flow, or Core APIs
-* Works in-proc today; later can use `StateStore` for durable pause/resume with zero breaking changes
-* No new mandatory dependencies; LiteLLM required only if you import/use the planner
+1. **Developer Experience**
+   - IDE autocomplete works for tool context
+   - No more "what fields are injected?" confusion
+   - Clear separation of concerns in API
 
----
+2. **Code Quality**
+   - No file over 500 lines in planner module
+   - All public APIs typed
+   - e85% test coverage
 
-## Risks & Mitigations
+3. **Documentation**
+   - Every feature in guide has working example
+   - Migration path clear for existing users
+   - No deprecated APIs in examples
 
-* **LLM returns non-JSON** → strict response_format (where supported) + repair loop
-* **Hallucinated args** → Pydantic validation + corrective prompt, bounded retries
-* **Token sprawl** → structured summarization + budgets
-* **Complexity creep** → keep planner ~300–500 LOC; prompts/data contracts do the heavy lifting
-* **Vendor lock-in** → LiteLLM keeps providers swappable
-
----
-
-## Definition of Done
-
-* **Phase A**: JSON-only planner completes typical triage→retrieve→summarize flows with deterministic outputs
-* **Phase B**: Summarization keeps prompts within budget; pause/resume reliable; hints work as expected
-* **Phase C**: Re-planning succeeds on common failures or exits with typed "no_path/budget_exhausted"
-* **Phase D**: Parallel fan-out with join works; reliability preserved per branch
+4. **Stability**
+   - All existing tests pass
+   - No breaking changes for valid v2.3 code
+   - Deprecation warnings guide migration
 
 ---
 
-## Stretch Goals (post-v2.5)
+## Appendix: File Changes Summary
 
-* Planner policies (cost ceilings per tenant)
-* Automatic tool selection from **Agent Cards (A2A)** when available
-* Cached tool arg priors (few-shot from past successful trajectories)
+### New Files
+```
+penguiflow/planner/context.py
+penguiflow/planner/models.py
+penguiflow/planner/trajectory.py
+penguiflow/planner/constraints.py
+penguiflow/planner/hints.py
+penguiflow/planner/parallel.py
+penguiflow/planner/pause.py
+penguiflow/planner/llm.py
+penguiflow/planner/join.py
+examples/react_parallel_join/
+examples/react_typed_tools/
+docs/MIGRATION_V24.md
+```
 
----
+### Modified Files
+```
+penguiflow/planner/__init__.py    # Export ToolContext, new structure
+penguiflow/planner/react.py       # Slim coordinator
+penguiflow/planner/prompts.py     # Join injection docs
+examples/planner_enterprise_agent_v2/*
+examples/react_memory_context/*
+REACT_PLANNER_INTEGRATION_GUIDE.md
+CLAUDE.md
+CHANGELOG.md
+pyproject.toml (version bump)
+```
 
-## Catalog System Benefits
-
-* **Ergonomic**: use decorator, wrapper, or external catalog—whatever fits your codebase
-* **Typed**: args/out schemas come straight from your Pydantic models (no duplicate typing)
-* **Lightweight**: no core API break; everything is additive
-* **Planner-ready**: clean, compact tool catalog with side-effects and hints the planner can use
-* **Side-effect-aware**: planner can apply rules ("avoid `write` unless approved"; "never call `stateful` in parallel")
-* **Cost/latency shaping**: use `cost_hint` and `latency_hint_ms` to penalize expensive/slow nodes
-* **Auth scopes**: if caller lacks scopes, planner blocks those nodes (hard constraint)
-* **Tags**: great for domain routing ("finance", "customer_support") and developer hints
-
----
-
-**TL;DR**
-
-This planner stays true to PenguiFlow's DNA: **typed, reliable, lightweight**. It borrows the *good parts* of DSPy/Google/Pydantic—tool iteration, plan→act discipline, typed outputs—while avoiding heavy frameworks, free-form logs, and complex servers.
+### Deleted Files
+```
+(none - backward compatibility maintained)
+```
