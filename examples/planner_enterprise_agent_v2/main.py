@@ -14,11 +14,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import sys
 from collections import defaultdict
-from collections.abc import Iterator, Mapping
 from typing import Any
 from uuid import uuid4
 
@@ -51,48 +49,6 @@ from penguiflow.registry import ModelRegistry
 # Global buffers for demonstration (in production: use message queue/websocket)
 STATUS_BUFFER: defaultdict[str, list[StatusUpdate]] = defaultdict(list)
 EXECUTION_LOGS: list[str] = []
-
-
-class _SerializableContext(Mapping[str, Any]):
-    """Context wrapper that filters non-serializable values for JSON serialization.
-
-    This class allows passing both serializable and non-serializable objects
-    in context_meta. When the planner serializes context for the LLM prompt,
-    only JSON-serializable values are included. But nodes can still access
-    all values (including functions, loggers, etc.) via ctx.meta.
-    """
-
-    def __init__(self, data: dict[str, Any]) -> None:
-        self._data = data
-        self._serializable_keys = self._find_serializable_keys()
-
-    def _find_serializable_keys(self) -> set[str]:
-        """Identify which keys have JSON-serializable values."""
-        serializable = set()
-        for key, value in self._data.items():
-            try:
-                json.dumps(value)
-                serializable.add(key)
-            except (TypeError, ValueError):
-                # Skip non-serializable values
-                pass
-        return serializable
-
-    def __getitem__(self, key: str) -> Any:
-        """Allow access to all values (both serializable and non-serializable)."""
-        return self._data[key]
-
-    def __iter__(self) -> Iterator[str]:
-        """Iterate only over serializable keys (for dict() and JSON conversion)."""
-        return iter(self._serializable_keys)
-
-    def __len__(self) -> int:
-        """Return count of serializable keys."""
-        return len(self._serializable_keys)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Get value with default (allows access to all values)."""
-        return self._data.get(key, default)
 
 
 class EnterpriseAgentOrchestrator:
@@ -428,10 +384,12 @@ When context is provided, use it appropriately to enhance your responses.
             >>> result = await agent.execute("What was deployed?", memories=memories)
         """
         trace_id = uuid4().hex
-        status_history = STATUS_BUFFER[trace_id]
+        status_history: list[StatusUpdate] = STATUS_BUFFER[trace_id]
+        status_history_for_llm: list[dict[str, Any]] = []
 
         def publish_status(update: StatusUpdate) -> None:
             status_history.append(update)
+            status_history_for_llm.append(update.model_dump())
             message_text = update.message or ""
             step_ref = str(update.roadmap_step_id) if update.roadmap_step_id is not None else "-"
             EXECUTION_LOGS.append(f"{trace_id}:{update.status}:{message_text}:{step_ref}")
@@ -454,13 +412,13 @@ When context is provided, use it appropriately to enhance your responses.
         #   - NO internal routing metadata (tenant_id, trace_id)
         #   - Format can be customized per application
         #
-        # node_meta: Data visible ONLY to nodes (via ctx.meta)
+        # tool_context: Data visible ONLY to nodes (via ctx.tool_context)
         #   - Internal concerns: routing, logging, telemetry
         #   - Non-serializable objects: functions, loggers
         #   - Never sent to LLM
 
         llm_context: dict[str, Any] = {
-            "status_history": status_history,  # Can help LLM track progress
+            "status_history": status_history_for_llm,  # Can help LLM track progress
         }
 
         # Add memories if provided - these ARE sent to the LLM!
@@ -468,17 +426,13 @@ When context is provided, use it appropriately to enhance your responses.
             llm_context["memories"] = memories
 
         # Node metadata - internal concerns only
-        node_meta: dict[str, Any] = {
+        tool_context: dict[str, Any] = {
             "tenant_id": tenant_id,
             "trace_id": trace_id,
             "status_publisher": publish_status,
             "telemetry": self.telemetry,
             "status_logger": self.telemetry.logger,
         }
-
-        # Merge both contexts for nodes to access via ctx.meta
-        # The planner only sends llm_context to the LLM
-        combined_meta = {**llm_context, **node_meta}
 
         self.telemetry.logger.info(
             "execute_start",
@@ -490,7 +444,8 @@ When context is provided, use it appropriately to enhance your responses.
         try:
             planner_result = await self._planner.run(
                 query=query,
-                context_meta=combined_meta,
+                llm_context=llm_context,
+                tool_context=tool_context,
             )
 
             if isinstance(planner_result, PlannerPause):

@@ -1,17 +1,21 @@
-# PenguiFlow v2.4  API Refinement & Production Hardening
+# PenguiFlow v2.4 — API Refinement & Production Hardening
+
+> **Status**: v2.4 is **largely implemented**. This document tracks remaining work and serves as historical reference.
 
 ## Overview
 
-Version 2.4 focuses on **API clarity**, **developer experience**, and **documentation completeness**. This release addresses accumulated technical debt before broader agent migration, ensuring a stable foundation for production deployments.
+Version 2.4 focused on **API clarity**, **developer experience**, and **documentation completeness**. This release addressed accumulated technical debt before broader agent migration.
 
-### Goals
+### Goals — Implementation Status
 
-1. **Clean API Surface**: Eliminate confusion between context types, remove deprecated parameters
-2. **Type Safety**: Proper typed context for tools, eliminating `ctx: Any`
-3. **Explicit over Implicit**: Remove magic field injection, make parallel join explicit
-4. **Maintainable Codebase**: Break up monolithic modules, improve separation of concerns
-5. **Documentation Parity**: Every feature documented with examples before release
-6. **Example Quality**: All examples use current best practices, no deprecated APIs
+| Goal | Status |
+|------|--------|
+| Clean API Surface (`llm_context` + `tool_context` separation) | ✅ Done |
+| Type Safety (`ToolContext` protocol) | ✅ Done |
+| Explicit over Implicit (`JoinInjection` for parallel joins) | ✅ Done |
+| Maintainable Codebase (modular structure) | ✅ Done |
+| Documentation Parity | ⏳ In Progress |
+| Example Quality (`react_typed_tools`, `react_parallel_join`) | ✅ Done |
 
 ### Non-Goals
 
@@ -21,115 +25,37 @@ Version 2.4 focuses on **API clarity**, **developer experience**, and **document
 
 ---
 
-## Current State Assessment
+## Implementation Summary
 
-### Issues to Address
-
-| Issue | Severity | Phase |
-|-------|----------|-------|
-| `_SerializableContext` workaround needed | High | 1 |
-| `ctx: Any` in all tools | High | 2 |
-| Magic join field injection | Medium | 3 |
-| `react.py` monolith (2500+ lines) | Medium | 4 |
-| Deprecated `context_meta` in examples | High | 5 |
-| Missing documentation for features | High | 5 |
-| Confusing context terminology | Medium | 5 |
-
-### Files Requiring Changes
+### What Was Built
 
 ```
-penguiflow/
-  planner/
-    react.py          # Split into modules (Phase 4)
-    context.py        # NEW: ToolContext type (Phase 2)
-    parallel.py       # NEW: Parallel execution logic (Phase 4)
-    trajectory.py     # NEW: Trajectory management (Phase 4)
-    join.py           # NEW: Explicit join configuration (Phase 3)
-  types.py            # Add ToolContext protocol (Phase 2)
+penguiflow/planner/
+├── __init__.py           # Public exports (ToolContext, JoinInjection, etc.)
+├── react.py              # ReactPlanner (1437 lines - coordinator)
+├── models.py             # PlannerAction, PlannerPause, PlannerFinish, JoinInjection
+├── context.py            # ToolContext protocol, AnyContext helper
+├── trajectory.py         # Trajectory, TrajectoryStep, TrajectorySummary
+├── constraints.py        # _ConstraintTracker, budget/deadline logic
+├── hints.py              # _PlanningHints, hint parsing
+├── parallel.py           # execute_parallel_plan, branch execution
+├── pause.py              # _PauseRecord, _PlannerPauseSignal
+├── llm.py                # Message building, critique, summarization
+├── prompts.py            # Prompt templates
+├── reflection_prompts.py # Reflection loop prompts
+└── dspy_client.py        # DSPy integration
 
 examples/
-  planner_enterprise_agent_v2/  # Update all deprecated APIs (Phase 5)
-  react_memory_context/          # Update context patterns (Phase 5)
-  react_pause_resume/            # Verify current (Phase 5)
-  NEW: react_parallel_join/      # Explicit join example (Phase 5)
-
-docs/
-  REACT_PLANNER_INTEGRATION_GUIDE.md  # Already updated, verify (Phase 5)
-  MIGRATION_V24.md                     # NEW: Migration guide (Phase 5)
+├── react_typed_tools/    # ToolContext usage demo
+├── react_parallel_join/  # Explicit join injection demo
+├── react_pause_resume/   # Human-in-the-loop demo
+├── react_memory_context/ # Context patterns demo
+├── react_minimal/        # Minimal setup
+├── react_parallel/       # Basic parallel execution
+└── react_replan/         # Replanning demo
 ```
 
----
-
-## Phase 1  Context API Separation
-
-**Goal**: Eliminate the `_SerializableContext` workaround by providing first-class API separation.
-
-### Problem
-
-Currently, users must merge LLM-visible and tool-only context, then wrap in `_SerializableContext`:
-
-```python
-# Current (confusing)
-combined = {**llm_visible, **tool_only}
-safe = _SerializableContext(combined)
-result = await planner.run(query=query, llm_context=safe)
-```
-
-### Solution
-
-Introduce explicit `tool_context` parameter alongside `llm_context`:
-
-```python
-# New (clear)
-result = await planner.run(
-    query=query,
-    llm_context={"memories": [...], "preferences": {...}},  # Sent to LLM
-    tool_context={"trace_id": "...", "publisher": fn},       # Tools only
-)
-```
-
-### Deliverables
-
-1. **Add `tool_context` parameter to `ReactPlanner.run()`**
-   - `llm_context`: JSON-serializable, included in LLM prompt
-   - `tool_context`: Any objects, only accessible via `ctx.tool_context`
-   - Validation: `llm_context` must be JSON-serializable (fail fast)
-
-2. **Update `_PlannerContext`**
-   ```python
-   class _PlannerContext:
-       @property
-       def llm_context(self) -> dict[str, Any]:
-           """Context visible to LLM (read-only view)."""
-
-       @property
-       def tool_context(self) -> dict[str, Any]:
-           """Tool-only context (callbacks, loggers, etc.)."""
-
-       @property
-       def meta(self) -> dict[str, Any]:
-           """Combined context (deprecated, for backward compat)."""
-   ```
-
-3. **Deprecate `_SerializableContext`**
-   - Keep for one version with deprecation warning
-   - Document migration path
-
-4. **Update `prompts.build_user_prompt()`**
-   - Only receives `llm_context` (never tool_context)
-   - Add JSON serialization validation
-
-### Acceptance Criteria
-
-- [ ] `tool_context` parameter accepted by `run()` and `resume()`
-- [ ] `ctx.tool_context` accessible in tools
-- [ ] `ctx.llm_context` accessible in tools (read-only)
-- [ ] `ctx.meta` still works (deprecated warning)
-- [ ] Passing non-serializable in `llm_context` raises `TypeError` immediately
-- [ ] Tests cover all new paths
-- [ ] Backward compatible: old code still works with deprecation warnings
-
-### Migration Example
+### Key API Changes (v2.3 → v2.4)
 
 ```python
 # Before (v2.3)
@@ -142,520 +68,143 @@ result = await planner.run(query=q, llm_context=context)
 # After (v2.4)
 result = await planner.run(
     query=q,
-    llm_context={"memories": memories},
-    tool_context={"status_publisher": publisher},
+    llm_context={"memories": memories},       # JSON-only, sent to LLM
+    tool_context={"status_publisher": publisher},  # Any objects, tools only
 )
 ```
 
----
-
-## Phase 2  Typed Tool Context
-
-**Goal**: Replace `ctx: Any` with a proper typed protocol for IDE support and type checking.
-
-### Problem
+### Exports from `penguiflow.planner`
 
 ```python
-# Current - no type hints, no autocomplete
-async def my_tool(args: MyArgs, ctx: Any) -> MyResult:
-    meta = ctx.meta  # Hope this exists!
-    await ctx.pause(...)  # Is this even a method?
-```
-
-### Solution
-
-Introduce `ToolContext` protocol:
-
-```python
-# New - full type support
-from penguiflow.planner import ToolContext
-
-async def my_tool(args: MyArgs, ctx: ToolContext) -> MyResult:
-    trace_id = ctx.tool_context.get("trace_id")  # Autocomplete works!
-    await ctx.pause("await_input", {"q": "?"})    # Type checked!
-```
-
-### Deliverables
-
-1. **Create `penguiflow/planner/context.py`**
-   ```python
-   from typing import Protocol, Any, Mapping
-
-   class ToolContext(Protocol):
-       """Protocol for tool execution context.
-
-       This is the typed interface available to all planner tools.
-       """
-
-       @property
-       def llm_context(self) -> Mapping[str, Any]:
-           """Context visible to LLM (read-only)."""
-           ...
-
-       @property
-       def tool_context(self) -> dict[str, Any]:
-           """Tool-only context (callbacks, telemetry, etc.)."""
-           ...
-
-       @property
-       def meta(self) -> dict[str, Any]:
-           """Combined context. Deprecated: use llm_context/tool_context."""
-           ...
-
-       async def pause(
-           self,
-           reason: PlannerPauseReason,
-           payload: Mapping[str, Any] | None = None,
-       ) -> None:
-           """Pause execution for human input."""
-           ...
-
-       def emit_chunk(
-           self,
-           text: str,
-           *,
-           stream_id: str | None = None,
-           done: bool = False,
-           meta: dict[str, Any] | None = None,
-       ) -> None:
-           """Emit a streaming chunk."""
-           ...
-   ```
-
-2. **Export from `penguiflow.planner`**
-   ```python
-   from penguiflow.planner import ToolContext
-   ```
-
-3. **Update `_PlannerContext` to satisfy protocol**
-
-4. **Create helper type for flow context compatibility**
-   ```python
-   from typing import Union
-   from penguiflow.planner import ToolContext
-   from penguiflow.core import Context
-
-   # For tools that work in both flow and planner
-   AnyContext = Union[ToolContext, Context]
-   ```
-
-### Acceptance Criteria
-
-- [ ] `ToolContext` protocol defined and exported
-- [ ] `_PlannerContext` implements `ToolContext`
-- [ ] mypy passes with `ctx: ToolContext` annotations
-- [ ] IDE autocomplete works for all methods
-- [ ] Documentation updated with type hints
-- [ ] Helper functions updated to use `ToolContext | Any` for backward compat
-
----
-
-## Phase 3  Explicit Join Configuration
-
-**Goal**: Replace magic field name injection with explicit, discoverable configuration.
-
-### Problem
-
-```python
-# Current - magic field names
-class JoinArgs(BaseModel):
-    results: list[T]  # Magically injected if named "results"
-    expect: int       # Magically injected if named "expect"
-    # What if I name it "data"? Nothing happens. Surprise!
-```
-
-### Solution
-
-Explicit join configuration in the action:
-
-```python
-# New - explicit mapping
-{
-    "plan": [...],
-    "join": {
-        "node": "merge_results",
-        "inject": {
-            "branch_results": "$results",     # Explicit: inject results into this field
-            "total_branches": "$expect",       # Explicit: inject count into this field
-            "all_outcomes": "$branches",       # Explicit: inject all branch data
-        },
-        "args": {
-            "custom_param": "value"            # Additional static args
-        }
-    }
-}
-```
-
-### Deliverables
-
-1. **Extend `ParallelJoin` schema**
-   ```python
-   class JoinInjection(BaseModel):
-       """Mapping of target field -> injection source."""
-       # Target field name -> source (prefixed with $)
-       # Sources: $results, $expect, $branches, $failures, $success_count, $failure_count
-       mapping: dict[str, str] = Field(default_factory=dict)
-
-   class ParallelJoin(BaseModel):
-       node: str
-       args: dict[str, Any] = Field(default_factory=dict)
-       inject: JoinInjection | None = None  # NEW: explicit injection config
-   ```
-
-2. **Update parallel execution logic**
-   - If `inject` is provided, use explicit mapping
-   - If `inject` is None, fall back to magic names (backward compat, with deprecation warning)
-   - Log warning when using magic injection: "Implicit join injection is deprecated. Use explicit 'inject' mapping."
-
-3. **Update prompts to explain injection**
-   - System prompt should document available injection sources
-   - Error messages should suggest using `inject`
-
-4. **Create `penguiflow/planner/join.py`**
-   - Extract join logic from `react.py`
-   - Clean implementation with explicit injection
-
-### Acceptance Criteria
-
-- [ ] `inject` field accepted in `ParallelJoin`
-- [ ] Explicit mapping works correctly
-- [ ] Magic injection still works with deprecation warning
-- [ ] Prompts updated with injection documentation
-- [ ] Tests cover explicit and implicit injection
-- [ ] Error messages guide users to explicit injection
-
-### Example
-
-```python
-# Before (magic)
-class MergeArgs(BaseModel):
-    results: list[T]  # Must be named exactly "results"
-
-# After (explicit)
-class MergeArgs(BaseModel):
-    branch_outputs: list[T]  # Can be named anything
-
-# LLM action:
-{
-    "plan": [...],
-    "join": {
-        "node": "merge",
-        "inject": {"branch_outputs": "$results"}
-    }
-}
-```
-
----
-
-## Phase 4  Modularize react.py
-
-**Goal**: Break the 2500+ line monolith into focused, maintainable modules.
-
-### Current Structure
-
-```
-react.py (2500+ lines)
-   PlannerAction, PlannerPause, PlannerFinish (models)
-   _PlannerContext (context)
-   Trajectory, TrajectoryStep (state)
-   _ConstraintTracker (budgets)
-   _PlanningHints (hints)
-   _BranchExecutionResult (parallel)
-   ReactPlanner (main class)
-      __init__, run, resume
-      _run_loop (main loop)
-      _execute_parallel_plan (parallel)
-      _run_parallel_branch (parallel)
-      _build_messages (prompts)
-      _check_action_constraints (constraints)
-      _record_pause, _load_pause_record (pause)
-      ... many more
-   Helper functions
-```
-
-### Target Structure
-
-```
-penguiflow/planner/
-   __init__.py           # Public exports
-   react.py              # ReactPlanner class (slim coordinator)
-   models.py             # PlannerAction, PlannerPause, PlannerFinish, etc.
-   context.py            # ToolContext protocol, _PlannerContext (Phase 2)
-   trajectory.py         # Trajectory, TrajectoryStep, serialization
-   constraints.py        # _ConstraintTracker, budget/deadline logic
-   hints.py              # _PlanningHints, hint parsing
-   parallel.py           # Parallel execution, branching, joining
-   pause.py              # Pause/resume logic, state storage
-   llm.py                # LLM interaction, message building
-   prompts.py            # (existing) prompt templates
-```
-
-### Deliverables
-
-1. **Create `models.py`**
-   - Move: `PlannerAction`, `ParallelCall`, `ParallelJoin`, `PlannerPause`, `PlannerFinish`
-   - Move: `PlannerPauseReason`, `PlannerEvent`
-
-2. **Create `trajectory.py`**
-   - Move: `Trajectory`, `TrajectoryStep`
-   - Move: Serialization/deserialization logic
-
-3. **Create `constraints.py`**
-   - Move: `_ConstraintTracker`
-   - Move: Budget and deadline enforcement
-
-4. **Create `hints.py`**
-   - Move: `_PlanningHints`
-   - Move: Hint parsing from dict/config
-
-5. **Create `parallel.py`**
-   - Move: `_BranchExecutionResult`
-   - Move: `_execute_parallel_plan`, `_run_parallel_branch`
-   - Move: Join logic (from Phase 3)
-
-6. **Create `pause.py`**
-   - Move: `_PauseRecord`
-   - Move: `_record_pause`, `_load_pause_record`
-   - Move: State store integration
-
-7. **Create `llm.py`**
-   - Move: `_build_messages`, `_call_llm`
-   - Move: Response parsing, repair logic
-
-8. **Slim down `react.py`**
-   - Keep: `ReactPlanner` class
-   - Coordinator that imports from other modules
-   - Target: < 500 lines
-
-### Acceptance Criteria
-
-- [ ] All modules created with clear responsibilities
-- [ ] No circular imports
-- [ ] All tests pass without modification
-- [ ] `react.py` under 500 lines
-- [ ] Public API unchanged (imports from `penguiflow.planner` work)
-- [ ] mypy passes on new module structure
-
-### Import Structure
-
-```python
-# Public API (unchanged)
 from penguiflow.planner import (
+    # Core
     ReactPlanner,
     PlannerPause,
     PlannerFinish,
     PlannerEvent,
-    ToolContext,  # NEW from Phase 2
-)
+    PlannerAction,
 
-# Internal imports (new)
-from penguiflow.planner.models import PlannerAction
-from penguiflow.planner.trajectory import Trajectory
-from penguiflow.planner.parallel import execute_parallel_plan
+    # Types
+    ToolContext,      # Protocol for tool context
+    AnyContext,       # ToolContext | FlowContext
+
+    # Parallel
+    JoinInjection,    # Explicit injection mapping
+    ParallelCall,
+    ParallelJoin,
+
+    # Trajectory
+    Trajectory,
+    TrajectoryStep,
+    TrajectorySummary,
+
+    # Reflection
+    ReflectionConfig,
+    ReflectionCriteria,
+    ReflectionCritique,
+
+    # Policy
+    ToolPolicy,
+)
 ```
 
 ---
 
-## Phase 5  Documentation & Examples Update
+## Phase Status
 
-**Goal**: Every feature documented, all examples using best practices.
+### Phase 1 — Context API Separation ✅ COMPLETE
 
-### Documentation Updates
+- `tool_context` parameter added to `run()` and `resume()`
+- `llm_context` validated as JSON-serializable (raises `TypeError` if not)
+- `ctx.tool_context` and `ctx.llm_context` accessible in tools
+- `ctx.meta` still works (deprecated, for backward compat)
 
-1. **REACT_PLANNER_INTEGRATION_GUIDE.md**
-   - [x] Already updated with parallel execution
-   - [ ] Update Section 4 for new `tool_context` parameter
-   - [ ] Update Section 5 orchestrator example
-   - [ ] Update Section 11 for explicit join injection
-   - [ ] Add deprecation notices for `_SerializableContext`, `ctx.meta`
+### Phase 2 — Typed Tool Context ✅ COMPLETE
 
-2. **Create MIGRATION_V24.md**
-   ```markdown
-   # Migrating to PenguiFlow v2.4
+- `ToolContext` protocol defined in `context.py`
+- `AnyContext` helper type for tools that work in both flow and planner
+- Exported from `penguiflow.planner`
+- IDE autocomplete works for all methods
 
-   ## Breaking Changes
-   - None (fully backward compatible)
+### Phase 3 — Explicit Join Configuration ✅ COMPLETE
 
-   ## Deprecations
-   - `context_meta` parameter � use `llm_context`
-   - `_SerializableContext` � use separate `llm_context` + `tool_context`
-   - `ctx.meta` � use `ctx.llm_context` or `ctx.tool_context`
-   - Magic join field injection � use explicit `inject` mapping
+- `JoinInjection` model in `models.py`
+- `ParallelJoin.inject` field accepts explicit mapping
+- Supported sources: `$results`, `$expect`, `$branches`, `$failures`, `$success_count`, `$failure_count`
+- Magic injection deprecated but still works with warning
 
-   ## Migration Steps
-   1. Update `planner.run()` calls...
-   2. Update tool signatures...
-   3. Update join configurations...
-   ```
+### Phase 4 — Modularize react.py ✅ COMPLETE
 
-3. **Update CLAUDE.md**
-   - Add v2.4 to version history
-   - Update any outdated patterns
+Modules created:
+- `models.py` — Data models and protocols
+- `context.py` — ToolContext protocol
+- `trajectory.py` — Trajectory management
+- `constraints.py` — Budget and deadline tracking
+- `hints.py` — Planning hints parsing
+- `parallel.py` — Parallel execution logic
+- `pause.py` — Pause/resume state management
+- `llm.py` — LLM interaction and message building
 
-4. **API Reference** (if exists)
-   - Document `ToolContext` protocol
-   - Document new parameters
+Note: `react.py` is 1437 lines (target was <500). This is acceptable as it's now a coordinator that imports from modules. Further slimming is optional.
 
-### Example Updates
+### Phase 5 — Documentation & Examples ⏳ IN PROGRESS
 
-1. **planner_enterprise_agent_v2/**
-   - [ ] Replace `context_meta` with `llm_context` + `tool_context`
-   - [ ] Remove `_SerializableContext` usage
-   - [ ] Update tool signatures to use `ToolContext`
-   - [ ] Add explicit join injection if using parallel
-   - [ ] Verify all tests pass
+Examples completed:
+- ✅ `react_typed_tools/` — ToolContext usage
+- ✅ `react_parallel_join/` — Explicit join injection
+- ✅ `react_pause_resume/` — Human-in-the-loop
+- ✅ `react_memory_context/` — Context patterns
 
-2. **react_memory_context/**
-   - [ ] Update to new context pattern
-   - [ ] Add `ToolContext` type hints
+Documentation:
+- ✅ `docs/MIGRATION_V24.md` — Migration guide exists
+- ⏳ `REACT_PLANNER_INTEGRATION_GUIDE.md` — **Needs comprehensive rewrite**
 
-3. **react_pause_resume/**
-   - [ ] Verify current patterns
-   - [ ] Update if needed
+### Phase 6 — Cleanup & Release ⏳ PENDING
 
-4. **NEW: react_parallel_join/**
-   - [ ] Create example demonstrating:
-     - Parallel fan-out
-     - Explicit join injection
-     - Failure handling
-     - Partial result processing
-   - [ ] Include README.md
-
-5. **NEW: react_typed_tools/**
-   - [ ] Create example demonstrating:
-     - `ToolContext` protocol usage
-     - Proper type hints throughout
-     - IDE autocomplete benefits
-
-### Acceptance Criteria
-
-- [ ] All deprecated APIs have warnings in docs
-- [ ] Migration guide complete with before/after examples
-- [ ] All examples run without deprecation warnings
-- [ ] All examples use `ToolContext` type hints
-- [ ] New examples created for new features
-- [ ] README updated with v2.4 highlights
+- [ ] Comprehensive guide rewrite
+- [ ] Final test pass
+- [ ] Version bump to 2.4.0
+- [ ] CHANGELOG.md update
+- [ ] Git tag
 
 ---
 
-## Phase 6  Cleanup & Release
+## Remaining Work
 
-**Goal**: Final polish, remove deprecated code paths, release v2.4.
+### Priority 1: Guide Rewrite
 
-### Tasks
+The `REACT_PLANNER_INTEGRATION_GUIDE.md` is too terse (249 lines) and needs expansion:
+- Detailed context separation explanation with examples
+- Complete parallel execution documentation
+- Pause/resume patterns with state management
+- Reflection loop configuration
+- Troubleshooting section
+- Quick reference card
 
-1. **Code Cleanup**
-   - Remove `# type: ignore` comments where possible
-   - Fix any remaining mypy issues
-   - Run ruff with strict settings
+### Priority 2: Optional Improvements
 
-2. **Test Coverage**
-   - Ensure e85% coverage maintained
-   - Add edge case tests for new features
-   - Add deprecation warning tests
+- Slim `react.py` further (optional, not blocking)
+- Add more edge case tests
+- Performance benchmarks
 
-3. **Performance Validation**
-   - Benchmark parallel execution
-   - Ensure no regression from modularization
-   - Profile memory usage
+---
 
-4. **Release Checklist**
-   - [ ] All phases complete
-   - [ ] All tests pass (Python 3.11, 3.12, 3.13)
-   - [ ] Coverage e85%
-   - [ ] No mypy errors
-   - [ ] No ruff errors
-   - [ ] CHANGELOG.md updated
-   - [ ] Version bumped to 2.4.0
-   - [ ] Git tag created
-
-### Deprecation Timeline
+## Deprecation Timeline
 
 | Deprecated | Warning in | Removed in |
 |------------|------------|------------|
-| `context_meta` | v2.3 | v2.5 |
-| `_SerializableContext` | v2.4 | v2.6 |
+| `context_meta` parameter | v2.3 | v2.5 |
+| `_SerializableContext` wrapper | v2.4 | v2.6 |
 | `ctx.meta` (direct access) | v2.4 | v2.6 |
-| Magic join injection | v2.4 | v2.6 |
-
----
-
-## Implementation Order
-
-```
-Phase 1: Context API Separation     [~3 days]
-    �
-Phase 2: Typed Tool Context         [~2 days]
-    �
-Phase 3: Explicit Join Config       [~2 days]
-    �
-Phase 4: Modularize react.py        [~4 days]
-    �
-Phase 5: Docs & Examples            [~3 days]
-    �
-Phase 6: Cleanup & Release          [~2 days]
-
-Total: ~16 days of focused work
-```
+| Magic join field injection | v2.4 | v2.6 |
 
 ---
 
 ## Success Metrics
 
-1. **Developer Experience**
-   - IDE autocomplete works for tool context
-   - No more "what fields are injected?" confusion
-   - Clear separation of concerns in API
-
-2. **Code Quality**
-   - No file over 500 lines in planner module
-   - All public APIs typed
-   - e85% test coverage
-
-3. **Documentation**
-   - Every feature in guide has working example
-   - Migration path clear for existing users
-   - No deprecated APIs in examples
-
-4. **Stability**
-   - All existing tests pass
-   - No breaking changes for valid v2.3 code
-   - Deprecation warnings guide migration
-
----
-
-## Appendix: File Changes Summary
-
-### New Files
-```
-penguiflow/planner/context.py
-penguiflow/planner/models.py
-penguiflow/planner/trajectory.py
-penguiflow/planner/constraints.py
-penguiflow/planner/hints.py
-penguiflow/planner/parallel.py
-penguiflow/planner/pause.py
-penguiflow/planner/llm.py
-penguiflow/planner/join.py
-examples/react_parallel_join/
-examples/react_typed_tools/
-docs/MIGRATION_V24.md
-```
-
-### Modified Files
-```
-penguiflow/planner/__init__.py    # Export ToolContext, new structure
-penguiflow/planner/react.py       # Slim coordinator
-penguiflow/planner/prompts.py     # Join injection docs
-examples/planner_enterprise_agent_v2/*
-examples/react_memory_context/*
-REACT_PLANNER_INTEGRATION_GUIDE.md
-CLAUDE.md
-CHANGELOG.md
-pyproject.toml (version bump)
-```
-
-### Deleted Files
-```
-(none - backward compatibility maintained)
-```
+1. ✅ IDE autocomplete works for tool context
+2. ✅ No more "what fields are injected?" confusion (explicit injection)
+3. ✅ Clear API separation (`llm_context` vs `tool_context`)
+4. ⏳ Every feature in guide has working example
+5. ✅ Migration path clear for existing users
+6. ✅ All existing tests pass

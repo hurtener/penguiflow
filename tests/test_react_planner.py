@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import Mapping
 from typing import Any
+import warnings
 
 import pytest
 from pydantic import BaseModel
@@ -56,6 +58,13 @@ class MergeArgs(BaseModel):
     results: list[ShardPayload]
 
 
+class FlexibleMergeArgs(BaseModel):
+    expected: int
+    payloads: list[ShardPayload]
+    branches: list[dict[str, Any]]
+    success_total: int
+
+
 class AuditArgs(BaseModel):
     branches: list[dict[str, Any]]
     failures: list[dict[str, Any]]
@@ -79,6 +88,24 @@ async def search(args: Query, ctx: object) -> SearchResult:
 @tool(desc="Compose final answer")
 async def respond(args: Answer, ctx: object) -> Answer:
     return args
+
+
+CONTEXT_CAPTURE: dict[str, Any] = {}
+RESUME_CAPTURE: dict[str, Any] = {}
+
+
+@tool(desc="Echo answer while recording contexts")
+async def capture_answer(args: Answer, ctx: Any) -> Answer:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", DeprecationWarning)
+        meta_view = dict(ctx.meta)
+    CONTEXT_CAPTURE["llm_context"] = dict(ctx.llm_context)
+    CONTEXT_CAPTURE["tool_context"] = dict(ctx.tool_context)
+    CONTEXT_CAPTURE["meta"] = meta_view
+    CONTEXT_CAPTURE["meta_warnings"] = [
+        warning for warning in caught if issubclass(warning.category, DeprecationWarning)
+    ]
+    return Answer(answer=args.answer)
 
 
 @tool(desc="Return invalid documents")
@@ -105,6 +132,15 @@ async def merge_results(args: MergeArgs, ctx: Any) -> Documents:
     return Documents(documents=[item.text for item in args.results])
 
 
+@tool(desc="Merge shard payloads with explicit inject mapping")
+async def merge_results_explicit(
+    args: FlexibleMergeArgs, ctx: Any
+) -> Documents:
+    assert args.success_total == args.expected == len(args.payloads)
+    assert len(args.branches) == args.expected
+    return Documents(documents=[item.text for item in args.payloads])
+
+
 AUDIT_CALLS: list[dict[str, Any]] = []
 
 
@@ -117,6 +153,25 @@ async def audit_parallel(args: AuditArgs, ctx: Any) -> Documents:
 @tool(desc="Approval required before proceeding")
 async def approval_gate(args: Intent, ctx: Any) -> Intent:
     await ctx.pause("approval_required", {"intent": args.intent})
+    return args
+
+
+@tool(desc="Pause and record tool context")
+async def pause_and_record(args: Intent, ctx: Any) -> Intent:
+    RESUME_CAPTURE.setdefault("calls", []).append(
+        {
+            "llm_context": dict(ctx.llm_context),
+            "tool_context": dict(ctx.tool_context),
+        }
+    )
+    await ctx.pause("approval_required", {"intent": args.intent})
+    return args
+
+
+@tool(desc="Respond while recording tool context")
+async def respond_with_context(args: Answer, ctx: Any) -> Answer:
+    RESUME_CAPTURE["resumed_tool_context"] = dict(ctx.tool_context)
+    RESUME_CAPTURE["resumed_llm_context"] = dict(ctx.llm_context)
     return args
 
 
@@ -246,6 +301,59 @@ async def test_react_planner_runs_end_to_end() -> None:
     assert result.reason == "answer_complete"
     assert result.payload == {"answer": "PenguiFlow is lightweight."}
     assert result.metadata["step_count"] == 2
+
+
+@pytest.mark.asyncio()
+async def test_tool_context_separation_and_meta_warning() -> None:
+    CONTEXT_CAPTURE.clear()
+    client = StubClient(
+        [
+            {
+                "thought": "capture",
+                "next_node": "capture",
+                "args": {"answer": "ok"},
+            },
+            {"thought": "finish", "next_node": None, "args": {"answer": "ok"}},
+        ]
+    )
+    registry = ModelRegistry()
+    registry.register("capture", Answer, Answer)
+    nodes = [Node(capture_answer, name="capture")]
+    catalog = build_catalog(nodes, registry)
+    planner = ReactPlanner(llm_client=client, catalog=catalog)
+
+    sentinel = object()
+    llm_ctx = {"visible": "memories"}
+    tool_ctx = {"hidden": "secret", "sentinel": sentinel}
+
+    result = await planner.run(
+        "Check context separation", llm_context=llm_ctx, tool_context=tool_ctx
+    )
+
+    assert result.reason == "answer_complete"
+    assert CONTEXT_CAPTURE["llm_context"] == llm_ctx
+    assert CONTEXT_CAPTURE["tool_context"]["hidden"] == "secret"
+    assert CONTEXT_CAPTURE["tool_context"]["sentinel"] is sentinel
+    assert CONTEXT_CAPTURE["meta"]["visible"] == "memories"
+    assert CONTEXT_CAPTURE["meta"]["hidden"] == "secret"
+    assert any(
+        issubclass(warning.category, DeprecationWarning)
+        for warning in CONTEXT_CAPTURE["meta_warnings"]
+    )
+    first_user_messages = [
+        msg["content"]
+        for msg in client.calls[0]
+        if msg.get("role") == "user"
+    ]
+    assert any("memories" in content for content in first_user_messages)
+    assert all("secret" not in content for content in first_user_messages)
+
+
+@pytest.mark.asyncio()
+async def test_llm_context_must_be_json_serialisable() -> None:
+    planner = make_planner(StubClient([]))
+    with pytest.raises(TypeError):
+        await planner.run("invalid", llm_context={"bad": object()})
 
 
 @pytest.mark.asyncio()
@@ -621,6 +729,52 @@ async def test_react_planner_pause_and_resume_flow() -> None:
 
 
 @pytest.mark.asyncio()
+async def test_resume_accepts_tool_context_override() -> None:
+    RESUME_CAPTURE.clear()
+    registry = ModelRegistry()
+    registry.register("pause_and_record", Intent, Intent)
+    registry.register("contextual_respond", Answer, Answer)
+
+    nodes = [
+        Node(pause_and_record, name="pause_and_record"),
+        Node(respond_with_context, name="contextual_respond"),
+    ]
+    catalog = build_catalog(nodes, registry)
+
+    client = StubClient(
+        [
+            {
+                "thought": "pause",
+                "next_node": "pause_and_record",
+                "args": {"intent": "docs"},
+            },
+            {
+                "thought": "respond",
+                "next_node": "contextual_respond",
+                "args": {"answer": "done"},
+            },
+            {"thought": "finish", "next_node": None, "args": {"answer": "done"}},
+        ]
+    )
+    planner = ReactPlanner(llm_client=client, catalog=catalog, pause_enabled=True)
+
+    pause_result = await planner.run(
+        "Need approval", llm_context={"user": "demo"}, tool_context={"initial": "one"}
+    )
+    assert isinstance(pause_result, PlannerPause)
+    assert RESUME_CAPTURE["calls"][0]["tool_context"]["initial"] == "one"
+
+    finish_result = await planner.resume(
+        pause_result.resume_token,
+        user_input="approved",
+        tool_context={"resumed": "two"},
+    )
+
+    assert finish_result.reason == "answer_complete"
+    assert RESUME_CAPTURE["resumed_tool_context"]["resumed"] == "two"
+
+
+@pytest.mark.asyncio()
 async def test_react_planner_resume_preserves_hop_budget() -> None:
     registry = ModelRegistry()
     registry.register("approval", Intent, Intent)
@@ -806,6 +960,119 @@ async def test_react_planner_parallel_plan_executes_concurrently() -> None:
     join_obs = step["observation"]["join"]["observation"]
     assert join_obs["documents"] == ["topic-primary", "topic-secondary"]
     assert step["observation"]["stats"] == {"success": 2, "failed": 0}
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_parallel_join_explicit_inject_mapping() -> None:
+    client = StubClient(
+        [
+            {
+                "thought": "fan out",
+                "plan": [
+                    {
+                        "node": "fetch_primary",
+                        "args": {"topic": "topic", "shard": 0},
+                    },
+                    {
+                        "node": "fetch_secondary",
+                        "args": {"topic": "topic", "shard": 1},
+                    },
+                ],
+                "join": {
+                    "node": "merge_results_explicit",
+                    "inject": {
+                        "payloads": "$results",
+                        "expected": "$expect",
+                        "branches": "$branches",
+                        "success_total": "$success_count",
+                    },
+                },
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"answer": "done"},
+            },
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("fetch_primary", ShardRequest, ShardPayload)
+    registry.register("fetch_secondary", ShardRequest, ShardPayload)
+    registry.register("merge_results_explicit", FlexibleMergeArgs, Documents)
+
+    nodes = [
+        Node(fetch_primary, name="fetch_primary"),
+        Node(fetch_secondary, name="fetch_secondary"),
+        Node(merge_results_explicit, name="merge_results_explicit"),
+    ]
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog(nodes, registry),
+    )
+
+    result = await planner.run("parallel explicit inject")
+    assert result.reason == "answer_complete"
+
+    step = result.metadata["steps"][0]
+    join_obs = step["observation"]["join"]["observation"]
+    assert join_obs["documents"] == ["topic-primary", "topic-secondary"]
+    assert step["observation"]["stats"] == {"success": 2, "failed": 0}
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_parallel_join_magic_injection_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = StubClient(
+        [
+            {
+                "thought": "fan out",
+                "plan": [
+                    {
+                        "node": "fetch_primary",
+                        "args": {"topic": "topic", "shard": 0},
+                    },
+                    {
+                        "node": "fetch_secondary",
+                        "args": {"topic": "topic", "shard": 1},
+                    },
+                ],
+                "join": {"node": "merge_results"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"answer": "done"},
+            },
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("fetch_primary", ShardRequest, ShardPayload)
+    registry.register("fetch_secondary", ShardRequest, ShardPayload)
+    registry.register("merge_results", MergeArgs, Documents)
+
+    nodes = [
+        Node(fetch_primary, name="fetch_primary"),
+        Node(fetch_secondary, name="fetch_secondary"),
+        Node(merge_results, name="merge_results"),
+    ]
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog(nodes, registry),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="penguiflow.planner"):
+        result = await planner.run("parallel implicit inject")
+
+    assert result.reason == "answer_complete"
+    assert any(
+        "Implicit join injection is deprecated" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio()

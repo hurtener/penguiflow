@@ -43,6 +43,13 @@ It provides:
   sizes, cancel reasons) and the `penguiflow-admin` CLI replays trace history from any
   configured `StateStore` for debugging.
 
+### v2.4 planner refinements (current)
+
+- Explicit `llm_context` vs `tool_context` split; fail-fast on non-JSON `llm_context`
+- `ToolContext` protocol for typed tools (`ctx.pause`, `ctx.emit_chunk`, `ctx.tool_context`)
+- Explicit join injection for parallel plans; examples in `examples/react_parallel_join`
+- Fresh docs: `REACT_PLANNER_INTEGRATION_GUIDE.md`, `docs/MIGRATION_V24.md`
+
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
 

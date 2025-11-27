@@ -189,7 +189,11 @@ def build_system_prompt(
         "3. Keep 'thought' concise and factual.",
         "4. When the task is complete, set 'next_node' to null "
         "and include the final payload in 'args'.",
-        "5. Do not emit plain text outside JSON.",
+        "5. For parallel plans, set 'join.inject' to map join args to "
+        "parallel outputs. Implicit injection is deprecated.",
+        "   Sources: $results, $expect, $branches, $failures, "
+        "$success_count, $failure_count.",
+        "6. Do not emit plain text outside JSON.",
         "",
         "Available tools:",
         rendered_tools or "(none)",
@@ -283,6 +287,30 @@ def render_invalid_node(node_name: str, available: Sequence[str]) -> str:
     return (
         f"tool '{node_name}' is not in the catalog. Choose one of: {options}."
     )
+
+
+def render_invalid_join_injection_source(
+    source: str, available: Sequence[str]
+) -> str:
+    options = ", ".join(available)
+    return (
+        f"join.inject uses unknown source '{source}'. "
+        f"Choose one of: {options}."
+    )
+
+
+def render_join_validation_error(
+    node_name: str, error: str, *, suggest_inject: bool
+) -> str:
+    message = (
+        f"args for join tool '{node_name}' did not validate: {error}. "
+        "Return corrected JSON."
+    )
+    if suggest_inject:
+        message += (
+            " Provide 'join.inject' to map parallel outputs to this join tool."
+        )
+    return message
 
 
 def render_repair_message(error: str) -> str:

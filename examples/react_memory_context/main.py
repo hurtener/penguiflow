@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
-from penguiflow.planner import ReactPlanner
+from penguiflow.planner import ReactPlanner, ToolContext
 from penguiflow.registry import ModelRegistry
 
 
@@ -33,7 +33,7 @@ class Answer(BaseModel):
 
 
 @tool(desc="Search for information based on query", tags=["search"])
-async def search(args: Query, ctx: object) -> SearchResult:
+async def search(args: Query, ctx: ToolContext) -> SearchResult:
     """Mock search that returns canned results."""
     return SearchResult(
         results=[
@@ -44,7 +44,7 @@ async def search(args: Query, ctx: object) -> SearchResult:
 
 
 @tool(desc="Analyze search results and produce answer")
-async def analyze(args: SearchResult, ctx: object) -> Answer:
+async def analyze(args: SearchResult, ctx: ToolContext) -> Answer:
     """Mock analysis."""
     return Answer(answer="Based on the results, both languages have strengths.")
 

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from .context import AnyContext, ToolContext
 from .dspy_client import DSPyLLMClient
 from .react import (
+    JoinInjection,
     ParallelCall,
     ParallelJoin,
     PlannerAction,
@@ -22,7 +24,9 @@ from .react import (
 )
 
 __all__ = [
+    "AnyContext",
     "DSPyLLMClient",
+    "JoinInjection",
     "ParallelCall",
     "ParallelJoin",
     "PlannerAction",
@@ -34,6 +38,7 @@ __all__ = [
     "ReflectionCriteria",
     "ReflectionCritique",
     "ReactPlanner",
+    "ToolContext",
     "ToolPolicy",
     "Trajectory",
     "TrajectoryStep",
