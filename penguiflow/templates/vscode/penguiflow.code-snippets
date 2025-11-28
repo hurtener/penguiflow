@@ -1,0 +1,95 @@
+{
+  "PenguiFlow Tool": {
+    "prefix": "pftool",
+    "scope": "python",
+    "body": [
+      "from penguiflow.catalog import tool",
+      "from penguiflow.planner import ToolContext",
+      "from pydantic import BaseModel, Field",
+      "",
+      "",
+      "class ${1:Name}Args(BaseModel):",
+      "    \"\"\"Input for ${1:Name}.\"\"\"",
+      "    ${2:field}: ${3:str} = Field(description=\"${4:description}\")",
+      "",
+      "",
+      "class ${1:Name}Result(BaseModel):",
+      "    \"\"\"Output of ${1:Name}.\"\"\"",
+      "    ${5:result}: ${6:str}",
+      "",
+      "",
+      "@tool(desc=\"${7:description}\", side_effects=\"${8|pure,read,write,external,stateful|}\")",
+      "async def ${9:tool_name}(args: ${1:Name}Args, ctx: ToolContext) -> ${1:Name}Result:",
+      "    \"\"\"${7:description}.\"\"\"",
+      "    publisher = ctx.tool_context.get(\"status_publisher\")",
+      "    if callable(publisher):",
+      "        publisher(StatusUpdate(status=\"thinking\", message=\"${10:Working...}\"))",
+      "    ",
+      "    ${11:# TODO: implement tool logic}",
+      "    ",
+      "    return ${1:Name}Result(${5:result}=\"\")"
+    ]
+  },
+  "PenguiFlow Status Update": {
+    "prefix": "pfstatus",
+    "scope": "python",
+    "body": [
+      "publisher = ctx.tool_context.get(\"status_publisher\")",
+      "if callable(publisher):",
+      "    publisher(StatusUpdate(status=\"${1|thinking,ok,error,paused|}\", message=\"${2:message}\"))"
+    ]
+  },
+  "PenguiFlow Orchestrator": {
+    "prefix": "pforchestrator",
+    "scope": "python",
+    "body": [
+      "class ${1:Agent}Orchestrator:",
+      "    def __init__(self, config: AgentConfig) -> None:",
+      "        self.config = config",
+      "        self._planner = self._build_planner()",
+      "",
+      "    def _build_planner(self) -> ReactPlanner:",
+      "        nodes = [",
+      "            Node(${2:tool_func}, name=\"${3:tool_name}\"),",
+      "        ]",
+      "        registry = ModelRegistry()",
+      "        registry.register(\"${3:tool_name}\", ${4:InputModel}, ${5:OutputModel})",
+      "",
+      "        return ReactPlanner(",
+      "            llm=self.config.llm_model,",
+      "            catalog=build_catalog(nodes, registry),",
+      "            event_callback=self.telemetry.record_planner_event,",
+      "        )",
+      "",
+      "    async def execute(self, query: str) -> FinalAnswer:",
+      "        result = await self._planner.run(",
+      "            query=query,",
+      "            llm_context=${6:{\"memories\": []}},",
+      "            tool_context=${7:{\"status_publisher\": publish_status}},",
+      "        )",
+      "        if isinstance(result, PlannerPause):",
+      "            return FinalAnswer(text=\"Paused\", route=\"pause\", metadata={\"resume_token\": result.resume_token})",
+      "        return FinalAnswer.model_validate(result.payload)"
+    ]
+  },
+  "PenguiFlow Parallel Join": {
+    "prefix": "pfjoin",
+    "scope": "python",
+    "body": [
+      "class ${1:Merge}Args(BaseModel):",
+      "    \"\"\"Join node for parallel fan-out.\"\"\"",
+      "    branch_outputs: list[${2:BranchResult}]  # injected via $results",
+      "    total_requests: int = 0                   # injected via $expect",
+      "    failures: list[dict[str, object]] = Field(default_factory=list)  # injected via $failures",
+      "    failure_count: int = 0                    # injected via $failure_count",
+      "    success_count: int = 0                    # injected via $success_count",
+      "",
+      "",
+      "@tool(desc=\"Merge parallel results\", side_effects=\"pure\")",
+      "async def ${3:merge_results}(args: ${1:Merge}Args, ctx: ToolContext) -> ${4:FinalResult}:",
+      "    \"\"\"Merge results from parallel branches.\"\"\"",
+      "    ${5:# combine args.branch_outputs here}",
+      "    return ${4:FinalResult}(...)"
+    ]
+  }
+}

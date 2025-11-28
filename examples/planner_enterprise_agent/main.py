@@ -337,34 +337,27 @@ class EnterpriseAgentOrchestrator:
                 },
             )
 
-        # Use _SerializableContext to allow both serializable and non-serializable
-        # values. The planner will only see serializable values in the LLM prompt,
-        # but nodes can access all values via ctx.meta.
-        #
-        # Serializable values (sent to LLM):
-        # - tenant_id, query, trace_id: Basic metadata
-        # - memories: Conversation history and context (if provided)
-        # - status_history: Real-time execution updates
-        #
-        # Non-serializable values (only for nodes):
-        # - status_publisher: Function to publish status updates
-        # - telemetry: Telemetry object for metrics
-        # - status_logger: Logger instance
-        context_meta_dict = {
+        # UPDATED FOR v2.4: Explicit context separation
+        # llm_context: JSON-serializable data sent to the LLM prompt
+        # tool_context: Runtime objects available only to tools (callbacks, loggers)
+
+        # llm_context: Data the LLM can see and use for planning decisions
+        llm_context: dict[str, Any] = {
+            "status_history": [s.model_dump() for s in status_history],
+        }
+
+        # Add memories if provided - these ARE sent to the LLM
+        if memories:
+            llm_context["memories"] = memories
+
+        # tool_context: Runtime resources for tools only (NOT sent to LLM)
+        tool_context: dict[str, Any] = {
             "tenant_id": tenant_id,
-            "query": query,
             "trace_id": trace_id,
             "status_publisher": publish_status,
-            "status_history": status_history,
             "telemetry": self.telemetry,
             "status_logger": self.telemetry.logger,
         }
-
-        # Add memories if provided - these will be sent to the LLM!
-        if memories:
-            context_meta_dict["memories"] = memories
-
-        context_meta = _SerializableContext(context_meta_dict)
 
         self.telemetry.logger.info(
             "execute_start",
@@ -376,7 +369,8 @@ class EnterpriseAgentOrchestrator:
         try:
             planner_result = await self._planner.run(
                 query=query,
-                context_meta=context_meta,
+                llm_context=llm_context,
+                tool_context=tool_context,
             )
 
             if isinstance(planner_result, PlannerPause):

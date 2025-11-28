@@ -42,6 +42,7 @@ It provides:
 * **Observability & ops polish** — remote calls emit structured metrics (latency, payload
   sizes, cancel reasons) and the `penguiflow-admin` CLI replays trace history from any
   configured `StateStore` for debugging.
+* **Built-in CLI** — `penguiflow init` generates VS Code snippets/launch/tasks/settings for planner development (travels with the pip package).
 
 ### v2.4 planner refinements (current)
 
@@ -49,6 +50,14 @@ It provides:
 - `ToolContext` protocol for typed tools (`ctx.pause`, `ctx.emit_chunk`, `ctx.tool_context`)
 - Explicit join injection for parallel plans; examples in `examples/react_parallel_join`
 - Fresh docs: `REACT_PLANNER_INTEGRATION_GUIDE.md`, `docs/MIGRATION_V24.md`
+
+### CLI Quickstart
+
+```bash
+uv run penguiflow init             # create .vscode snippets/launch/tasks/settings
+uv run penguiflow init --dry-run   # preview without writing files
+uv run penguiflow init --force     # overwrite existing files
+```
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.

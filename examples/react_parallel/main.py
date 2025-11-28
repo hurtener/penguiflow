@@ -5,13 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
-from typing import Any
 
 from pydantic import BaseModel
 
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
-from penguiflow.planner import ReactPlanner
+from penguiflow.planner import ReactPlanner, ToolContext
 from penguiflow.registry import ModelRegistry
 
 
@@ -35,21 +34,21 @@ class Documents(BaseModel):
 
 
 @tool(desc="Fetch from the primary shard", tags=["parallel"])
-async def fetch_primary(args: ShardRequest, ctx: Any) -> ShardResult:
+async def fetch_primary(args: ShardRequest, ctx: ToolContext) -> ShardResult:
     await asyncio.sleep(0.1)
     return ShardResult(shard=args.shard, text=f"{args.topic}-primary")
 
 
 @tool(desc="Fetch from the secondary shard", tags=["parallel"])
-async def fetch_secondary(args: ShardRequest, ctx: Any) -> ShardResult:
+async def fetch_secondary(args: ShardRequest, ctx: ToolContext) -> ShardResult:
     await asyncio.sleep(0.1)
     return ShardResult(shard=args.shard, text=f"{args.topic}-secondary")
 
 
 @tool(desc="Merge shard payloads")
-async def merge_results(args: MergeArgs, ctx: Any) -> Documents:
-    # The planner stores rich branch metadata in ctx.meta for joins.
-    assert ctx.meta["parallel_success_count"] == args.expect
+async def merge_results(args: MergeArgs, ctx: ToolContext) -> Documents:
+    # The planner stores branch metadata in ctx.tool_context for joins.
+    assert ctx.tool_context["parallel_success_count"] == args.expect
     merged = [item.text for item in args.results]
     return Documents(documents=merged)
 
@@ -98,7 +97,13 @@ async def main() -> None:
                         "args": {"topic": "penguins", "shard": 1},
                     },
                 ],
-                "join": {"node": "merge_results"},
+                "join": {
+                    "node": "merge_results",
+                    "inject": {
+                        "results": "$results",
+                        "expect": "$expect",
+                    },
+                },
             },
             {
                 "thought": "finish",
