@@ -1,0 +1,168 @@
+"""Main orchestrator for {{ project_name }}."""
+
+from __future__ import annotations
+
+import json
+import logging
+import secrets
+from dataclasses import dataclass
+from typing import Any
+
+from penguiflow.errors import FlowError
+from penguiflow.planner import PlannerFinish, PlannerPause, ReactPlanner
+
+from .clients.memory import MemoryClient
+from .config import Config
+from .telemetry import AgentTelemetry
+from .tools import Answer, build_catalog_bundle
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class {{ class_name }}FlowError(RuntimeError):
+    """Raised when the planner surface a FlowError."""
+
+    def __init__(self, flow_error: FlowError | str) -> None:
+        message = flow_error.message if isinstance(flow_error, FlowError) else str(flow_error)
+        super().__init__(message)
+        self.flow_error = flow_error
+
+
+@dataclass
+class AgentResponse:
+    """Response envelope returned by the orchestrator."""
+
+    answer: str
+    trace_id: str
+    metadata: dict[str, Any] | None = None
+
+
+class ScriptedLLM:
+    """Deterministic JSON responses for planner tests."""
+
+    def __init__(self) -> None:
+        self._responses: list[str] | None = None
+
+    async def complete(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        response_format: dict[str, Any] | None = None,
+    ) -> str:
+        del response_format
+        if self._responses is None:
+            user_prompt = messages[-1].get("content", "")
+            scripted = [
+                {
+                    "thought": "draft answer",
+                    "next_node": "answer_question",
+                    "args": {"text": user_prompt},
+                },
+                {
+                    "thought": "finish",
+                    "next_node": None,
+                    "args": None,
+                },
+            ]
+            self._responses = [json.dumps(item, ensure_ascii=False) for item in scripted]
+
+        if not self._responses:
+            raise RuntimeError("ScriptedLLM has no responses left")
+
+        return self._responses.pop(0)
+
+
+class {{ class_name }}Orchestrator:
+    """Production-style orchestrator using emit/fetch pattern."""
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        telemetry: AgentTelemetry | None = None,
+    ) -> None:
+        self._config = config
+        self._memory = MemoryClient(config.memory_base_url)
+        self._telemetry = telemetry or AgentTelemetry(
+            flow_name="{{ project_name }}",
+            logger=_LOGGER,
+        )
+
+        nodes, registry = build_catalog_bundle()
+        self._llm = ScriptedLLM()
+        self._planner = ReactPlanner(
+            llm_client=self._llm,
+            nodes=nodes,
+            registry=registry,
+            event_callback=self._telemetry.record_planner_event,
+        )
+        self._started = True
+
+    async def execute(
+        self,
+        query: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> AgentResponse:
+        """Execute the agent for a single query."""
+        trace_id = secrets.token_hex(8)
+
+        conscious = await self._memory.start_session(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        retrieval = await self._memory.auto_retrieve(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            prompt=query,
+        )
+
+        llm_context = {
+            "conscious_memories": conscious.get("conscious", []),
+            "retrieved_memories": retrieval.get("snippets", []),
+        }
+        tool_context = {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "status_publisher": self._telemetry.publish_status,
+        }
+
+        result = await self._planner.run(
+            query=query,
+            llm_context=llm_context,
+            tool_context=tool_context,
+        )
+        if isinstance(result, PlannerPause):
+            raise {{ class_name }}FlowError("Planner paused unexpectedly")
+
+        if not isinstance(result, PlannerFinish):
+            raise {{ class_name }}FlowError("Planner did not finish successfully")
+
+        payload: Any = result.payload
+        answer_text = payload.answer if isinstance(payload, Answer) else str(payload)
+
+        await self._memory.ingest_interaction(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            user_prompt=query,
+            agent_response=answer_text,
+        )
+
+        return AgentResponse(
+            answer=answer_text,
+            trace_id=trace_id,
+            metadata=dict(result.metadata),
+        )
+
+    async def stop(self) -> None:
+        """Graceful shutdown hook."""
+        if self._started:
+            self._started = False
+            _LOGGER.info("{{ project_name }} orchestrator stopped")

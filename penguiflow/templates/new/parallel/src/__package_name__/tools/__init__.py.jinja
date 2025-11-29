@@ -1,0 +1,32 @@
+"""Parallel tools for {{ project_name }}."""
+
+from __future__ import annotations
+
+from penguiflow.node import Node
+from penguiflow.registry import ModelRegistry
+
+from .fetch import fetch_primary, fetch_secondary
+from .merge import merge_results
+from ..models import FinalDocuments, JoinRequest, ShardRequest, ShardResult
+
+__all__ = [
+    "fetch_primary",
+    "fetch_secondary",
+    "merge_results",
+    "build_catalog_bundle",
+]
+
+
+def build_catalog_bundle() -> tuple[list[Node], ModelRegistry]:
+    """Create the planner catalog and registry."""
+    registry = ModelRegistry()
+    registry.register("fetch_primary", ShardRequest, ShardResult)
+    registry.register("fetch_secondary", ShardRequest, ShardResult)
+    registry.register("merge_results", JoinRequest, FinalDocuments)
+
+    nodes = [
+        Node(fetch_primary, name="fetch_primary"),
+        Node(fetch_secondary, name="fetch_secondary"),
+        Node(merge_results, name="merge_results"),
+    ]
+    return nodes, registry

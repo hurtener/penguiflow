@@ -1,0 +1,30 @@
+"""Tool registry for {{ project_name }}."""
+
+from __future__ import annotations
+
+from penguiflow.node import Node
+from penguiflow.registry import ModelRegistry
+
+from .analyze import analyze_results
+from .search import search_documents
+from ..models import FinalAnswer, Query, SearchResults
+
+__all__ = [
+    "analyze_results",
+    "search_documents",
+    "FinalAnswer",
+    "build_catalog_bundle",
+]
+
+
+def build_catalog_bundle() -> tuple[list[Node], ModelRegistry]:
+    """Create the planner catalog and registry."""
+    registry = ModelRegistry()
+    registry.register("search_documents", Query, SearchResults)
+    registry.register("analyze_results", SearchResults, FinalAnswer)
+
+    nodes = [
+        Node(search_documents, name="search_documents"),
+        Node(analyze_results, name="analyze_results"),
+    ]
+    return nodes, registry

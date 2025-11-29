@@ -1,0 +1,33 @@
+"""Unit tests for analyze tool."""
+
+from __future__ import annotations
+
+import pytest
+
+from {{ package_name }}.models import FinalAnswer, SearchResult, SearchResults
+from {{ package_name }}.tools.analyze import analyze_results
+
+
+class DummyCtx:
+    def __init__(self) -> None:
+        self.llm_context = {}
+        self.tool_context = {"user_id": "alice"}
+        self.meta = {}
+
+    async def pause(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        del args, kwargs
+        raise RuntimeError("pause not supported")
+
+    async def emit_chunk(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        del args, kwargs
+        return None
+
+
+@pytest.mark.asyncio
+async def test_analyze_results_summarises_hits() -> None:
+    ctx = DummyCtx()
+    hits = SearchResults(results=[SearchResult(title="a", snippet="stub insight")])
+    result = await analyze_results(hits, ctx)
+    assert isinstance(result, FinalAnswer)
+    assert "alice" in result.text
+    assert "stub insight" in result.text

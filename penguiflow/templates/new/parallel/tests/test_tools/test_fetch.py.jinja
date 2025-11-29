@@ -1,0 +1,40 @@
+"""Unit tests for parallel fetch tools."""
+
+from __future__ import annotations
+
+import pytest
+
+from {{ package_name }}.models import ShardRequest, ShardResult
+from {{ package_name }}.tools.fetch import fetch_primary, fetch_secondary
+
+
+class DummyCtx:
+    def __init__(self) -> None:
+        self.llm_context = {}
+        self.tool_context = {}
+        self.meta = {}
+
+    async def pause(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        del args, kwargs
+        raise RuntimeError("pause not supported")
+
+    async def emit_chunk(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        del args, kwargs
+        return None
+
+
+@pytest.mark.asyncio
+async def test_fetch_primary_returns_shard() -> None:
+    ctx = DummyCtx()
+    result = await fetch_primary(ShardRequest(topic="penguins", shard=0), ctx)
+    assert isinstance(result, ShardResult)
+    assert result.shard == 0
+    assert "penguins" in result.text
+
+
+@pytest.mark.asyncio
+async def test_fetch_secondary_returns_shard() -> None:
+    ctx = DummyCtx()
+    result = await fetch_secondary(ShardRequest(topic="ice", shard=1), ctx)
+    assert result.shard == 1
+    assert "ice" in result.text

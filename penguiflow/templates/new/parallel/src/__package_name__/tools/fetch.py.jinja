@@ -1,0 +1,24 @@
+"""Fan-out fetch tools."""
+
+from __future__ import annotations
+
+import asyncio
+
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+
+from ..models import ShardRequest, ShardResult
+
+
+@tool(desc="Fetch from the primary shard", tags=["parallel"])
+async def fetch_primary(args: ShardRequest, ctx: ToolContext) -> ShardResult:
+    del ctx
+    await asyncio.sleep(0.01)
+    return ShardResult(shard=args.shard, text=f"{args.topic}-primary")
+
+
+@tool(desc="Fetch from the secondary shard", tags=["parallel"])
+async def fetch_secondary(args: ShardRequest, ctx: ToolContext) -> ShardResult:
+    del ctx
+    await asyncio.sleep(0.01)
+    return ShardResult(shard=args.shard, text=f"{args.topic}-secondary")

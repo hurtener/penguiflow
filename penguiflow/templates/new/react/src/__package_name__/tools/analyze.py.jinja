@@ -1,0 +1,15 @@
+"""Analysis tool."""
+
+from __future__ import annotations
+
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+
+from ..models import FinalAnswer, SearchResults
+
+
+@tool(desc="Summarise search results for the user", tags=["planner"])
+async def analyze_results(args: SearchResults, ctx: ToolContext) -> FinalAnswer:
+    user = ctx.tool_context.get("user_id", "user")
+    summary = "; ".join(hit.snippet for hit in args.results) or "No results found."
+    return FinalAnswer(text=f"{user}: {summary}")

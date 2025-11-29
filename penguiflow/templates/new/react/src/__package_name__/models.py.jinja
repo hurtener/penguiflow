@@ -1,0 +1,30 @@
+"""Pydantic models for {{ project_name }} tools."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel
+
+
+class Query(BaseModel):
+    """User query."""
+
+    question: str
+
+
+class SearchResult(BaseModel):
+    """Single search hit."""
+
+    title: str
+    snippet: str
+
+
+class SearchResults(BaseModel):
+    """List of search results."""
+
+    results: list[SearchResult]
+
+
+class FinalAnswer(BaseModel):
+    """Final agent answer."""
+
+    text: str

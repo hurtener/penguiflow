@@ -1,0 +1,43 @@
+"""Unit tests for tools."""
+
+from __future__ import annotations
+
+import pytest
+
+from {{ package_name }}.tools import Answer, Question, answer_question
+
+
+class DummyCtx:
+    """Minimal ToolContext stub."""
+
+    def __init__(self) -> None:
+        self.llm_context = {}
+        self.tool_context = {}
+        self.meta = {}
+
+    async def pause(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        del args, kwargs
+        raise RuntimeError("pause not supported in dummy context")
+
+    async def emit_chunk(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        del args, kwargs
+        return None
+
+
+@pytest.mark.asyncio
+async def test_answer_question_prefixes_tenant() -> None:
+    ctx = DummyCtx()
+    ctx.tool_context["tenant_id"] = "tenant-123"
+
+    result = await answer_question(Question(text="hello"), ctx)
+
+    assert isinstance(result, Answer)
+    assert "tenant-123" in result.answer
+    assert "hello" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_answer_question_handles_missing_tenant() -> None:
+    ctx = DummyCtx()
+    result = await answer_question(Question(text="hey"), ctx)
+    assert "anonymous" in result.answer

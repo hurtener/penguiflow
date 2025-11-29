@@ -1,0 +1,15 @@
+"""Search tool."""
+
+from __future__ import annotations
+
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+
+from ..models import Query, SearchResult, SearchResults
+
+
+@tool(desc="Search internal knowledge sources", side_effects="read", tags=["planner"])
+async def search_documents(args: Query, ctx: ToolContext) -> SearchResults:
+    tenant = ctx.tool_context.get("tenant_id", "public")
+    snippet = f"Result for '{args.question}' in tenant '{tenant}'"
+    return SearchResults(results=[SearchResult(title="stub", snippet=snippet)])
