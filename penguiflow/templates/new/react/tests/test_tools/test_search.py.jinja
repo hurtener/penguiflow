@@ -11,16 +11,26 @@ from {{ package_name }}.tools.search import search_documents
 class DummyCtx:
     def __init__(self) -> None:
         self.llm_context = {}
-        self.tool_context = {"tenant_id": "tenant-test"}
+        self.tool_context = {"tenant_id": "tenant-test", "status_publisher": self._record_status}
         self.meta = {}
+        self.updates: list[object] = []
+{% if with_streaming %}
+        self.chunks: list[tuple[str, int, str]] = []
+{% endif %}
 
     async def pause(self, *args, **kwargs):  # pragma: no cover - not used in tests
         del args, kwargs
         raise RuntimeError("pause not supported")
 
     async def emit_chunk(self, *args, **kwargs):  # pragma: no cover - not used in tests
-        del args, kwargs
+        {% if with_streaming %}stream_id, seq, text = args[:3]
+        self.chunks.append((stream_id, seq, text))
         return None
+        {% else %}del args, kwargs
+        return None{% endif %}
+
+    def _record_status(self, update: object) -> None:
+        self.updates.append(update)
 
 
 @pytest.mark.asyncio
@@ -30,3 +40,7 @@ async def test_search_documents_returns_stub() -> None:
     assert isinstance(result, SearchResults)
     assert result.results
     assert "PenguiFlow" in result.results[0].snippet
+{% if with_streaming %}
+    assert ctx.chunks
+    assert ctx.updates
+{% endif %}

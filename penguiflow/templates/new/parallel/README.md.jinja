@@ -15,3 +15,9 @@ uv run python -m {{ package_name }}
 - Swap the scripted LLM in `planner.py` with your provider.
 - Telemetry and memory stubs are ready for production integrations.
 
+## Use a real LLM and adjust prompts
+
+- Set `LLM_MODEL` and your provider key (e.g., `OPENAI_API_KEY`) in the environment.
+- In `planner.py`, replace `ScriptedLLM` by passing `llm=config.llm_model` to `ReactPlanner` (LiteLLM path), or use `DSPyLLMClient(llm=config.llm_model)` as `llm_client`.
+- Custom clients just need `.complete(messages=[...], response_format=...)`.
+- To nudge prompts, pass `system_prompt_extra` and/or `planning_hints` to `ReactPlanner` instead of editing `penguiflow.planner.prompts` directly.

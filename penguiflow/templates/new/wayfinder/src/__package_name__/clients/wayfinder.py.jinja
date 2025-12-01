@@ -1,0 +1,27 @@
+"""Wayfinder API client stub."""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+class WayfinderClient:
+    """Minimal stub mirroring Wayfinder NLQ endpoints."""
+
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url
+
+    async def plan_query(self, question: str) -> dict[str, Any]:
+        """Stub plan; would POST /v1/nlq/agent-query."""
+        return {"sql": f"SELECT * FROM demo WHERE question = '{question}'", "clarifications": []}
+
+    async def request_clarification(self, question: str) -> dict[str, Any]:
+        """Stub clarification; would POST /v1/nlq/preflight."""
+        return {"questions": [f"Clarify scope for '{question}'"]}
+
+    async def execute_query(self, sql: str) -> dict[str, Any]:
+        """Stub execution; would POST /v1/nlq/agent-query:execute."""
+        return {
+            "rows": [{"column": "value"}],
+            "summary": f"Executed: {sql}",
+        }

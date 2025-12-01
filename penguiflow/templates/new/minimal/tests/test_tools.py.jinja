@@ -14,14 +14,20 @@ class DummyCtx:
         self.llm_context = {}
         self.tool_context = {}
         self.meta = {}
+{% if with_streaming %}
+        self.chunks: list[tuple[str, int, str]] = []
+{% endif %}
 
     async def pause(self, *args, **kwargs):  # pragma: no cover - not used in tests
         del args, kwargs
         raise RuntimeError("pause not supported in dummy context")
 
     async def emit_chunk(self, *args, **kwargs):  # pragma: no cover - not used in tests
-        del args, kwargs
+        {% if with_streaming %}stream_id, seq, text = args[:3]
+        self.chunks.append((stream_id, seq, text))
         return None
+        {% else %}del args, kwargs
+        return None{% endif %}
 
 
 @pytest.mark.asyncio
@@ -41,3 +47,6 @@ async def test_answer_question_handles_missing_tenant() -> None:
     ctx = DummyCtx()
     result = await answer_question(Question(text="hey"), ctx)
     assert "anonymous" in result.answer
+{% if with_streaming %}
+    assert ctx.chunks  # chunk emitted
+{% endif %}

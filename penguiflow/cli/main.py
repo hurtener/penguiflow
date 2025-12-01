@@ -80,7 +80,10 @@ def init(
     "--template",
     "-t",
     default="react",
-    type=click.Choice(["minimal", "react", "parallel"], case_sensitive=False),
+    type=click.Choice(
+        ["minimal", "react", "parallel", "lighthouse", "wayfinder", "analyst", "enterprise"],
+        case_sensitive=False,
+    ),
     show_default=True,
     help="Template to scaffold.",
 )
@@ -106,6 +109,26 @@ def init(
     is_flag=True,
     help="Suppress output messages.",
 )
+@click.option(
+    "--with-streaming",
+    is_flag=True,
+    help="Include streaming support (StreamChunk + status publisher).",
+)
+@click.option(
+    "--with-hitl",
+    is_flag=True,
+    help="Include HITL pause/resume handling.",
+)
+@click.option(
+    "--with-a2a",
+    is_flag=True,
+    help="Include A2A server/client stubs.",
+)
+@click.option(
+    "--no-memory",
+    is_flag=True,
+    help="Skip memory integration stubs.",
+)
 def new(
     name: str,
     template: str,
@@ -113,6 +136,10 @@ def new(
     dry_run: bool,
     output_dir: str | None,
     quiet: bool,
+    with_streaming: bool,
+    with_hitl: bool,
+    with_a2a: bool,
+    no_memory: bool,
 ) -> None:
     """Create a new PenguiFlow agent project."""
     from pathlib import Path
@@ -128,6 +155,10 @@ def new(
             dry_run=dry_run,
             output_dir=Path(output_dir) if output_dir else None,
             quiet=quiet,
+            with_streaming=with_streaming,
+            with_hitl=with_hitl,
+            with_a2a=with_a2a,
+            no_memory=no_memory,
         )
         if not result.success:
             sys.exit(1)

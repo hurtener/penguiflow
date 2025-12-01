@@ -1,0 +1,30 @@
+"""Pydantic models for enterprise tools."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class UserQuery(BaseModel):
+    """User question/issue."""
+
+    question: str
+
+
+class RouteDecision(BaseModel):
+    """Routing decision for workflows."""
+
+    path: str
+
+
+class Diagnostics(BaseModel):
+    """Diagnostics results."""
+
+    logs: list[str] = Field(default_factory=list)
+    findings: list[str] = Field(default_factory=list)
+
+
+class FinalAnswer(BaseModel):
+    """User-facing answer."""
+
+    answer: str

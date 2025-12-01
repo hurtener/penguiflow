@@ -1,0 +1,31 @@
+{% if with_a2a -%}
+"""A2A server stub for remote orchestration."""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+class A2AServer:
+    """Placeholder A2A server for remote agent communication."""
+
+    def __init__(self, orchestrator: Any, *, host: str = "127.0.0.1", port: int = 9000) -> None:
+        self.orchestrator = orchestrator
+        self.host = host
+        self.port = port
+        self.started = False
+
+    async def start(self) -> None:
+        """Start the server (stub)."""
+        self.started = True
+
+    async def stop(self) -> None:
+        """Stop the server (stub)."""
+        self.started = False
+
+    async def handle_ping(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Example handler that echoes payload."""
+        return {"status": "ok", "payload": payload or {}}
+{% else -%}
+# A2A flag not enabled; add `--with-a2a` to scaffold server stubs.
+{% endif %}

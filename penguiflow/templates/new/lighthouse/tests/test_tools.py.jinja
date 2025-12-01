@@ -1,0 +1,65 @@
+"""Unit tests for lighthouse tools."""
+
+from __future__ import annotations
+
+import pytest
+
+from {{ package_name }}.models import (
+    IngestRequest,
+    IngestStatus,
+    QueryRequest,
+    QueryResult,
+    UploadRequest,
+    UploadResult,
+)
+from {{ package_name }}.tools import check_ingest_status, ingest_documents, query_index, upload_files
+
+
+class DummyCtx:
+    """Minimal ToolContext stub."""
+
+    def __init__(self) -> None:
+        self.llm_context = {}
+        self.tool_context = {"lighthouse_base_url": "http://localhost:9000", "tenant_id": "tenant-test"}
+        self.meta = {}
+{% if with_streaming %}
+        self.chunks: list[tuple[str, int, str]] = []
+{% endif %}
+
+    async def pause(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        del args, kwargs
+        raise RuntimeError("pause not supported in dummy context")
+
+    async def emit_chunk(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        {% if with_streaming %}stream_id, seq, text = args[:3]
+        self.chunks.append((stream_id, seq, text))
+        return None
+        {% else %}del args, kwargs
+        return None{% endif %}
+
+
+@pytest.mark.asyncio
+async def test_upload_and_ingest_roundtrip() -> None:
+    ctx = DummyCtx()
+    upload = await upload_files(UploadRequest(paths=["a.pdf", "b.pdf"]), ctx)
+    assert isinstance(upload, UploadResult)
+    assert upload.file_ids
+
+    ingest = await ingest_documents(IngestRequest(file_ids=upload.file_ids), ctx)
+    assert isinstance(ingest, IngestStatus)
+    status = await check_ingest_status(ingest, ctx)
+    assert status.status == "ready"
+{% if with_streaming %}
+    assert ctx.chunks
+{% endif %}
+
+
+@pytest.mark.asyncio
+async def test_query_index_returns_answer() -> None:
+    ctx = DummyCtx()
+    result = await query_index(QueryRequest(question="penguins?"), ctx)
+    assert isinstance(result, QueryResult)
+    assert result.answer
+{% if with_streaming %}
+    assert ctx.chunks
+{% endif %}

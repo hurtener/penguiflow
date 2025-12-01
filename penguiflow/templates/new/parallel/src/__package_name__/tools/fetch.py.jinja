@@ -12,13 +12,21 @@ from ..models import ShardRequest, ShardResult
 
 @tool(desc="Fetch from the primary shard", tags=["parallel"])
 async def fetch_primary(args: ShardRequest, ctx: ToolContext) -> ShardResult:
+{% if with_streaming %}
+    await ctx.emit_chunk("fetch_primary", args.shard, f"primary-{args.topic}")
+{% else %}
     del ctx
+{% endif %}
     await asyncio.sleep(0.01)
     return ShardResult(shard=args.shard, text=f"{args.topic}-primary")
 
 
 @tool(desc="Fetch from the secondary shard", tags=["parallel"])
 async def fetch_secondary(args: ShardRequest, ctx: ToolContext) -> ShardResult:
+{% if with_streaming %}
+    await ctx.emit_chunk("fetch_secondary", args.shard, f"secondary-{args.topic}")
+{% else %}
     del ctx
+{% endif %}
     await asyncio.sleep(0.01)
     return ShardResult(shard=args.shard, text=f"{args.topic}-secondary")

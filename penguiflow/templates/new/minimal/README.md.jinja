@@ -15,3 +15,9 @@ uv run python -m {{ package_name }}
 - Wire memory or observability as needed (placeholders included).
 - Run tests with `uv run pytest`.
 
+## Use a real LLM and adjust prompts
+
+- Set `LLM_MODEL` and your provider key (e.g., `OPENAI_API_KEY`) in the environment.
+- Swap `ScriptedLLM` in `orchestrator.py` by passing `llm=config.llm_model` to `ReactPlanner` (LiteLLM path), or use `DSPyLLMClient(llm=config.llm_model)` as `llm_client`.
+- Any client with `.complete(messages=[...], response_format=...)` works if you prefer custom wiring.
+- To nudge prompts, pass `system_prompt_extra` and/or `planning_hints` to `ReactPlanner` instead of editing `penguiflow.planner.prompts` directly.

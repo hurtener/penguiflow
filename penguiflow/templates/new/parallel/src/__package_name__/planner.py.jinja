@@ -72,7 +72,16 @@ def build_planner(
     *,
     event_callback: PlannerEventCallback | None = None,
 ) -> PlannerBundle:
-    """Create a ReactPlanner wired for parallel flows."""
+    """Create a ReactPlanner wired for parallel flows.
+
+    Swap the scripted client with a real model by:
+    - LiteLLM path: pass llm=config.llm_model (e.g., "gpt-4o") to ReactPlanner and set provider keys in env
+      (e.g., OPENAI_API_KEY).
+    - DSPy path: pass llm_client=DSPyLLMClient(llm=config.llm_model) and leave llm=None.
+    - Custom client: pass any object with .complete(messages=[...], response_format=...).
+    Prompt tweaks: pass system_prompt_extra (string) or planning_hints (mapping) to ReactPlanner to append
+    guidance without editing penguiflow.planner.prompts.
+    """
     del config  # kept for future expansion
     nodes, registry = build_catalog_bundle()
     llm_client = ScriptedLLM()

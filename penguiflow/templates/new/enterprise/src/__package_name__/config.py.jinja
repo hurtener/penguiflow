@@ -1,0 +1,31 @@
+"""Configuration for {{ project_name }} enterprise agent."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Literal
+
+
+@dataclass
+class Config:
+    """Environment-driven configuration."""
+
+    memory_base_url: str = "http://localhost:8000"
+    llm_model: str = "stub-llm"
+    environment: Literal["development", "staging", "production"] = "development"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    max_iters: int = 12
+    hop_budget: int = 8
+
+    @classmethod
+    def from_env(cls) -> "Config":
+        """Load configuration from environment variables."""
+        return cls(
+            memory_base_url=os.getenv("MEMORY_BASE_URL", "http://localhost:8000"),
+            llm_model=os.getenv("LLM_MODEL", "stub-llm"),
+            environment=os.getenv("AGENT_ENVIRONMENT", "development"),  # type: ignore[arg-type]
+            log_level=os.getenv("LOG_LEVEL", "INFO"),  # type: ignore[arg-type]
+            max_iters=int(os.getenv("PLANNER_MAX_ITERS", "12")),
+            hop_budget=int(os.getenv("PLANNER_HOP_BUDGET", "8")),
+        )

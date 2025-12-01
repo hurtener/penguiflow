@@ -12,4 +12,7 @@ from ..models import FinalAnswer, SearchResults
 async def analyze_results(args: SearchResults, ctx: ToolContext) -> FinalAnswer:
     user = ctx.tool_context.get("user_id", "user")
     summary = "; ".join(hit.snippet for hit in args.results) or "No results found."
+{% if with_streaming %}
+    await ctx.emit_chunk("analysis", 0, f"Summarising for {user}")
+{% endif %}
     return FinalAnswer(text=f"{user}: {summary}")

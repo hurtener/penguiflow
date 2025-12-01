@@ -1,0 +1,20 @@
+"""Analyst remote API client stub."""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+class AnalystClient:
+    """Minimal stub for A2A analyst service."""
+
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url
+
+    async def analyze(self, topic: str, artifacts: list[str]) -> dict[str, Any]:
+        """Stub analysis entrypoint."""
+        recommendations = [f"Improve {artifact}" for artifact in artifacts] or ["No artifacts provided"]
+        return {
+            "summary": f"Analysis for '{topic}'",
+            "recommendations": recommendations,
+        }

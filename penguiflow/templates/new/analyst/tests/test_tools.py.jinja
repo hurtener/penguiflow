@@ -1,0 +1,43 @@
+"""Unit tests for analyst tools."""
+
+from __future__ import annotations
+
+import pytest
+
+from {{ package_name }}.models import AnalysisRequest, AnalysisResult
+from {{ package_name }}.tools import analyze_request
+
+
+class DummyCtx:
+    """Minimal ToolContext stub."""
+
+    def __init__(self) -> None:
+        self.llm_context = {}
+        self.tool_context = {"analyst_base_url": "http://localhost:9200"}
+        self.meta = {}
+{% if with_streaming %}
+        self.chunks: list[tuple[str, int, str]] = []
+{% endif %}
+
+    async def pause(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        del args, kwargs
+        raise RuntimeError("pause not supported in dummy context")
+
+    async def emit_chunk(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        {% if with_streaming %}stream_id, seq, text = args[:3]
+        self.chunks.append((stream_id, seq, text))
+        return None
+        {% else %}del args, kwargs
+        return None{% endif %}
+
+
+@pytest.mark.asyncio
+async def test_analyze_request_returns_result() -> None:
+    ctx = DummyCtx()
+    result = await analyze_request(AnalysisRequest(topic="api outage", artifacts=["logs.txt"]), ctx)
+    assert isinstance(result, AnalysisResult)
+    assert result.summary
+    assert result.recommendations
+{% if with_streaming %}
+    assert ctx.chunks
+{% endif %}

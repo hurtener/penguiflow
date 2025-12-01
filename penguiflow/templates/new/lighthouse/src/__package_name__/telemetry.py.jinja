@@ -1,0 +1,62 @@
+"""Observability helpers for {{ project_name }}."""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any, Callable
+
+from penguiflow.planner import PlannerEvent
+
+
+@dataclass
+class StatusUpdate:
+    """Status update payload for UI hooks."""
+
+    status: str
+    message: str
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+class AgentTelemetry:
+    """Simple telemetry middleware for planner events."""
+
+    def __init__(
+        self,
+        *,
+        flow_name: str,
+        logger: logging.Logger,
+        status_callback: Callable[[StatusUpdate], None] | None = None,
+    ) -> None:
+        self.flow_name = flow_name
+        self.logger = logger
+        self._status_callback = status_callback
+        self.events: list[PlannerEvent] = []
+
+    def record_planner_event(self, event: PlannerEvent) -> None:
+        """Synchronous callback attached to the planner."""
+        self.events.append(event)
+        payload: dict[str, Any] = {"flow": self.flow_name, **event.to_payload()}
+
+        if event.event_type == "node_error":
+            self.logger.error("planner_node_error", extra=payload)
+        elif event.event_type == "finish":
+            self.logger.info("planner_finish", extra=payload)
+        else:
+            self.logger.debug(event.event_type, extra=payload)
+
+    def publish_status(self, update: StatusUpdate) -> None:
+        """Forward status updates to callback or logs."""
+        if self._status_callback:
+            self._status_callback(update)
+        else:
+            self.logger.info(
+                "status_update",
+                extra={
+                    "flow": self.flow_name,
+                    "status": update.status,
+                    "message": update.message,
+                    "timestamp": update.timestamp.isoformat(),
+                },
+            )

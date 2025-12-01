@@ -1,0 +1,45 @@
+"""Unit tests for enterprise tools."""
+
+from __future__ import annotations
+
+import pytest
+
+from {{ package_name }}.models import Diagnostics, RouteDecision, UserQuery
+from {{ package_name }}.tools import collect_logs, recommend_fix, run_diagnostics, triage_query
+
+
+class DummyCtx:
+    """Minimal ToolContext stub."""
+
+    def __init__(self) -> None:
+        self.llm_context = {}
+        self.tool_context = {}
+        self.meta = {}
+{% if with_streaming %}
+        self.chunks: list[tuple[str, int, str]] = []
+{% endif %}
+
+    async def pause(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        del args, kwargs
+        raise RuntimeError("pause not supported in dummy context")
+
+    async def emit_chunk(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        {% if with_streaming %}stream_id, seq, text = args[:3]
+        self.chunks.append((stream_id, seq, text))
+        return None
+        {% else %}del args, kwargs
+        return None{% endif %}
+
+
+@pytest.mark.asyncio
+async def test_full_diagnostics_flow() -> None:
+    ctx = DummyCtx()
+    route = await triage_query(UserQuery(question="login failures"), ctx)
+    assert isinstance(route, RouteDecision)
+    logs = await collect_logs(route, ctx)
+    diag = await run_diagnostics(logs, ctx)
+    final = await recommend_fix(diag, ctx)
+    assert final.answer
+{% if with_streaming %}
+    assert ctx.chunks
+{% endif %}

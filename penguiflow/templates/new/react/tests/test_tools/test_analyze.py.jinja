@@ -13,14 +13,20 @@ class DummyCtx:
         self.llm_context = {}
         self.tool_context = {"user_id": "alice"}
         self.meta = {}
+{% if with_streaming %}
+        self.chunks: list[tuple[str, int, str]] = []
+{% endif %}
 
     async def pause(self, *args, **kwargs):  # pragma: no cover - not used in tests
         del args, kwargs
         raise RuntimeError("pause not supported")
 
     async def emit_chunk(self, *args, **kwargs):  # pragma: no cover - not used in tests
-        del args, kwargs
+        {% if with_streaming %}stream_id, seq, text = args[:3]
+        self.chunks.append((stream_id, seq, text))
         return None
+        {% else %}del args, kwargs
+        return None{% endif %}
 
 
 @pytest.mark.asyncio
@@ -31,3 +37,6 @@ async def test_analyze_results_summarises_hits() -> None:
     assert isinstance(result, FinalAnswer)
     assert "alice" in result.text
     assert "stub insight" in result.text
+{% if with_streaming %}
+    assert ctx.chunks
+{% endif %}

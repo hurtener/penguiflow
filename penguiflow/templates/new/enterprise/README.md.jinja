@@ -1,0 +1,23 @@
+# {{ project_name }}
+
+Enterprise-grade agent scaffold inspired by `examples/planner_enterprise_agent` with observability, A2A option, and tests.
+
+## Quickstart
+
+```bash
+uv sync
+uv run python -m {{ package_name }}
+```
+
+## Customize
+
+- Add real workflows in `src/{{ package_name }}/tools/` (triage/diagnostics/etc.).
+- Replace `ScriptedLLM` in `planner.py` with your LLM client, tune constraints in `config.py`.
+- Wire telemetry to your backend in `telemetry.py` and integrate A2A transport when `--with-a2a` is enabled.
+
+## Use a real LLM and adjust prompts
+
+- Set `LLM_MODEL` and your provider key (e.g., `OPENAI_API_KEY`) in the environment.
+- In `planner.py`, replace `ScriptedLLM` by passing `llm=config.llm_model` to `ReactPlanner` (LiteLLM path), or use `DSPyLLMClient(llm=config.llm_model)` as `llm_client`.
+- Custom clients just need `.complete(messages=[...], response_format=...)`.
+- To nudge prompts, pass `system_prompt_extra` and/or `planning_hints` to `ReactPlanner` instead of editing `penguiflow.planner.prompts` directly.

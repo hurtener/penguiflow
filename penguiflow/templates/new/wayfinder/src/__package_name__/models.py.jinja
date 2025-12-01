@@ -1,0 +1,38 @@
+"""Pydantic models for wayfinder tools."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class NLQ(BaseModel):
+    """User natural language query."""
+
+    question: str
+
+
+class PlanQuery(BaseModel):
+    """Wayfinder planned query."""
+
+    sql: str
+    clarifications: list[str] = Field(default_factory=list)
+
+
+class ClarificationRequest(BaseModel):
+    """Clarification request payload."""
+
+    questions: list[str] = Field(default_factory=list)
+
+
+class QueryExecution(BaseModel):
+    """Executed query result."""
+
+    rows: list[dict[str, str]] = Field(default_factory=list)
+    summary: str = ""
+
+
+class FinalAnswer(BaseModel):
+    """User-facing answer."""
+
+    answer: str
+    clarifications_requested: list[str] = Field(default_factory=list)

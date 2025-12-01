@@ -1,0 +1,19 @@
+"""Pydantic models for analyst tools."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class AnalysisRequest(BaseModel):
+    """Incoming analysis task."""
+
+    topic: str
+    artifacts: list[str] = Field(default_factory=list)
+
+
+class AnalysisResult(BaseModel):
+    """Structured analysis output."""
+
+    summary: str
+    recommendations: list[str] = Field(default_factory=list)

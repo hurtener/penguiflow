@@ -1,0 +1,36 @@
+"""Tool registry for {{ project_name }}."""
+
+from __future__ import annotations
+
+from penguiflow.node import Node
+from penguiflow.registry import ModelRegistry
+
+from .diagnostics import collect_logs, run_diagnostics, triage_query
+from .resolve import recommend_fix
+from ..models import Diagnostics, FinalAnswer, RouteDecision, UserQuery
+
+__all__ = [
+    "triage_query",
+    "collect_logs",
+    "run_diagnostics",
+    "recommend_fix",
+    "FinalAnswer",
+    "build_catalog_bundle",
+]
+
+
+def build_catalog_bundle() -> tuple[list[Node], ModelRegistry]:
+    """Create the planner catalog and registry."""
+    registry = ModelRegistry()
+    registry.register("triage_query", UserQuery, RouteDecision)
+    registry.register("collect_logs", RouteDecision, Diagnostics)
+    registry.register("run_diagnostics", Diagnostics, Diagnostics)
+    registry.register("recommend_fix", Diagnostics, FinalAnswer)
+
+    nodes = [
+        Node(triage_query, name="triage_query"),
+        Node(collect_logs, name="collect_logs"),
+        Node(run_diagnostics, name="run_diagnostics"),
+        Node(recommend_fix, name="recommend_fix"),
+    ]
+    return nodes, registry

@@ -20,7 +20,7 @@ def _project_paths(base: Path, name: str) -> tuple[Path, Path]:
     return project_dir, package_dir
 
 
-@pytest.mark.parametrize("template", ["minimal", "react", "parallel"])
+@pytest.mark.parametrize("template", ["minimal", "react", "parallel", "lighthouse", "wayfinder", "analyst", "enterprise"])
 def test_run_new_creates_expected_files(tmp_path: Path, template: str) -> None:
     name = f"{template}-agent"
     result = run_new(name=name, template=template, output_dir=tmp_path, quiet=True)
@@ -60,7 +60,7 @@ def test_cli_new_command_creates_project(tmp_path: Path) -> None:
     assert (tmp_path / "cli-agent" / "pyproject.toml").exists()
 
 
-@pytest.mark.parametrize("template", ["minimal", "react", "parallel"])
+@pytest.mark.parametrize("template", ["minimal", "react", "parallel", "lighthouse", "wayfinder", "analyst", "enterprise"])
 def test_generated_project_tests_pass(tmp_path: Path, template: str) -> None:
     name = f"{template}-proj"
     project_dir, _ = _project_paths(tmp_path, name)
@@ -85,3 +85,52 @@ def test_generated_project_tests_pass(tmp_path: Path, template: str) -> None:
         print(completed.stderr, file=sys.stderr)
     assert completed.returncode == 0
 
+
+@pytest.mark.parametrize(
+    ("template", "flags"),
+    [
+        ("minimal", {"with_streaming": True, "with_hitl": True}),
+        ("react", {"with_streaming": True, "with_a2a": True}),
+        ("parallel", {"no_memory": True}),
+        ("lighthouse", {"with_streaming": True}),
+        ("wayfinder", {"with_hitl": True}),
+        ("analyst", {"with_a2a": True}),
+        ("enterprise", {"with_streaming": True, "with_hitl": True}),
+    ],
+)
+def test_generated_project_tests_pass_with_flags(
+    tmp_path: Path,
+    template: str,
+    flags: dict[str, bool],
+) -> None:
+    name = f"{template}-flags-proj"
+    project_dir, _ = _project_paths(tmp_path, name)
+    result = run_new(
+        name=name,
+        template=template,
+        output_dir=tmp_path,
+        quiet=True,
+        force=True,
+        **flags,
+    )
+
+    assert result.success
+
+    env = os.environ.copy()
+    repo_root = Path(__file__).resolve().parents[1]
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(repo_root), env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q"],
+        cwd=project_dir,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed.returncode != 0:  # pragma: no cover - captured for debugging
+        print(completed.stdout)
+        print(completed.stderr, file=sys.stderr)
+    assert completed.returncode == 0

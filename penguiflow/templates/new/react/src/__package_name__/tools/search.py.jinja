@@ -4,12 +4,20 @@ from __future__ import annotations
 
 from penguiflow.catalog import tool
 from penguiflow.planner import ToolContext
-
+{% if with_streaming %}
+from ..telemetry import StatusUpdate
+{% endif %}
 from ..models import Query, SearchResult, SearchResults
 
 
 @tool(desc="Search internal knowledge sources", side_effects="read", tags=["planner"])
 async def search_documents(args: Query, ctx: ToolContext) -> SearchResults:
     tenant = ctx.tool_context.get("tenant_id", "public")
+{% if with_streaming %}
+    publisher = ctx.tool_context.get("status_publisher")
+    if callable(publisher):
+        publisher(StatusUpdate(status="thinking", message=f"Searching for '{args.question}'"))
+    await ctx.emit_chunk("search", 0, f"Searching {tenant} sources...")
+{% endif %}
     snippet = f"Result for '{args.question}' in tenant '{tenant}'"
     return SearchResults(results=[SearchResult(title="stub", snippet=snippet)])
