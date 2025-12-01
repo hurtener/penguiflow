@@ -98,8 +98,16 @@ async def build_planner() -> ReactPlanner:
 
     scripted_actions = [
         {"thought": "triage", "next_node": "triage", "args": {"text": "send update"}},
-        {"thought": "fetch profile", "next_node": "fetch_profile", "args": {"intent": "summarize", "note": "tone=warm"}},
-        {"thought": "respond", "next_node": "respond", "args": {"name": "Ava Agent", "department": "eng", "preferences": {"note": "tone=warm"}}},
+        {
+            "thought": "fetch profile",
+            "next_node": "fetch_profile",
+            "args": {"intent": "summarize", "note": "tone=warm"},
+        },
+        {
+            "thought": "respond",
+            "next_node": "respond",
+            "args": {"name": "Ava Agent", "department": "eng", "preferences": {"note": "tone=warm"}},
+        },
         {"thought": "finish", "next_node": None, "args": None},
     ]
 

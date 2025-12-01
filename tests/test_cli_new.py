@@ -20,7 +20,10 @@ def _project_paths(base: Path, name: str) -> tuple[Path, Path]:
     return project_dir, package_dir
 
 
-@pytest.mark.parametrize("template", ["minimal", "react", "parallel", "flow", "controller", "lighthouse", "wayfinder", "analyst", "enterprise"])
+@pytest.mark.parametrize(
+    "template",
+    ["minimal", "react", "parallel", "flow", "controller", "lighthouse", "wayfinder", "analyst", "enterprise"],
+)
 def test_run_new_creates_expected_files(tmp_path: Path, template: str) -> None:
     name = f"{template}-agent"
     result = run_new(name=name, template=template, output_dir=tmp_path, quiet=True)
@@ -60,7 +63,10 @@ def test_cli_new_command_creates_project(tmp_path: Path) -> None:
     assert (tmp_path / "cli-agent" / "pyproject.toml").exists()
 
 
-@pytest.mark.parametrize("template", ["minimal", "react", "parallel", "flow", "controller", "lighthouse", "wayfinder", "analyst", "enterprise"])
+@pytest.mark.parametrize(
+    "template",
+    ["minimal", "react", "parallel", "flow", "controller", "lighthouse", "wayfinder", "analyst", "enterprise"],
+)
 def test_generated_project_tests_pass(tmp_path: Path, template: str) -> None:
     name = f"{template}-proj"
     project_dir, _ = _project_paths(tmp_path, name)
@@ -76,8 +82,7 @@ def test_generated_project_tests_pass(tmp_path: Path, template: str) -> None:
         [sys.executable, "-m", "pytest", "-q"],
         cwd=project_dir,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
     if completed.returncode != 0:  # pragma: no cover - captured for debugging
@@ -128,8 +133,7 @@ def test_generated_project_tests_pass_with_flags(
         [sys.executable, "-m", "pytest", "-q"],
         cwd=project_dir,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
     if completed.returncode != 0:  # pragma: no cover - captured for debugging

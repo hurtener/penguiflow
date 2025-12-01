@@ -4,9 +4,9 @@ import asyncio
 import json
 import logging
 import time
+import warnings
 from collections.abc import Mapping
 from typing import Any
-import warnings
 
 import pytest
 from pydantic import BaseModel
