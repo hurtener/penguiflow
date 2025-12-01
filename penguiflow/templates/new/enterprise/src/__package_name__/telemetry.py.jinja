@@ -1,0 +1,204 @@
+"""Observability helpers for {{ project_name }}."""
+
+from __future__ import annotations
+
+import logging
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import Any, Callable
+
+from penguiflow.planner import PlannerEvent
+
+
+@dataclass
+class StatusUpdate:
+    """Status update payload for UI hooks."""
+
+    status: str
+    message: str
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+@dataclass
+class LatencyHistogram:
+    """Tracks latency percentiles for performance monitoring."""
+
+    window_size: int = 1000
+    _samples: deque = field(default_factory=deque, init=False)
+
+    def record(self, latency_ms: float) -> None:
+        """Record a latency sample."""
+        self._samples.append(latency_ms)
+        if len(self._samples) > self.window_size:
+            self._samples.popleft()
+
+    def percentiles(self) -> dict[str, float]:
+        """Calculate common percentiles (p50, p95, p99)."""
+        if not self._samples:
+            return {"p50": 0.0, "p95": 0.0, "p99": 0.0, "mean": 0.0, "max": 0.0}
+
+        sorted_samples = sorted(self._samples)
+        count = len(sorted_samples)
+
+        def _percentile(p: float) -> float:
+            idx = int(count * p)
+            return sorted_samples[min(idx, count - 1)]
+
+        return {
+            "p50": _percentile(0.50),
+            "p95": _percentile(0.95),
+            "p99": _percentile(0.99),
+            "mean": sum(sorted_samples) / count,
+            "max": max(sorted_samples),
+        }
+
+
+@dataclass
+class ErrorRateTracker:
+    """Tracks error rates over a rolling time window."""
+
+    window_seconds: float = 60.0
+    _successes: deque = field(default_factory=deque, init=False)
+    _failures: deque = field(default_factory=deque, init=False)
+
+    def record_success(self) -> None:
+        """Record a successful operation."""
+        self._successes.append(datetime.now(UTC))
+        self._cleanup()
+
+    def record_failure(self) -> None:
+        """Record a failed operation."""
+        self._failures.append(datetime.now(UTC))
+        self._cleanup()
+
+    def _cleanup(self) -> None:
+        """Remove timestamps outside the window."""
+        cutoff = datetime.now(UTC) - timedelta(seconds=self.window_seconds)
+        while self._successes and self._successes[0] < cutoff:
+            self._successes.popleft()
+        while self._failures and self._failures[0] < cutoff:
+            self._failures.popleft()
+
+    def error_rate(self) -> float:
+        """Calculate current error rate (0.0 to 1.0)."""
+        self._cleanup()
+        total = len(self._successes) + len(self._failures)
+        if total == 0:
+            return 0.0
+        return len(self._failures) / total
+
+    def stats(self) -> dict[str, Any]:
+        """Get detailed error rate statistics."""
+        self._cleanup()
+        return {
+            "successes": len(self._successes),
+            "failures": len(self._failures),
+            "error_rate": self.error_rate(),
+            "window_seconds": self.window_seconds,
+        }
+
+
+class AgentTelemetry:
+    """Enterprise telemetry middleware with advanced metrics."""
+
+    def __init__(
+        self,
+        *,
+        flow_name: str,
+        logger: logging.Logger,
+        status_callback: Callable[[StatusUpdate], None] | None = None,
+    ) -> None:
+        self.flow_name = flow_name
+        self.logger = logger
+        self._status_callback = status_callback
+        self.events: list[PlannerEvent] = []
+
+        # Advanced metrics
+        self._latency_histograms: dict[str, LatencyHistogram] = defaultdict(LatencyHistogram)
+        self._error_trackers: dict[str, ErrorRateTracker] = defaultdict(ErrorRateTracker)
+        self._circuit_breaker_states: dict[str, str] = {}
+
+    def record_planner_event(self, event: PlannerEvent) -> None:
+        """Synchronous callback attached to the planner."""
+        self.events.append(event)
+        payload: dict[str, Any] = {"flow": self.flow_name, **event.to_payload()}
+
+        # Track latency for step_complete events
+        if event.event_type == "step_complete" and event.latency_ms is not None:
+            node_name = event.node_name or "unknown"
+            self._latency_histograms[node_name].record(event.latency_ms)
+
+            # Log if latency is unusually high (> p95)
+            percentiles = self._latency_histograms[node_name].percentiles()
+            if event.latency_ms > percentiles["p95"]:
+                self.logger.warning(
+                    "high_latency_detected",
+                    extra={**payload, "p95": percentiles["p95"]},
+                )
+
+        # Track error rates - errors are indicated by the error field, not event_type
+        if event.event_type == "step_complete":
+            node_name = event.node_name or "unknown"
+            if event.error:
+                self._error_trackers[node_name].record_failure()
+                self.logger.error("planner_node_error", extra=payload)
+
+                # Alert if error rate is high
+                error_rate = self._error_trackers[node_name].error_rate()
+                if error_rate > 0.1:  # > 10% error rate
+                    self.logger.error(
+                        "high_error_rate",
+                        extra={
+                            "node_name": node_name,
+                            "error_rate": error_rate,
+                            **self._error_trackers[node_name].stats(),
+                        },
+                    )
+            else:
+                self._error_trackers[node_name].record_success()
+
+        # Log finish events
+        if event.event_type == "finish":
+            self.logger.info("planner_finish", extra=payload)
+        elif event.event_type != "step_complete":
+            self.logger.debug(event.event_type, extra=payload)
+
+    def publish_status(self, update: StatusUpdate) -> None:
+        """Forward status updates to callback or logs."""
+        if self._status_callback:
+            self._status_callback(update)
+        else:
+            self.logger.info(
+                "status_update",
+                extra={
+                    "flow": self.flow_name,
+                    "status": update.status,
+                    "message": update.message,
+                    "timestamp": update.timestamp.isoformat(),
+                },
+            )
+
+    def record_circuit_breaker_state(self, service: str, state: str) -> None:
+        """Record circuit breaker state change."""
+        self._circuit_breaker_states[service] = state
+        self.logger.info(
+            "circuit_breaker_state_change",
+            extra={"service": service, "state": state},
+        )
+
+    def get_metrics_summary(self) -> dict[str, Any]:
+        """Get a summary of all collected metrics."""
+        return {
+            "flow_name": self.flow_name,
+            "total_events": len(self.events),
+            "latency_percentiles": {
+                node: hist.percentiles()
+                for node, hist in self._latency_histograms.items()
+            },
+            "error_rates": {
+                node: tracker.stats()
+                for node, tracker in self._error_trackers.items()
+            },
+            "circuit_breaker_states": dict(self._circuit_breaker_states),
+        }

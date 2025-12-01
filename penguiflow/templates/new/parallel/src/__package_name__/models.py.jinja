@@ -1,0 +1,38 @@
+"""Pydantic models for {{ project_name }} parallel template."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel
+
+
+class FanoutRequest(BaseModel):
+    """Initial request for the parallel planner."""
+
+    topic: str
+
+
+class ShardRequest(BaseModel):
+    """Request sent to each shard."""
+
+    topic: str
+    shard: int
+
+
+class ShardResult(BaseModel):
+    """Result from a shard."""
+
+    shard: int
+    text: str
+
+
+class JoinRequest(BaseModel):
+    """Join payload combining branch results."""
+
+    expect: int
+    results: list[ShardResult]
+
+
+class FinalDocuments(BaseModel):
+    """Final merged documents."""
+
+    documents: list[str]

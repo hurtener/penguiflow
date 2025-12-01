@@ -1,0 +1,129 @@
+"""Unit tests for flow nodes using run_one."""
+
+from __future__ import annotations
+
+import pytest
+from penguiflow.testkit import run_one
+from penguiflow.types import Headers, Message
+
+from {{ package_name }}.flow import (
+    FinalAnswer,
+    ProcessedPayload,
+    QueryPayload,
+    _build_flow,
+    _prepare_node,
+    _finalize_node,
+{% if not memory_enabled %}
+    _process_node,
+{% endif %}
+)
+
+
+@pytest.mark.asyncio
+async def test_flow_executes_successfully() -> None:
+    """Test that the flow completes end-to-end."""
+    bundle = _build_flow(
+{% if memory_enabled %}
+        memory=None,
+{% endif %}
+    )
+
+    message = Message(
+        payload=QueryPayload(
+            query="Test query",
+            tenant_id="test-tenant",
+            user_id="test-user",
+            session_id="test-session",
+        ),
+        headers=Headers(tenant="test-tenant", topic="test"),
+        trace_id="test-trace-123",
+    )
+
+    # run_one is ONLY for tests - starts, runs, stops flow
+    result_message = await run_one(
+        bundle.flow,
+        message,
+        registry=bundle.registry,
+    )
+
+    # Verify final answer
+    assert isinstance(result_message, Message)
+    payload = result_message.payload
+    assert isinstance(payload, FinalAnswer)
+    assert "Processed: Test query" in payload.text
+
+
+@pytest.mark.asyncio
+async def test_prepare_node_preserves_envelope() -> None:
+    """Test that prepare node preserves message envelope."""
+    message = Message(
+        payload=QueryPayload(
+            query="Test",
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+        ),
+        headers=Headers(tenant="t1", topic="test"),
+        trace_id="trace-abc",
+        meta={"origin": "unit-test"},
+    )
+
+    # Execute the node function directly
+    result = await _prepare_node(message, None)
+
+    # Envelope should be preserved
+    assert result.headers == message.headers
+    assert result.trace_id == message.trace_id
+    assert result.meta == message.meta
+
+
+@pytest.mark.asyncio
+async def test_process_node_transforms_payload() -> None:
+    """Test that process node transforms payload correctly."""
+    message = Message(
+        payload=QueryPayload(
+            query="Sample query",
+            tenant_id="t1",
+            user_id="u1",
+            session_id="s1",
+        ),
+        headers=Headers(tenant="t1", topic="test"),
+    )
+
+{% if memory_enabled %}
+    # Get the process node from bundle and execute its function
+    bundle = _build_flow(memory=None)
+    result = await bundle.process_node.func(message, None)
+{% else %}
+    # Execute the node function directly
+    result = await _process_node(message, None)
+{% endif %}
+
+    # Verify transformation
+    payload = result.payload
+    assert isinstance(payload, ProcessedPayload)
+    assert payload.query == "Sample query"
+    assert "Processed: Sample query" in payload.processed_text
+    assert "original_query" in payload.metadata
+
+
+@pytest.mark.asyncio
+async def test_finalize_node_creates_answer() -> None:
+    """Test that finalize node creates final answer."""
+    message = Message(
+        payload=ProcessedPayload(
+            query="Test",
+            processed_text="Processed: Test",
+            metadata={"original_query": "Test", "tenant_id": "t1"},
+        ),
+        headers=Headers(tenant="t1", topic="test"),
+    )
+
+    # Execute the node function directly
+    result = await _finalize_node(message, None)
+
+    # Verify final answer
+    payload = result.payload
+    assert isinstance(payload, FinalAnswer)
+    assert "Processed: Test" in payload.text
+    assert payload.sources is not None

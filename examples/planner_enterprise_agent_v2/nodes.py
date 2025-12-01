@@ -31,6 +31,7 @@ from penguiflow import (
 )
 from penguiflow.catalog import tool
 from penguiflow.errors import FlowError
+from penguiflow.planner import ToolContext
 
 logger = logging.getLogger("penguiflow.examples.planner_enterprise")
 
@@ -134,6 +135,10 @@ def _resolve_meta(source: Any) -> MutableMapping[str, Any] | None:
 
     if isinstance(source, MutableMapping):
         return source
+
+    tool_ctx = getattr(source, "tool_context", None)
+    if isinstance(tool_ctx, MutableMapping):
+        return tool_ctx
 
     meta = getattr(source, "meta", None)
     if isinstance(meta, MutableMapping):
@@ -239,7 +244,7 @@ def _ensure_message(message: Any) -> Message:
     tags=["planner", "routing"],
     side_effects="read",
 )
-async def triage_query(args: UserQuery, ctx: Any) -> RouteDecision:
+async def triage_query(args: UserQuery, ctx: ToolContext) -> RouteDecision:
     """Intelligent routing based on query content analysis."""
     _publish_status(
         ctx,
@@ -277,7 +282,9 @@ async def triage_query(args: UserQuery, ctx: Any) -> RouteDecision:
     tags=["planner", "documents"],
     side_effects="stateful",
 )
-async def initialize_document_workflow(args: RouteDecision, ctx: Any) -> DocumentState:
+async def initialize_document_workflow(
+    args: RouteDecision, ctx: ToolContext
+) -> DocumentState:
     """Set up document analysis pipeline."""
     if args.route != "documents":
         raise FlowError(
@@ -308,7 +315,7 @@ async def initialize_document_workflow(args: RouteDecision, ctx: Any) -> Documen
     tags=["planner", "documents"],
     side_effects="read",
 )
-async def parse_documents(args: DocumentState, ctx: Any) -> DocumentState:
+async def parse_documents(args: DocumentState, ctx: ToolContext) -> DocumentState:
     """Extract document references from query."""
     roadmap = list(args.roadmap)
     current = _mark_step_status(
@@ -351,7 +358,7 @@ async def parse_documents(args: DocumentState, ctx: Any) -> DocumentState:
     side_effects="read",
     latency_hint_ms=1000,  # High latency,
 )
-async def extract_metadata(args: DocumentState, ctx: Any) -> DocumentState:
+async def extract_metadata(args: DocumentState, ctx: ToolContext) -> DocumentState:
     """Concurrent metadata extraction from document sources."""
 
     async def analyze_file(source: str) -> dict[str, Any]:
@@ -399,7 +406,9 @@ async def extract_metadata(args: DocumentState, ctx: Any) -> DocumentState:
     tags=["planner", "documents"],
     side_effects="pure",
 )
-async def generate_document_summary(args: DocumentState, ctx: Any) -> DocumentState:
+async def generate_document_summary(
+    args: DocumentState, ctx: ToolContext
+) -> DocumentState:
     """Synthesize findings into natural language summary."""
     roadmap = list(args.roadmap)
     current = _mark_step_status(
@@ -438,7 +447,7 @@ async def generate_document_summary(args: DocumentState, ctx: Any) -> DocumentSt
     tags=["planner", "documents"],
     side_effects="pure",
 )
-async def render_document_report(args: DocumentState, ctx: Any) -> FinalAnswer:
+async def render_document_report(args: DocumentState, ctx: ToolContext) -> FinalAnswer:
     """Package results into structured final answer."""
     roadmap = list(args.roadmap)
     current = _mark_step_status(
@@ -486,7 +495,7 @@ async def render_document_report(args: DocumentState, ctx: Any) -> FinalAnswer:
     tags=["planner", "bugs"],
     side_effects="stateful",
 )
-async def initialize_bug_workflow(args: RouteDecision, ctx: Any) -> BugState:
+async def initialize_bug_workflow(args: RouteDecision, ctx: ToolContext) -> BugState:
     """Set up bug triage pipeline."""
     if args.route != "bug":
         raise FlowError(
@@ -515,7 +524,7 @@ async def initialize_bug_workflow(args: RouteDecision, ctx: Any) -> BugState:
     tags=["planner", "bugs"],
     side_effects="read",
 )
-async def collect_error_logs(args: BugState, ctx: Any) -> BugState:
+async def collect_error_logs(args: BugState, ctx: ToolContext) -> BugState:
     """Gather diagnostic logs from error context."""
     roadmap = list(args.roadmap)
     current = _mark_step_status(roadmap, step_id=BUG_ROADMAP[0].id, status="running")
@@ -555,7 +564,7 @@ async def collect_error_logs(args: BugState, ctx: Any) -> BugState:
     side_effects="external",
     latency_hint_ms=1000,  # High latency,
 )
-async def run_diagnostics(args: BugState, ctx: Any) -> BugState:
+async def run_diagnostics(args: BugState, ctx: ToolContext) -> BugState:
     """Execute validation suite to isolate failure."""
     roadmap = list(args.roadmap)
     current = _mark_step_status(roadmap, step_id=BUG_ROADMAP[1].id, status="running")
@@ -595,7 +604,7 @@ async def run_diagnostics(args: BugState, ctx: Any) -> BugState:
     tags=["planner", "bugs"],
     side_effects="pure",
 )
-async def recommend_bug_fix(args: BugState, ctx: Any) -> FinalAnswer:
+async def recommend_bug_fix(args: BugState, ctx: ToolContext) -> FinalAnswer:
     """Generate actionable fix recommendation."""
     roadmap = list(args.roadmap)
     current = _mark_step_status(roadmap, step_id=BUG_ROADMAP[2].id, status="running")
@@ -651,7 +660,7 @@ async def recommend_bug_fix(args: BugState, ctx: Any) -> FinalAnswer:
     side_effects="read",
     latency_hint_ms=500,  # Medium latency,
 )
-async def answer_general_query(args: RouteDecision, ctx: Any) -> FinalAnswer:
+async def answer_general_query(args: RouteDecision, ctx: ToolContext) -> FinalAnswer:
     """Direct LLM answer for queries not requiring specialized workflows."""
     _publish_status(
         ctx,
@@ -796,7 +805,7 @@ def build_document_analysis_subflow(
     latency_hint_ms=2000,  # Entire pipeline latency
     cost_hint="medium",  # Multiple internal operations
 )
-async def analyze_documents_pipeline(args: RouteDecision, ctx: Any) -> FinalAnswer:
+async def analyze_documents_pipeline(args: RouteDecision, ctx: ToolContext) -> FinalAnswer:
     """Execute complete document analysis workflow as a single operation."""
     if args.route != "documents":
         raise FlowError(

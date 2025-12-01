@@ -1,0 +1,38 @@
+"""Fan-out fetch tools."""
+
+from __future__ import annotations
+
+import asyncio
+
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+
+from ..models import ShardRequest, ShardResult
+
+
+@tool(desc="Fetch from the primary shard", tags=["parallel"])
+async def fetch_primary(args: ShardRequest, ctx: ToolContext) -> ShardResult:
+{% if with_streaming %}
+    await ctx.emit_chunk("fetch_primary", 0, f"Fetching primary shard for {args.topic}...")
+{% else %}
+    del ctx
+{% endif %}
+    await asyncio.sleep(0.01)
+{% if with_streaming %}
+    await ctx.emit_chunk("fetch_primary", 1, f"Primary shard complete", done=True)
+{% endif %}
+    return ShardResult(shard=args.shard, text=f"{args.topic}-primary")
+
+
+@tool(desc="Fetch from the secondary shard", tags=["parallel"])
+async def fetch_secondary(args: ShardRequest, ctx: ToolContext) -> ShardResult:
+{% if with_streaming %}
+    await ctx.emit_chunk("fetch_secondary", 0, f"Fetching secondary shard for {args.topic}...")
+{% else %}
+    del ctx
+{% endif %}
+    await asyncio.sleep(0.01)
+{% if with_streaming %}
+    await ctx.emit_chunk("fetch_secondary", 1, f"Secondary shard complete", done=True)
+{% endif %}
+    return ShardResult(shard=args.shard, text=f"{args.topic}-secondary")

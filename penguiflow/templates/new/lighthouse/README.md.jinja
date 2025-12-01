@@ -1,0 +1,23 @@
+# {{ project_name }}
+
+Lighthouse RAG agent scaffold with PenguiFlow ReactPlanner, service stubs, and tests.
+
+## Quickstart
+
+```bash
+uv sync
+uv run python -m {{ package_name }}
+```
+
+## Customize
+
+- Implement Lighthouse API calls in `src/{{ package_name }}/clients/lighthouse.py`.
+- Extend tools in `src/{{ package_name }}/tools/` to cover more endpoints.
+- Swap `ScriptedLLM` in `planner.py` for a real model and wire telemetry/memory to your stack.
+
+## Use a real LLM and adjust prompts
+
+- Set `LLM_MODEL` and your provider key (e.g., `OPENAI_API_KEY`) in the environment.
+- In `planner.py`, replace `ScriptedLLM` by passing `llm=config.llm_model` to `ReactPlanner` (LiteLLM path), or use `DSPyLLMClient(llm=config.llm_model)` as `llm_client`.
+- Custom clients just need `.complete(messages=[...], response_format=...)`.
+- To nudge prompts, pass `system_prompt_extra` and/or `planning_hints` to `ReactPlanner` instead of editing `penguiflow.planner.prompts` directly.

@@ -1,0 +1,299 @@
+"""Main orchestrator for {{ project_name }}."""
+
+from __future__ import annotations
+
+import json
+import logging
+import secrets
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+from penguiflow.errors import FlowError
+from penguiflow.planner import PlannerFinish, PlannerPause, ReactPlanner
+{% if memory_enabled %}
+from .clients.memory import MemoryClient
+{% endif %}
+{% if with_a2a %}
+from .a2a import A2AServer
+{% endif %}
+from .config import Config
+from .telemetry import AgentTelemetry
+from .tools import Answer, build_catalog_bundle
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class {{ class_name }}FlowError(RuntimeError):
+    """Raised when the planner surface a FlowError."""
+
+    def __init__(self, flow_error: FlowError | str) -> None:
+        message = flow_error.message if isinstance(flow_error, FlowError) else str(flow_error)
+        super().__init__(message)
+        self.flow_error = flow_error
+
+
+@dataclass
+class AgentResponse:
+    """Response envelope returned by the orchestrator."""
+
+    answer: str | None
+    trace_id: str
+    metadata: dict[str, Any] | None = None
+{% if with_streaming %}
+    streams: dict[str, list[dict[str, Any]]] | None = None
+{% endif %}
+{% if with_hitl %}
+    pause_token: str | None = None
+{% endif %}
+
+
+def _collect_streams(metadata: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Aggregate stream chunks from planner metadata."""
+    streams: dict[str, list[dict[str, Any]]] = {}
+    for step in metadata.get("steps", []):
+        for stream_id, chunks in (step.get("streams") or {}).items():
+            streams.setdefault(stream_id, []).extend(chunks)
+    return streams
+
+
+class ScriptedLLM:
+    """Deterministic JSON responses for planner tests."""
+
+    def __init__(self) -> None:
+        self._responses: list[str] | None = None
+
+    async def complete(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        response_format: dict[str, Any] | None = None,
+    ) -> str:
+        del response_format
+        if self._responses is None:
+            user_prompt = messages[-1].get("content", "")
+            scripted = [
+                {
+                    "thought": "draft answer",
+                    "next_node": "answer_question",
+                    "args": {"text": user_prompt},
+                },
+                {
+                    "thought": "finish",
+                    "next_node": None,
+                    "args": None,
+                },
+            ]
+            self._responses = [json.dumps(item, ensure_ascii=False) for item in scripted]
+
+        if not self._responses:
+            raise RuntimeError("ScriptedLLM has no responses left")
+
+        return self._responses.pop(0)
+
+
+class {{ class_name }}Orchestrator:
+    """Production-style orchestrator using emit/fetch pattern."""
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        telemetry: AgentTelemetry | None = None,
+    ) -> None:
+        self._config = config
+{% if memory_enabled %}
+        self._memory = MemoryClient(config.memory_base_url)
+{% else %}
+        self._memory = None
+{% endif %}
+        self._telemetry = telemetry or AgentTelemetry(
+            flow_name="{{ project_name }}",
+            logger=_LOGGER,
+        )
+
+        nodes, registry = build_catalog_bundle()
+        self._llm = ScriptedLLM()
+        self._planner = ReactPlanner(
+            llm_client=self._llm,
+            nodes=nodes,
+            registry=registry,
+            event_callback=self._telemetry.record_planner_event,
+        )
+        # To use a real LLM instead of ScriptedLLM:
+        # - LiteLLM path: pass llm=config.llm_model (e.g., "gpt-4o") to ReactPlanner and set provider keys
+        #   in env (e.g., OPENAI_API_KEY).
+        # - DSPy path: pass llm_client=DSPyLLMClient(llm=config.llm_model) and leave llm=None.
+        # - Custom: pass any client with .complete(messages=[...], response_format=...).
+        # Prompt tweaks: pass system_prompt_extra or planning_hints to ReactPlanner to append guidance without
+        # editing penguiflow.planner.prompts.
+{% if with_a2a %}
+        self._a2a_server = A2AServer(self)
+{% endif %}
+        self._started = True
+
+    async def execute(
+        self,
+        query: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> AgentResponse:
+        """Execute the agent for a single query."""
+        trace_id = secrets.token_hex(8)
+
+{% if memory_enabled %}
+        conscious = await self._memory.start_session(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        retrieval = await self._memory.auto_retrieve(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            prompt=query,
+        )
+{% else %}
+        conscious = {"conscious": []}
+        retrieval = {"snippets": []}
+{% endif %}
+
+        llm_context = {
+            "conscious_memories": conscious.get("conscious", []),
+            "retrieved_memories": retrieval.get("snippets", []),
+        }
+        tool_context = {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "status_publisher": self._telemetry.publish_status,
+        }
+
+        result = await self._planner.run(
+            query=query,
+            llm_context=llm_context,
+            tool_context=tool_context,
+        )
+{% if with_streaming %}
+        streams = _collect_streams(getattr(result, "metadata", {}) or {})
+{% endif %}
+        if isinstance(result, PlannerPause):
+{% if with_hitl %}
+            return AgentResponse(
+                answer=None,
+                trace_id=trace_id,
+                metadata={"reason": result.reason, "payload": dict(result.payload)},
+{% if with_streaming %}
+                streams=streams or None,
+{% endif %}
+                pause_token=result.resume_token,
+            )
+{% else %}
+            raise {{ class_name }}FlowError("Planner paused unexpectedly")
+{% endif %}
+
+        if not isinstance(result, PlannerFinish):
+            raise {{ class_name }}FlowError("Planner did not finish successfully")
+
+        payload: Any = result.payload
+        answer_text = payload.answer if isinstance(payload, Answer) else str(payload)
+
+{% if memory_enabled %}
+        await self._memory.ingest_interaction(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            user_prompt=query,
+            agent_response=answer_text,
+        )
+{% endif %}
+
+        return AgentResponse(
+            answer=answer_text,
+            trace_id=trace_id,
+            metadata=dict(result.metadata),
+{% if with_streaming %}
+            streams=streams or None,
+{% endif %}
+        )
+
+{% if with_hitl %}
+    async def resume(
+        self,
+        resume_token: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        user_input: str | None = None,
+    ) -> AgentResponse:
+        """Resume a paused planner execution."""
+        trace_id = secrets.token_hex(8)
+        tool_context = {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "status_publisher": self._telemetry.publish_status,
+        }
+        result = await self._planner.resume(
+            token=resume_token,
+            user_input=user_input,
+            tool_context=tool_context,
+        )
+{% if with_streaming %}
+        streams = _collect_streams(getattr(result, "metadata", {}) or {})
+{% endif %}
+        if isinstance(result, PlannerPause):
+            return AgentResponse(
+                answer=None,
+                trace_id=trace_id,
+                metadata={"reason": result.reason, "payload": dict(result.payload)},
+{% if with_streaming %}
+                streams=streams or None,
+{% endif %}
+                pause_token=result.resume_token,
+            )
+        if not isinstance(result, PlannerFinish):
+            raise {{ class_name }}FlowError("Planner did not finish successfully")
+
+        payload: Any = result.payload
+        answer_text = payload.answer if isinstance(payload, Answer) else str(payload)
+
+{% if memory_enabled %}
+        await self._memory.ingest_interaction(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            user_prompt=f"[resume] {user_input or ''}",
+            agent_response=answer_text,
+        )
+{% endif %}
+
+        return AgentResponse(
+            answer=answer_text,
+            trace_id=trace_id,
+            metadata=dict(result.metadata),
+{% if with_streaming %}
+            streams=streams or None,
+{% endif %}
+        )
+{% endif %}
+
+    async def stop(self) -> None:
+        """Graceful shutdown hook."""
+        if self._started:
+{% if with_a2a %}
+            if getattr(self, "_a2a_server", None):
+                await self._a2a_server.stop()
+{% endif %}
+            self._started = False
+            _LOGGER.info("{{ project_name }} orchestrator stopped")
+
+{% if with_a2a %}
+    async def start_a2a(self) -> None:
+        """Start the A2A server stub."""
+        await self._a2a_server.start()
+{% endif %}

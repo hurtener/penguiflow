@@ -1,0 +1,41 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Test",
+      "type": "shell",
+      "command": "uv run pytest tests/ -v",
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Test (current file)",
+      "type": "shell",
+      "command": "uv run pytest ${file} -v"
+    },
+    {
+      "label": "Type Check",
+      "type": "shell",
+      "command": "uv run mypy .",
+      "group": "build"
+    },
+    {
+      "label": "Lint",
+      "type": "shell",
+      "command": "uv run ruff check .",
+      "group": "build"
+    },
+    {
+      "label": "Lint (fix)",
+      "type": "shell",
+      "command": "uv run ruff check . --fix"
+    },
+    {
+      "label": "Format",
+      "type": "shell",
+      "command": "uv run ruff format ."
+    }
+  ]
+}

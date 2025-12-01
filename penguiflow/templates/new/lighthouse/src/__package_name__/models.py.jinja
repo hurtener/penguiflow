@@ -1,0 +1,43 @@
+"""Pydantic models for lighthouse tools."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class UploadRequest(BaseModel):
+    """Upload local files to Lighthouse."""
+
+    paths: list[str] = Field(default_factory=list, description="Local file paths to upload")
+
+
+class UploadResult(BaseModel):
+    """Upload response."""
+
+    file_ids: list[str] = Field(default_factory=list)
+
+
+class IngestRequest(BaseModel):
+    """Trigger ingestion of uploaded files."""
+
+    file_ids: list[str] = Field(default_factory=list)
+
+
+class IngestStatus(BaseModel):
+    """Track ingestion job status."""
+
+    job_id: str
+    status: str = "pending"
+
+
+class QueryRequest(BaseModel):
+    """Search Lighthouse index."""
+
+    question: str
+
+
+class QueryResult(BaseModel):
+    """Search answer from Lighthouse."""
+
+    answer: str
+    sources: list[str] = Field(default_factory=list)

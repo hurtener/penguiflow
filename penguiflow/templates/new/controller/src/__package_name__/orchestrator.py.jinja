@@ -1,0 +1,193 @@
+"""Main orchestrator for {{ project_name }}."""
+
+from __future__ import annotations
+
+import logging
+import secrets
+from dataclasses import dataclass
+from typing import Any
+
+from penguiflow import FinalAnswer
+{% if with_streaming %}
+from penguiflow.types import StreamChunk
+{% endif %}
+{% if memory_enabled %}
+from .clients.memory import MemoryClient
+{% endif %}
+{% if with_a2a %}
+from .a2a import A2AServer
+{% endif %}
+from .config import Config
+from .flow import run_controller
+from .telemetry import AgentTelemetry
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class {{ class_name }}FlowError(RuntimeError):
+    """Raised when the controller flow fails."""
+
+    def __init__(self, error: Exception | str) -> None:
+        message = str(error)
+        super().__init__(message)
+        self.error = error
+
+
+@dataclass
+class AgentResponse:
+    """Response envelope returned by the orchestrator."""
+
+    answer: str | None
+    trace_id: str
+    metadata: dict[str, Any] | None = None
+{% if with_streaming %}
+    streams: dict[str, list[dict[str, Any]]] | None = None
+{% endif %}
+{% if with_hitl %}
+    pause_token: str | None = None
+{% endif %}
+
+
+class {{ class_name }}Orchestrator:
+    """Production-style orchestrator using controller loop pattern."""
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        telemetry: AgentTelemetry | None = None,
+    ) -> None:
+        self._config = config
+{% if memory_enabled %}
+        self._memory = MemoryClient(config.memory_base_url)
+{% else %}
+        self._memory = None
+{% endif %}
+        self._telemetry = telemetry or AgentTelemetry(
+            flow_name="{{ project_name }}",
+            logger=_LOGGER,
+        )
+{% if with_a2a %}
+        self._a2a_server = A2AServer(self)
+{% endif %}
+        self._started = True
+
+    async def execute(
+        self,
+        query: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> AgentResponse:
+        """Execute the controller loop for a single query."""
+        trace_id = secrets.token_hex(8)
+
+{% if memory_enabled %}
+        conscious = await self._memory.start_session(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        retrieval = await self._memory.auto_retrieve(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            prompt=query,
+        )
+
+        # Enrich query with memory context
+        enriched_query = query
+        if retrieval.get("snippets"):
+            context = " ".join(retrieval["snippets"])
+            enriched_query = f"{query}\n\nContext: {context}"
+{% else %}
+        enriched_query = query
+{% endif %}
+
+        try:
+            final_msg, flow = await run_controller(
+                enriched_query,
+                config=self._config,
+                tenant=tenant_id,
+            )
+
+            payload = final_msg.payload
+            if isinstance(payload, FinalAnswer):
+                answer_text = payload.text
+                iterations = len(payload.citations)
+            else:
+                answer_text = str(payload)
+                iterations = 0
+
+{% if memory_enabled %}
+            await self._memory.ingest_interaction(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+                user_prompt=query,
+                agent_response=answer_text,
+            )
+{% endif %}
+
+            self._telemetry.record_flow_event(
+                "finish",
+                {
+                    "trace_id": trace_id,
+                    "iterations": iterations,
+                    "tenant_id": tenant_id,
+                },
+            )
+
+            return AgentResponse(
+                answer=answer_text,
+                trace_id=trace_id,
+                metadata={"iterations": iterations},
+{% if with_streaming %}
+                streams=None,
+{% endif %}
+            )
+
+        except Exception as exc:
+            self._telemetry.record_flow_event(
+                "error",
+                {
+                    "trace_id": trace_id,
+                    "error": str(exc),
+                    "tenant_id": tenant_id,
+                },
+            )
+            raise {{ class_name }}FlowError(exc) from exc
+
+{% if with_hitl %}
+    async def resume(
+        self,
+        resume_token: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        user_input: str | None = None,
+    ) -> AgentResponse:
+        """Resume is not supported in controller loop pattern."""
+        raise NotImplementedError(
+            "Controller loop does not support pause/resume. "
+            "Consider using the react template for HITL workflows."
+        )
+{% endif %}
+
+    async def stop(self) -> None:
+        """Graceful shutdown hook."""
+        if self._started:
+{% if with_a2a %}
+            if getattr(self, "_a2a_server", None):
+                await self._a2a_server.stop()
+{% endif %}
+            self._started = False
+            _LOGGER.info("{{ project_name }} orchestrator stopped")
+
+{% if with_a2a %}
+    async def start_a2a(self) -> None:
+        """Start the A2A server stub."""
+        await self._a2a_server.start()
+{% endif %}

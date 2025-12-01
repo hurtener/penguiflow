@@ -1,0 +1,200 @@
+# {{ project_name }}
+
+PenguiFlow flow template demonstrating the core emit/fetch pattern with linear flow composition.
+
+## Overview
+
+This template showcases:
+- **Core PenguiFlow patterns**: `create()`, `Node`, `NodePolicy`, `ModelRegistry`
+- **Emit/fetch orchestration**: Production pattern with flow started once in `__init__`
+- **Linear flow composition**: Prepare → Process → Finalize
+- **Message immutability**: Using `message.model_copy(update={...})` pattern
+{% if with_streaming %}
+- **Status streaming**: Real-time status updates via sink nodes
+{% endif %}
+{% if memory_enabled %}
+- **Memory integration**: Conscious and retrieved memory context
+{% endif %}
+{% if with_a2a %}
+- **A2A server stub**: Agent-to-agent communication scaffold
+{% endif %}
+
+## Quickstart
+
+```bash
+uv sync
+uv run python -m {{ package_name }}
+```
+
+## Architecture
+
+### Flow Structure
+
+```
+QueryPayload → [prepare] → [process] → [finalize] → FinalAnswer
+{% if with_streaming %}                     ↓           ↓
+                            [status_sink] ←─┴───────────┘
+{% endif %}
+```
+
+### Key Components
+
+1. **flow.py**: Defines nodes and flow topology using `create()`
+2. **orchestrator.py**: Manages flow lifecycle with emit/fetch pattern
+3. **telemetry.py**: Observability and status tracking
+{% if memory_enabled %}
+4. **clients/memory.py**: Memory service integration stub
+{% endif %}
+
+### Node Pattern
+
+Each node follows the best practice pattern:
+
+```python
+async def _node_function(message: Message, _ctx: Any) -> Message:
+    # 1. Extract and validate message
+    base_message = message if isinstance(message, Message) else Message.model_validate(message)
+
+    # 2. Extract and validate payload
+    payload = PayloadType.model_validate(base_message.payload)
+
+    # 3. Business logic
+    result = process(payload)
+
+    # 4. Return updated message (immutable pattern)
+    return base_message.model_copy(update={"payload": result})
+```
+
+## Orchestrator Pattern
+
+The orchestrator demonstrates the **production emit/fetch pattern**:
+
+```python
+def __init__(self, config: Config):
+    bundle = _build_flow(...)
+    self._flow = bundle.flow
+    self._registry = bundle.registry
+
+    # Start flow ONCE in __init__ - CRITICAL
+    self._flow.run(registry=self._registry)
+    self._flow_started = True
+
+async def execute(self, query: str, ...) -> AgentResponse:
+    # Create message
+    message = Message(payload=..., headers=Headers(...))
+
+    # Use emit/fetch on running flow
+    await self._flow.emit(message)
+    result = await self._flow.fetch()
+
+    # Handle FlowError
+    if isinstance(result, FlowError):
+        raise CustomFlowError(result)
+
+    # Extract and return payload
+    return AgentResponse(...)
+
+async def stop(self):
+    if self._flow_started:
+        await self._flow.stop()
+        self._flow_started = False
+```
+
+## Testing
+
+Tests demonstrate proper usage patterns:
+
+- **Unit tests** (`test_flow.py`): Use `run_one()` to test individual nodes
+- **Integration tests** (`test_orchestrator.py`): Test full orchestrator with emit/fetch
+
+```bash
+uv run pytest tests/
+```
+
+## Customization
+
+### Add More Nodes
+
+1. Define node function in `flow.py`:
+   ```python
+   async def _my_node(message: Message, _ctx: Any) -> Message:
+       # ... your logic
+       return message.model_copy(update={"payload": new_payload})
+   ```
+
+2. Create Node instance:
+   ```python
+   my_node = Node(_my_node, name="my_node", policy=NodePolicy(validate="both"))
+   ```
+
+3. Add to flow topology:
+   ```python
+   flow = create(
+       prepare_node.to(my_node),
+       my_node.to(process_node),
+       process_node.to(finalize_node),
+   )
+   ```
+
+4. Register in ModelRegistry:
+   ```python
+   registry.register("my_node", InputType, OutputType)
+   ```
+
+### Add Dependencies
+
+Use factory pattern for nodes with dependencies:
+
+```python
+def _make_my_node(service: MyService) -> Node:
+    async def _my_node_impl(message: Message, _ctx: Any) -> Message:
+        # Node has access to service via closure
+        result = await service.do_something(...)
+        return message.model_copy(update={"payload": result})
+
+    return Node(_my_node_impl, name="my_node", policy=NodePolicy(validate="both"))
+```
+
+## Key Patterns
+
+### ✅ DO:
+- Start flow once in orchestrator `__init__`
+- Use emit/fetch for production code
+- Use `message.model_copy(update={...})` to preserve envelope
+- Register all nodes in ModelRegistry
+- Handle FlowError explicitly
+- Implement graceful `stop()` method
+
+### ❌ DON'T:
+- Use `run_one()` in production code (only in tests)
+- Mutate messages directly
+- Forget to register nodes in registry
+- Skip FlowError handling
+
+## Environment Variables
+
+{% if memory_enabled -%}
+- `MEMORY_BASE_URL`: Memory service endpoint (default: `http://localhost:8000`)
+{% endif %}
+
+Create a `.env` file:
+
+```bash
+{% if memory_enabled -%}
+MEMORY_BASE_URL=http://localhost:8000
+{% endif %}
+```
+
+## Next Steps
+
+1. **Add custom business logic** to node functions
+2. **Wire up real services** instead of stubs
+3. **Add middleware** for logging/metrics in orchestrator
+4. **Expand flow topology** with branching or fan-out patterns
+5. **Add error handling** specific to your domain
+
+## Learn More
+
+- [PenguiFlow Best Practices](../../PENGUIFLOW_BEST_PRACTICES.md)
+- [Examples](../../examples/)
+- [PenguiFlow Documentation](../../README.md)

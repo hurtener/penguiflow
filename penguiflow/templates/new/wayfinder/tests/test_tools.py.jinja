@@ -1,0 +1,53 @@
+"""Unit tests for wayfinder tools."""
+
+from __future__ import annotations
+
+import pytest
+
+from {{ package_name }}.models import ClarificationRequest, NLQ, PlanQuery, QueryExecution
+from {{ package_name }}.tools import execute_sql, plan_nlq, request_clarification
+
+
+class DummyCtx:
+    """Minimal ToolContext stub."""
+
+    def __init__(self) -> None:
+        self.llm_context = {}
+        self.tool_context = {"wayfinder_base_url": "http://localhost:9100"}
+        self.meta = {}
+{% if with_streaming %}
+        self.chunks: list[tuple[str, int, str]] = []
+{% endif %}
+
+    async def pause(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        del args, kwargs
+        raise RuntimeError("pause not supported in dummy context")
+
+    async def emit_chunk(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        {% if with_streaming %}stream_id, seq, text = args[:3]
+        self.chunks.append((stream_id, seq, text))
+        return None
+        {% else %}del args, kwargs
+        return None{% endif %}
+
+
+@pytest.mark.asyncio
+async def test_plan_and_execute_flow() -> None:
+    ctx = DummyCtx()
+    plan = await plan_nlq(NLQ(question="list customers"), ctx)
+    assert isinstance(plan, PlanQuery)
+    assert plan.sql
+    execution = await execute_sql(plan, ctx)
+    assert isinstance(execution, QueryExecution)
+    assert execution.summary
+{% if with_streaming %}
+    assert ctx.chunks
+{% endif %}
+
+
+@pytest.mark.asyncio
+async def test_clarification_request() -> None:
+    ctx = DummyCtx()
+    clarifications = await request_clarification(NLQ(question="ambiguous"), ctx)
+    assert isinstance(clarifications, ClarificationRequest)
+    assert clarifications.questions

@@ -1327,6 +1327,7 @@ name = "penguiflow"
 version = "2.3.0"
 source = { editable = "." }
 dependencies = [
+    { name = "click" },
     { name = "pydantic" },
 ]
 
@@ -1334,11 +1335,15 @@ dependencies = [
 a2a-server = [
     { name = "fastapi" },
 ]
+cli = [
+    { name = "jinja2" },
+]
 dev = [
     { name = "coverage", extra = ["toml"] },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "hypothesis" },
+    { name = "jinja2" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1356,6 +1361,7 @@ dev = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "hypothesis" },
+    { name = "jinja2" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1365,12 +1371,15 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.1" },
     { name = "coverage", extras = ["toml"], marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "dspy", marker = "extra == 'planner'", specifier = ">=3.0.3" },
     { name = "fastapi", marker = "extra == 'a2a-server'", specifier = ">=0.118" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.118" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.103" },
+    { name = "jinja2", marker = "extra == 'cli'", specifier = ">=3.1" },
+    { name = "jinja2", marker = "extra == 'dev'", specifier = ">=3.1" },
     { name = "litellm", marker = "extra == 'planner'", specifier = ">=1.77.3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8" },
     { name = "pydantic", specifier = ">=2.6" },
@@ -1379,7 +1388,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.2" },
 ]
-provides-extras = ["dev", "a2a-server", "planner"]
+provides-extras = ["dev", "cli", "a2a-server", "planner"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1387,6 +1396,7 @@ dev = [
     { name = "fastapi", specifier = ">=0.118" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "hypothesis", specifier = ">=6.103" },
+    { name = "jinja2", specifier = ">=3.1" },
     { name = "mypy", specifier = ">=1.8" },
     { name = "pytest", specifier = ">=7.4" },
     { name = "pytest-asyncio", specifier = ">=0.23" },

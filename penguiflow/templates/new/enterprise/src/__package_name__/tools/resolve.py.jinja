@@ -1,0 +1,20 @@
+"""Resolution tools."""
+
+from __future__ import annotations
+
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+
+from ..models import Diagnostics, FinalAnswer
+
+
+@tool(desc="Recommend a fix", tags=["enterprise"])
+async def recommend_fix(args: Diagnostics, ctx: ToolContext) -> FinalAnswer:
+{% if with_streaming %}
+    await ctx.emit_chunk("recommendation", 0, "Building recommendation...")
+{% endif %}
+    summary = "; ".join(args.findings) or "No findings"
+{% if with_streaming %}
+    await ctx.emit_chunk("recommendation", 1, "Recommendation ready", done=True)
+{% endif %}
+    return FinalAnswer(answer=f"Recommended fix based on: {summary}")

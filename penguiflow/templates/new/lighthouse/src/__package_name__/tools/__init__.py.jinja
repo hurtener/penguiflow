@@ -1,0 +1,35 @@
+"""Tool registry for {{ project_name }}."""
+
+from __future__ import annotations
+
+from penguiflow.node import Node
+from penguiflow.registry import ModelRegistry
+
+from .rag import check_ingest_status, ingest_documents, query_index, upload_files
+from ..models import IngestRequest, IngestStatus, QueryRequest, QueryResult, UploadRequest, UploadResult
+
+__all__ = [
+    "upload_files",
+    "ingest_documents",
+    "check_ingest_status",
+    "query_index",
+    "build_catalog_bundle",
+    "QueryResult",
+]
+
+
+def build_catalog_bundle() -> tuple[list[Node], ModelRegistry]:
+    """Create the planner catalog and registry."""
+    registry = ModelRegistry()
+    registry.register("upload_files", UploadRequest, UploadResult)
+    registry.register("ingest_documents", IngestRequest, IngestStatus)
+    registry.register("check_ingest_status", IngestStatus, IngestStatus)
+    registry.register("query_index", QueryRequest, QueryResult)
+
+    nodes = [
+        Node(upload_files, name="upload_files"),
+        Node(ingest_documents, name="ingest_documents"),
+        Node(check_ingest_status, name="check_ingest_status"),
+        Node(query_index, name="query_index"),
+    ]
+    return nodes, registry

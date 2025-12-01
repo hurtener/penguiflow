@@ -1,0 +1,237 @@
+# {{ project_name }}
+
+Enterprise-grade agent scaffold with production-ready resilience patterns, advanced observability, and optional A2A integration.
+
+## Enterprise Features
+
+### Service Registry Pattern
+Centralized client management with lazy initialization:
+- Single responsibility for service lifecycle
+- Easy to mock/replace individual services
+- Resource-efficient (clients created only when needed)
+
+See: `src/{{ package_name }}/clients/registry.py`
+
+### Resilience Patterns
+Production-grade error handling and recovery:
+- **Circuit Breaker**: Fail fast when external services are down
+- **Rate Limiter**: Token bucket pattern for request throttling
+- **Retry Policy**: Exponential backoff with jitter
+
+See: `src/{{ package_name }}/resilience.py`
+
+Configure via environment variables:
+```bash
+CIRCUIT_BREAKER_ENABLED=true
+CIRCUIT_BREAKER_THRESHOLD=5
+CIRCUIT_BREAKER_TIMEOUT=30.0
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_MAX_REQUESTS=100
+RATE_LIMIT_WINDOW=60.0
+RETRY_MAX_ATTEMPTS=3
+```
+
+### Advanced Telemetry
+Enterprise observability with detailed metrics:
+- **Latency Histograms**: Track p50, p95, p99 percentiles per node
+- **Error Rate Tracking**: Rolling window error rate monitoring
+- **Circuit Breaker State Logging**: Track service health
+- **High Latency Alerts**: Automatic warnings when p95 exceeded
+
+See: `src/{{ package_name }}/telemetry.py`
+
+### Multi-Stage Validation
+Input and output validation with detailed reporting:
+- Schema validation
+- Business rules enforcement
+- Security checks (injection detection)
+- PII detection
+- Quality checks
+
+See: `src/{{ package_name }}/tools/validate.py`
+
+### Server Integration
+HTTP and gRPC handler stubs for production deployment:
+- FastAPI-ready HTTP handlers
+- Health check and metrics endpoints{% if with_hitl %}
+- Resume endpoint for human-in-the-loop{% endif %}{% if with_a2a %}
+- gRPC handler stub for agent-to-agent communication{% endif %}
+
+See: `src/{{ package_name }}/server/`
+
+## Quickstart
+
+```bash
+uv sync
+uv run python -m {{ package_name }}
+```
+
+## Configuration
+
+All settings are environment-driven. See `config.py` for full list:
+
+```bash
+# Service endpoints
+MEMORY_BASE_URL=http://localhost:8000
+LLM_MODEL=stub-llm
+
+# Environment
+AGENT_ENVIRONMENT=development  # development|staging|production
+LOG_LEVEL=INFO
+
+# Planner limits
+PLANNER_MAX_ITERS=12
+PLANNER_HOP_BUDGET=8
+
+# Resilience (see above for circuit breaker, rate limiting, retry)
+
+# Telemetry
+TELEMETRY_ENABLED=true
+METRICS_WINDOW_SIZE=1000
+```
+
+## Customize
+
+### Add Real Workflows
+Add domain-specific tools in `src/{{ package_name }}/tools/`:
+- Follow the existing pattern in `diagnostics.py` and `resolve.py`
+- Register new tools in `tools/__init__.py`
+- Update models in `models.py` as needed
+
+### Replace ScriptedLLM
+In `planner.py`, replace `ScriptedLLM` with a real LLM:
+
+**LiteLLM path:**
+```python
+planner = ReactPlanner(
+    llm=config.llm_model,  # e.g., "gpt-4o"
+    nodes=nodes,
+    registry=registry,
+    event_callback=event_callback,
+)
+```
+
+**DSPy path:**
+```python
+from dspy import LLMClient
+llm_client = LLMClient(llm=config.llm_model)
+planner = ReactPlanner(
+    llm_client=llm_client,
+    nodes=nodes,
+    registry=registry,
+    event_callback=event_callback,
+)
+```
+
+**Custom client:**
+```python
+# Any object with .complete(messages=[...], response_format=...)
+class MyLLMClient:
+    async def complete(self, *, messages, response_format):
+        # Your implementation
+        pass
+```
+
+### Customize Prompts
+Pass `system_prompt_extra` and/or `planning_hints` to `ReactPlanner`:
+```python
+planner = ReactPlanner(
+    llm_client=llm_client,
+    nodes=nodes,
+    registry=registry,
+    system_prompt_extra="Always prioritize security checks...",
+    planning_hints={"validation": "Run validate_input before processing"},
+)
+```
+
+### Wire Telemetry
+In `telemetry.py`, extend `AgentTelemetry.record_planner_event` to push to your backend:
+- Prometheus/Grafana
+- DataDog
+- CloudWatch
+- Your custom metrics system
+
+### HTTP Server Integration
+Example FastAPI integration:
+```python
+from fastapi import FastAPI, HTTPException
+from {{ package_name }}.orchestrator import {{ class_name }}Orchestrator
+from {{ package_name }}.server import create_http_handler
+from {{ package_name }}.config import Config
+
+app = FastAPI()
+config = Config.from_env()
+orchestrator = {{ class_name }}Orchestrator(config)
+handler = create_http_handler(orchestrator)
+
+@app.post("/execute")
+async def execute(request: dict):
+    return await handler.handle_execute(request)
+
+@app.get("/health")
+async def health():
+    return await handler.handle_health()
+
+@app.get("/metrics")
+async def metrics():
+    return await handler.handle_metrics()
+{% if with_hitl %}
+@app.post("/resume")
+async def resume(request: dict):
+    return await handler.handle_resume(request)
+{% endif %}
+```
+
+## Production Deployment Checklist
+
+- [ ] Replace `ScriptedLLM` with production LLM client
+- [ ] Configure circuit breaker thresholds for your SLAs
+- [ ] Set up rate limiting based on expected load
+- [ ] Wire telemetry to monitoring backend
+- [ ] Add authentication/authorization to HTTP handlers
+- [ ] Configure logging level for production (`LOG_LEVEL=WARNING`)
+- [ ] Set up health check monitoring
+- [ ] Test circuit breaker behavior under load
+- [ ] Validate error rate tracking and alerting{% if with_a2a %}
+- [ ] Implement gRPC protobuf definitions for A2A{% endif %}
+
+## Testing
+
+```bash
+uv run pytest
+```
+
+Tests cover:
+- Orchestrator execute/resume flows
+- Tool validation
+- Telemetry metrics collection
+- Service registry lifecycle
+- Circuit breaker state transitions (see test updates)
+
+## Architecture
+
+```
+{{ package_name }}/
+├── orchestrator.py      # Main entry point using ServiceRegistry
+├── planner.py          # ReactPlanner configuration
+├── config.py           # Environment-driven settings
+├── resilience.py       # Circuit breaker, rate limiter, retry
+├── telemetry.py        # Advanced metrics and observability
+├── models.py           # Pydantic data models
+├── clients/
+│   ├── registry.py     # Service registry pattern
+│   └── memory.py       # Memory client stub
+├── tools/
+│   ├── diagnostics.py  # Example diagnostic tools
+│   ├── resolve.py      # Example resolution tools
+│   └── validate.py     # Multi-stage validation
+└── server/
+    ├── __init__.py
+    └── handlers.py     # HTTP/gRPC integration stubs
+```
+
+## Learn More
+
+- PenguiFlow docs: [github.com/yourorg/penguiflow](https://github.com/yourorg/penguiflow)
+- ReactPlanner guide: See `REACT_PLANNER_INTEGRATION_GUIDE.md`
+- Circuit breaker pattern: [martinfowler.com/bliki/CircuitBreaker.html](https://martinfowler.com/bliki/CircuitBreaker.html)

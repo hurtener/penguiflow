@@ -1,0 +1,32 @@
+"""Tool registry for {{ project_name }}."""
+
+from __future__ import annotations
+
+from penguiflow.node import Node
+from penguiflow.registry import ModelRegistry
+
+from .nlq import execute_sql, plan_nlq, request_clarification
+from ..models import ClarificationRequest, FinalAnswer, NLQ, PlanQuery, QueryExecution
+
+__all__ = [
+    "plan_nlq",
+    "request_clarification",
+    "execute_sql",
+    "FinalAnswer",
+    "build_catalog_bundle",
+]
+
+
+def build_catalog_bundle() -> tuple[list[Node], ModelRegistry]:
+    """Create the planner catalog and registry."""
+    registry = ModelRegistry()
+    registry.register("plan_nlq", NLQ, PlanQuery)
+    registry.register("request_clarification", NLQ, ClarificationRequest)
+    registry.register("execute_sql", PlanQuery, QueryExecution)
+
+    nodes = [
+        Node(plan_nlq, name="plan_nlq"),
+        Node(request_clarification, name="request_clarification"),
+        Node(execute_sql, name="execute_sql"),
+    ]
+    return nodes, registry

@@ -1,0 +1,24 @@
+"""Configuration for {{ project_name }}."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+
+@dataclass
+class Config:
+    """Environment-driven configuration."""
+
+{% if memory_enabled %}
+    memory_base_url: str = "http://localhost:8000"
+{% endif %}
+
+    @classmethod
+    def from_env(cls) -> "Config":
+        """Load configuration from environment variables."""
+        return cls(
+{% if memory_enabled %}
+            memory_base_url=os.getenv("MEMORY_BASE_URL", "http://localhost:8000"),
+{% endif %}
+        )

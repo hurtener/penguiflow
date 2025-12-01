@@ -1,0 +1,22 @@
+"""Join tool for merging parallel results."""
+
+from __future__ import annotations
+
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+
+from ..models import FinalDocuments, JoinRequest
+
+
+@tool(desc="Merge shard payloads", tags=["parallel"])
+async def merge_results(args: JoinRequest, ctx: ToolContext) -> FinalDocuments:
+{% if with_streaming %}
+    await ctx.emit_chunk("merge", 0, f"Merging {len(args.results)} shard results...")
+{% endif %}
+    success_count = ctx.tool_context.get("parallel_success_count", 0)
+    assert success_count == args.expect
+    merged = [item.text for item in args.results]
+{% if with_streaming %}
+    await ctx.emit_chunk("merge", 1, f"Merge complete", done=True)
+{% endif %}
+    return FinalDocuments(documents=merged)

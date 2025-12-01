@@ -1,0 +1,23 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run {{ project_name }}",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "{{ package_name }}",
+            "cwd": "${workspaceFolder}",
+            "envFile": "${workspaceFolder}/.env",
+            "justMyCode": true
+        },
+        {
+            "name": "Debug Tests",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["-xvs", "tests/"],
+            "cwd": "${workspaceFolder}",
+            "justMyCode": true
+        }
+    ]
+}

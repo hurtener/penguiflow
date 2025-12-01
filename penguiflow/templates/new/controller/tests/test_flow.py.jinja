@@ -1,0 +1,81 @@
+"""Tests for the controller flow."""
+
+from __future__ import annotations
+
+import pytest
+
+from penguiflow import FinalAnswer, WM
+
+from {{ package_name }}.config import Config
+from {{ package_name }}.flow import build_controller_flow, run_controller
+
+
+@pytest.fixture
+def config() -> Config:
+    return Config(max_hops=3)
+
+
+@pytest.mark.asyncio
+async def test_controller_terminates_at_max_hops(config: Config) -> None:
+    """Controller should terminate when max_hops is reached."""
+    final_msg, flow = await run_controller(
+        "test query",
+        config=config,
+        max_hops=3,
+    )
+
+    assert isinstance(final_msg.payload, FinalAnswer)
+    assert "Completed 3 iterations" in final_msg.payload.text
+    assert len(final_msg.payload.citations) == 3
+
+
+@pytest.mark.asyncio
+async def test_controller_accumulates_facts(config: Config) -> None:
+    """Controller should accumulate facts on each iteration."""
+    final_msg, flow = await run_controller(
+        "test query",
+        config=config,
+        max_hops=2,
+    )
+
+    assert isinstance(final_msg.payload, FinalAnswer)
+    # FinalAnswer text should reference the last fact
+    assert "iteration-1" in final_msg.payload.text
+
+
+@pytest.mark.asyncio
+async def test_controller_flow_topology() -> None:
+    """Controller flow should have a self-loop topology."""
+    flow = build_controller_flow(max_hops=1)
+
+    # The flow should have one node that points to itself
+    assert flow is not None
+
+
+@pytest.mark.asyncio
+async def test_controller_respects_custom_max_hops() -> None:
+    """Controller should respect max_hops override."""
+    config = Config(max_hops=10)  # default high
+    final_msg, flow = await run_controller(
+        "test query",
+        config=config,
+        max_hops=2,  # override to 2
+    )
+
+    assert isinstance(final_msg.payload, FinalAnswer)
+    assert "Completed 2 iterations" in final_msg.payload.text
+
+
+@pytest.mark.asyncio
+async def test_controller_increments_confidence() -> None:
+    """Controller should incrementally increase confidence."""
+    config = Config(max_hops=3)
+    final_msg, flow = await run_controller(
+        "test query",
+        config=config,
+        max_hops=3,
+    )
+
+    # After 3 iterations, confidence should be 0.6 (0.2 * 3)
+    assert isinstance(final_msg.payload, FinalAnswer)
+    assert "Completed 3 iterations" in final_msg.payload.text

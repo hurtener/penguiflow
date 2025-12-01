@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
-from penguiflow.planner import PlannerPause, ReactPlanner
+from penguiflow.planner import PlannerPause, ReactPlanner, ToolContext
 from penguiflow.registry import ModelRegistry
 
 
@@ -32,12 +32,12 @@ class Answer(BaseModel):
 
 
 @tool(desc="Detect the type of request", tags=["triage"])
-async def triage(args: Query, ctx: object) -> Intent:
+async def triage(args: Query, ctx: ToolContext) -> Intent:
     return Intent(intent="docs")
 
 
 @tool(desc="Approval checkpoint before side-effects", side_effects="external")
-async def approval(args: Intent, ctx: Any) -> Intent:
+async def approval(args: Intent, ctx: ToolContext) -> Intent:
     # Pause the planner for human approval. This raises internally and
     # returns control to the caller as a PlannerPause.
     await ctx.pause("approval_required", {"intent": args.intent})
@@ -45,12 +45,12 @@ async def approval(args: Intent, ctx: Any) -> Intent:
 
 
 @tool(desc="Retrieve supporting documents", side_effects="read")
-async def retrieve(args: Intent, ctx: object) -> Documents:
+async def retrieve(args: Intent, ctx: ToolContext) -> Documents:
     return Documents(documents=[f"weekly metrics summary for {args.intent}"])
 
 
 @tool(desc="Compose the final response", tags=["summary"])
-async def respond(args: Answer, ctx: object) -> Answer:
+async def respond(args: Answer, ctx: ToolContext) -> Answer:
     return args
 
 

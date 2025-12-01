@@ -154,6 +154,32 @@ def build_system_prompt(
     extra: str | None = None,
     planning_hints: Mapping[str, Any] | None = None,
 ) -> str:
+    """Build system prompt for the planner.
+
+    The library provides baseline behavior: context (including memories) is injected
+    via the user prompt. Use `extra` to specify format-specific interpretation rules
+    that your application requires.
+
+    Args:
+        catalog: Tool catalog (rendered tool specs)
+        extra: Optional instructions for interpreting custom context structures.
+               This is where you define how the planner should use memories or other
+               domain-specific data passed via llm_context.
+
+               Common patterns:
+               - Memory as JSON object: "context.memories contains user preferences
+                 as {key: value}; prioritize them when selecting tools."
+               - Memory as text: "context.knowledge is free-form notes; extract
+                 relevant facts as needed."
+               - Historical context: "context.previous_failures lists failed attempts;
+                 avoid repeating the same tool sequence."
+
+        planning_hints: Optional planning constraints and preferences (ordering,
+                       disallowed nodes, parallel limits, etc.)
+
+    Returns:
+        Complete system prompt string combining baseline rules + tools + extra + hints
+    """
     rendered_tools = "\n".join(render_tool(item) for item in catalog)
     prompt = [
         "You are PenguiFlow ReactPlanner, a JSON-only planner.",
@@ -163,7 +189,11 @@ def build_system_prompt(
         "3. Keep 'thought' concise and factual.",
         "4. When the task is complete, set 'next_node' to null "
         "and include the final payload in 'args'.",
-        "5. Do not emit plain text outside JSON.",
+        "5. For parallel plans, set 'join.inject' to map join args to "
+        "parallel outputs. Implicit injection is deprecated.",
+        "   Sources: $results, $expect, $branches, $failures, "
+        "$success_count, $failure_count.",
+        "6. Do not emit plain text outside JSON.",
         "",
         "Available tools:",
         rendered_tools or "(none)",
@@ -177,9 +207,32 @@ def build_system_prompt(
     return "\n".join(prompt)
 
 
-def build_user_prompt(query: str, context_meta: Mapping[str, Any] | None = None) -> str:
-    if context_meta:
-        return _compact_json({"query": query, "context": dict(context_meta)})
+def build_user_prompt(query: str, llm_context: Mapping[str, Any] | None = None) -> str:
+    """Build user prompt with query and optional LLM context.
+
+    This is the baseline mechanism for injecting memories and other context into
+    the planner. The structure/format is developer-defined; use system_prompt_extra
+    to document interpretation semantics if needed.
+
+    Args:
+        query: The user's question or request
+        llm_context: Optional context visible to LLM. Can contain memories,
+                    status_history, knowledge bases, or any custom structure.
+                    Should NOT include internal metadata like tenant_id or trace_id.
+
+                    Examples:
+                    - {"memories": {"user_pref_lang": "python"}}
+                    - {"knowledge": "User prefers concise answers."}
+                    - {"previous_failures": ["tool_a timed out", "tool_b invalid args"]}
+
+    Returns:
+        JSON string with query and context
+    """
+    if llm_context:
+        # Filter out 'query' if present to avoid duplication
+        context_dict = {k: v for k, v in llm_context.items() if k != "query"}
+        if context_dict:
+            return _compact_json({"query": query, "context": context_dict})
     return _compact_json({"query": query})
 
 
@@ -234,6 +287,30 @@ def render_invalid_node(node_name: str, available: Sequence[str]) -> str:
     return (
         f"tool '{node_name}' is not in the catalog. Choose one of: {options}."
     )
+
+
+def render_invalid_join_injection_source(
+    source: str, available: Sequence[str]
+) -> str:
+    options = ", ".join(available)
+    return (
+        f"join.inject uses unknown source '{source}'. "
+        f"Choose one of: {options}."
+    )
+
+
+def render_join_validation_error(
+    node_name: str, error: str, *, suggest_inject: bool
+) -> str:
+    message = (
+        f"args for join tool '{node_name}' did not validate: {error}. "
+        "Return corrected JSON."
+    )
+    if suggest_inject:
+        message += (
+            " Provide 'join.inject' to map parallel outputs to this join tool."
+        )
+    return message
 
 
 def render_repair_message(error: str) -> str:

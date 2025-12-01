@@ -1,0 +1,31 @@
+"""Analyst tools."""
+
+from __future__ import annotations
+
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+
+from ..clients.analyst import AnalystClient
+from ..models import AnalysisRequest, AnalysisResult
+
+
+def _client(ctx: ToolContext) -> AnalystClient:
+    """Resolve Analyst client from tool context."""
+    base_url = ctx.tool_context.get("analyst_base_url", "http://localhost:9200")
+    return AnalystClient(base_url)
+
+
+@tool(desc="Perform analysis on behalf of another agent", tags=["analyst"])
+async def analyze_request(args: AnalysisRequest, ctx: ToolContext) -> AnalysisResult:
+    client = _client(ctx)
+{% if with_streaming %}
+    await ctx.emit_chunk("analysis", 0, f"Analyzing {args.topic}...")
+{% endif %}
+    result = await client.analyze(args.topic, args.artifacts)
+{% if with_streaming %}
+    await ctx.emit_chunk("analysis", 1, f"Analysis complete", done=True)
+{% endif %}
+    return AnalysisResult(
+        summary=str(result.get("summary", "")),
+        recommendations=[str(rec) for rec in result.get("recommendations", [])],
+    )

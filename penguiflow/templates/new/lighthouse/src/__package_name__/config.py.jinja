@@ -1,0 +1,24 @@
+"""Configuration for {{ project_name }} lighthouse agent."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+
+@dataclass
+class Config:
+    """Environment-driven configuration."""
+
+    memory_base_url: str = "http://localhost:8000"
+    lighthouse_base_url: str = "http://localhost:9000"
+    llm_model: str = "stub-llm"
+
+    @classmethod
+    def from_env(cls) -> "Config":
+        """Load configuration from environment variables."""
+        return cls(
+            memory_base_url=os.getenv("MEMORY_BASE_URL", "http://localhost:8000"),
+            lighthouse_base_url=os.getenv("LIGHTHOUSE_BASE_URL", "http://localhost:9000"),
+            llm_model=os.getenv("LLM_MODEL", "stub-llm"),
+        )

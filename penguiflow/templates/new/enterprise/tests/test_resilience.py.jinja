@@ -1,0 +1,191 @@
+"""Tests for enterprise resilience patterns."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from {{ package_name }}.resilience import CircuitBreaker, CircuitOpenError, RateLimiter, RetryPolicy
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_opens_after_failures() -> None:
+    """Circuit breaker should open after threshold failures."""
+    cb = CircuitBreaker(failure_threshold=3, recovery_timeout_s=1.0)
+
+    async def failing_call():
+        raise ValueError("service down")
+
+    # First 2 failures should pass through
+    for _ in range(2):
+        with pytest.raises(ValueError):
+            await cb.call(failing_call())
+    assert cb.state == "closed"
+
+    # Third failure should open the circuit
+    with pytest.raises(ValueError):
+        await cb.call(failing_call())
+    assert cb.state == "open"
+
+    # Next call should fail fast without calling the function
+    with pytest.raises(CircuitOpenError):
+        await cb.call(failing_call())
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_recovers() -> None:
+    """Circuit breaker should move to half-open after timeout."""
+    cb = CircuitBreaker(failure_threshold=2, recovery_timeout_s=0.1)
+
+    async def failing_call():
+        raise ValueError("service down")
+
+    # Open the circuit
+    for _ in range(2):
+        with pytest.raises(ValueError):
+            await cb.call(failing_call())
+    assert cb.state == "open"
+
+    # Wait for recovery timeout
+    await asyncio.sleep(0.15)
+
+    # Next call should be attempted (half-open)
+    async def success_call():
+        return "ok"
+
+    result = await cb.call(success_call())
+    assert result == "ok"
+    assert cb.state == "closed"
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_resets_on_success() -> None:
+    """Circuit breaker should reset failure count on success."""
+    cb = CircuitBreaker(failure_threshold=3)
+
+    async def alternating_call(should_fail: bool):
+        if should_fail:
+            raise ValueError("fail")
+        return "ok"
+
+    # One failure
+    with pytest.raises(ValueError):
+        await cb.call(alternating_call(True))
+
+    # Success resets counter
+    await cb.call(alternating_call(False))
+    assert cb.state == "closed"
+
+    # Can fail up to threshold again without opening
+    for _ in range(2):
+        with pytest.raises(ValueError):
+            await cb.call(alternating_call(True))
+    assert cb.state == "closed"
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_allows_within_limit() -> None:
+    """Rate limiter should allow requests within limit."""
+    limiter = RateLimiter(max_requests=5, window_seconds=1.0)
+
+    # Should allow 5 requests immediately
+    for _ in range(5):
+        async with limiter:
+            pass  # Request allowed
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_blocks_over_limit() -> None:
+    """Rate limiter should delay requests over limit."""
+    limiter = RateLimiter(max_requests=2, window_seconds=0.5)
+
+    # First 2 requests should be immediate
+    start = asyncio.get_event_loop().time()
+    for _ in range(2):
+        async with limiter:
+            pass
+
+    elapsed = asyncio.get_event_loop().time() - start
+    assert elapsed < 0.1  # Should be nearly instant
+
+    # Third request should wait
+    start = asyncio.get_event_loop().time()
+    async with limiter:
+        pass
+    elapsed = asyncio.get_event_loop().time() - start
+    assert elapsed >= 0.4  # Should wait close to window time
+
+
+@pytest.mark.asyncio
+async def test_retry_policy_succeeds_on_retry() -> None:
+    """Retry policy should succeed if function eventually works."""
+    policy = RetryPolicy(max_attempts=3, base_delay=0.01)
+
+    attempt_count = 0
+
+    async def eventually_succeeds():
+        nonlocal attempt_count
+        attempt_count += 1
+        if attempt_count < 3:
+            raise ValueError("not yet")
+        return "success"
+
+    result = await policy.execute(eventually_succeeds)
+    assert result == "success"
+    assert attempt_count == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_policy_exhausts_attempts() -> None:
+    """Retry policy should raise after max attempts."""
+    policy = RetryPolicy(max_attempts=2, base_delay=0.01)
+
+    async def always_fails():
+        raise ValueError("always fails")
+
+    with pytest.raises(ValueError, match="always fails"):
+        await policy.execute(always_fails)
+
+
+@pytest.mark.asyncio
+async def test_retry_policy_respects_retryable_exceptions() -> None:
+    """Retry policy should only retry specified exceptions."""
+    policy = RetryPolicy(max_attempts=3, base_delay=0.01)
+
+    attempt_count = 0
+
+    async def raises_non_retryable():
+        nonlocal attempt_count
+        attempt_count += 1
+        raise TypeError("non-retryable")
+
+    # Should fail immediately on non-retryable exception
+    with pytest.raises(TypeError):
+        await policy.execute(
+            raises_non_retryable,
+            retryable_exceptions=(ValueError,),
+        )
+    assert attempt_count == 1  # Only one attempt
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_manual_reset() -> None:
+    """Circuit breaker should support manual reset."""
+    cb = CircuitBreaker(failure_threshold=1)
+
+    async def failing_call():
+        raise ValueError("fail")
+
+    # Open the circuit
+    with pytest.raises(ValueError):
+        await cb.call(failing_call())
+    assert cb.state == "open"
+
+    # Manual reset
+    cb.reset()
+    assert cb.state == "closed"
+
+    # Should allow calls again
+    with pytest.raises(ValueError):
+        await cb.call(failing_call())

@@ -2,816 +2,91 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 import logging
 import time
-from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+import warnings
+from collections import ChainMap, defaultdict
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ..catalog import NodeSpec, build_catalog
 from ..node import Node
 from ..registry import ModelRegistry
 from . import prompts
+from .constraints import _ConstraintTracker, _CostTracker
+from .context import PlannerPauseReason, ToolContext
+from .hints import _PlanningHints
+from .llm import (
+    _coerce_llm_response,
+    _estimate_size,
+    _LiteLLMJSONClient,
+    _sanitize_json_schema,
+    build_messages,
+    critique_answer,
+    generate_clarification,
+    request_revision,
+    summarise_trajectory,
+)
+from .models import (
+    ClarificationResponse,
+    JoinInjection,
+    JSONLLMClient,
+    ParallelCall,
+    ParallelJoin,
+    PlannerAction,
+    PlannerEvent,
+    PlannerEventCallback,
+    PlannerFinish,
+    PlannerPause,
+    ReflectionConfig,
+    ReflectionCriteria,
+    ReflectionCritique,
+    ToolPolicy,
+)
+from .parallel import execute_parallel_plan
+from .pause import _PauseRecord, _PlannerPauseSignal
+from .trajectory import Trajectory, TrajectoryStep, TrajectorySummary
 
 # Planner-specific logger
 logger = logging.getLogger("penguiflow.planner")
 
 
-@dataclass(frozen=True, slots=True)
-class PlannerEvent:
-    """Structured event emitted during planner execution for observability."""
-
-    event_type: str  # step_start, step_complete, llm_call, pause, resume, finish
-    ts: float
-    trajectory_step: int
-    thought: str | None = None
-    node_name: str | None = None
-    latency_ms: float | None = None
-    token_estimate: int | None = None
-    error: str | None = None
-    extra: Mapping[str, Any] = field(default_factory=dict)
-
-    def to_payload(self) -> dict[str, Any]:
-        """Render a dictionary payload suitable for structured logging."""
-        payload: dict[str, Any] = {
-            "event": self.event_type,
-            "ts": self.ts,
-            "step": self.trajectory_step,
-        }
-        if self.thought is not None:
-            payload["thought"] = self.thought
-        if self.node_name is not None:
-            payload["node_name"] = self.node_name
-        if self.latency_ms is not None:
-            payload["latency_ms"] = self.latency_ms
-        if self.token_estimate is not None:
-            payload["token_estimate"] = self.token_estimate
-        if self.error is not None:
-            payload["error"] = self.error
-        if self.extra:
-            payload.update(self.extra)
-        return payload
-
-
-# Observability callback type
-PlannerEventCallback = Callable[[PlannerEvent], None]
-
-
-class JSONLLMClient(Protocol):
-    async def complete(
-        self,
-        *,
-        messages: Sequence[Mapping[str, str]],
-        response_format: Mapping[str, Any] | None = None,
-    ) -> str | tuple[str, float]:
-        ...
-
-
-class ParallelCall(BaseModel):
-    node: str
-    args: dict[str, Any] = Field(default_factory=dict)
-
-
-class ParallelJoin(BaseModel):
-    node: str
-    args: dict[str, Any] = Field(default_factory=dict)
-
-
-class PlannerAction(BaseModel):
-    thought: str
-    next_node: str | None = None
-    args: dict[str, Any] | None = None
-    plan: list[ParallelCall] | None = None
-    join: ParallelJoin | None = None
-
-
-PlannerPauseReason = Literal[
-    "approval_required",
-    "await_input",
-    "external_event",
-    "constraints_conflict",
-]
-
-
-class PlannerPause(BaseModel):
-    reason: PlannerPauseReason
-    payload: dict[str, Any] = Field(default_factory=dict)
-    resume_token: str
-
-
-class PlannerFinish(BaseModel):
-    reason: Literal["answer_complete", "no_path", "budget_exhausted"]
-    payload: Any = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class ToolPolicy(BaseModel):
-    """Runtime policy for tool availability and permissions.
-
-    Use :class:`ToolPolicy` to scope which tools are visible to a planner
-    instance at runtime. Policies can be derived from tenant entitlements,
-    user roles, safety requirements, or cost controls.
-
-    Examples
-    --------
-    >>> ToolPolicy(allowed_tools={"search", "summarise"})  # whitelist only
-    ToolPolicy(
-    ...     allowed_tools={'search', 'summarise'},
-    ...     denied_tools=set(),
-    ...     require_tags=set(),
-    ... )
-
-    >>> ToolPolicy(denied_tools={"gpt4_analysis"})  # blacklist specific tools
-    ToolPolicy(
-    ...     allowed_tools=None,
-    ...     denied_tools={'gpt4_analysis'},
-    ...     require_tags=set(),
-    ... )
-
-    >>> ToolPolicy(require_tags={"safe", "read-only"})  # enforce safety tags
-    ToolPolicy(
-    ...     allowed_tools=None,
-    ...     denied_tools=set(),
-    ...     require_tags={'safe', 'read-only'},
-    ... )
-    """
-
-    allowed_tools: set[str] | None = None
-    """If set, only these tools are available (whitelist)."""
-
-    denied_tools: set[str] = Field(default_factory=set)
-    """Tools that are explicitly forbidden (blacklist)."""
-
-    require_tags: set[str] = Field(default_factory=set)
-    """Tools must include **all** of these tags to be available."""
-
-    def is_allowed(
-        self,
-        node_name: str,
-        node_tags: Mapping[str, Any] | Sequence[str],
-    ) -> bool:
-        """Return ``True`` when a tool passes the policy filters."""
-
-        tags = set(node_tags)
-
-        if node_name in self.denied_tools:
-            return False
-
-        if self.allowed_tools is not None and node_name not in self.allowed_tools:
-            return False
-
-        if self.require_tags and not self.require_tags.issubset(tags):
-            return False
-
-        return True
-
-
-class ReflectionCriteria(BaseModel):
-    """Quality criteria used when critiquing an answer."""
-
-    completeness: str = "Addresses all parts of the query"
-    accuracy: str = "Factually correct based on observations"
-    clarity: str = "Well-explained and coherent"
-
-
-class ReflectionCritique(BaseModel):
-    """Structured critique returned by the reflection LLM."""
-
-    score: float = Field(ge=0.0, le=1.0)
-    passed: bool
-    feedback: str
-    issues: list[str] = Field(default_factory=list)
-    suggestions: list[str] = Field(default_factory=list)
-
-
-class ReflectionConfig(BaseModel):
-    """Configuration controlling the reflection loop behaviour."""
-
-    enabled: bool = False
-    criteria: ReflectionCriteria = Field(default_factory=ReflectionCriteria)
-    quality_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
-    max_revisions: int = Field(default=2, ge=1, le=10)
-    use_separate_llm: bool = False
-
-
-class ClarificationResponse(BaseModel):
-    """Response when planner cannot satisfy query after reflection failures.
-
-    This structured response is generated when:
-    1. Reflection loop exhausts max_revisions
-    2. Quality score remains below threshold
-    3. System transforms low-quality answer into honest clarification
-
-    The goal is to be transparent with users about limitations and guide
-    them toward providing the information needed for a proper answer.
-    """
-
-    # Main response text (required)
-    text: str = Field(
-        description="Honest explanation of what was tried and why it didn't work"
-    )
-
-    # Query satisfaction status (required)
-    confidence: Literal["satisfied", "unsatisfied"] = Field(
-        description="Whether the query was satisfactorily answered"
-    )
-
-    # What was attempted (optional but recommended)
-    attempted_approaches: list[str] = Field(
-        default_factory=list,
-        description="List of approaches/tools tried to answer the query",
-    )
-
-    # Clarifying questions to ask user (optional but recommended)
-    clarifying_questions: list[str] = Field(
-        default_factory=list,
-        description="Questions to ask user to better understand their needs",
-    )
-
-    # Suggestions for improvement (optional)
-    suggestions: list[str] = Field(
-        default_factory=list,
-        description="What would help answer this query (data sources, tools, context)",
-    )
-
-    # Diagnostic metadata (optional)
-    reflection_score: float | None = Field(
-        default=None,
-        description="Final reflection quality score that triggered clarification",
-    )
-
-    revision_attempts: int | None = Field(
-        default=None,
-        description="How many revision attempts were made before giving up",
-    )
-
-
-class TrajectorySummary(BaseModel):
-    goals: list[str] = Field(default_factory=list)
-    facts: dict[str, Any] = Field(default_factory=dict)
-    pending: list[str] = Field(default_factory=list)
-    last_output_digest: str | None = None
-    note: str | None = None
-
-    def compact(self) -> dict[str, Any]:
-        payload = {
-            "goals": list(self.goals),
-            "facts": dict(self.facts),
-            "pending": list(self.pending),
-            "last_output_digest": self.last_output_digest,
-        }
-        if self.note:
-            payload["note"] = self.note
-        return payload
-
-
-@dataclass(slots=True)
-class TrajectoryStep:
-    action: PlannerAction
-    observation: Any | None = None
-    error: str | None = None
-    failure: Mapping[str, Any] | None = None
-    streams: Mapping[str, Sequence[Mapping[str, Any]]] | None = None
-
-    def dump(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "action": self.action.model_dump(mode="json"),
-            "observation": self._serialise_observation(),
-            "error": self.error,
-            "failure": dict(self.failure) if self.failure else None,
-        }
-        if self.streams:
-            payload["streams"] = {
-                stream_id: [dict(chunk) for chunk in chunks]
-                for stream_id, chunks in self.streams.items()
-            }
-        return payload
-
-    def _serialise_observation(self) -> Any:
-        if isinstance(self.observation, BaseModel):
-            return self.observation.model_dump(mode="json")
-        return self.observation
-
-
-@dataclass(slots=True)
-class Trajectory:
-    query: str
-    context_meta: Mapping[str, Any] | None = None
-    steps: list[TrajectoryStep] = field(default_factory=list)
-    summary: TrajectorySummary | None = None
-    hint_state: dict[str, Any] = field(default_factory=dict)
-    resume_user_input: str | None = None
-
-    def to_history(self) -> list[dict[str, Any]]:
-        return [step.dump() for step in self.steps]
-
-    def serialise(self) -> dict[str, Any]:
-        return {
-            "query": self.query,
-            "context_meta": dict(self.context_meta or {}),
-            "steps": self.to_history(),
-            "summary": self.summary.model_dump(mode="json")
-            if self.summary
-            else None,
-            "hint_state": dict(self.hint_state),
-            "resume_user_input": self.resume_user_input,
-        }
-
-    @classmethod
-    def from_serialised(cls, payload: Mapping[str, Any]) -> Trajectory:
-        trajectory = cls(
-            query=payload["query"],
-            context_meta=payload.get("context_meta"),
-        )
-        for step_data in payload.get("steps", []):
-            action = PlannerAction.model_validate(step_data["action"])
-            streams_payload = step_data.get("streams")
-            normalised_streams: dict[str, tuple[Mapping[str, Any], ...]] | None = None
-            if isinstance(streams_payload, Mapping):
-                normalised_streams = {}
-                for stream_id, chunk_list in streams_payload.items():
-                    if not isinstance(chunk_list, Sequence):
-                        continue
-                    chunks: list[Mapping[str, Any]] = []
-                    for chunk in chunk_list:
-                        if isinstance(chunk, Mapping):
-                            chunks.append(dict(chunk))
-                    if chunks:
-                        normalised_streams[str(stream_id)] = tuple(chunks)
-            step = TrajectoryStep(
-                action=action,
-                observation=step_data.get("observation"),
-                error=step_data.get("error"),
-                failure=step_data.get("failure"),
-                streams=normalised_streams,
-            )
-            trajectory.steps.append(step)
-        summary_data = payload.get("summary")
-        if summary_data:
-            trajectory.summary = TrajectorySummary.model_validate(summary_data)
-        trajectory.hint_state.update(payload.get("hint_state", {}))
-        trajectory.resume_user_input = payload.get("resume_user_input")
-        return trajectory
-
-    def compress(self) -> TrajectorySummary:
-        facts: dict[str, Any] = {}
-        pending: list[str] = []
-        last_observation = None
-        if self.steps:
-            last_step = self.steps[-1]
-            if last_step.observation is not None:
-                last_observation = last_step._serialise_observation()
-                facts["last_observation"] = last_observation
-            if last_step.error:
-                facts["last_error"] = last_step.error
-        for step in self.steps:
-            if step.error:
-                pending.append(
-                    f"retry {step.action.next_node or 'finish'}"
-                )
-        digest = None
-        if last_observation is not None:
-            digest_raw = json.dumps(last_observation, ensure_ascii=False)
-            digest = digest_raw if len(digest_raw) <= 120 else f"{digest_raw[:117]}..."
-        summary = TrajectorySummary(
-            goals=[self.query],
-            facts=facts,
-            pending=pending,
-            last_output_digest=digest,
-            note="rule_based",
-        )
-        self.summary = summary
-        return summary
-
-
-@dataclass(slots=True)
-class _PauseRecord:
-    trajectory: Trajectory
-    reason: str
-    payload: dict[str, Any]
-    constraints: dict[str, Any] | None = None
-
-
-@dataclass(slots=True)
-class _PlanningHints:
-    ordering_hints: tuple[str, ...]
-    parallel_groups: tuple[tuple[str, ...], ...]
-    sequential_only: set[str]
-    disallow_nodes: set[str]
-    prefer_nodes: tuple[str, ...]
-    max_parallel: int | None
-    budget_hints: dict[str, Any]
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, Any] | None) -> _PlanningHints:
-        if not payload:
-            return cls((), (), set(), set(), (), None, {})
-        ordering = tuple(str(item) for item in payload.get("ordering_hints", ()))
-        parallel_groups = tuple(
-            tuple(str(node) for node in group)
-            for group in payload.get("parallel_groups", ())
-        )
-        sequential = {str(item) for item in payload.get("sequential_only", ())}
-        disallow = {str(item) for item in payload.get("disallow_nodes", ())}
-        prefer = tuple(str(item) for item in payload.get("prefer_nodes", ()))
-        budget_raw = dict(payload.get("budget_hints", {}))
-        max_parallel_value = payload.get("max_parallel")
-        if not isinstance(max_parallel_value, int):
-            candidate = budget_raw.get("max_parallel")
-            max_parallel_value = candidate if isinstance(candidate, int) else None
-        return cls(
-            ordering_hints=ordering,
-            parallel_groups=parallel_groups,
-            sequential_only=sequential,
-            disallow_nodes=disallow,
-            prefer_nodes=prefer,
-            max_parallel=max_parallel_value,
-            budget_hints=budget_raw,
-        )
-
-    def to_prompt_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {}
-        constraints: list[str] = []
-        if self.max_parallel is not None:
-            constraints.append(f"max_parallel={self.max_parallel}")
-        if self.sequential_only:
-            constraints.append(
-                "sequential_only=" + ",".join(sorted(self.sequential_only))
-            )
-        if constraints:
-            payload["constraints"] = "; ".join(constraints)
-        if self.ordering_hints:
-            payload["preferred_order"] = list(self.ordering_hints)
-        if self.parallel_groups:
-            payload["parallel_groups"] = [list(group) for group in self.parallel_groups]
-        if self.disallow_nodes:
-            payload["disallow_nodes"] = sorted(self.disallow_nodes)
-        if self.prefer_nodes:
-            payload["preferred_nodes"] = list(self.prefer_nodes)
-        if self.budget_hints:
-            payload["budget"] = dict(self.budget_hints)
-        return payload
-
-    def empty(self) -> bool:
-        return not (
-            self.ordering_hints
-            or self.parallel_groups
-            or self.sequential_only
-            or self.disallow_nodes
-            or self.prefer_nodes
-            or self.max_parallel is not None
-            or self.budget_hints
-        )
-
-
-class _ConstraintTracker:
-    __slots__ = (
-        "_deadline_at",
-        "_hop_budget",
-        "_hops_used",
-        "_time_source",
-        "deadline_triggered",
-        "hop_exhausted",
-    )
-
-    def __init__(
-        self,
-        *,
-        deadline_s: float | None,
-        hop_budget: int | None,
-        time_source: Callable[[], float],
-    ) -> None:
-        now = time_source()
-        self._deadline_at = now + deadline_s if deadline_s is not None else None
-        self._hop_budget = hop_budget
-        self._hops_used = 0
-        self._time_source = time_source
-        self.deadline_triggered = False
-        self.hop_exhausted = hop_budget == 0 and hop_budget is not None
-
-    def check_deadline(self) -> str | None:
-        if self._deadline_at is None:
-            return None
-        if self._time_source() >= self._deadline_at:
-            self.deadline_triggered = True
-            return prompts.render_deadline_exhausted()
+def _validate_llm_context(
+    llm_context: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Ensure llm_context is JSON-serialisable."""
+
+    if llm_context is None:
         return None
-
-    def has_budget_for_next_tool(self) -> bool:
-        if self._hop_budget is None:
-            return True
-        return self._hops_used < self._hop_budget
-
-    def record_hop(self) -> None:
-        if self._hop_budget is None:
-            return
-        self._hops_used += 1
-        if self._hops_used >= self._hop_budget:
-            self.hop_exhausted = True
-
-    def snapshot(self) -> dict[str, Any]:
-        remaining: float | None = None
-        if self._deadline_at is not None:
-            remaining = max(self._deadline_at - self._time_source(), 0.0)
-        return {
-            "deadline_at": self._deadline_at,
-            "deadline_remaining_s": remaining,
-            "hop_budget": self._hop_budget,
-            "hops_used": self._hops_used,
-            "deadline_triggered": self.deadline_triggered,
-            "hop_exhausted": self.hop_exhausted,
-        }
-
-    @classmethod
-    def from_snapshot(
-        cls, snapshot: Mapping[str, Any], *, time_source: Callable[[], float]
-    ) -> _ConstraintTracker:
-        deadline_remaining = snapshot.get("deadline_remaining_s")
-        hop_budget = snapshot.get("hop_budget")
-        tracker = cls(
-            deadline_s=deadline_remaining,
-            hop_budget=hop_budget,
-            time_source=time_source,
-        )
-        tracker._hops_used = int(snapshot.get("hops_used", 0))
-        tracker._hop_budget = hop_budget
-        if deadline_remaining is None and snapshot.get("deadline_at") is None:
-            tracker._deadline_at = None
-        elif deadline_remaining is not None:
-            tracker._deadline_at = time_source() + max(float(deadline_remaining), 0.0)
-        else:
-            tracker._deadline_at = snapshot.get("deadline_at")
-        tracker.deadline_triggered = bool(snapshot.get("deadline_triggered", False))
-        tracker.hop_exhausted = bool(snapshot.get("hop_exhausted", False))
-        if (
-            tracker._hop_budget is not None
-            and tracker._hops_used >= tracker._hop_budget
-        ):
-            tracker.hop_exhausted = True
-        return tracker
+    if not isinstance(llm_context, Mapping):
+        raise TypeError("llm_context must be a mapping of JSON-serializable data")
+    try:
+        json.dumps(llm_context, ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"llm_context must be JSON-serializable: {exc}"
+        ) from exc
+    return dict(llm_context)
 
 
-@dataclass(slots=True)
-class _CostTracker:
-    """Track LLM costs across a planning session."""
+def _coerce_tool_context(
+    tool_context: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Normalise tool_context to a mutable dict."""
 
-    _total_cost_usd: float = 0.0
-    _main_llm_calls: int = 0
-    _reflection_llm_calls: int = 0
-    _summarizer_llm_calls: int = 0
+    if tool_context is None:
+        return {}
+    if not isinstance(tool_context, Mapping):
+        raise TypeError("tool_context must be a mapping")
+    return dict(tool_context)
 
-    def record_main_call(self, cost: float) -> None:
-        """Record a planner step LLM invocation."""
-
-        self._total_cost_usd += cost
-        self._main_llm_calls += 1
-
-    def record_reflection_call(self, cost: float) -> None:
-        """Record a reflection LLM invocation."""
-
-        self._total_cost_usd += cost
-        self._reflection_llm_calls += 1
-
-    def record_summarizer_call(self, cost: float) -> None:
-        """Record a summariser LLM invocation."""
-
-        self._total_cost_usd += cost
-        self._summarizer_llm_calls += 1
-
-    def snapshot(self) -> dict[str, Any]:
-        """Render a rounded snapshot suitable for metadata."""
-
-        return {
-            "total_cost_usd": round(self._total_cost_usd, 6),
-            "main_llm_calls": self._main_llm_calls,
-            "reflection_llm_calls": self._reflection_llm_calls,
-            "summarizer_llm_calls": self._summarizer_llm_calls,
-        }
-
-
-class _PlannerPauseSignal(Exception):
-    def __init__(self, pause: PlannerPause) -> None:
-        super().__init__(pause.reason)
-        self.pause = pause
-
-
-def _coerce_llm_response(
-    result: str | tuple[str, float]
-) -> tuple[str, float]:
-    """Normalise JSON LLM client responses to ``(content, cost)`` tuples."""
-
-    if isinstance(result, tuple):
-        content, cost = result
-        return content, float(cost)
-    if isinstance(result, str):
-        return result, 0.0
-    msg = (
-        "Expected JSONLLMClient to return a string or (string, float) tuple, "
-        f"received {type(result)!r}"
-    )
-    raise TypeError(msg)
-
-
-@dataclass(slots=True)
-class _BranchExecutionResult:
-    observation: BaseModel | None = None
-    error: str | None = None
-    failure: Mapping[str, Any] | None = None
-    pause: PlannerPause | None = None
-
-
-def _sanitize_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """Remove advanced JSON schema constraints for broader provider compatibility.
-
-    Many LLM providers (Databricks, Cerebras, Groq, etc.) don't support advanced
-    JSON schema features like:
-    - minimum, maximum, exclusiveMinimum, exclusiveMaximum (number constraints)
-    - minLength, maxLength (string constraints)
-    - minItems, maxItems, uniqueItems (array constraints)
-    - pattern (regex patterns)
-    - format (string formats like 'email', 'date-time')
-
-    This function recursively removes these constraints while preserving the core
-    schema structure (types, properties, required fields, etc.).
-
-    Args:
-        schema: JSON schema dict (potentially with unsupported constraints)
-
-    Returns:
-        Sanitized schema dict compatible with more LLM providers
-    """
-    if not isinstance(schema, dict):
-        return schema
-
-    # Create a copy to avoid mutating the original
-    sanitized = {}
-
-    # List of constraint keys to remove
-    unsupported_constraints = {
-        "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",  # number constraints
-        "minLength", "maxLength",  # string constraints
-        "minItems", "maxItems", "uniqueItems",  # array constraints
-        "pattern",  # regex pattern matching
-        "format",  # string formats (email, date-time, etc.)
-    }
-
-    for key, value in schema.items():
-        # Skip unsupported constraint keys
-        if key in unsupported_constraints:
-            continue
-
-        # Recursively sanitize nested objects
-        if key == "properties" and isinstance(value, dict):
-            sanitized[key] = {
-                prop_name: _sanitize_json_schema(prop_schema)
-                for prop_name, prop_schema in value.items()
-            }
-        elif key == "items" and isinstance(value, dict):
-            sanitized[key] = _sanitize_json_schema(value)
-        elif key == "additionalProperties" and isinstance(value, dict):
-            sanitized[key] = _sanitize_json_schema(value)
-        elif key == "allOf" and isinstance(value, list):
-            sanitized[key] = [_sanitize_json_schema(item) for item in value]  # type: ignore[assignment]
-        elif key == "anyOf" and isinstance(value, list):
-            sanitized[key] = [_sanitize_json_schema(item) for item in value]  # type: ignore[assignment]
-        elif key == "oneOf" and isinstance(value, list):
-            sanitized[key] = [_sanitize_json_schema(item) for item in value]  # type: ignore[assignment]
-        else:
-            sanitized[key] = value
-
-    return sanitized
-
-
-class _LiteLLMJSONClient:
-    def __init__(
-        self,
-        llm: str | Mapping[str, Any],
-        *,
-        temperature: float,
-        json_schema_mode: bool,
-        max_retries: int = 3,
-        timeout_s: float = 60.0,
-    ) -> None:
-        self._llm = llm
-        self._temperature = temperature
-        self._json_schema_mode = json_schema_mode
-        self._max_retries = max_retries
-        self._timeout_s = timeout_s
-
-    async def complete(
-        self,
-        *,
-        messages: Sequence[Mapping[str, str]],
-        response_format: Mapping[str, Any] | None = None,
-    ) -> tuple[str, float]:
-        try:
-            import litellm
-        except ModuleNotFoundError as exc:  # pragma: no cover - import guard
-            raise RuntimeError(
-                "LiteLLM is not installed. Install penguiflow[planner] or provide "
-                "a custom llm_client."
-            ) from exc
-
-        params: dict[str, Any]
-        if isinstance(self._llm, str):
-            params = {"model": self._llm}
-        else:
-            params = dict(self._llm)
-        params.setdefault("temperature", self._temperature)
-        params["messages"] = list(messages)
-        if self._json_schema_mode and response_format is not None:
-            # Detect providers that don't support advanced JSON schema constraints
-            model_name = self._llm if isinstance(self._llm, str) else self._llm.get("model", "")
-            needs_sanitization = (
-                model_name.startswith("databricks/")
-                or "databricks" in model_name.lower()
-                or "groq" in model_name.lower()
-                or "cerebras" in model_name.lower()
-            )
-
-            if needs_sanitization and "json_schema" in response_format:
-                # Sanitize the schema to remove unsupported constraints
-                sanitized_format = dict(response_format)
-                sanitized_format["json_schema"] = {
-                    "name": response_format["json_schema"]["name"],
-                    "schema": _sanitize_json_schema(
-                        response_format["json_schema"]["schema"]
-                    ),
-                }
-                params["response_format"] = sanitized_format
-                logger.debug(
-                    "json_schema_sanitized",
-                    extra={"model": model_name, "reason": "provider_compatibility"},
-                )
-            else:
-                params["response_format"] = response_format
-
-        last_error: Exception | None = None
-        for attempt in range(self._max_retries):
-            try:
-                # Add timeout protection
-                async with asyncio.timeout(self._timeout_s):
-                    response = await litellm.acompletion(**params)
-                    choice = response["choices"][0]
-                    content = choice["message"]["content"]
-                    if content is None:
-                        raise RuntimeError("LiteLLM returned empty content")
-
-                    # Log successful LLM call with cost if available
-                    cost = float(
-                        response.get("_hidden_params", {}).get("response_cost", 0.0)
-                        or 0.0
-                    )
-                    logger.debug(
-                        "llm_call_success",
-                        extra={
-                            "attempt": attempt + 1,
-                            "cost_usd": cost,
-                            "tokens": response.get("usage", {}).get("total_tokens", 0),
-                        },
-                    )
-
-                    return content, cost
-            except TimeoutError as exc:
-                last_error = exc
-                logger.warning(
-                    "llm_timeout",
-                    extra={"attempt": attempt + 1, "timeout_s": self._timeout_s},
-                )
-            except Exception as exc:
-                last_error = exc
-                # Check if it's a retryable error (network, rate limit, etc.)
-                error_type = exc.__class__.__name__
-                if "RateLimit" in error_type or "ServiceUnavailable" in error_type:
-                    backoff_s = 2 ** attempt
-                    logger.warning(
-                        "llm_retry",
-                        extra={
-                            "attempt": attempt + 1,
-                            "error": str(exc),
-                            "backoff_s": backoff_s,
-                        },
-                    )
-                    if attempt < self._max_retries - 1:
-                        await asyncio.sleep(backoff_s)
-                        continue
-                # Non-retryable error, raise immediately
-                raise
-
-        # All retries exhausted
-        logger.error(
-            "llm_retries_exhausted",
-            extra={"max_retries": self._max_retries, "last_error": str(last_error)},
-        )
-        msg = f"LLM call failed after {self._max_retries} retries"
-        raise RuntimeError(msg) from last_error
 
 
 @dataclass(slots=True)
@@ -826,14 +101,42 @@ class _StreamChunk:
     ts: float
 
 
-class _PlannerContext:
-    __slots__ = ("meta", "_planner", "_trajectory", "_chunks")
+class _PlannerContext(ToolContext):
+    __slots__ = (
+        "_llm_context",
+        "_tool_context",
+        "_planner",
+        "_trajectory",
+        "_chunks",
+        "_meta_warned",
+    )
 
     def __init__(self, planner: ReactPlanner, trajectory: Trajectory) -> None:
-        self.meta = dict(trajectory.context_meta or {})
+        self._llm_context = dict(trajectory.llm_context or {})
+        self._tool_context = dict(trajectory.tool_context or {})
         self._planner = planner
         self._trajectory = trajectory
         self._chunks: list[_StreamChunk] = []
+        self._meta_warned = False
+
+    @property
+    def llm_context(self) -> Mapping[str, Any]:
+        return MappingProxyType(self._llm_context)
+
+    @property
+    def tool_context(self) -> dict[str, Any]:
+        return self._tool_context
+
+    @property
+    def meta(self) -> MutableMapping[str, Any]:
+        if not self._meta_warned:
+            warnings.warn(
+                "ctx.meta is deprecated; use ctx.llm_context and ctx.tool_context instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self._meta_warned = True
+        return ChainMap(self._tool_context, self._llm_context)
 
     async def emit_chunk(
         self,
@@ -940,7 +243,15 @@ class ReactPlanner:
         Enable strict JSON schema enforcement via LLM response_format.
         Default: True.
     system_prompt_extra : str | None
-        Additional guidance appended to system prompt.
+        Optional instructions for interpreting custom context (e.g., memory format).
+        Use this to specify how the planner should use structured data passed via
+        llm_context. The library provides baseline injection; this parameter lets
+        you define format-specific semantics.
+
+        Examples:
+        - "memories contains JSON with user preferences; respect them when planning"
+        - "context.knowledge is a flat list of facts; cite relevant ones"
+        - "Use context.history to avoid repeating failed approaches"
     token_budget : int | None
         If set, triggers trajectory summarization when history exceeds limit.
         Token count is estimated by character length (approx).
@@ -1190,7 +501,9 @@ class ReactPlanner:
         self,
         query: str,
         *,
-        context_meta: Mapping[str, Any] | None = None,
+        llm_context: Mapping[str, Any] | None = None,
+        context_meta: Mapping[str, Any] | None = None,  # Deprecated
+        tool_context: Mapping[str, Any] | None = None,
     ) -> PlannerFinish | PlannerPause:
         """Execute planner on a query until completion or pause.
 
@@ -1198,8 +511,15 @@ class ReactPlanner:
         ----------
         query : str
             Natural language task description.
+        llm_context : Mapping[str, Any] | None
+            Optional context visible to LLM (memories, status_history, etc.).
+            Should NOT include internal metadata like tenant_id or trace_id.
         context_meta : Mapping[str, Any] | None
-            Optional metadata passed to nodes via ctx.meta.
+            **Deprecated**: Use llm_context instead. This parameter is kept for
+            backward compatibility but will be removed in a future version.
+        tool_context : Mapping[str, Any] | None
+            Tool-only context (callbacks, loggers, telemetry objects). Not
+            visible to the LLM. May contain non-serialisable objects.
 
         Returns
         -------
@@ -1212,15 +532,33 @@ class ReactPlanner:
         RuntimeError
             If LLM client fails after all retries.
         """
+        # Handle backward compatibility
+        if context_meta is not None:
+            warnings.warn(
+                "context_meta parameter is deprecated. Use llm_context instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if llm_context is None:
+                llm_context = context_meta
+
         logger.info("planner_run_start", extra={"query": query})
+        normalised_llm_context = _validate_llm_context(llm_context)
+        normalised_tool_context = _coerce_tool_context(tool_context)
         self._cost_tracker = _CostTracker()
-        trajectory = Trajectory(query=query, context_meta=context_meta)
+        trajectory = Trajectory(
+            query=query,
+            llm_context=normalised_llm_context,
+            tool_context=normalised_tool_context,
+        )
         return await self._run_loop(trajectory, tracker=None)
 
     async def resume(
         self,
         token: str,
         user_input: str | None = None,
+        *,
+        tool_context: Mapping[str, Any] | None = None,
     ) -> PlannerFinish | PlannerPause:
         """Resume a paused planning session.
 
@@ -1230,6 +568,10 @@ class ReactPlanner:
             Resume token from a previous PlannerPause.
         user_input : str | None
             Optional user response to the pause (e.g., approval decision).
+        tool_context : Mapping[str, Any] | None
+            Tool-only context (callbacks, loggers, telemetry objects). Not
+            visible to the LLM. May contain non-serialisable objects. Overrides
+            any tool_context captured in the pause record.
 
         Returns
         -------
@@ -1242,9 +584,18 @@ class ReactPlanner:
             If resume token is invalid or expired.
         """
         logger.info("planner_resume", extra={"token": token[:8] + "..."})
+        provided_tool_context = (
+            _coerce_tool_context(tool_context) if tool_context is not None else None
+        )
         record = await self._load_pause_record(token)
         trajectory = record.trajectory
-        trajectory.context_meta = trajectory.context_meta or {}
+        trajectory.llm_context = _validate_llm_context(trajectory.llm_context) or {}
+        if provided_tool_context is not None:
+            trajectory.tool_context = provided_tool_context
+        elif record.tool_context is not None:
+            trajectory.tool_context = dict(record.tool_context)
+        else:
+            trajectory.tool_context = trajectory.tool_context or {}
         if user_input is not None:
             trajectory.resume_user_input = user_input
         tracker: _ConstraintTracker | None = None
@@ -1722,521 +1073,35 @@ class ReactPlanner:
         trajectory: Trajectory,
         tracker: _ConstraintTracker,
     ) -> tuple[Any | None, PlannerPause | None]:
-        if action.next_node is not None:
-            error = prompts.render_parallel_with_next_node(action.next_node)
-            trajectory.steps.append(TrajectoryStep(action=action, error=error))
-            trajectory.summary = None
-            return None, None
+        return await execute_parallel_plan(self, action, trajectory, tracker)
 
-        if not action.plan:
-            error = prompts.render_empty_parallel_plan()
-            trajectory.steps.append(TrajectoryStep(action=action, error=error))
-            trajectory.summary = None
-            return None, None
-
-        validation_errors: list[str] = []
-        entries: list[tuple[ParallelCall, NodeSpec, BaseModel]] = []
-        for plan_item in action.plan:
-            spec = self._spec_by_name.get(plan_item.node)
-            if spec is None:
-                validation_errors.append(
-                    prompts.render_invalid_node(
-                        plan_item.node, list(self._spec_by_name.keys())
-                    )
-                )
-                continue
-            try:
-                parsed_args = spec.args_model.model_validate(plan_item.args or {})
-            except ValidationError as exc:
-                validation_errors.append(
-                    prompts.render_validation_error(
-                        spec.name,
-                        json.dumps(exc.errors(), ensure_ascii=False),
-                    )
-                )
-                continue
-            entries.append((plan_item, spec, parsed_args))
-
-        if validation_errors:
-            error = prompts.render_parallel_setup_error(validation_errors)
-            trajectory.steps.append(TrajectoryStep(action=action, error=error))
-            trajectory.summary = None
-            return None, None
-
-        ctx = _PlannerContext(self, trajectory)
-        results = await asyncio.gather(
-            *(
-                self._run_parallel_branch(spec, parsed_args, ctx)
-                for (_, spec, parsed_args) in entries
-            )
-        )
-
-        branch_payloads: list[dict[str, Any]] = []
-        success_payloads: list[Any] = []
-        failure_entries: list[dict[str, Any]] = []
-        pause_result: PlannerPause | None = None
-
-        for (_, spec, parsed_args), outcome in zip(
-            entries, results, strict=False
-        ):
-            tracker.record_hop()
-            payload: dict[str, Any] = {
-                "node": spec.name,
-                "args": parsed_args.model_dump(mode="json"),
-            }
-            if outcome.pause is not None and pause_result is None:
-                pause_result = outcome.pause
-                payload["pause"] = {
-                    "reason": outcome.pause.reason,
-                    "payload": dict(outcome.pause.payload),
-                }
-            elif outcome.observation is not None:
-                obs_json = outcome.observation.model_dump(mode="json")
-                payload["observation"] = obs_json
-                success_payloads.append(obs_json)
-                self._record_hint_progress(spec.name, trajectory)
-            else:
-                error_text = outcome.error or prompts.render_parallel_unknown_failure(
-                    spec.name
-                )
-                payload["error"] = error_text
-                if outcome.failure is not None:
-                    payload["failure"] = dict(outcome.failure)
-                    failure_entries.append(
-                        {
-                            "node": spec.name,
-                            "error": error_text,
-                            "failure": dict(outcome.failure),
-                        }
-                    )
-                else:
-                    failure_entries.append(
-                        {"node": spec.name, "error": error_text}
-                    )
-            branch_payloads.append(payload)
-
-        stats = {"success": len(success_payloads), "failed": len(failure_entries)}
-        observation: dict[str, Any] = {
-            "branches": branch_payloads,
-            "stats": stats,
-        }
-
-        if pause_result is not None:
-            observation["join"] = {
-                "status": "skipped",
-                "reason": "pause",
-            }
-            trajectory.steps.append(
-                TrajectoryStep(action=action, observation=observation)
-            )
-            trajectory.summary = None
-            await self._record_pause(pause_result, trajectory, tracker)
-            return observation, pause_result
-
-        join_payload: dict[str, Any] | None = None
-        join_error: str | None = None
-        join_failure: Mapping[str, Any] | None = None
-        join_spec: NodeSpec | None = None
-        join_args_template: dict[str, Any] | None = None
-
-        if action.join is not None:
-            join_spec = self._spec_by_name.get(action.join.node)
-            if join_spec is None:
-                join_error = prompts.render_invalid_node(
-                    action.join.node, list(self._spec_by_name.keys())
-                )
-            elif failure_entries:
-                join_payload = {
-                    "node": join_spec.name,
-                    "status": "skipped",
-                    "reason": "branch_failures",
-                    "failures": list(failure_entries),
-                }
-            else:
-                join_args_template = dict(action.join.args or {})
-                join_fields = join_spec.args_model.model_fields
-                if "expect" in join_fields and "expect" not in join_args_template:
-                    join_args_template["expect"] = len(entries)
-                if "results" in join_fields and "results" not in join_args_template:
-                    join_args_template["results"] = list(success_payloads)
-                if "branches" in join_fields and "branches" not in join_args_template:
-                    join_args_template["branches"] = list(branch_payloads)
-                if "failures" in join_fields and "failures" not in join_args_template:
-                    join_args_template["failures"] = []
-                if (
-                    "success_count" in join_fields
-                    and "success_count" not in join_args_template
-                ):
-                    join_args_template["success_count"] = len(success_payloads)
-                if (
-                    "failure_count" in join_fields
-                    and "failure_count" not in join_args_template
-                ):
-                    join_args_template["failure_count"] = len(failure_entries)
-
-                try:
-                    join_args = join_spec.args_model.model_validate(join_args_template)
-                except ValidationError as exc:
-                    join_error = prompts.render_validation_error(
-                        join_spec.name,
-                        json.dumps(exc.errors(), ensure_ascii=False),
-                    )
-                else:
-                    join_ctx = _PlannerContext(self, trajectory)
-                    join_ctx.meta.update(
-                        {
-                            "parallel_results": branch_payloads,
-                            "parallel_success_count": len(success_payloads),
-                            "parallel_failure_count": len(failure_entries),
-                        }
-                    )
-                    if failure_entries:
-                        join_ctx.meta["parallel_failures"] = list(failure_entries)
-                    join_ctx.meta["parallel_input"] = dict(join_args_template)
-
-                    try:
-                        join_raw = await join_spec.node.func(join_args, join_ctx)
-                    except _PlannerPauseSignal as signal:
-                        tracker.record_hop()
-                        join_payload = {
-                            "node": join_spec.name,
-                            "pause": {
-                                "reason": signal.pause.reason,
-                                "payload": dict(signal.pause.payload),
-                            },
-                        }
-                        observation["join"] = join_payload
-                        trajectory.steps.append(
-                            TrajectoryStep(action=action, observation=observation)
-                        )
-                        trajectory.summary = None
-                        await self._record_pause(signal.pause, trajectory, tracker)
-                        return observation, signal.pause
-                    except Exception as exc:
-                        tracker.record_hop()
-                        join_error = (
-                            f"tool '{join_spec.name}' raised "
-                            f"{exc.__class__.__name__}: {exc}"
-                        )
-                        join_failure = self._build_failure_payload(
-                            join_spec, join_args, exc
-                        )
-                    else:
-                        try:
-                            join_model = join_spec.out_model.model_validate(join_raw)
-                        except ValidationError as exc:
-                            tracker.record_hop()
-                            join_error = prompts.render_output_validation_error(
-                                join_spec.name,
-                                json.dumps(exc.errors(), ensure_ascii=False),
-                            )
-                        else:
-                            tracker.record_hop()
-                            self._record_hint_progress(join_spec.name, trajectory)
-                            join_payload = {
-                                "node": join_spec.name,
-                                "observation": join_model.model_dump(mode="json"),
-                            }
-
-        if action.join is not None and "join" not in observation:
-            if join_payload is not None:
-                observation["join"] = join_payload
-            else:
-                join_name = (
-                    join_spec.name
-                    if join_spec is not None
-                    else action.join.node
-                    if action.join is not None
-                    else "join"
-                )
-                join_entry: dict[str, Any] = {"node": join_name}
-                if join_error is not None:
-                    join_entry["error"] = join_error
-                if join_failure is not None:
-                    join_entry["failure"] = dict(join_failure)
-                if "error" in join_entry or "failure" in join_entry:
-                    observation["join"] = join_entry
-                elif action.join is not None and join_spec is None:
-                    observation["join"] = join_entry
-
-        trajectory.steps.append(
-            TrajectoryStep(action=action, observation=observation)
-        )
-        trajectory.summary = None
-        return observation, None
-
-    async def _run_parallel_branch(
-        self, spec: NodeSpec, args: BaseModel, ctx: _PlannerContext
-    ) -> _BranchExecutionResult:
-        try:
-            raw = await spec.node.func(args, ctx)
-        except _PlannerPauseSignal as signal:
-            return _BranchExecutionResult(pause=signal.pause)
-        except Exception as exc:
-            failure_payload = self._build_failure_payload(spec, args, exc)
-            error = (
-                f"tool '{spec.name}' raised {exc.__class__.__name__}: {exc}"
-            )
-            return _BranchExecutionResult(error=error, failure=failure_payload)
-
-        try:
-            observation = spec.out_model.model_validate(raw)
-        except ValidationError as exc:
-            error = prompts.render_output_validation_error(
-                spec.name,
-                json.dumps(exc.errors(), ensure_ascii=False),
-            )
-            return _BranchExecutionResult(error=error)
-
-        return _BranchExecutionResult(observation=observation)
+    def _make_context(self, trajectory: Trajectory) -> _PlannerContext:
+        return _PlannerContext(self, trajectory)
 
     async def _build_messages(self, trajectory: Trajectory) -> list[dict[str, str]]:
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": self._system_prompt},
-            {
-                "role": "user",
-                "content": prompts.build_user_prompt(
-                    trajectory.query,
-                    trajectory.context_meta,
-                ),
-            },
-        ]
-
-        history_messages: list[dict[str, str]] = []
-        for step in trajectory.steps:
-            action_payload = json.dumps(
-                step.action.model_dump(mode="json"),
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            history_messages.append({"role": "assistant", "content": action_payload})
-            history_messages.append(
-                {
-                    "role": "user",
-                    "content": prompts.render_observation(
-                        observation=step._serialise_observation(),
-                        error=step.error,
-                        failure=step.failure,
-                    ),
-                }
-            )
-
-        if trajectory.resume_user_input:
-            history_messages.append(
-                {
-                    "role": "user",
-                    "content": prompts.render_resume_user_input(
-                        trajectory.resume_user_input
-                    ),
-                }
-            )
-
-        if self._token_budget is None:
-            return messages + history_messages
-
-        candidate = messages + history_messages
-        if self._estimate_size(candidate) <= self._token_budget:
-            return candidate
-
-        summary = await self._summarise_trajectory(trajectory)
-        summary_message = {
-            "role": "system",
-            "content": prompts.render_summary(summary.compact()),
-        }
-        condensed: list[dict[str, str]] = messages + [summary_message]
-        if trajectory.steps:
-            last_step = trajectory.steps[-1]
-            condensed.append(
-                {
-                    "role": "assistant",
-                    "content": json.dumps(
-                        last_step.action.model_dump(mode="json"),
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ),
-                }
-            )
-            condensed.append(
-                {
-                    "role": "user",
-                    "content": prompts.render_observation(
-                        observation=last_step._serialise_observation(),
-                        error=last_step.error,
-                        failure=last_step.failure,
-                    ),
-                }
-            )
-        if trajectory.resume_user_input:
-            condensed.append(
-                {
-                    "role": "user",
-                    "content": prompts.render_resume_user_input(
-                        trajectory.resume_user_input
-                    ),
-                }
-            )
-        return condensed
+        return await build_messages(self, trajectory)
 
     def _estimate_size(self, messages: Sequence[Mapping[str, str]]) -> int:
-        """Estimate token count for messages.
-
-        Uses a heuristic formula that accounts for JSON structure and
-        typical token-to-character ratios for English text with JSON.
-
-        Returns approximately 4 characters = 1 token for GPT models.
-        This is conservative to avoid context overflow.
-        """
-        total_chars = 0
-        for item in messages:
-            content = item.get("content", "")
-            role = item.get("role", "")
-            # Count content characters
-            total_chars += len(content)
-            # Add overhead for message structure (role, JSON wrapping, etc.)
-            total_chars += len(role) + 20  # Approx overhead per message
-
-        # Conservative estimate: 3.5 chars = 1 token (slightly aggressive)
-        # This ensures we trigger summarization before hitting actual limits
-        estimated_tokens = int(total_chars / 3.5)
-
-        logger.debug(
-            "token_estimate",
-            extra={"chars": total_chars, "estimated_tokens": estimated_tokens},
-        )
-
-        return estimated_tokens
+        return _estimate_size(messages)
 
     async def _summarise_trajectory(
         self, trajectory: Trajectory
     ) -> TrajectorySummary:
-        if trajectory.summary is not None:
-            return trajectory.summary
-
-        base_summary = trajectory.compress()
-        summary_text = prompts.render_summary(base_summary.compact())
-        if (
-            self._summarizer_client is not None
-            and self._token_budget is not None
-            and len(summary_text) > self._token_budget
-        ):
-            messages = prompts.build_summarizer_messages(
-                trajectory.query,
-                trajectory.to_history(),
-                base_summary.compact(),
-            )
-            response_format = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "trajectory_summary",
-                    "schema": TrajectorySummary.model_json_schema(),
-                },
-            }
-            try:
-                llm_result = await self._summarizer_client.complete(
-                    messages=messages,
-                    response_format=response_format,
-                )
-                raw, cost = _coerce_llm_response(llm_result)
-                self._cost_tracker.record_summarizer_call(cost)
-                summary = TrajectorySummary.model_validate_json(raw)
-                summary.note = summary.note or "llm"
-                trajectory.summary = summary
-                logger.debug("trajectory_summarized", extra={"method": "llm"})
-                return summary
-            except Exception as exc:
-                # Catch all exceptions to prevent summarizer failures from crashing
-                # the planner. Summarization is non-critical; always fall back.
-                logger.warning(
-                    "summarizer_failed_fallback",
-                    extra={"error": str(exc), "error_type": exc.__class__.__name__},
-                )
-                base_summary.note = "rule_based_fallback"
-        trajectory.summary = base_summary
-        logger.debug("trajectory_summarized", extra={"method": "rule_based"})
-        return base_summary
+        return await summarise_trajectory(self, trajectory)
 
     async def _critique_answer(
         self,
         trajectory: Trajectory,
         candidate: Any,
     ) -> ReflectionCritique:
-        """Call the critique LLM to assess the candidate answer."""
-
-        if self._reflection_config is None:
-            raise RuntimeError("Reflection not configured")
-
-        client = (
-            self._reflection_client
-            if self._reflection_config.use_separate_llm
-            and self._reflection_client is not None
-            else self._client
-        )
-        if client is None:
-            raise RuntimeError("Reflection client unavailable")
-
-        from . import reflection_prompts
-
-        system_prompt = reflection_prompts.build_critique_system_prompt(
-            self._reflection_config.criteria
-        )
-        user_prompt = reflection_prompts.build_critique_user_prompt(
-            trajectory.query,
-            candidate,
-            trajectory,
-        )
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "reflection_critique",
-                "schema": ReflectionCritique.model_json_schema(),
-            },
-        }
-
-        llm_result = await client.complete(
-            messages=messages, response_format=response_format
-        )
-        raw, cost = _coerce_llm_response(llm_result)
-        self._cost_tracker.record_reflection_call(cost)
-        critique = ReflectionCritique.model_validate_json(raw)
-
-        if (
-            critique.score >= self._reflection_config.quality_threshold
-            and not critique.passed
-        ):
-            critique.passed = True
-
-        return critique
+        return await critique_answer(self, trajectory, candidate)
 
     async def _request_revision(
         self,
         trajectory: Trajectory,
         critique: ReflectionCritique,
     ) -> PlannerAction:
-        """Request a revised answer from the main planner LLM."""
-
-        from . import reflection_prompts
-
-        base_messages = await self._build_messages(trajectory)
-        revision_prompt = reflection_prompts.build_revision_prompt(
-            trajectory.steps[-1].action.thought if trajectory.steps else "",
-            critique,
-        )
-
-        messages = list(base_messages)
-        messages.append({"role": "user", "content": revision_prompt})
-
-        llm_result = await self._client.complete(
-            messages=messages,
-            response_format=self._response_format,
-        )
-        raw, cost = _coerce_llm_response(llm_result)
-        self._cost_tracker.record_main_call(cost)
-        return PlannerAction.model_validate_json(raw)
+        return await request_revision(self, trajectory, critique)
 
     async def _generate_clarification(
         self,
@@ -2245,142 +1110,9 @@ class ReactPlanner:
         critique: ReflectionCritique,
         revision_attempts: int,
     ) -> str:
-        """Generate honest clarification when reflection fails after max revisions.
-
-        This transforms a low-quality answer into a transparent response that:
-        1. Explains what was tried and why it didn't work
-        2. Asks clarifying questions to understand user needs
-        3. Suggests what would help answer the query properly
-
-        Uses the main planner LLM (not reflection LLM) to maintain "the voice".
-
-        Args:
-            trajectory: Current planning trajectory
-            failed_answer: The low-quality answer that failed reflection (str or dict)
-            critique: Final reflection critique with feedback
-            revision_attempts: How many revisions were attempted
-
-        Returns:
-            Formatted clarification text asking user for guidance
-        """
-        # Build prompt for clarification generation
-        system_prompt = """You are a helpful assistant that is transparent about limitations.
-
-When you cannot satisfactorily answer a query with available tools/data, you should:
-1. Honestly explain what you tried and why it didn't fully address the query
-2. Ask specific clarifying questions to better understand what the user needs
-3. Suggest what additional information, tools, or context would help you provide a proper answer
-
-Your goal is to guide the user toward providing what you need to answer their query properly."""
-
-        # Extract attempted approaches from trajectory
-        attempted_tools = [step.action.next_node for step in trajectory.steps if step.action.next_node]
-        attempts_summary = "\n".join([f"- {tool}" for tool in attempted_tools]) if attempted_tools else "None recorded"
-
-        user_prompt = f"""The query was: "{trajectory.query}"
-
-I attempted to answer this query but the quality was deemed unsatisfactory (score: {critique.score:.2f}/1.0).
-
-**What I tried:**
-{attempts_summary}
-
-**My attempted answer:**
-{failed_answer}
-
-**Quality feedback received:**
-{critique.feedback}
-
-**Issues identified:**
-{chr(10).join([f'- {issue}' for issue in critique.issues]) if critique.issues else 'None specified'}
-
-Given this situation, generate a STRUCTURED clarification response with:
-1. `text`: Honest explanation of limitations and what was tried
-2. `confidence`: Set to "unsatisfied"
-3. `attempted_approaches`: List of tools/approaches I tried
-4. `clarifying_questions`: 2-4 specific questions to ask the user
-5. `suggestions`: What would help me answer this properly (data sources, tools, context)
-6. `reflection_score`: {critique.score}
-7. `revision_attempts`: {revision_attempts}
-
-Be transparent, helpful, and guide the user toward providing what's needed."""
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-
-        # Determine which client to use (handle DSPy multi-schema)
-        client: JSONLLMClient
-        response_format: Mapping[str, Any]
-
-        from .dspy_client import DSPyLLMClient
-        if isinstance(self._client, DSPyLLMClient):
-            # DSPy requires separate client instance for ClarificationResponse schema
-            if self._clarification_client is None:
-                # Shouldn't happen (initialized in __init__), but handle gracefully
-                logger.warning(
-                    "clarification_client_missing",
-                    extra={"client_type": "DSPy"}
-                )
-                # Create on-the-fly
-                self._clarification_client = DSPyLLMClient.from_base_client(
-                    self._client, ClarificationResponse
-                )
-            client = self._clarification_client
-        else:
-            # LiteLLM uses same client with different response_format
-            client = self._client
-
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "clarification_response",
-                "schema": ClarificationResponse.model_json_schema(),
-            },
-        }
-
-        llm_result = await client.complete(
-            messages=messages,
-            response_format=response_format,
+        return await generate_clarification(
+            self, trajectory, failed_answer, critique, revision_attempts
         )
-        raw, cost = _coerce_llm_response(llm_result)
-        self._cost_tracker.record_main_call(cost)
-
-        clarification = ClarificationResponse.model_validate_json(raw)
-
-        # Format into user-friendly text
-        attempts_list = chr(10).join([
-            f'  {i+1}. {approach}'
-            for i, approach in enumerate(clarification.attempted_approaches)
-        ])
-        questions_list = chr(10).join([
-            f'  - {q}' for q in clarification.clarifying_questions
-        ])
-        suggestions_list = chr(10).join([
-            f'  - {s}' for s in clarification.suggestions
-        ])
-
-        # Build metadata line (split to avoid line length issues)
-        score_line = (
-            f"[Confidence: {clarification.confidence} | "
-            f"Quality Score: {clarification.reflection_score:.2f}/1.0 | "
-            f"Revision Attempts: {clarification.revision_attempts}]"
-        )
-
-        formatted_text = f"""{clarification.text}
-
-**What I Tried:**
-{attempts_list}
-
-**To Help Me Answer This:**
-{questions_list}
-
-**Suggestions:**
-{suggestions_list}
-
-{score_line}"""
-
-        return formatted_text
 
     def _check_action_constraints(
         self,
@@ -2508,11 +1240,13 @@ Be transparent, helpful, and guide the user toward providing what's needed."""
         tracker: _ConstraintTracker | None,
     ) -> None:
         snapshot = Trajectory.from_serialised(trajectory.serialise())
+        snapshot.tool_context = dict(trajectory.tool_context or {})
         record = _PauseRecord(
             trajectory=snapshot,
             reason=pause.reason,
             payload=dict(pause.payload),
             constraints=tracker.snapshot() if tracker is not None else None,
+            tool_context=dict(snapshot.tool_context or {}),
         )
         await self._store_pause_record(pause.resume_token, record)
 
@@ -2565,12 +1299,19 @@ Be transparent, helpful, and guide the user toward providing what's needed."""
                     payload = dict(result.get("payload", {}))
                     reason = result.get("reason", "await_input")
                     constraints = result.get("constraints")
+                    tool_context_payload = result.get("tool_context")
+                    tool_context = (
+                        dict(tool_context_payload)
+                        if isinstance(tool_context_payload, Mapping)
+                        else None
+                    )
                     logger.debug("pause_record_loaded", extra={"source": "state_store"})
                     return _PauseRecord(
                         trajectory=trajectory,
                         reason=reason,
                         payload=payload,
                         constraints=constraints,
+                        tool_context=tool_context,
                     )
                 except KeyError:
                     raise
@@ -2589,6 +1330,14 @@ Be transparent, helpful, and guide the user toward providing what's needed."""
         raise KeyError(token)
 
     def _serialise_pause_record(self, record: _PauseRecord) -> dict[str, Any]:
+        tool_context: dict[str, Any] | None = None
+        if record.tool_context is not None:
+            try:
+                tool_context = json.loads(
+                    json.dumps(record.tool_context, ensure_ascii=False)
+                )
+            except (TypeError, ValueError):
+                tool_context = None
         return {
             "trajectory": record.trajectory.serialise(),
             "reason": record.reason,
@@ -2596,6 +1345,7 @@ Be transparent, helpful, and guide the user toward providing what's needed."""
             "constraints": dict(record.constraints)
             if record.constraints is not None
             else None,
+            "tool_context": tool_context,
         }
 
     def _emit_event(self, event: PlannerEvent) -> None:
@@ -2668,6 +1418,7 @@ Be transparent, helpful, and guide the user toward providing what's needed."""
 
 
 __all__ = [
+    "JoinInjection",
     "ParallelCall",
     "ParallelJoin",
     "PlannerAction",
@@ -2679,6 +1430,7 @@ __all__ = [
     "ReflectionCriteria",
     "ReflectionCritique",
     "ReactPlanner",
+    "_sanitize_json_schema",
     "Trajectory",
     "TrajectoryStep",
     "TrajectorySummary",

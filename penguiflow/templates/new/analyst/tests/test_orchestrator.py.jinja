@@ -1,0 +1,157 @@
+"""Integration tests for the {{ class_name }}Orchestrator."""
+
+from __future__ import annotations
+
+import pytest
+
+from penguiflow.planner import PlannerFinish, PlannerPause
+
+from {{ package_name }}.config import Config
+from {{ package_name }}.orchestrator import {{ class_name }}Orchestrator
+{% if memory_enabled %}
+from {{ package_name }}.clients.memory import MemoryClient
+{% endif %}
+
+
+@pytest.fixture
+def config() -> Config:
+    return Config()
+
+
+{% if memory_enabled %}
+class TrackingMemory(MemoryClient):
+    """Memory stub that records calls for assertions."""
+
+    def __init__(self, base_url: str) -> None:
+        super().__init__(base_url)
+        self.calls: list[tuple[str, dict[str, str]]] = []
+
+    async def start_session(self, **kwargs):  # type: ignore[override]
+        self.calls.append(("start_session", kwargs))
+        return await super().start_session(**kwargs)
+
+    async def auto_retrieve(self, **kwargs):  # type: ignore[override]
+        self.calls.append(("auto_retrieve", kwargs))
+        return await super().auto_retrieve(**kwargs)
+
+    async def ingest_interaction(self, **kwargs):  # type: ignore[override]
+        self.calls.append(("ingest_interaction", kwargs))
+        return await super().ingest_interaction(**kwargs)
+{% endif %}
+
+
+@pytest.mark.asyncio
+async def test_execute_returns_agent_response(config: Config) -> None:
+    orchestrator = {{ class_name }}Orchestrator(config)
+    response = await orchestrator.execute(
+        query="Investigate failing tests",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+    )
+
+    assert response.answer
+    assert response.trace_id
+{% if with_streaming %}
+    # Verify streaming is enabled and streams attribute exists
+    assert hasattr(response, "streams")
+    assert response.streams is not None
+    # Note: analyst template may emit "analysis" stream if tool is called
+{% endif %}
+{% if with_hitl %}
+    assert hasattr(response, "pause_token")
+{% endif %}
+    await orchestrator.stop()
+
+
+{% if memory_enabled %}
+@pytest.mark.asyncio
+async def test_memory_lifecycle_called(config: Config) -> None:
+    orchestrator = {{ class_name }}Orchestrator(config)
+    tracker = TrackingMemory(config.memory_base_url)
+    orchestrator._memory = tracker  # type: ignore[attr-defined]
+
+    await orchestrator.execute(
+        query="check lifecycle",
+        tenant_id="tenant-b",
+        user_id="user-b",
+        session_id="session-b",
+    )
+
+    assert [call[0] for call in tracker.calls] == [
+        "start_session",
+        "auto_retrieve",
+        "ingest_interaction",
+    ]
+    await orchestrator.stop()
+{% else %}
+@pytest.mark.asyncio
+async def test_memory_disabled(config: Config) -> None:
+    orchestrator = {{ class_name }}Orchestrator(config)
+    response = await orchestrator.execute(
+        query="memory off",
+        tenant_id="tenant-b",
+        user_id="user-b",
+        session_id="session-b",
+    )
+    assert response.answer
+    await orchestrator.stop()
+{% endif %}
+
+
+@pytest.mark.asyncio
+async def test_stop_marks_orchestrator_inactive(config: Config) -> None:
+    orchestrator = {{ class_name }}Orchestrator(config)
+    assert orchestrator._started is True  # type: ignore[attr-defined]
+    await orchestrator.stop()
+    assert orchestrator._started is False  # type: ignore[attr-defined]
+
+
+{% if with_a2a %}
+@pytest.mark.asyncio
+async def test_a2a_server_stub(config: Config) -> None:
+    orchestrator = {{ class_name }}Orchestrator(config)
+    await orchestrator.start_a2a()
+    assert orchestrator._a2a_server.started  # type: ignore[attr-defined]
+    await orchestrator.stop()
+{% endif %}
+
+
+{% if with_hitl %}
+@pytest.mark.asyncio
+async def test_execute_handles_pause(config: Config) -> None:
+    orchestrator = {{ class_name }}Orchestrator(config)
+    pause = PlannerPause(reason="await_input", payload={"note": "need input"}, resume_token="token-123")
+
+    async def fake_run(*_args, **_kwargs):
+        return pause
+
+    orchestrator._planner.run = fake_run  # type: ignore[attr-defined]
+    response = await orchestrator.execute(
+        query="needs approval",
+        tenant_id="t-hitl",
+        user_id="u-hitl",
+        session_id="s-hitl",
+    )
+    assert response.pause_token == "token-123"
+    await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_resume_invokes_planner(config: Config) -> None:
+    orchestrator = {{ class_name }}Orchestrator(config)
+    finish = PlannerFinish(reason="answer_complete", payload="done", metadata={"steps": []})
+
+    async def fake_resume(*_args, **_kwargs):
+        return finish
+
+    orchestrator._planner.resume = fake_resume  # type: ignore[attr-defined]
+    response = await orchestrator.resume(
+        "token-xyz",
+        tenant_id="t-hitl",
+        user_id="u-hitl",
+        session_id="s-hitl",
+    )
+    assert response.answer == "done"
+    await orchestrator.stop()
+{% endif %}

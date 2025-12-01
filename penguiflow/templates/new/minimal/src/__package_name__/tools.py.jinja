@@ -1,0 +1,47 @@
+"""Tool definitions for {{ project_name }}."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel
+
+from penguiflow.catalog import tool
+from penguiflow.node import Node
+from penguiflow.planner import ToolContext
+from penguiflow.registry import ModelRegistry
+
+
+class Question(BaseModel):
+    """User question."""
+
+    text: str
+
+
+class Answer(BaseModel):
+    """Agent answer."""
+
+    answer: str
+
+
+@tool(desc="Respond to user questions", tags=["demo"])
+async def answer_question(args: Question, ctx: ToolContext) -> Answer:
+    prefix = ctx.tool_context.get("tenant_id", "anonymous")
+{% if with_streaming %}
+    await ctx.emit_chunk("answer", 0, f"{prefix}: thinking about '{args.text}'...")
+{% endif %}
+{% if with_streaming %}
+    await ctx.emit_chunk("answer", 1, f"Answer ready", done=True)
+{% endif %}
+    return Answer(answer=f"[{prefix}] {args.text}")
+
+
+def build_catalog_bundle() -> tuple[list[Node], ModelRegistry]:
+    """Create the node list and registry for the planner."""
+    registry = ModelRegistry()
+    registry.register("answer_question", Question, Answer)
+    nodes = [Node(answer_question, name="answer_question")]
+    return nodes, registry
+
+
+def build_catalog_for_tests() -> tuple[list[Node], ModelRegistry]:
+    """Alias for tests to keep imports explicit."""
+    return build_catalog_bundle()

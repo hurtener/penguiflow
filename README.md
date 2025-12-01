@@ -42,6 +42,38 @@ It provides:
 * **Observability & ops polish** — remote calls emit structured metrics (latency, payload
   sizes, cancel reasons) and the `penguiflow-admin` CLI replays trace history from any
   configured `StateStore` for debugging.
+* **Built-in CLI** — `penguiflow init` generates VS Code snippets/launch/tasks/settings for planner development (travels with the pip package).
+
+### v2.5 - CLI Scaffolding & Extended Planner (current)
+
+**CLI Scaffolding System:**
+- Full `penguiflow new` command with 9 project templates
+- **Tier 1 (Core):** `minimal`, `react`, `parallel` — foundational patterns
+- **Tier 2 (Service):** `lighthouse`, `wayfinder`, `analyst` — domain-ready agents
+- **Tier 3 (Enterprise):** `enterprise` — multi-tenant with RBAC, quotas, audit trails
+- **Additional:** `flow`, `controller` — traditional PenguiFlow patterns
+- **Enhancement flags:** `--with-streaming`, `--with-hitl`, `--with-a2a`, `--no-memory`
+- See [TEMPLATING_QUICKGUIDE.md](TEMPLATING_QUICKGUIDE.md) for complete documentation
+
+**v2.4 Planner Refinements (included):**
+- Explicit `llm_context` vs `tool_context` split; fail-fast on non-JSON `llm_context`
+- `ToolContext` protocol for typed tools (`ctx.pause`, `ctx.emit_chunk`, `ctx.tool_context`)
+- Explicit join injection for parallel plans; examples in `examples/react_parallel_join`
+- Fresh docs: `REACT_PLANNER_INTEGRATION_GUIDE.md`, `docs/MIGRATION_V24.md`
+
+### CLI Quickstart
+
+```bash
+# Project scaffolding (NEW in v2.5)
+uv run penguiflow new my-agent --template react        # ReactPlanner with memory
+uv run penguiflow new my-agent --template enterprise   # Multi-tenant enterprise setup
+uv run penguiflow new my-agent --template parallel --with-streaming  # Parallel + SSE
+
+# VS Code configuration
+uv run penguiflow init             # create .vscode snippets/launch/tasks/settings
+uv run penguiflow init --dry-run   # preview without writing files
+uv run penguiflow init --force     # overwrite existing files
+```
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
@@ -53,7 +85,7 @@ Product repos only define **their models + node functions** — the core stays d
 | Hop overhead | µs per hop | ≤ 500 | 398 |
 | Streaming order | gaps/dupes | 0 | 0 |
 | Cancel leakage | orphan tasks | 0 | 0 |
-| Coverage | lines | ≥85% | 87% |
+| Coverage | lines | ≥85% | 86% |
 | Deps | count | ≤2 | 2 |
 | Import time | ms | ≤220 | 203 |
 
@@ -762,8 +794,9 @@ playbook latency. Copy them into product repos to watch for regressions over tim
 
 ## 🔮 Roadmap
 
-* **v2 (current)**: streaming, per-trace cancellation, deadlines/budgets, metadata propagation, observability hooks, visualizer, routing policies, traceable errors, and FlowTestKit.
-* **Future**: optional distributed runners, richer third-party observability adapters, and opinionated playbook templates.
+* **v2.5 (current)**: CLI scaffolding system with 9 templates and enhancement flags, extended ReactPlanner with ToolContext protocol and explicit context splits.
+* **v2.x**: streaming, per-trace cancellation, deadlines/budgets, metadata propagation, observability hooks, visualizer, routing policies, traceable errors, and FlowTestKit.
+* **Future**: optional distributed runners, richer third-party observability adapters, and extended template library.
 
 ---
 

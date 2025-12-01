@@ -1,0 +1,73 @@
+"""Configuration for {{ project_name }} enterprise agent."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Literal
+
+
+@dataclass
+class Config:
+    """Environment-driven configuration with enterprise resilience settings."""
+
+    # Service endpoints
+    memory_base_url: str = "http://localhost:8000"
+    llm_model: str = "stub-llm"
+
+    # Environment
+    environment: Literal["development", "staging", "production"] = "development"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+
+    # Planner limits
+    max_iters: int = 12
+    hop_budget: int = 8
+
+    # Circuit breaker settings
+    circuit_breaker_enabled: bool = True
+    circuit_breaker_failure_threshold: int = 5
+    circuit_breaker_recovery_timeout_s: float = 30.0
+
+    # Rate limiting
+    rate_limit_enabled: bool = True
+    rate_limit_max_requests: int = 100
+    rate_limit_window_seconds: float = 60.0
+
+    # Retry policy
+    retry_max_attempts: int = 3
+    retry_base_delay: float = 1.0
+    retry_max_delay: float = 30.0
+
+    # Telemetry
+    telemetry_enabled: bool = True
+    metrics_window_size: int = 1000
+
+    @classmethod
+    def from_env(cls) -> "Config":
+        """Load configuration from environment variables."""
+        return cls(
+            # Service endpoints
+            memory_base_url=os.getenv("MEMORY_BASE_URL", "http://localhost:8000"),
+            llm_model=os.getenv("LLM_MODEL", "stub-llm"),
+            # Environment
+            environment=os.getenv("AGENT_ENVIRONMENT", "development"),  # type: ignore[arg-type]
+            log_level=os.getenv("LOG_LEVEL", "INFO"),  # type: ignore[arg-type]
+            # Planner limits
+            max_iters=int(os.getenv("PLANNER_MAX_ITERS", "12")),
+            hop_budget=int(os.getenv("PLANNER_HOP_BUDGET", "8")),
+            # Circuit breaker
+            circuit_breaker_enabled=os.getenv("CIRCUIT_BREAKER_ENABLED", "true").lower() == "true",
+            circuit_breaker_failure_threshold=int(os.getenv("CIRCUIT_BREAKER_THRESHOLD", "5")),
+            circuit_breaker_recovery_timeout_s=float(os.getenv("CIRCUIT_BREAKER_TIMEOUT", "30.0")),
+            # Rate limiting
+            rate_limit_enabled=os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true",
+            rate_limit_max_requests=int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "100")),
+            rate_limit_window_seconds=float(os.getenv("RATE_LIMIT_WINDOW", "60.0")),
+            # Retry policy
+            retry_max_attempts=int(os.getenv("RETRY_MAX_ATTEMPTS", "3")),
+            retry_base_delay=float(os.getenv("RETRY_BASE_DELAY", "1.0")),
+            retry_max_delay=float(os.getenv("RETRY_MAX_DELAY", "30.0")),
+            # Telemetry
+            telemetry_enabled=os.getenv("TELEMETRY_ENABLED", "true").lower() == "true",
+            metrics_window_size=int(os.getenv("METRICS_WINDOW_SIZE", "1000")),
+        )

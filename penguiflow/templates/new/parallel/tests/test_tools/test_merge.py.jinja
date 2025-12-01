@@ -1,0 +1,38 @@
+"""Unit tests for merge tool."""
+
+from __future__ import annotations
+
+import pytest
+
+from {{ package_name }}.models import FinalDocuments, JoinRequest, ShardResult
+from {{ package_name }}.tools.merge import merge_results
+
+
+class DummyCtx:
+    def __init__(self) -> None:
+        self.llm_context = {}
+        self.tool_context = {"parallel_success_count": 2}
+        self.meta = {}
+
+    async def pause(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        del args, kwargs
+        raise RuntimeError("pause not supported")
+
+    async def emit_chunk(self, *args, **kwargs):  # pragma: no cover - not used in tests
+        del args, kwargs
+        return None
+
+
+@pytest.mark.asyncio
+async def test_merge_results_combines_text() -> None:
+    ctx = DummyCtx()
+    join_args = JoinRequest(
+        expect=2,
+        results=[
+            ShardResult(shard=0, text="left"),
+            ShardResult(shard=1, text="right"),
+        ],
+    )
+    merged = await merge_results(join_args, ctx)
+    assert isinstance(merged, FinalDocuments)
+    assert merged.documents == ["left", "right"]

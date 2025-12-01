@@ -1,0 +1,73 @@
+"""Integration tests for orchestrator using emit/fetch."""
+
+from __future__ import annotations
+
+import pytest
+
+from {{ package_name }}.config import Config
+from {{ package_name }}.orchestrator import {{ class_name }}Orchestrator
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_execute_returns_response() -> None:
+    """Test that orchestrator executes and returns a valid response."""
+    config = Config.from_env()
+    orchestrator = {{ class_name }}Orchestrator(config)
+
+    try:
+        response = await orchestrator.execute(
+            query="What is PenguiFlow?",
+            tenant_id="test-tenant",
+            user_id="test-user",
+            session_id="test-session",
+        )
+
+        # Verify response structure
+        assert response.answer is not None
+        assert response.trace_id is not None
+        assert "Processed:" in response.answer
+    finally:
+        await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_handles_multiple_queries() -> None:
+    """Test that orchestrator can handle multiple sequential queries."""
+    config = Config.from_env()
+    orchestrator = {{ class_name }}Orchestrator(config)
+
+    try:
+        # Execute first query
+        response1 = await orchestrator.execute(
+            query="First query",
+            tenant_id="test-tenant",
+            user_id="test-user",
+            session_id="test-session",
+        )
+
+        # Execute second query
+        response2 = await orchestrator.execute(
+            query="Second query",
+            tenant_id="test-tenant",
+            user_id="test-user",
+            session_id="test-session",
+        )
+
+        # Both should succeed with different traces
+        assert response1.answer is not None
+        assert response2.answer is not None
+        assert response1.trace_id != response2.trace_id
+    finally:
+        await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stop_is_idempotent() -> None:
+    """Test that stop can be called multiple times safely."""
+    config = Config.from_env()
+    orchestrator = {{ class_name }}Orchestrator(config)
+
+    # Stop multiple times should not raise
+    await orchestrator.stop()
+    await orchestrator.stop()
+    await orchestrator.stop()

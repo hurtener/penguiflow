@@ -1,0 +1,23 @@
+# {{ project_name }}
+
+ReactPlanner-based agent scaffold with observability, memory stubs, and tests.
+
+## Quickstart
+
+```bash
+uv sync
+uv run python -m {{ package_name }}
+```
+
+## Customize
+
+- Add tools in `src/{{ package_name }}/tools/`.
+- Update `planner.py` to switch to a real LLM client.
+- Wire telemetry/memory to your environment.
+
+## Use a real LLM and adjust prompts
+
+- Set `LLM_MODEL` and your provider key (e.g., `OPENAI_API_KEY`) in the environment.
+- In `planner.py`, replace `ScriptedLLM` by passing `llm=config.llm_model` to `ReactPlanner` (LiteLLM path), or use `DSPyLLMClient(llm=config.llm_model)` as `llm_client`.
+- Custom clients just need `.complete(messages=[...], response_format=...)`.
+- To nudge prompts, pass `system_prompt_extra` and/or `planning_hints` to `ReactPlanner` instead of editing `penguiflow.planner.prompts` directly.

@@ -1,0 +1,147 @@
+"""Integration tests for the {{ class_name }}Orchestrator."""
+
+from __future__ import annotations
+
+import pytest
+
+from {{ package_name }}.config import Config
+from {{ package_name }}.orchestrator import {{ class_name }}Orchestrator
+{% if memory_enabled %}
+from {{ package_name }}.clients.memory import MemoryClient
+{% endif %}
+
+
+@pytest.fixture
+def config() -> Config:
+    return Config(max_hops=3)
+
+
+{% if memory_enabled %}
+class TrackingMemory(MemoryClient):
+    """Memory stub that records calls for assertions."""
+
+    def __init__(self, base_url: str) -> None:
+        super().__init__(base_url)
+        self.calls: list[tuple[str, dict[str, str]]] = []
+
+    async def start_session(self, **kwargs):  # type: ignore[override]
+        self.calls.append(("start_session", kwargs))
+        return await super().start_session(**kwargs)
+
+    async def auto_retrieve(self, **kwargs):  # type: ignore[override]
+        self.calls.append(("auto_retrieve", kwargs))
+        return await super().auto_retrieve(**kwargs)
+
+    async def ingest_interaction(self, **kwargs):  # type: ignore[override]
+        self.calls.append(("ingest_interaction", kwargs))
+        return await super().ingest_interaction(**kwargs)
+{% endif %}
+
+
+@pytest.mark.asyncio
+async def test_execute_returns_agent_response(config: Config) -> None:
+    orchestrator = {{ class_name }}Orchestrator(config)
+    response = await orchestrator.execute(
+        query="Run iterations",
+        tenant_id="t-1",
+        user_id="u-1",
+        session_id="s-1",
+    )
+
+    assert response.answer
+    assert response.trace_id
+    assert response.metadata is not None
+    assert "iterations" in response.metadata
+    assert response.metadata["iterations"] == 3
+{% if with_streaming %}
+    assert response.streams is None  # Controller pattern doesn't stream
+{% endif %}
+{% if with_hitl %}
+    assert hasattr(response, "pause_token")
+    assert response.pause_token is None
+{% endif %}
+    await orchestrator.stop()
+
+
+{% if memory_enabled %}
+@pytest.mark.asyncio
+async def test_memory_lifecycle_called(config: Config) -> None:
+    orchestrator = {{ class_name }}Orchestrator(config)
+    tracker = TrackingMemory(config.memory_base_url)
+    orchestrator._memory = tracker  # type: ignore[attr-defined]
+
+    await orchestrator.execute(
+        query="Check lifecycle",
+        tenant_id="tenant-xyz",
+        user_id="user-xyz",
+        session_id="session-xyz",
+    )
+
+    assert [call[0] for call in tracker.calls] == [
+        "start_session",
+        "auto_retrieve",
+        "ingest_interaction",
+    ]
+    await orchestrator.stop()
+{% else %}
+@pytest.mark.asyncio
+async def test_memory_disabled(config: Config) -> None:
+    orchestrator = {{ class_name }}Orchestrator(config)
+    response = await orchestrator.execute(
+        query="No memory run",
+        tenant_id="tenant-xyz",
+        user_id="user-xyz",
+        session_id="session-xyz",
+    )
+    assert response.answer
+    await orchestrator.stop()
+{% endif %}
+
+
+@pytest.mark.asyncio
+async def test_stop_marks_orchestrator_inactive(config: Config) -> None:
+    orchestrator = {{ class_name }}Orchestrator(config)
+    assert orchestrator._started is True  # type: ignore[attr-defined]
+    await orchestrator.stop()
+    assert orchestrator._started is False  # type: ignore[attr-defined]
+
+
+{% if with_a2a %}
+@pytest.mark.asyncio
+async def test_a2a_server_stub(config: Config) -> None:
+    orchestrator = {{ class_name }}Orchestrator(config)
+    await orchestrator.start_a2a()
+    assert orchestrator._a2a_server.started  # type: ignore[attr-defined]
+    await orchestrator.stop()
+{% endif %}
+
+
+{% if with_hitl %}
+@pytest.mark.asyncio
+async def test_resume_not_supported(config: Config) -> None:
+    orchestrator = {{ class_name }}Orchestrator(config)
+    with pytest.raises(NotImplementedError, match="Controller loop does not support pause/resume"):
+        await orchestrator.resume(
+            "token-xyz",
+            tenant_id="t-hitl",
+            user_id="u-hitl",
+            session_id="s-hitl",
+        )
+    await orchestrator.stop()
+{% endif %}
+
+
+@pytest.mark.asyncio
+async def test_execute_captures_iterations(config: Config) -> None:
+    orchestrator = {{ class_name }}Orchestrator(config)
+    response = await orchestrator.execute(
+        query="Count iterations",
+        tenant_id="t-iter",
+        user_id="u-iter",
+        session_id="s-iter",
+    )
+
+    assert response.metadata is not None
+    assert response.metadata["iterations"] == config.max_hops
+    assert f"Completed {config.max_hops} iterations" in response.answer
+    await orchestrator.stop()

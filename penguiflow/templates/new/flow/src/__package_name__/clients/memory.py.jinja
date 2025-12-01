@@ -1,0 +1,63 @@
+{% if memory_enabled -%}
+"""Memory service client stub."""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+class MemoryClient:
+    """Async client for the memory service (stubbed)."""
+
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url
+
+    async def start_session(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Load conscious context for a session."""
+        return {"conscious": [], "token_estimate": 0}
+
+    async def auto_retrieve(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        prompt: str,
+    ) -> dict[str, Any]:
+        """Retrieve relevant memories for the prompt."""
+        del prompt
+        return {"snippets": [], "tokens_estimate": 0}
+
+    async def ingest_interaction(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        user_prompt: str,
+        agent_response: str,
+    ) -> dict[str, Any]:
+        """Persist the interaction for future retrieval."""
+        del user_prompt, agent_response
+        return {"id": "stub-fragment-id"}
+
+    async def reinforce(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        memory_id: str,
+        delta: int,
+    ) -> dict[str, Any]:
+        """Send feedback for retrieved memories."""
+        del tenant_id, user_id, memory_id, delta
+        return {"success": True}
+{% else -%}
+# Memory flag not enabled; add `--memory` to scaffold memory client.
+{% endif %}

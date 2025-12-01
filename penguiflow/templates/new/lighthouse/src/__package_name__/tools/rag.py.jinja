@@ -1,0 +1,70 @@
+"""Lighthouse RAG tools."""
+
+from __future__ import annotations
+
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+
+from ..clients.lighthouse import LighthouseClient
+from ..models import IngestRequest, IngestStatus, QueryRequest, QueryResult, UploadRequest, UploadResult
+
+
+def _client(ctx: ToolContext) -> LighthouseClient:
+    """Resolve Lighthouse client from tool context."""
+    base_url = ctx.tool_context.get("lighthouse_base_url", "http://localhost:9000")
+    return LighthouseClient(base_url)
+
+
+@tool(desc="Upload files to Lighthouse", side_effects="write", tags=["lighthouse"])
+async def upload_files(args: UploadRequest, ctx: ToolContext) -> UploadResult:
+    client = _client(ctx)
+{% if with_streaming %}
+    await ctx.emit_chunk("upload", 0, f"Uploading {len(args.paths)} files...")
+{% endif %}
+    result = await client.upload_files(args.paths)
+{% if with_streaming %}
+    await ctx.emit_chunk("upload", 1, f"Upload complete", done=True)
+{% endif %}
+    return UploadResult(file_ids=list(result.get("file_ids", [])))
+
+
+@tool(desc="Start ingestion job", side_effects="write", tags=["lighthouse"])
+async def ingest_documents(args: IngestRequest, ctx: ToolContext) -> IngestStatus:
+    client = _client(ctx)
+{% if with_streaming %}
+    await ctx.emit_chunk("ingest", 0, f"Ingesting {len(args.file_ids)} files...")
+{% endif %}
+    result = await client.ingest(args.file_ids)
+{% if with_streaming %}
+    await ctx.emit_chunk("ingest", 1, f"Ingestion started", done=True)
+{% endif %}
+    return IngestStatus(job_id=result.get("job_id", "job-unknown"), status="pending")
+
+
+@tool(desc="Check ingestion status", side_effects="read", tags=["lighthouse"])
+async def check_ingest_status(args: IngestStatus, ctx: ToolContext) -> IngestStatus:
+    client = _client(ctx)
+{% if with_streaming %}
+    await ctx.emit_chunk("ingest_status", 0, f"Checking job {args.job_id}...")
+{% endif %}
+    result = await client.check_status(args.job_id)
+{% if with_streaming %}
+    await ctx.emit_chunk("ingest_status", 1, f"Status: {result.get('status', 'pending')}", done=True)
+{% endif %}
+    return IngestStatus(job_id=result.get("job_id", args.job_id), status=result.get("status", "pending"))
+
+
+@tool(desc="Query Lighthouse index", side_effects="read", tags=["lighthouse"])
+async def query_index(args: QueryRequest, ctx: ToolContext) -> QueryResult:
+    client = _client(ctx)
+{% if with_streaming %}
+    await ctx.emit_chunk("query", 0, f"Searching for '{args.question}'...")
+{% endif %}
+    result = await client.query(args.question)
+{% if with_streaming %}
+    await ctx.emit_chunk("query", 1, f"Query complete", done=True)
+{% endif %}
+    return QueryResult(
+        answer=str(result.get("answer", "")),
+        sources=[str(item) for item in result.get("sources", [])],
+    )

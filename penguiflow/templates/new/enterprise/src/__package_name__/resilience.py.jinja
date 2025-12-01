@@ -1,0 +1,240 @@
+"""Resilience patterns for production systems."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import Any, Awaitable, Callable, TypeVar
+
+_LOGGER = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+class CircuitOpenError(RuntimeError):
+    """Raised when circuit breaker is open and refuses requests."""
+
+    def __init__(self, message: str = "Circuit breaker is open") -> None:
+        super().__init__(message)
+
+
+@dataclass
+class CircuitBreaker:
+    """Simple circuit breaker for external service calls.
+
+    States:
+    - closed: normal operation, requests flow through
+    - open: too many failures, requests are rejected immediately
+    - half-open: testing if service recovered, limited requests allowed
+
+    The circuit breaker tracks failures over a rolling window and opens
+    when the failure threshold is exceeded. After a recovery timeout,
+    it moves to half-open state to test if the service has recovered.
+
+    Example:
+        >>> cb = CircuitBreaker(failure_threshold=5, recovery_timeout_s=30.0)
+        >>> try:
+        ...     result = await cb.call(some_async_function())
+        ... except CircuitOpenError:
+        ...     # Handle circuit open (fail fast)
+        ...     pass
+    """
+
+    failure_threshold: int = 5
+    recovery_timeout_s: float = 30.0
+    _failures: int = field(default=0, init=False)
+    _last_failure: datetime | None = field(default=None, init=False)
+    _state: str = field(default="closed", init=False)  # closed, open, half-open
+
+    def _should_attempt_reset(self) -> bool:
+        """Check if enough time has passed to try recovery."""
+        if self._last_failure is None:
+            return False
+        elapsed = (datetime.now(UTC) - self._last_failure).total_seconds()
+        return elapsed >= self.recovery_timeout_s
+
+    def _on_success(self) -> None:
+        """Reset circuit breaker on successful call."""
+        if self._state in ("half-open", "open"):
+            _LOGGER.info("circuit_breaker_recovered", extra={"state": self._state})
+        self._failures = 0
+        self._last_failure = None
+        self._state = "closed"
+
+    def _on_failure(self) -> None:
+        """Record failure and potentially open circuit."""
+        self._failures += 1
+        self._last_failure = datetime.now(UTC)
+
+        if self._state == "half-open":
+            # Failed during recovery test, reopen circuit
+            self._state = "open"
+            _LOGGER.warning("circuit_breaker_reopened", extra={"failures": self._failures})
+        elif self._failures >= self.failure_threshold:
+            self._state = "open"
+            _LOGGER.error(
+                "circuit_breaker_opened",
+                extra={"failures": self._failures, "threshold": self.failure_threshold},
+            )
+
+    async def call(self, coro: Awaitable[T]) -> T:
+        """Execute an async operation through the circuit breaker.
+
+        Args:
+            coro: The coroutine to execute
+
+        Returns:
+            The result of the coroutine
+
+        Raises:
+            CircuitOpenError: If circuit is open and not ready to retry
+            Exception: Any exception raised by the coroutine
+        """
+        if self._state == "open":
+            if self._should_attempt_reset():
+                self._state = "half-open"
+                _LOGGER.info("circuit_breaker_half_open")
+            else:
+                raise CircuitOpenError("Circuit breaker is open")
+
+        try:
+            result = await coro
+            self._on_success()
+            return result
+        except Exception as e:
+            self._on_failure()
+            raise
+
+    @property
+    def state(self) -> str:
+        """Get current circuit breaker state."""
+        return self._state
+
+    def reset(self) -> None:
+        """Manually reset the circuit breaker to closed state."""
+        self._failures = 0
+        self._last_failure = None
+        self._state = "closed"
+        _LOGGER.info("circuit_breaker_manually_reset")
+
+
+@dataclass
+class RateLimiter:
+    """Token bucket rate limiter for request throttling.
+
+    Example:
+        >>> limiter = RateLimiter(max_requests=100, window_seconds=60)
+        >>> async with limiter:
+        ...     await make_api_call()
+    """
+
+    max_requests: int = 100
+    window_seconds: float = 60.0
+    _timestamps: deque = field(default_factory=deque, init=False)
+
+    async def acquire(self) -> None:
+        """Acquire permission to proceed, waiting if necessary."""
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(seconds=self.window_seconds)
+
+        # Remove old timestamps outside the window
+        while self._timestamps and self._timestamps[0] < cutoff:
+            self._timestamps.popleft()
+
+        if len(self._timestamps) >= self.max_requests:
+            # Calculate wait time until oldest request expires
+            wait_until = self._timestamps[0] + timedelta(seconds=self.window_seconds)
+            wait_seconds = (wait_until - now).total_seconds()
+            if wait_seconds > 0:
+                _LOGGER.debug("rate_limit_waiting", extra={"wait_seconds": wait_seconds})
+                await asyncio.sleep(wait_seconds)
+            # Try again after waiting
+            await self.acquire()
+        else:
+            self._timestamps.append(now)
+
+    async def __aenter__(self) -> "RateLimiter":
+        """Context manager entry."""
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        """Context manager exit."""
+        pass
+
+
+@dataclass
+class RetryPolicy:
+    """Configurable retry policy with exponential backoff.
+
+    Example:
+        >>> policy = RetryPolicy(max_attempts=3, base_delay=1.0)
+        >>> result = await policy.execute(some_async_function)
+    """
+
+    max_attempts: int = 3
+    base_delay: float = 1.0
+    max_delay: float = 30.0
+    exponential_base: float = 2.0
+    jitter: bool = True
+
+    async def execute(
+        self,
+        fn: Callable[[], Awaitable[T]],
+        *,
+        retryable_exceptions: tuple[type[Exception], ...] = (Exception,),
+    ) -> T:
+        """Execute function with retry logic.
+
+        Args:
+            fn: Async function to execute
+            retryable_exceptions: Tuple of exception types to retry on
+
+        Returns:
+            Result of the function
+
+        Raises:
+            Exception: The last exception if all retries exhausted
+        """
+        last_exception: Exception | None = None
+
+        for attempt in range(self.max_attempts):
+            try:
+                return await fn()
+            except retryable_exceptions as e:
+                last_exception = e
+                if attempt < self.max_attempts - 1:
+                    delay = min(
+                        self.base_delay * (self.exponential_base**attempt),
+                        self.max_delay,
+                    )
+                    if self.jitter:
+                        import random
+
+                        delay *= 0.5 + random.random()  # 50-150% of calculated delay
+
+                    _LOGGER.warning(
+                        "retry_attempt",
+                        extra={
+                            "attempt": attempt + 1,
+                            "max_attempts": self.max_attempts,
+                            "delay": delay,
+                            "error": str(e),
+                        },
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    _LOGGER.error(
+                        "retry_exhausted",
+                        extra={
+                            "attempts": self.max_attempts,
+                            "error": str(e),
+                        },
+                    )
+
+        if last_exception:
+            raise last_exception
+        raise RuntimeError("Retry policy failed without exception")

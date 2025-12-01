@@ -1,0 +1,55 @@
+"""Wayfinder NLQ tools."""
+
+from __future__ import annotations
+
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+
+from ..clients.wayfinder import WayfinderClient
+from ..models import ClarificationRequest, NLQ, PlanQuery, QueryExecution
+
+
+def _client(ctx: ToolContext) -> WayfinderClient:
+    """Resolve Wayfinder client from tool context."""
+    base_url = ctx.tool_context.get("wayfinder_base_url", "http://localhost:9100")
+    return WayfinderClient(base_url)
+
+
+@tool(desc="Plan NLQ to SQL", side_effects="read", tags=["wayfinder"])
+async def plan_nlq(args: NLQ, ctx: ToolContext) -> PlanQuery:
+    client = _client(ctx)
+{% if with_streaming %}
+    await ctx.emit_chunk("plan", 0, f"Planning SQL for '{args.question}'...")
+{% endif %}
+    result = await client.plan_query(args.question)
+{% if with_streaming %}
+    await ctx.emit_chunk("plan", 1, f"SQL plan ready", done=True)
+{% endif %}
+    return PlanQuery(sql=result.get("sql", ""), clarifications=list(result.get("clarifications", [])))
+
+
+@tool(desc="Request clarification questions", side_effects="read", tags=["wayfinder"])
+async def request_clarification(args: NLQ, ctx: ToolContext) -> ClarificationRequest:
+    client = _client(ctx)
+{% if with_streaming %}
+    await ctx.emit_chunk("clarify", 0, "Requesting clarification...")
+{% endif %}
+    result = await client.request_clarification(args.question)
+{% if with_streaming %}
+    await ctx.emit_chunk("clarify", 1, f"Got {len(result.get('questions', []))} clarifications", done=True)
+{% endif %}
+    return ClarificationRequest(questions=list(result.get("questions", [])))
+
+
+@tool(desc="Execute SQL plan", side_effects="read", tags=["wayfinder"])
+async def execute_sql(args: PlanQuery, ctx: ToolContext) -> QueryExecution:
+    client = _client(ctx)
+{% if with_streaming %}
+    await ctx.emit_chunk("execute", 0, f"Executing SQL: {args.sql}...")
+{% endif %}
+    result = await client.execute_query(args.sql)
+    rows = [dict(row) for row in result.get("rows", [])] if isinstance(result.get("rows"), list) else []
+{% if with_streaming %}
+    await ctx.emit_chunk("execute", 1, f"Execution complete: {len(rows)} rows", done=True)
+{% endif %}
+    return QueryExecution(rows=rows, summary=str(result.get("summary", "")))

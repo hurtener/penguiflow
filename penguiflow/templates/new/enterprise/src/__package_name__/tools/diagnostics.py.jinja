@@ -1,0 +1,44 @@
+"""Diagnostics-focused tools."""
+
+from __future__ import annotations
+
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+
+from ..models import Diagnostics, RouteDecision, UserQuery
+
+
+@tool(desc="Route query to workflow", tags=["enterprise"])
+async def triage_query(args: UserQuery, ctx: ToolContext) -> RouteDecision:
+{% if with_streaming %}
+    await ctx.emit_chunk("triage", 0, f"Triaging query...")
+{% endif %}
+    route = "bug" if "fail" in args.question.lower() else "general"
+{% if with_streaming %}
+    await ctx.emit_chunk("triage", 1, f"Routing to {route}", done=True)
+{% endif %}
+    return RouteDecision(path=route)
+
+
+@tool(desc="Collect logs for diagnostics", tags=["enterprise"])
+async def collect_logs(args: RouteDecision, ctx: ToolContext) -> Diagnostics:
+{% if with_streaming %}
+    await ctx.emit_chunk("logs", 0, f"Collecting logs for {args.path}...")
+{% endif %}
+    logs = [f"log-{args.path}-1", f"log-{args.path}-2"]
+{% if with_streaming %}
+    await ctx.emit_chunk("logs", 1, f"Collected {len(logs)} logs", done=True)
+{% endif %}
+    return Diagnostics(logs=logs, findings=[f"finding from {args.path}"])
+
+
+@tool(desc="Run diagnostics", tags=["enterprise"])
+async def run_diagnostics(args: Diagnostics, ctx: ToolContext) -> Diagnostics:
+{% if with_streaming %}
+    await ctx.emit_chunk("diagnostics", 0, "Running diagnostics...")
+{% endif %}
+    findings = args.findings + ["diagnostic: all systems nominal"]
+{% if with_streaming %}
+    await ctx.emit_chunk("diagnostics", 1, f"Diagnostics complete: {len(findings)} findings", done=True)
+{% endif %}
+    return Diagnostics(logs=args.logs, findings=findings)

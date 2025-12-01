@@ -1,0 +1,94 @@
+"""Planner configuration for {{ project_name }} (parallel fan-out)."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any, Mapping, Sequence
+
+from penguiflow.planner import PlannerEventCallback, ReactPlanner
+
+from .config import Config
+from .tools import build_catalog_bundle
+
+
+@dataclass
+class PlannerBundle:
+    """Container for planner and LLM client."""
+
+    planner: ReactPlanner
+    llm_client: "ScriptedLLM"
+
+
+class ScriptedLLM:
+    """Deterministic LLM client emitting a parallel plan with join injection."""
+
+    def __init__(self, scripted: Sequence[Mapping[str, Any]] | None = None) -> None:
+        self._scripted = [json.dumps(item, ensure_ascii=False) for item in scripted] if scripted else None
+
+    async def complete(
+        self,
+        *,
+        messages: list[Mapping[str, str]],
+        response_format: Mapping[str, Any] | None = None,
+    ) -> str:
+        del response_format
+        if self._scripted is None:
+            query = messages[-1].get("content", "")
+            scripted = [
+                {
+                    "thought": "fan out",
+                    "plan": [
+                        {
+                            "node": "fetch_primary",
+                            "args": {"topic": query, "shard": 0},
+                        },
+                        {
+                            "node": "fetch_secondary",
+                            "args": {"topic": query, "shard": 1},
+                        },
+                    ],
+                    "join": {
+                        "node": "merge_results",
+                        "inject": {"results": "$results", "expect": "$expect"},
+                    },
+                },
+                {
+                    "thought": "finish",
+                    "next_node": None,
+                    "args": None,
+                },
+            ]
+            self._scripted = [json.dumps(item, ensure_ascii=False) for item in scripted]
+
+        if not self._scripted:
+            raise RuntimeError("ScriptedLLM has no responses left")
+
+        return self._scripted.pop(0)
+
+
+def build_planner(
+    config: Config,
+    *,
+    event_callback: PlannerEventCallback | None = None,
+) -> PlannerBundle:
+    """Create a ReactPlanner wired for parallel flows.
+
+    Swap the scripted client with a real model by:
+    - LiteLLM path: pass llm=config.llm_model (e.g., "gpt-4o") to ReactPlanner and set provider keys in env
+      (e.g., OPENAI_API_KEY).
+    - DSPy path: pass llm_client=DSPyLLMClient(llm=config.llm_model) and leave llm=None.
+    - Custom client: pass any object with .complete(messages=[...], response_format=...).
+    Prompt tweaks: pass system_prompt_extra (string) or planning_hints (mapping) to ReactPlanner to append
+    guidance without editing penguiflow.planner.prompts.
+    """
+    del config  # kept for future expansion
+    nodes, registry = build_catalog_bundle()
+    llm_client = ScriptedLLM()
+    planner = ReactPlanner(
+        llm_client=llm_client,
+        nodes=nodes,
+        registry=registry,
+        event_callback=event_callback,
+    )
+    return PlannerBundle(planner=planner, llm_client=llm_client)

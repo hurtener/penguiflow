@@ -14,11 +14,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import sys
 from collections import defaultdict
-from collections.abc import Iterator, Mapping
 from typing import Any
 from uuid import uuid4
 
@@ -51,48 +49,6 @@ from penguiflow.registry import ModelRegistry
 # Global buffers for demonstration (in production: use message queue/websocket)
 STATUS_BUFFER: defaultdict[str, list[StatusUpdate]] = defaultdict(list)
 EXECUTION_LOGS: list[str] = []
-
-
-class _SerializableContext(Mapping[str, Any]):
-    """Context wrapper that filters non-serializable values for JSON serialization.
-
-    This class allows passing both serializable and non-serializable objects
-    in context_meta. When the planner serializes context for the LLM prompt,
-    only JSON-serializable values are included. But nodes can still access
-    all values (including functions, loggers, etc.) via ctx.meta.
-    """
-
-    def __init__(self, data: dict[str, Any]) -> None:
-        self._data = data
-        self._serializable_keys = self._find_serializable_keys()
-
-    def _find_serializable_keys(self) -> set[str]:
-        """Identify which keys have JSON-serializable values."""
-        serializable = set()
-        for key, value in self._data.items():
-            try:
-                json.dumps(value)
-                serializable.add(key)
-            except (TypeError, ValueError):
-                # Skip non-serializable values
-                pass
-        return serializable
-
-    def __getitem__(self, key: str) -> Any:
-        """Allow access to all values (both serializable and non-serializable)."""
-        return self._data[key]
-
-    def __iter__(self) -> Iterator[str]:
-        """Iterate only over serializable keys (for dict() and JSON conversion)."""
-        return iter(self._serializable_keys)
-
-    def __len__(self) -> int:
-        """Return count of serializable keys."""
-        return len(self._serializable_keys)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Get value with default (allows access to all values)."""
-        return self._data.get(key, default)
 
 
 class EnterpriseAgentOrchestrator:
@@ -307,9 +263,7 @@ class EnterpriseAgentOrchestrator:
                 "tool_policy_enabled",
                 extra={
                     "allowed_tools": (
-                        list(self.config.tool_policy_allowed_tools)
-                        if self.config.tool_policy_allowed_tools
-                        else None
+                        list(self.config.tool_policy_allowed_tools) if self.config.tool_policy_allowed_tools else None
                     ),
                     "denied_tools": list(self.config.tool_policy_denied_tools),
                     "require_tags": list(self.config.tool_policy_require_tags),
@@ -335,6 +289,27 @@ class EnterpriseAgentOrchestrator:
                 extra={"backend": self.config.state_store_backend},
             )
 
+        # Document context structure for LLM
+        # This demonstrates how developers can use system_prompt_extra to document
+        # their custom context format (memories, etc.)
+        system_prompt_extra = """
+## Context Usage
+
+The user message may include a 'context' field with additional information:
+
+- **memories**: Array of conversation history and user preferences
+  - Format: `[{role: "user"|"assistant"|"system", content: str, timestamp?: str, metadata?: dict}]`
+  - Use memories to provide context-aware responses
+  - Reference previous interactions when relevant
+  - Respect user preferences indicated in system-role memories
+
+- **status_history**: Real-time execution progress updates
+  - Contains roadmap steps and current status
+  - Can help track multi-step workflow progress
+
+When context is provided, use it appropriately to enhance your responses.
+"""
+
         # CRITICAL: Set event_callback for planner observability
         planner = ReactPlanner(
             llm=self.config.llm_model,
@@ -343,6 +318,7 @@ class EnterpriseAgentOrchestrator:
             temperature=self.config.llm_temperature,
             json_schema_mode=True if not use_dspy else False,
             llm_client=llm_client,
+            system_prompt_extra=system_prompt_extra,
             token_budget=self.config.planner_token_budget,
             deadline_s=self.config.planner_deadline_s,
             hop_budget=self.config.planner_hop_budget,
@@ -408,19 +384,15 @@ class EnterpriseAgentOrchestrator:
             >>> result = await agent.execute("What was deployed?", memories=memories)
         """
         trace_id = uuid4().hex
-        status_history = STATUS_BUFFER[trace_id]
+        status_history: list[StatusUpdate] = STATUS_BUFFER[trace_id]
+        status_history_for_llm: list[dict[str, Any]] = []
 
         def publish_status(update: StatusUpdate) -> None:
             status_history.append(update)
+            status_history_for_llm.append(update.model_dump())
             message_text = update.message or ""
-            step_ref = (
-                str(update.roadmap_step_id)
-                if update.roadmap_step_id is not None
-                else "-"
-            )
-            EXECUTION_LOGS.append(
-                f"{trace_id}:{update.status}:{message_text}:{step_ref}"
-            )
+            step_ref = str(update.roadmap_step_id) if update.roadmap_step_id is not None else "-"
+            EXECUTION_LOGS.append(f"{trace_id}:{update.status}:{message_text}:{step_ref}")
             self.telemetry.logger.debug(
                 "status_update_buffered",
                 extra={
@@ -432,34 +404,35 @@ class EnterpriseAgentOrchestrator:
                 },
             )
 
-        # Use _SerializableContext to allow both serializable and non-serializable
-        # values. The planner will only see serializable values in the LLM prompt,
-        # but nodes can access all values via ctx.meta.
+        # CRYSTAL CLEAR PATTERN: Split context into two explicit dicts
+        # This demonstrates the recommended pattern for PenguiFlow developers
         #
-        # Serializable values (sent to LLM):
-        # - tenant_id, query, trace_id: Basic metadata
-        # - memories: Conversation history and context (if provided)
-        # - status_history: Real-time execution updates
+        # llm_context: Data visible to LLM (sent in user message)
+        #   - Only include information useful for planning decisions
+        #   - NO internal routing metadata (tenant_id, trace_id)
+        #   - Format can be customized per application
         #
-        # Non-serializable values (only for nodes):
-        # - status_publisher: Function to publish status updates
-        # - telemetry: Telemetry object for metrics
-        # - status_logger: Logger instance
-        context_meta_dict = {
+        # tool_context: Data visible ONLY to nodes (via ctx.tool_context)
+        #   - Internal concerns: routing, logging, telemetry
+        #   - Non-serializable objects: functions, loggers
+        #   - Never sent to LLM
+
+        llm_context: dict[str, Any] = {
+            "status_history": status_history_for_llm,  # Can help LLM track progress
+        }
+
+        # Add memories if provided - these ARE sent to the LLM!
+        if memories:
+            llm_context["memories"] = memories
+
+        # Node metadata - internal concerns only
+        tool_context: dict[str, Any] = {
             "tenant_id": tenant_id,
-            "query": query,
             "trace_id": trace_id,
             "status_publisher": publish_status,
-            "status_history": status_history,
             "telemetry": self.telemetry,
             "status_logger": self.telemetry.logger,
         }
-
-        # Add memories if provided - these will be sent to the LLM!
-        if memories:
-            context_meta_dict["memories"] = memories
-
-        context_meta = _SerializableContext(context_meta_dict)
 
         self.telemetry.logger.info(
             "execute_start",
@@ -471,7 +444,8 @@ class EnterpriseAgentOrchestrator:
         try:
             planner_result = await self._planner.run(
                 query=query,
-                context_meta=context_meta,
+                llm_context=llm_context,
+                tool_context=tool_context,
             )
 
             if isinstance(planner_result, PlannerPause):
@@ -517,10 +491,7 @@ class EnterpriseAgentOrchestrator:
                 planner_meta = dict(planner_result.metadata)
                 meta = {"error": "no_path", "planner": planner_meta}
                 finish = FinalAnswer(
-                    text=(
-                        f"I couldn't complete the task. "
-                        f"Reason: {planner_meta.get('thought', 'Unknown')}"
-                    ),
+                    text=(f"I couldn't complete the task. Reason: {planner_meta.get('thought', 'Unknown')}"),
                     route="error",
                     metadata=meta,
                 )
@@ -542,10 +513,7 @@ class EnterpriseAgentOrchestrator:
                 planner_meta = dict(planner_result.metadata)
                 meta = {"error": "budget_exhausted", "planner": planner_meta}
                 finish = FinalAnswer(
-                    text=(
-                        "Task interrupted due to resource constraints. "
-                        "Partial results may be available."
-                    ),
+                    text=("Task interrupted due to resource constraints. Partial results may be available."),
                     route="error",
                     metadata=meta,
                 )
@@ -558,9 +526,7 @@ class EnterpriseAgentOrchestrator:
                     },
                 )
             else:
-                raise RuntimeError(
-                    f"Unexpected planner result: {planner_result.reason}"
-                )
+                raise RuntimeError(f"Unexpected planner result: {planner_result.reason}")
 
             assert finish is not None
             metadata = dict(finish.metadata)
@@ -630,9 +596,7 @@ async def _monitor_and_stream_status(stream_enabled: bool = False) -> str | None
         return None
 
     seen_traces = set(STATUS_BUFFER.keys())
-    trace_counts: dict[str, int] = {
-        tid: len(updates) for tid, updates in STATUS_BUFFER.items()
-    }
+    trace_counts: dict[str, int] = {tid: len(updates) for tid, updates in STATUS_BUFFER.items()}
 
     while True:
         # Check for new trace IDs
