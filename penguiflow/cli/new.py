@@ -121,7 +121,7 @@ def _load_template_root(template: str) -> Traversable:
     """Load the template directory resource."""
     base = resources.files("penguiflow.templates.new")
     target = base.joinpath(template)
-    if not target.exists():
+    if not target.is_dir():
         available = sorted(
             entry.name
             for entry in base.iterdir()
