@@ -1,0 +1,181 @@
+"""HTTP and gRPC handler stubs for {{ project_name }}."""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..orchestrator import {{ class_name }}Orchestrator
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class HTTPHandler:
+    """HTTP request handler for the orchestrator.
+
+    Example integration with FastAPI:
+        >>> from fastapi import FastAPI, HTTPException
+        >>> app = FastAPI()
+        >>> handler = create_http_handler(orchestrator)
+        >>> @app.post("/execute")
+        >>> async def execute(request: dict):
+        ...     return await handler.handle_execute(request)
+    """
+
+    def __init__(self, orchestrator: {{ class_name }}Orchestrator) -> None:
+        self._orchestrator = orchestrator
+
+    async def handle_execute(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Handle an execute request.
+
+        Expected request format:
+        {
+            "query": "user query",
+            "tenant_id": "tenant123",
+            "user_id": "user456",
+            "session_id": "session789"
+        }
+
+        Returns:
+        {
+            "answer": "agent response",
+            "trace_id": "abc123",
+            "metadata": {...}{% if with_streaming %},
+            "streams": {...}{% endif %}{% if with_hitl %},
+            "pause_token": "optional"{% endif %}
+        }
+        """
+        try:
+            response = await self._orchestrator.execute(
+                query=request["query"],
+                tenant_id=request["tenant_id"],
+                user_id=request["user_id"],
+                session_id=request["session_id"],
+            )
+            return {
+                "answer": response.answer,
+                "trace_id": response.trace_id,
+                "metadata": response.metadata,
+{% if with_streaming %}
+                "streams": response.streams,
+{% endif %}
+{% if with_hitl %}
+                "pause_token": response.pause_token,
+{% endif %}
+            }
+        except KeyError as e:
+            _LOGGER.error("missing_required_field", extra={"field": str(e)})
+            raise ValueError(f"Missing required field: {e}")
+        except Exception as e:
+            _LOGGER.error("execute_failed", extra={"error": str(e)}, exc_info=True)
+            raise
+
+{% if with_hitl %}
+    async def handle_resume(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Handle a resume request.
+
+        Expected request format:
+        {
+            "resume_token": "token123",
+            "tenant_id": "tenant123",
+            "user_id": "user456",
+            "session_id": "session789",
+            "user_input": "optional user response"
+        }
+        """
+        try:
+            response = await self._orchestrator.resume(
+                resume_token=request["resume_token"],
+                tenant_id=request["tenant_id"],
+                user_id=request["user_id"],
+                session_id=request["session_id"],
+                user_input=request.get("user_input"),
+            )
+            return {
+                "answer": response.answer,
+                "trace_id": response.trace_id,
+                "metadata": response.metadata,
+{% if with_streaming %}
+                "streams": response.streams,
+{% endif %}
+                "pause_token": response.pause_token,
+            }
+        except KeyError as e:
+            _LOGGER.error("missing_required_field", extra={"field": str(e)})
+            raise ValueError(f"Missing required field: {e}")
+        except Exception as e:
+            _LOGGER.error("resume_failed", extra={"error": str(e)}, exc_info=True)
+            raise
+{% endif %}
+
+    async def handle_health(self) -> dict[str, Any]:
+        """Health check endpoint."""
+        return {
+            "status": "healthy",
+            "service": "{{ project_name }}",
+        }
+
+    async def handle_metrics(self) -> dict[str, Any]:
+        """Metrics endpoint (if telemetry is available)."""
+        if hasattr(self._orchestrator, "_telemetry"):
+            return self._orchestrator._telemetry.get_metrics_summary()
+        return {"message": "Telemetry not available"}
+
+
+def create_http_handler(orchestrator: {{ class_name }}Orchestrator) -> HTTPHandler:
+    """Factory function to create an HTTP handler."""
+    return HTTPHandler(orchestrator)
+
+
+{% if with_a2a %}
+class GRPCHandler:
+    """gRPC handler stub for A2A integration.
+
+    This is a minimal stub. For full gRPC support:
+    1. Define .proto files for your service
+    2. Generate Python code with protoc
+    3. Implement the generated service interface
+    4. Use grpcio for server setup
+
+    Example structure:
+        >>> import grpc
+        >>> from concurrent import futures
+        >>> from . import agent_pb2_grpc  # generated
+        >>>
+        >>> class AgentServicer(agent_pb2_grpc.AgentServicer):
+        ...     def Execute(self, request, context):
+        ...         # Convert protobuf request to dict
+        ...         # Call orchestrator
+        ...         # Convert response to protobuf
+        ...         pass
+        >>>
+        >>> server = grpc.aio.server(futures.ThreadPoolExecutor(max_workers=10))
+        >>> agent_pb2_grpc.add_AgentServicer_to_server(AgentServicer(), server)
+        >>> server.add_insecure_port('[::]:50051')
+        >>> await server.start()
+    """
+
+    def __init__(self, orchestrator: {{ class_name }}Orchestrator) -> None:
+        self._orchestrator = orchestrator
+
+    async def execute_grpc(self, request_proto: Any) -> Any:
+        """Handle gRPC execute request.
+
+        Args:
+            request_proto: Generated protobuf request message
+
+        Returns:
+            Generated protobuf response message
+        """
+        # This is a stub - implement with actual protobuf types
+        _LOGGER.warning("grpc_handler_stub_called")
+        raise NotImplementedError(
+            "gRPC handler is a stub. Implement with actual protobuf definitions."
+        )
+
+
+def create_grpc_handler(orchestrator: {{ class_name }}Orchestrator) -> GRPCHandler:
+    """Factory function to create a gRPC handler."""
+    return GRPCHandler(orchestrator)
+{% endif %}

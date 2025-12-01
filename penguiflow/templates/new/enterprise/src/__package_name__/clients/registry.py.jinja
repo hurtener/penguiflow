@@ -1,0 +1,63 @@
+"""Service registry for centralized client management."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+{% if memory_enabled %}
+from .memory import MemoryClient
+{% endif %}
+
+if TYPE_CHECKING:
+    from ..config import Config
+
+
+class ServiceRegistry:
+    """Central registry for service clients with lazy initialization.
+
+    This pattern provides:
+    - Lazy initialization: clients are created only when first accessed
+    - Single responsibility: centralized service lifecycle management
+    - Testability: easy to mock/replace individual services
+    - Resource efficiency: avoid creating unused clients
+
+    Example:
+        >>> registry = ServiceRegistry(config)
+        >>> memory = registry.get_memory_client()
+        >>> # Memory client is initialized on first access
+    """
+
+    def __init__(self, config: Config) -> None:
+        self._config = config
+{% if memory_enabled %}
+        self._memory: MemoryClient | None = None
+{% endif %}
+        # Add more service clients here as needed
+        # self._search: SearchClient | None = None
+        # self._vector_db: VectorDBClient | None = None
+
+{% if memory_enabled %}
+    def get_memory_client(self) -> MemoryClient:
+        """Get or create the memory client."""
+        if self._memory is None:
+            self._memory = MemoryClient(self._config.memory_base_url)
+        return self._memory
+{% endif %}
+
+    # Example pattern for adding more services:
+    # def get_search_client(self) -> SearchClient:
+    #     """Get or create the search client."""
+    #     if self._search is None:
+    #         self._search = SearchClient(self._config.search_url)
+    #     return self._search
+
+    async def close_all(self) -> None:
+        """Close all initialized clients."""
+{% if memory_enabled %}
+        if self._memory is not None:
+            # If MemoryClient had a close method:
+            # await self._memory.close()
+            self._memory = None
+{% else %}
+        pass
+{% endif %}

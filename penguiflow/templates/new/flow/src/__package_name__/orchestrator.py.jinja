@@ -1,0 +1,204 @@
+"""Main orchestrator for {{ project_name }}."""
+
+from __future__ import annotations
+
+import logging
+import secrets
+from dataclasses import dataclass
+from typing import Any
+
+from penguiflow.errors import FlowError
+{% if with_streaming %}
+from penguiflow.types import StreamChunk
+{% endif %}
+{% if memory_enabled %}
+
+from .clients.memory import MemoryClient
+{% endif %}
+{% if with_a2a %}
+
+from .a2a import A2AServer
+{% endif %}
+from .config import Config
+from .flow import FinalAnswer, QueryPayload, _build_flow
+from .telemetry import AgentTelemetry
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class {{ class_name }}FlowError(RuntimeError):
+    """Raised when flow execution fails."""
+
+    def __init__(self, flow_error: FlowError | str) -> None:
+        message = flow_error.message if isinstance(flow_error, FlowError) else str(flow_error)
+        super().__init__(message)
+        self.flow_error = flow_error
+
+
+@dataclass
+class AgentResponse:
+    """Response envelope returned by the orchestrator."""
+
+    answer: str | None
+    trace_id: str
+    metadata: dict[str, Any] | None = None
+{% if with_streaming %}
+    status_updates: list[dict[str, Any]] | None = None
+{% endif %}
+
+
+class {{ class_name }}Orchestrator:
+    """Production-style orchestrator using emit/fetch pattern."""
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        telemetry: AgentTelemetry | None = None,
+    ) -> None:
+        self._config = config
+{% if memory_enabled %}
+        self._memory = MemoryClient(config.memory_base_url)
+{% else %}
+        self._memory = None
+{% endif %}
+        self._telemetry = telemetry or AgentTelemetry(
+            flow_name="{{ project_name }}",
+            logger=_LOGGER,
+        )
+
+        # Build flow
+        bundle = _build_flow(
+{% if memory_enabled %}
+            memory=self._memory,
+{% endif %}
+        )
+        self._flow = bundle.flow
+        self._registry = bundle.registry
+
+        # Start flow once - CRITICAL PATTERN
+        self._flow.run(registry=self._registry)
+        self._flow_started = True
+{% if with_a2a %}
+
+        self._a2a_server = A2AServer(self)
+{% endif %}
+
+    async def execute(
+        self,
+        query: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> AgentResponse:
+        """Execute the flow with emit/fetch pattern."""
+        trace_id = secrets.token_hex(8)
+
+{% if memory_enabled %}
+        # Fetch memory context
+        conscious = await self._memory.start_session(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        retrieval = await self._memory.auto_retrieve(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            prompt=query,
+        )
+
+        payload = QueryPayload(
+            query=query,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            conscious_memories=conscious.get("conscious", []),
+            retrieved_memories=retrieval.get("snippets", []),
+        )
+{% else %}
+        payload = QueryPayload(
+            query=query,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+{% endif %}
+
+        # Create message
+        from penguiflow.types import Headers, Message
+
+        message = Message(
+            payload=payload,
+            headers=Headers(
+                tenant=tenant_id,
+                topic="{{ project_name }}.query",
+            ),
+            trace_id=trace_id,
+        )
+
+        # Execute flow using emit/fetch pattern
+        await self._flow.emit(message)
+        result = await self._flow.fetch()
+
+        # Handle FlowError
+        if isinstance(result, FlowError):
+            _LOGGER.error(
+                "Flow execution failed: code=%s, message=%s",
+                result.code,
+                result.message,
+                extra={"trace_id": trace_id, "flow_error": result.to_payload()},
+            )
+            raise {{ class_name }}FlowError(result)
+
+        # Extract payload
+        if isinstance(result, Message):
+            result_payload = result.payload
+        else:
+            result_payload = result
+
+        # Validate and extract final answer
+        if isinstance(result_payload, FinalAnswer):
+            final_answer = result_payload
+        else:
+            final_answer = FinalAnswer.model_validate(result_payload)
+
+        answer_text = final_answer.text
+{% if memory_enabled %}
+
+        # Persist interaction to memory
+        await self._memory.ingest_interaction(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            user_prompt=query,
+            agent_response=answer_text,
+        )
+{% endif %}
+
+        return AgentResponse(
+            answer=answer_text,
+            trace_id=trace_id,
+            metadata={"sources": final_answer.sources} if final_answer.sources else None,
+{% if with_streaming %}
+            status_updates=self._telemetry.get_status_updates(trace_id),
+{% endif %}
+        )
+
+    async def stop(self) -> None:
+        """Graceful shutdown hook."""
+        if self._flow_started:
+{% if with_a2a %}
+            if getattr(self, "_a2a_server", None):
+                await self._a2a_server.stop()
+{% endif %}
+            await self._flow.stop()
+            self._flow_started = False
+            _LOGGER.info("{{ project_name }} orchestrator stopped")
+{% if with_a2a %}
+
+    async def start_a2a(self) -> None:
+        """Start the A2A server stub."""
+        await self._a2a_server.start()
+{% endif %}

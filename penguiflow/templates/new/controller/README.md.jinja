@@ -1,0 +1,327 @@
+# {{ project_name }}
+
+**Controller loop agent** built with PenguiFlow `{{ template }}` template.
+
+## Pattern Overview
+
+The **controller loop** pattern is ideal for iterative, self-refining agents that:
+
+- Execute repeated refinement cycles until a termination condition is met
+- Maintain working memory (WM) across iterations
+- Track progress via hop counters and accumulated facts
+- Enforce budget constraints (max iterations, token limits)
+- Use `allow_cycle=True` to enable self-loops in the flow graph
+
+### When to Use This Pattern
+
+Use the controller template when you need:
+
+- Iterative refinement (e.g., multi-pass reasoning, self-correction)
+- Progressive answer building (accumulate facts over iterations)
+- Budget-controlled loops (stop after N hops or token limit)
+- State persistence across iterations (working memory)
+
+### Key Differences from Other Templates
+
+| Template | Use Case |
+|----------|----------|
+| **minimal** | Simple one-shot tool execution |
+| **react** | Dynamic tool selection with ReAct planning |
+| **parallel** | Concurrent tool execution with fan-out/fan-in |
+| **controller** | Iterative refinement with self-loops |
+
+## Architecture
+
+```
+┌─────────────┐
+│  Controller │◄──────┐
+│     Node    │       │
+└──────┬──────┘       │
+       │              │
+       └──────────────┘
+        (allow_cycle=True)
+```
+
+The controller node wires to itself with `allow_cycle=True`, enabling iterative execution:
+
+```python
+controller_node = Node(
+    controller,
+    name="controller",
+    allow_cycle=True,  # KEY: enables self-loop
+    policy=NodePolicy(validate="none"),
+)
+controller_node.to(controller_node)
+```
+
+### Controller Logic
+
+Each iteration:
+
+1. Checks termination condition (e.g., `hops >= max_hops`)
+2. If done: returns `FinalAnswer`
+3. If continuing: updates `WM` state and returns updated message
+4. Flow automatically routes back to controller for next iteration
+
+```python
+async def controller(msg: Message, ctx: Any) -> Message:
+    wm = msg.payload
+    assert isinstance(wm, WM)
+
+    if wm.hops >= max_hops:  # termination
+        final = FinalAnswer(text=f"Completed after {wm.hops} iterations")
+        return msg.model_copy(update={"payload": final})
+
+    # Continue iteration
+    updated_wm = wm.model_copy(update={
+        "facts": wm.facts + [f"iteration-{wm.hops}"],
+        "hops": wm.hops + 1,
+    })
+    return msg.model_copy(update={"payload": updated_wm})
+```
+
+## Quickstart
+
+```bash
+uv sync
+uv run python -m {{ package_name }}
+```
+
+Expected output:
+```
+Agent response: Completed 5 iterations. Final result: iteration-4: refined answer...
+Iterations completed: 5
+```
+
+## Developing
+
+### Configuration
+
+Edit `src/{{ package_name }}/config.py` to adjust:
+
+- `max_hops`: Maximum iterations (default: 5)
+- `memory_base_url`: External memory service{% if memory_enabled %} (enabled){% endif %}
+- `llm_model`: LLM identifier (currently stub)
+
+Environment variables:
+```bash
+export MAX_HOPS=10
+export MEMORY_BASE_URL=http://localhost:8000
+```
+
+### Customizing the Controller
+
+Edit `src/{{ package_name }}/flow.py`:
+
+1. **Termination logic**: Modify the condition in `controller()`
+   ```python
+   if wm.hops >= max_hops or wm.confidence >= 0.95:
+       # terminate
+   ```
+
+2. **State updates**: Change what gets accumulated in `WM.facts`
+   ```python
+   updated_wm = wm.model_copy(update={
+       "facts": wm.facts + [compute_refinement(wm)],
+       "confidence": assess_confidence(wm),
+   })
+   ```
+
+3. **Budget controls**: Add token limits or time constraints
+   ```python
+   if wm.tokens_used >= wm.budget_tokens:
+       final = FinalAnswer(text="Budget exceeded")
+       return msg.model_copy(update={"payload": final})
+   ```
+
+### Testing
+
+Run all tests:
+```bash
+uv run pytest
+```
+
+Key test scenarios:
+- `test_controller_terminates_at_max_hops`: Verifies termination
+- `test_controller_accumulates_facts`: Checks state persistence
+- `test_execute_captures_iterations`: Integration test
+
+## Template Flags
+
+This template was scaffolded with:
+
+{% if with_streaming -%}
+- `--with-streaming`: Token streaming support
+{% else -%}
+- No streaming (add `--with-streaming` for token streams)
+{% endif -%}
+{% if with_hitl -%}
+- `--with-hitl`: Human-in-the-loop hooks
+{% else -%}
+- No HITL (add `--with-hitl` for pause/resume, though not recommended for controller loops)
+{% endif -%}
+{% if with_a2a -%}
+- `--with-a2a`: Agent-to-agent server stubs
+{% else -%}
+- No A2A (add `--with-a2a` for inter-agent communication)
+{% endif -%}
+{% if memory_enabled -%}
+- `--memory`: External memory client
+{% else -%}
+- No memory (add `--memory` for persistent RAG integration)
+{% endif %}
+
+## Working Memory (WM) Structure
+
+The controller uses `penguiflow.WM` to track state:
+
+```python
+class WM(BaseModel):
+    query: str                          # Original query
+    facts: list[Any] = []               # Accumulated results per iteration
+    hops: int = 0                       # Current iteration count
+    budget_hops: int | None = 8         # Max iterations allowed
+    tokens_used: int = 0                # Token consumption
+    budget_tokens: int | None = None    # Token limit
+    confidence: float = 0.0             # Confidence score (0.0-1.0)
+```
+
+Customize by subclassing or adding fields in your flow.
+
+## Advanced Usage
+
+### Integrating Real LLMs
+
+Replace the stub controller with LLM calls:
+
+```python
+async def controller(msg: Message, ctx: Any) -> Message:
+    wm = msg.payload
+
+    if wm.hops >= max_hops:
+        return finalize(wm)
+
+    # Call LLM for refinement
+    llm_response = await call_llm(
+        prompt=f"Refine this answer: {wm.facts[-1]}",
+        model=ctx.llm_model,
+    )
+
+    updated_wm = wm.model_copy(update={
+        "facts": wm.facts + [llm_response],
+        "hops": wm.hops + 1,
+    })
+    return msg.model_copy(update={"payload": updated_wm})
+```
+
+### Dynamic Termination
+
+Implement confidence-based stopping:
+
+```python
+if wm.hops >= max_hops or wm.confidence >= 0.9:
+    final = FinalAnswer(text=wm.facts[-1])
+    return msg.model_copy(update={"payload": final})
+```
+
+### Multi-Stage Refinement
+
+Chain different refinement strategies:
+
+```python
+if wm.hops < 3:
+    strategy = "broaden"
+elif wm.hops < 6:
+    strategy = "deepen"
+else:
+    strategy = "polish"
+
+refined_fact = apply_strategy(strategy, wm)
+```
+
+## Observability
+
+{% if memory_enabled -%}
+Memory integration is enabled. Interactions are stored for retrieval.
+{% else -%}
+Memory is disabled. Enable with `--memory` flag.
+{% endif %}
+
+Telemetry events are logged via `AgentTelemetry`:
+- `flow_finish`: Successful completion with iteration count
+- `flow_error`: Failures during execution
+
+Access events programmatically:
+```python
+orchestrator = {{ class_name }}Orchestrator(config)
+response = await orchestrator.execute(...)
+telemetry_events = orchestrator._telemetry.events
+```
+
+## Common Patterns
+
+### Self-Critique Loop
+
+```python
+async def self_critique_controller(msg: Message, ctx: Any) -> Message:
+    wm = msg.payload
+
+    if wm.hops >= max_hops or passes_critique(wm.facts[-1]):
+        return finalize(wm)
+
+    critique = generate_critique(wm.facts[-1])
+    improved = apply_critique(wm.facts[-1], critique)
+
+    updated_wm = wm.model_copy(update={
+        "facts": wm.facts + [improved],
+        "hops": wm.hops + 1,
+    })
+    return msg.model_copy(update={"payload": updated_wm})
+```
+
+### Progressive Summarization
+
+```python
+async def summarization_controller(msg: Message, ctx: Any) -> Message:
+    wm = msg.payload
+
+    if wm.hops >= max_hops or len(wm.facts[-1]) < target_length:
+        return finalize(wm)
+
+    condensed = summarize(wm.facts[-1])
+    updated_wm = wm.model_copy(update={
+        "facts": wm.facts + [condensed],
+        "hops": wm.hops + 1,
+    })
+    return msg.model_copy(update={"payload": updated_wm})
+```
+
+## Troubleshooting
+
+**Infinite loops**: Ensure termination conditions are reachable
+```python
+assert max_hops > 0, "max_hops must be positive"
+```
+
+**State not persisting**: Verify `wm.model_copy(update=...)` is used
+```python
+# WRONG: wm.hops += 1
+# RIGHT: updated_wm = wm.model_copy(update={"hops": wm.hops + 1})
+```
+
+**Budget exceeded**: Check token tracking
+```python
+if wm.tokens_used >= (wm.budget_tokens or float('inf')):
+    # handle budget exhaustion
+```
+
+## References
+
+- PenguiFlow docs: [penguiflow.dev](https://penguiflow.dev)
+- Controller example: `examples/controller_multihop/`
+- WM type: `penguiflow.types.WM`
+- FinalAnswer type: `penguiflow.types.FinalAnswer`
+
+## License
+
+Same as PenguiFlow core.

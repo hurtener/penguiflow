@@ -1,0 +1,129 @@
+"""Controller loop flow definition for {{ project_name }}."""
+
+from __future__ import annotations
+
+import time
+from typing import Any, Callable
+
+from penguiflow import WM, FinalAnswer, Headers, Message, Node, NodePolicy, create
+
+from .config import Config
+
+
+def make_controller(max_hops: int) -> Callable[[Message, Any], Message]:
+    """Factory to create controller with configurable max_hops.
+
+    This pattern demonstrates:
+    - Iterative refinement using working memory (WM)
+    - Budget control via budget_hops
+    - Graceful termination with FinalAnswer
+    - State accumulation in WM.facts
+    - allow_cycle=True for self-loops
+    """
+    async def controller(msg: Message, ctx: Any) -> Message:
+        wm = msg.payload
+        assert isinstance(wm, WM), f"Expected WM, got {type(wm)}"
+
+        # Termination condition: reached max iterations
+        if wm.hops >= max_hops:
+            final = FinalAnswer(
+                text=f"Completed {wm.hops} iterations. Final result: {wm.facts[-1] if wm.facts else 'no facts accumulated'}",
+                citations=[f"iteration-{i}" for i in range(wm.hops)],
+            )
+            return msg.model_copy(update={"payload": final})
+
+        # Continue iteration: accumulate facts
+        # Note: The framework automatically increments wm.hops on each cycle
+        token_cost = 5
+        iteration_result = f"iteration-{wm.hops}: refined answer based on '{wm.query}'"
+
+        updated_wm = wm.model_copy(
+            update={
+                "facts": wm.facts + [iteration_result],
+                "tokens_used": wm.tokens_used + token_cost,
+                "confidence": min(1.0, wm.confidence + 0.2),  # incrementally increase confidence
+            }
+        )
+
+        return msg.model_copy(update={"payload": updated_wm})
+
+    return controller
+
+
+def build_controller_flow(max_hops: int) -> Any:
+    """
+    Build the controller loop flow.
+
+    The controller node points to itself with allow_cycle=True, enabling
+    iterative refinement until termination conditions are met.
+
+    Args:
+        max_hops: Maximum number of iterations before termination
+    """
+    # Create controller function with the configured max_hops
+    controller_func = make_controller(max_hops)
+
+    # Create controller node with allow_cycle=True for self-loop
+    controller_node = Node(
+        controller_func,
+        name="controller",
+        allow_cycle=True,  # KEY: enables the loop
+        policy=NodePolicy(validate="none"),  # skip validation for performance
+    )
+
+    # Create flow with controller wired to itself (self-loop)
+    flow = create(controller_node.to(controller_node))
+
+    return flow
+
+
+async def run_controller(
+    query: str,
+    *,
+    config: Config,
+    tenant: str = "default",
+    max_hops: int | None = None,
+    budget_tokens: int | None = None,
+) -> tuple[Message, Any]:
+    """
+    Run the controller loop for a single query.
+
+    Args:
+        query: The input query to process
+        config: Configuration object
+        tenant: Tenant identifier for headers
+        max_hops: Maximum iterations (overrides config if provided)
+        budget_tokens: Token budget limit
+
+    Returns:
+        Final message and flow instance
+    """
+    # Use provided max_hops or fall back to config
+    effective_max_hops = max_hops if max_hops is not None else config.max_hops
+
+    # Build flow with the effective max_hops baked in
+    flow = build_controller_flow(effective_max_hops)
+    flow.run()
+
+    # Initialize working memory
+    # Set budget_hops higher than max_hops to allow controller's termination logic to run
+    # before the framework's budget exhaustion kicks in
+    wm = WM(
+        query=query,
+        budget_hops=effective_max_hops + 1,  # +1 headroom for controller logic
+        budget_tokens=budget_tokens,
+    )
+
+    message = Message(
+        payload=wm,
+        headers=Headers(tenant=tenant),
+        deadline_s=time.time() + 30,  # 30 second deadline
+    )
+
+    # Emit and fetch result
+    await flow.emit(message)
+    final_msg = await flow.fetch()
+
+    await flow.stop()
+
+    return final_msg, flow

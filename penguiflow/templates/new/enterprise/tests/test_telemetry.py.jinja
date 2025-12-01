@@ -1,0 +1,191 @@
+"""Tests for enterprise telemetry features."""
+
+from __future__ import annotations
+
+import logging
+
+import pytest
+
+from penguiflow.planner import PlannerEvent
+
+from {{ package_name }}.telemetry import AgentTelemetry, ErrorRateTracker, LatencyHistogram
+
+
+def test_latency_histogram_tracks_percentiles() -> None:
+    """Latency histogram should calculate percentiles correctly."""
+    hist = LatencyHistogram(window_size=100)
+
+    # Add samples
+    for i in range(1, 101):
+        hist.record(float(i))
+
+    percentiles = hist.percentiles()
+    assert percentiles["p50"] == pytest.approx(50, abs=2)
+    assert percentiles["p95"] == pytest.approx(95, abs=2)
+    assert percentiles["p99"] == pytest.approx(99, abs=2)
+    assert percentiles["mean"] == pytest.approx(50.5, abs=1)
+    assert percentiles["max"] == 100.0
+
+
+def test_latency_histogram_handles_empty() -> None:
+    """Latency histogram should handle empty samples."""
+    hist = LatencyHistogram()
+    percentiles = hist.percentiles()
+
+    assert percentiles["p50"] == 0.0
+    assert percentiles["p95"] == 0.0
+    assert percentiles["p99"] == 0.0
+    assert percentiles["mean"] == 0.0
+    assert percentiles["max"] == 0.0
+
+
+def test_latency_histogram_respects_window_size() -> None:
+    """Latency histogram should maintain window size."""
+    hist = LatencyHistogram(window_size=10)
+
+    # Add more than window size
+    for i in range(20):
+        hist.record(float(i))
+
+    # Should only keep last 10
+    assert len(hist._samples) == 10
+    percentiles = hist.percentiles()
+    # Latest 10 are 10-19
+    assert percentiles["mean"] == pytest.approx(14.5, abs=1)
+
+
+def test_error_rate_tracker_calculates_rate() -> None:
+    """Error rate tracker should calculate error rate correctly."""
+    tracker = ErrorRateTracker(window_seconds=60.0)
+
+    # Record some successes and failures
+    for _ in range(7):
+        tracker.record_success()
+    for _ in range(3):
+        tracker.record_failure()
+
+    error_rate = tracker.error_rate()
+    assert error_rate == pytest.approx(0.3, abs=0.01)  # 3/10 = 0.3
+
+
+def test_error_rate_tracker_stats() -> None:
+    """Error rate tracker should provide detailed stats."""
+    tracker = ErrorRateTracker(window_seconds=60.0)
+
+    tracker.record_success()
+    tracker.record_success()
+    tracker.record_failure()
+
+    stats = tracker.stats()
+    assert stats["successes"] == 2
+    assert stats["failures"] == 1
+    assert stats["error_rate"] == pytest.approx(1 / 3, abs=0.01)
+    assert stats["window_seconds"] == 60.0
+
+
+def test_agent_telemetry_records_events() -> None:
+    """Agent telemetry should record planner events."""
+    logger = logging.getLogger("test")
+    telemetry = AgentTelemetry(flow_name="test_flow", logger=logger)
+
+    event = PlannerEvent(
+        event_type="step_start",
+        ts=0.0,
+        trajectory_step=0,
+        node_name="test_node",
+    )
+
+    telemetry.record_planner_event(event)
+
+    assert len(telemetry.events) == 1
+    assert telemetry.events[0].event_type == "step_start"
+
+
+def test_agent_telemetry_tracks_latency() -> None:
+    """Agent telemetry should track node latency."""
+    logger = logging.getLogger("test")
+    telemetry = AgentTelemetry(flow_name="test_flow", logger=logger)
+
+    # Simulate node execution
+    for i, latency in enumerate([10.0, 20.0, 30.0]):
+        event = PlannerEvent(
+            event_type="step_complete",
+            ts=float(i),
+            trajectory_step=i,
+            node_name="test_node",
+            latency_ms=latency,
+        )
+        telemetry.record_planner_event(event)
+
+    # Check latency histogram
+    assert "test_node" in telemetry._latency_histograms
+    percentiles = telemetry._latency_histograms["test_node"].percentiles()
+    assert percentiles["mean"] == pytest.approx(20.0, abs=1)
+
+
+def test_agent_telemetry_tracks_errors() -> None:
+    """Agent telemetry should track error rates."""
+    logger = logging.getLogger("test")
+    telemetry = AgentTelemetry(flow_name="test_flow", logger=logger)
+
+    # Simulate successes and failures
+    for i in range(7):
+        event = PlannerEvent(
+            event_type="step_complete",
+            ts=float(i),
+            trajectory_step=i,
+            node_name="test_node",
+        )
+        telemetry.record_planner_event(event)
+
+    for i in range(3):
+        event = PlannerEvent(
+            event_type="step_complete",
+            ts=float(7 + i),
+            trajectory_step=7 + i,
+            node_name="test_node",
+            error="test error",
+        )
+        telemetry.record_planner_event(event)
+
+    # Check error rate
+    assert "test_node" in telemetry._error_trackers
+    error_rate = telemetry._error_trackers["test_node"].error_rate()
+    assert error_rate == pytest.approx(0.3, abs=0.01)
+
+
+def test_agent_telemetry_circuit_breaker_state() -> None:
+    """Agent telemetry should record circuit breaker states."""
+    logger = logging.getLogger("test")
+    telemetry = AgentTelemetry(flow_name="test_flow", logger=logger)
+
+    telemetry.record_circuit_breaker_state("memory_service", "open")
+    telemetry.record_circuit_breaker_state("search_service", "closed")
+
+    assert telemetry._circuit_breaker_states["memory_service"] == "open"
+    assert telemetry._circuit_breaker_states["search_service"] == "closed"
+
+
+def test_agent_telemetry_metrics_summary() -> None:
+    """Agent telemetry should provide metrics summary."""
+    logger = logging.getLogger("test")
+    telemetry = AgentTelemetry(flow_name="test_flow", logger=logger)
+
+    # Add some events
+    event = PlannerEvent(
+        event_type="step_complete",
+        ts=0.0,
+        trajectory_step=0,
+        node_name="test_node",
+        latency_ms=15.0,
+    )
+    telemetry.record_planner_event(event)
+    telemetry.record_circuit_breaker_state("test_service", "open")
+
+    summary = telemetry.get_metrics_summary()
+
+    assert summary["flow_name"] == "test_flow"
+    assert summary["total_events"] == 1
+    assert "test_node" in summary["latency_percentiles"]
+    assert "test_node" in summary["error_rates"]
+    assert summary["circuit_breaker_states"]["test_service"] == "open"

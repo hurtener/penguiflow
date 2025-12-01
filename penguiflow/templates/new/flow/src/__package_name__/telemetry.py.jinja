@@ -1,0 +1,52 @@
+"""Observability helpers for {{ project_name }}."""
+
+from __future__ import annotations
+
+import logging
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
+
+from pydantic import BaseModel
+
+
+class StatusUpdate(BaseModel):
+    """Status update payload for UI hooks."""
+
+    status: str
+    message: str
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+@dataclass
+class AgentTelemetry:
+    """Simple telemetry for flow events."""
+
+    flow_name: str
+    logger: logging.Logger
+{% if with_streaming %}
+    _status_buffer: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: defaultdict(list))
+{% endif %}
+
+    def log_event(self, event_type: str, **kwargs: Any) -> None:
+        """Log a telemetry event."""
+        payload = {"flow": self.flow_name, "event_type": event_type, **kwargs}
+
+        if event_type == "error":
+            self.logger.error(event_type, extra=payload)
+        elif event_type in ("start", "finish"):
+            self.logger.info(event_type, extra=payload)
+        else:
+            self.logger.debug(event_type, extra=payload)
+{% if with_streaming %}
+
+    def record_status(self, trace_id: str, status: StatusUpdate) -> None:
+        """Record status update for a trace."""
+        self._status_buffer[trace_id].append(status.model_dump())
+
+    def get_status_updates(self, trace_id: str) -> list[dict[str, Any]] | None:
+        """Retrieve status updates for a trace."""
+        updates = self._status_buffer.get(trace_id, [])
+        return updates if updates else None
+{% endif %}

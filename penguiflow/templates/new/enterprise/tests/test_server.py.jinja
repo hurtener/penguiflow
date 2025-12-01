@@ -1,0 +1,128 @@
+"""Tests for server handlers."""
+
+from __future__ import annotations
+
+import pytest
+
+from {{ package_name }}.config import Config
+from {{ package_name }}.orchestrator import {{ class_name }}Orchestrator, AgentResponse
+from {{ package_name }}.server import create_http_handler{% if with_a2a %}, create_grpc_handler{% endif %}
+
+
+@pytest.fixture
+def config() -> Config:
+    return Config()
+
+
+@pytest.fixture
+async def orchestrator(config: Config) -> {{ class_name }}Orchestrator:
+    orch = {{ class_name }}Orchestrator(config)
+    yield orch
+    await orch.stop()
+
+
+@pytest.mark.asyncio
+async def test_http_handler_execute(orchestrator: {{ class_name }}Orchestrator) -> None:
+    """HTTP handler should handle execute requests."""
+    handler = create_http_handler(orchestrator)
+
+    request = {
+        "query": "Test query",
+        "tenant_id": "tenant1",
+        "user_id": "user1",
+        "session_id": "session1",
+    }
+
+    response = await handler.handle_execute(request)
+
+    assert "answer" in response
+    assert "trace_id" in response
+    assert "metadata" in response
+{% if with_streaming %}
+    assert "streams" in response
+{% endif %}
+{% if with_hitl %}
+    assert "pause_token" in response
+{% endif %}
+
+
+@pytest.mark.asyncio
+async def test_http_handler_execute_missing_fields(
+    orchestrator: {{ class_name }}Orchestrator,
+) -> None:
+    """HTTP handler should raise on missing required fields."""
+    handler = create_http_handler(orchestrator)
+
+    request = {
+        "query": "Test query",
+        # Missing tenant_id, user_id, session_id
+    }
+
+    with pytest.raises(ValueError, match="Missing required field"):
+        await handler.handle_execute(request)
+
+
+{% if with_hitl %}
+@pytest.mark.asyncio
+async def test_http_handler_resume(orchestrator: {{ class_name }}Orchestrator) -> None:
+    """HTTP handler should handle resume requests."""
+    handler = create_http_handler(orchestrator)
+
+    # Mock the resume method
+    async def mock_resume(*args, **kwargs):
+        return AgentResponse(
+            answer="Resumed",
+            trace_id="trace123",
+            metadata={},
+            pause_token=None,
+        )
+
+    orchestrator.resume = mock_resume  # type: ignore[method-assign]
+
+    request = {
+        "resume_token": "token123",
+        "tenant_id": "tenant1",
+        "user_id": "user1",
+        "session_id": "session1",
+        "user_input": "Continue",
+    }
+
+    response = await handler.handle_resume(request)
+
+    assert response["answer"] == "Resumed"
+    assert response["trace_id"] == "trace123"
+{% endif %}
+
+
+@pytest.mark.asyncio
+async def test_http_handler_health(orchestrator: {{ class_name }}Orchestrator) -> None:
+    """HTTP handler should provide health check."""
+    handler = create_http_handler(orchestrator)
+
+    response = await handler.handle_health()
+
+    assert response["status"] == "healthy"
+    assert "{{ project_name }}" in response["service"]
+
+
+@pytest.mark.asyncio
+async def test_http_handler_metrics(orchestrator: {{ class_name }}Orchestrator) -> None:
+    """HTTP handler should provide metrics."""
+    handler = create_http_handler(orchestrator)
+
+    response = await handler.handle_metrics()
+
+    # Should return metrics summary from telemetry
+    assert "flow_name" in response or "message" in response
+
+
+{% if with_a2a %}
+@pytest.mark.asyncio
+async def test_grpc_handler_stub(orchestrator: {{ class_name }}Orchestrator) -> None:
+    """gRPC handler should be a stub."""
+    handler = create_grpc_handler(orchestrator)
+
+    # Should raise NotImplementedError as it's a stub
+    with pytest.raises(NotImplementedError):
+        await handler.execute_grpc(None)
+{% endif %}

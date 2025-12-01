@@ -20,7 +20,7 @@ def _project_paths(base: Path, name: str) -> tuple[Path, Path]:
     return project_dir, package_dir
 
 
-@pytest.mark.parametrize("template", ["minimal", "react", "parallel", "lighthouse", "wayfinder", "analyst", "enterprise"])
+@pytest.mark.parametrize("template", ["minimal", "react", "parallel", "flow", "controller", "lighthouse", "wayfinder", "analyst", "enterprise"])
 def test_run_new_creates_expected_files(tmp_path: Path, template: str) -> None:
     name = f"{template}-agent"
     result = run_new(name=name, template=template, output_dir=tmp_path, quiet=True)
@@ -60,7 +60,7 @@ def test_cli_new_command_creates_project(tmp_path: Path) -> None:
     assert (tmp_path / "cli-agent" / "pyproject.toml").exists()
 
 
-@pytest.mark.parametrize("template", ["minimal", "react", "parallel", "lighthouse", "wayfinder", "analyst", "enterprise"])
+@pytest.mark.parametrize("template", ["minimal", "react", "parallel", "flow", "controller", "lighthouse", "wayfinder", "analyst", "enterprise"])
 def test_generated_project_tests_pass(tmp_path: Path, template: str) -> None:
     name = f"{template}-proj"
     project_dir, _ = _project_paths(tmp_path, name)
@@ -92,6 +92,8 @@ def test_generated_project_tests_pass(tmp_path: Path, template: str) -> None:
         ("minimal", {"with_streaming": True, "with_hitl": True}),
         ("react", {"with_streaming": True, "with_a2a": True}),
         ("parallel", {"no_memory": True}),
+        ("flow", {"with_streaming": True, "with_a2a": True}),
+        ("controller", {"with_streaming": True, "no_memory": True}),
         ("lighthouse", {"with_streaming": True}),
         ("wayfinder", {"with_hitl": True}),
         ("analyst", {"with_a2a": True}),

@@ -53,7 +53,10 @@ async def test_execute_returns_agent_response(config: Config) -> None:
     assert response.answer
     assert response.trace_id
 {% if with_streaming %}
+    # Verify streaming is enabled and streams attribute exists
+    assert hasattr(response, "streams")
     assert response.streams is not None
+    # Note: wayfinder template may emit "plan", "clarify", "execute" streams if tools are called
 {% endif %}
 {% if with_hitl %}
     assert hasattr(response, "pause_token")

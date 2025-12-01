@@ -1,0 +1,230 @@
+"""Multi-stage validation for enterprise workflows."""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class ValidationStage(BaseModel):
+    """Represents a single validation stage."""
+
+    stage_name: str
+    passed: bool
+    message: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ValidationResult(BaseModel):
+    """Multi-stage validation result."""
+
+    overall_passed: bool
+    stages: list[ValidationStage]
+    recommendations: list[str] = Field(default_factory=list)
+
+
+async def validate_input(
+    ctx: dict[str, Any],
+    data: dict[str, Any],
+) -> ValidationResult:
+    """Perform multi-stage input validation.
+
+    Stages:
+    1. Schema validation (structure check)
+    2. Business rules validation
+    3. Security validation (injection detection)
+
+    Args:
+        ctx: Tool context with tenant/user/session info
+        data: Data to validate
+
+    Returns:
+        ValidationResult with all stages
+    """
+    stages: list[ValidationStage] = []
+
+    # Stage 1: Schema validation
+    schema_passed = True
+    schema_message = "Schema validation passed"
+    required_fields = ["query", "tenant_id"]
+    missing = [f for f in required_fields if f not in data]
+    if missing:
+        schema_passed = False
+        schema_message = f"Missing required fields: {missing}"
+
+    stages.append(
+        ValidationStage(
+            stage_name="schema",
+            passed=schema_passed,
+            message=schema_message,
+            details={"missing_fields": missing} if missing else {},
+        )
+    )
+
+    # Stage 2: Business rules validation
+    business_passed = True
+    business_message = "Business rules passed"
+    if "query" in data and len(data["query"]) > 10000:
+        business_passed = False
+        business_message = "Query exceeds maximum length (10000 characters)"
+
+    stages.append(
+        ValidationStage(
+            stage_name="business_rules",
+            passed=business_passed,
+            message=business_message,
+            details={"query_length": len(data.get("query", ""))},
+        )
+    )
+
+    # Stage 3: Security validation
+    security_passed = True
+    security_message = "Security validation passed"
+    suspicious_patterns = ["<script>", "DROP TABLE", "'; --"]
+    found_patterns = [
+        p for p in suspicious_patterns if p.lower() in str(data.get("query", "")).lower()
+    ]
+    if found_patterns:
+        security_passed = False
+        security_message = f"Suspicious patterns detected: {found_patterns}"
+
+    stages.append(
+        ValidationStage(
+            stage_name="security",
+            passed=security_passed,
+            message=security_message,
+            details={"suspicious_patterns": found_patterns} if found_patterns else {},
+        )
+    )
+
+    # Generate recommendations
+    recommendations: list[str] = []
+    if not schema_passed:
+        recommendations.append("Provide all required fields before processing")
+    if not business_passed:
+        recommendations.append("Reduce query length or split into multiple requests")
+    if not security_passed:
+        recommendations.append("Review input for potential security issues")
+
+    overall_passed = all(s.passed for s in stages)
+
+    _LOGGER.info(
+        "validation_completed",
+        extra={
+            "tenant_id": ctx.get("tenant_id"),
+            "overall_passed": overall_passed,
+            "failed_stages": [s.stage_name for s in stages if not s.passed],
+        },
+    )
+
+    return ValidationResult(
+        overall_passed=overall_passed,
+        stages=stages,
+        recommendations=recommendations,
+    )
+
+
+async def validate_output(
+    ctx: dict[str, Any],
+    output: dict[str, Any],
+) -> ValidationResult:
+    """Validate output before returning to user.
+
+    Stages:
+    1. Completeness check
+    2. Quality check
+    3. PII detection
+
+    Args:
+        ctx: Tool context
+        output: Output to validate
+
+    Returns:
+        ValidationResult with all stages
+    """
+    stages: list[ValidationStage] = []
+
+    # Stage 1: Completeness
+    completeness_passed = True
+    completeness_message = "Output is complete"
+    if "answer" not in output or not output["answer"]:
+        completeness_passed = False
+        completeness_message = "Output missing required 'answer' field"
+
+    stages.append(
+        ValidationStage(
+            stage_name="completeness",
+            passed=completeness_passed,
+            message=completeness_message,
+        )
+    )
+
+    # Stage 2: Quality check
+    quality_passed = True
+    quality_message = "Output quality is acceptable"
+    answer = str(output.get("answer", ""))
+    if len(answer) < 10:
+        quality_passed = False
+        quality_message = "Answer is too short to be useful"
+
+    stages.append(
+        ValidationStage(
+            stage_name="quality",
+            passed=quality_passed,
+            message=quality_message,
+            details={"answer_length": len(answer)},
+        )
+    )
+
+    # Stage 3: PII detection (simple patterns)
+    pii_passed = True
+    pii_message = "No PII detected"
+    pii_patterns = [
+        r"\d{3}-\d{2}-\d{4}",  # SSN
+        r"\d{16}",  # Credit card
+    ]
+    import re
+
+    found_pii = [p for p in pii_patterns if re.search(p, answer)]
+    if found_pii:
+        pii_passed = False
+        pii_message = "Potential PII detected in output"
+
+    stages.append(
+        ValidationStage(
+            stage_name="pii_detection",
+            passed=pii_passed,
+            message=pii_message,
+            details={"patterns_matched": len(found_pii)},
+        )
+    )
+
+    # Generate recommendations
+    recommendations: list[str] = []
+    if not completeness_passed:
+        recommendations.append("Ensure all required output fields are populated")
+    if not quality_passed:
+        recommendations.append("Expand answer to provide more detail")
+    if not pii_passed:
+        recommendations.append("Redact or mask PII before returning to user")
+
+    overall_passed = all(s.passed for s in stages)
+
+    _LOGGER.info(
+        "output_validation_completed",
+        extra={
+            "tenant_id": ctx.get("tenant_id"),
+            "overall_passed": overall_passed,
+            "failed_stages": [s.stage_name for s in stages if not s.passed],
+        },
+    )
+
+    return ValidationResult(
+        overall_passed=overall_passed,
+        stages=stages,
+        recommendations=recommendations,
+    )

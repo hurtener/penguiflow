@@ -1,0 +1,42 @@
+"""Entry point for {{ project_name }}."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from .config import Config
+from .orchestrator import {{ class_name }}Orchestrator
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
+
+async def main() -> None:
+    """Run a simple test query."""
+    config = Config.from_env()
+    orchestrator = {{ class_name }}Orchestrator(config)
+
+    try:
+        response = await orchestrator.execute(
+            query="What is PenguiFlow?",
+            tenant_id="demo-tenant",
+            user_id="demo-user",
+            session_id="demo-session",
+        )
+
+        print("\n=== Response ===")
+        print(f"Trace ID: {response.trace_id}")
+        print(f"Answer: {response.answer}")
+{% if with_streaming %}
+        if response.streams:
+            print(f"\nStreams collected: {list(response.streams.keys())}")
+{% endif %}
+    finally:
+        await orchestrator.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

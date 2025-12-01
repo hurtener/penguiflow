@@ -9,9 +9,6 @@ from typing import Any, Mapping
 
 from penguiflow.errors import FlowError
 from penguiflow.planner import PlannerFinish, PlannerPause
-{% if with_streaming %}
-from penguiflow.types import StreamChunk
-{% endif %}
 {% if memory_enabled %}
 from .clients.memory import MemoryClient
 {% endif %}

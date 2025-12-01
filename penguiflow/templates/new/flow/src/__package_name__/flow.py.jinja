@@ -1,0 +1,276 @@
+"""PenguiFlow flow definition for {{ project_name }}."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from penguiflow.core import PenguiFlow, create
+from penguiflow.node import Node, NodePolicy
+from penguiflow.registry import ModelRegistry
+from penguiflow.types import Message
+from pydantic import BaseModel
+{% if with_streaming %}
+
+from .telemetry import StatusUpdate
+{% endif %}
+{% if memory_enabled %}
+
+from .clients.memory import MemoryClient
+{% endif %}
+
+
+class QueryPayload(BaseModel):
+    """Input payload for the flow."""
+
+    query: str
+    tenant_id: str
+    user_id: str
+    session_id: str
+{% if memory_enabled %}
+    conscious_memories: list[dict[str, Any]] | None = None
+    retrieved_memories: list[dict[str, Any]] | None = None
+{% endif %}
+
+
+class ProcessedPayload(BaseModel):
+    """Intermediate processing result."""
+
+    query: str
+    processed_text: str
+    metadata: dict[str, Any]
+
+
+class FinalAnswer(BaseModel):
+    """Final response from the flow."""
+
+    text: str
+    sources: list[str] | None = None
+
+
+@dataclass(slots=True)
+class _FlowBundle:
+    """Bundle containing flow components."""
+
+    flow: PenguiFlow
+    registry: ModelRegistry
+    prepare_node: Node
+    process_node: Node
+    finalize_node: Node
+
+
+async def _prepare_node(message: Message, _ctx: Any) -> Message:
+    """Prepare and validate the incoming query."""
+    # Extract message
+    base_message = message if isinstance(message, Message) else Message.model_validate(message)
+
+    # Extract and validate payload
+    candidate = base_message.payload
+    payload = (
+        candidate
+        if isinstance(candidate, QueryPayload)
+        else QueryPayload.model_validate(candidate)
+    )
+
+{% if with_streaming %}
+    # Emit status update if context available
+    if hasattr(_ctx, "emit"):
+        status = StatusUpdate(status="preparing", message="Validating query")
+        status_message = base_message.model_copy(update={"payload": status})
+        # Try to emit to status_sink if it exists
+        for target in getattr(_ctx, "_outgoing", []):
+            if getattr(target, "name", None) == "status_sink":
+                await _ctx.emit(status_message, to=target)
+                break
+
+{% endif %}
+    # Business logic - prepare for processing
+    metadata = {
+        "tenant_id": payload.tenant_id,
+        "user_id": payload.user_id,
+        "session_id": payload.session_id,
+        "query_length": len(payload.query),
+    }
+{% if memory_enabled %}
+    if payload.conscious_memories:
+        metadata["conscious_count"] = len(payload.conscious_memories)
+    if payload.retrieved_memories:
+        metadata["retrieved_count"] = len(payload.retrieved_memories)
+{% endif %}
+
+    # Return updated message with same payload (validation complete)
+    return base_message.model_copy(update={"payload": payload})
+
+
+{% if memory_enabled %}
+def _make_process_node(memory: MemoryClient | None) -> Node:
+    """Create processing node with memory dependency."""
+
+    async def _process(message: Message, _ctx: Any) -> Message:
+{% else %}
+async def _process_node(message: Message, _ctx: Any) -> Message:
+{% endif %}
+        """Process the query with business logic."""
+        # Extract message
+        base_message = message if isinstance(message, Message) else Message.model_validate(message)
+
+        # Extract and validate payload
+        candidate = base_message.payload
+        payload = (
+            candidate
+            if isinstance(candidate, QueryPayload)
+            else QueryPayload.model_validate(candidate)
+        )
+
+{% if with_streaming %}
+        # Emit status update
+        if hasattr(_ctx, "emit"):
+            status = StatusUpdate(status="processing", message="Analyzing query")
+            status_message = base_message.model_copy(update={"payload": status})
+            for target in getattr(_ctx, "_outgoing", []):
+                if getattr(target, "name", None) == "status_sink":
+                    await _ctx.emit(status_message, to=target)
+                    break
+
+{% endif %}
+        # Business logic - process the query
+        processed_text = f"Processed: {payload.query}"
+
+        metadata = {
+            "original_query": payload.query,
+            "tenant_id": payload.tenant_id,
+            "processing_step": "complete",
+        }
+{% if memory_enabled %}
+
+        # Use memory if available
+        if memory:
+            # Example: could fetch additional context here
+            metadata["memory_available"] = True
+{% endif %}
+
+        processed = ProcessedPayload(
+            query=payload.query,
+            processed_text=processed_text,
+            metadata=metadata,
+        )
+
+        # Return updated message with new payload
+        return base_message.model_copy(update={"payload": processed})
+{% if memory_enabled %}
+
+    return Node(_process, name="process", policy=NodePolicy(validate="both"))
+{% endif %}
+
+
+async def _finalize_node(message: Message, _ctx: Any) -> Message:
+    """Finalize the response."""
+    # Extract message
+    base_message = message if isinstance(message, Message) else Message.model_validate(message)
+
+    # Extract and validate payload
+    candidate = base_message.payload
+    payload = (
+        candidate
+        if isinstance(candidate, ProcessedPayload)
+        else ProcessedPayload.model_validate(candidate)
+    )
+
+{% if with_streaming %}
+    # Emit status update
+    if hasattr(_ctx, "emit"):
+        status = StatusUpdate(status="finalizing", message="Generating final response")
+        status_message = base_message.model_copy(update={"payload": status})
+        for target in getattr(_ctx, "_outgoing", []):
+            if getattr(target, "name", None) == "status_sink":
+                await _ctx.emit(status_message, to=target)
+                break
+
+{% endif %}
+    # Business logic - create final answer
+    answer_text = f"{payload.processed_text}\n\nMetadata: {payload.metadata}"
+    sources = [payload.metadata.get("original_query", "")]
+
+    final = FinalAnswer(text=answer_text, sources=sources)
+
+{% if with_streaming %}
+    # Emit completion status
+    if hasattr(_ctx, "emit"):
+        status = StatusUpdate(status="complete", message="Response ready")
+        status_message = base_message.model_copy(update={"payload": status})
+        for target in getattr(_ctx, "_outgoing", []):
+            if getattr(target, "name", None) == "status_sink":
+                await _ctx.emit(status_message, to=target)
+                break
+
+{% endif %}
+    # Return updated message with final answer
+    return base_message.model_copy(update={"payload": final})
+
+
+{% if with_streaming %}
+async def _status_sink(message: Message, _ctx: Any) -> None:
+    """Sink node that collects status updates."""
+    # Just consume the status update - no return value needed
+    return None
+
+
+{% endif %}
+def _build_flow(
+{% if memory_enabled %}
+    *,
+    memory: MemoryClient | None = None,
+{% endif %}
+) -> _FlowBundle:
+    """Create the PenguiFlow definition."""
+
+    # Create nodes
+    prepare_node = Node(
+        _prepare_node,
+        name="prepare",
+        policy=NodePolicy(validate="both"),
+    )
+{% if memory_enabled %}
+    process_node = _make_process_node(memory)
+{% else %}
+    process_node = Node(
+        _process_node,
+        name="process",
+        policy=NodePolicy(validate="both"),
+    )
+{% endif %}
+    finalize_node = Node(
+        _finalize_node,
+        name="finalize",
+        policy=NodePolicy(validate="both"),
+    )
+{% if with_streaming %}
+    status_node = Node(
+        _status_sink,
+        name="status_sink",
+        policy=NodePolicy(validate="none"),
+    )
+{% endif %}
+
+    # Build flow
+    # Note: Status updates are emitted via ctx.emit() inside node functions,
+    # not via the topology. The main flow outputs go to the Rookery.
+    flow = create(
+        prepare_node.to(process_node),
+        process_node.to(finalize_node),
+    )
+
+    # Register models
+    # Note: status_sink is not registered since it has validate="none" and returns None
+    registry = ModelRegistry()
+    registry.register("prepare", Message, Message)
+    registry.register("process", Message, Message)
+    registry.register("finalize", Message, Message)
+
+    return _FlowBundle(
+        flow=flow,
+        registry=registry,
+        prepare_node=prepare_node,
+        process_node=process_node,
+        finalize_node=finalize_node,
+    )

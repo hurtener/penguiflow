@@ -1,0 +1,63 @@
+"""Tests for service registry."""
+
+from __future__ import annotations
+
+import pytest
+
+from {{ package_name }}.clients.registry import ServiceRegistry
+from {{ package_name }}.config import Config
+{% if memory_enabled %}
+from {{ package_name }}.clients.memory import MemoryClient
+{% endif %}
+
+
+@pytest.fixture
+def config() -> Config:
+    return Config()
+
+
+{% if memory_enabled %}
+def test_registry_lazy_initialization(config: Config) -> None:
+    """Service registry should lazily initialize clients."""
+    registry = ServiceRegistry(config)
+
+    # Client should not be initialized yet
+    assert registry._memory is None
+
+    # First access should initialize
+    memory = registry.get_memory_client()
+    assert isinstance(memory, MemoryClient)
+    assert registry._memory is not None
+
+    # Second access should return same instance
+    memory2 = registry.get_memory_client()
+    assert memory is memory2
+
+
+@pytest.mark.asyncio
+async def test_registry_close_all(config: Config) -> None:
+    """Service registry should close all clients."""
+    registry = ServiceRegistry(config)
+
+    # Initialize a client
+    memory = registry.get_memory_client()
+    assert registry._memory is not None
+
+    # Close all
+    await registry.close_all()
+    assert registry._memory is None
+{% else %}
+def test_registry_no_memory(config: Config) -> None:
+    """Service registry should work without memory enabled."""
+    registry = ServiceRegistry(config)
+
+    # No memory client should be available
+    assert not hasattr(registry, "get_memory_client")
+
+
+@pytest.mark.asyncio
+async def test_registry_close_all_no_clients(config: Config) -> None:
+    """Service registry should handle close_all with no clients."""
+    registry = ServiceRegistry(config)
+    await registry.close_all()  # Should not raise
+{% endif %}

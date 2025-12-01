@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from penguiflow.catalog import tool
 from penguiflow.planner import ToolContext
-{% if with_streaming %}
-from ..telemetry import StatusUpdate
-{% endif %}
+
 from ..clients.analyst import AnalystClient
 from ..models import AnalysisRequest, AnalysisResult
 
@@ -21,12 +19,12 @@ def _client(ctx: ToolContext) -> AnalystClient:
 async def analyze_request(args: AnalysisRequest, ctx: ToolContext) -> AnalysisResult:
     client = _client(ctx)
 {% if with_streaming %}
-    publisher = ctx.tool_context.get("status_publisher")
-    if callable(publisher):
-        publisher(StatusUpdate(status="thinking", message=f"Analyzing {args.topic}"))
-    await ctx.emit_chunk("analysis", 0, f"Analyzing {args.topic}")
+    await ctx.emit_chunk("analysis", 0, f"Analyzing {args.topic}...")
 {% endif %}
     result = await client.analyze(args.topic, args.artifacts)
+{% if with_streaming %}
+    await ctx.emit_chunk("analysis", 1, f"Analysis complete", done=True)
+{% endif %}
     return AnalysisResult(
         summary=str(result.get("summary", "")),
         recommendations=[str(rec) for rec in result.get("recommendations", [])],

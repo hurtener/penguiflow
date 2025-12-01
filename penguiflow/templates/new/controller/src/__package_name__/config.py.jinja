@@ -1,0 +1,24 @@
+"""Configuration for {{ project_name }}."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+
+@dataclass
+class Config:
+    """Environment-driven configuration."""
+
+    memory_base_url: str = "http://localhost:8000"
+    llm_model: str = "stub-llm"
+    max_hops: int = 5
+
+    @classmethod
+    def from_env(cls) -> "Config":
+        """Load configuration from environment variables."""
+        return cls(
+            memory_base_url=os.getenv("MEMORY_BASE_URL", "http://localhost:8000"),
+            llm_model=os.getenv("LLM_MODEL", "stub-llm"),
+            max_hops=int(os.getenv("MAX_HOPS", "5")),
+        )

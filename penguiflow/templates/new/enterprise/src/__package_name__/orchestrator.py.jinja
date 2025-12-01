@@ -9,15 +9,10 @@ from typing import Any, Mapping
 
 from penguiflow.errors import FlowError
 from penguiflow.planner import PlannerFinish, PlannerPause
-{% if with_streaming %}
-from penguiflow.types import StreamChunk
-{% endif %}
-{% if memory_enabled %}
-from .clients.memory import MemoryClient
-{% endif %}
 {% if with_a2a %}
 from .a2a import A2AServer
 {% endif %}
+from .clients.registry import ServiceRegistry
 from .config import Config
 from .models import FinalAnswer
 from .planner import PlannerBundle, build_planner
@@ -60,7 +55,14 @@ def _collect_streams(metadata: Mapping[str, Any]) -> dict[str, list[dict[str, An
 
 
 class {{ class_name }}Orchestrator:
-    """Production-style orchestrator using ReactPlanner with enterprise defaults."""
+    """Production-style orchestrator using ReactPlanner with enterprise defaults.
+
+    Features:
+    - Service registry for centralized client management
+    - Advanced telemetry with latency histograms and error rate tracking
+    - Circuit breaker and rate limiting support (configurable)
+    - Graceful shutdown and resource cleanup
+    """
 
     def __init__(
         self,
@@ -69,11 +71,7 @@ class {{ class_name }}Orchestrator:
         telemetry: AgentTelemetry | None = None,
     ) -> None:
         self._config = config
-{% if memory_enabled %}
-        self._memory = MemoryClient(config.memory_base_url)
-{% else %}
-        self._memory = None
-{% endif %}
+        self._registry = ServiceRegistry(config)
         self._telemetry = telemetry or AgentTelemetry(
             flow_name="{{ project_name }}",
             logger=_LOGGER,
@@ -101,12 +99,13 @@ class {{ class_name }}Orchestrator:
         trace_id = secrets.token_hex(8)
 
 {% if memory_enabled %}
-        conscious = await self._memory.start_session(
+        memory_client = self._registry.get_memory_client()
+        conscious = await memory_client.start_session(
             tenant_id=tenant_id,
             user_id=user_id,
             session_id=session_id,
         )
-        retrieval = await self._memory.auto_retrieve(
+        retrieval = await memory_client.auto_retrieve(
             tenant_id=tenant_id,
             user_id=user_id,
             session_id=session_id,
@@ -158,7 +157,8 @@ class {{ class_name }}Orchestrator:
         answer_text = payload.answer if isinstance(payload, FinalAnswer) else str(payload)
 
 {% if memory_enabled %}
-        await self._memory.ingest_interaction(
+        memory_client = self._registry.get_memory_client()
+        await memory_client.ingest_interaction(
             tenant_id=tenant_id,
             user_id=user_id,
             session_id=session_id,
@@ -220,7 +220,8 @@ class {{ class_name }}Orchestrator:
         answer_text = payload.answer if isinstance(payload, FinalAnswer) else str(payload)
 
 {% if memory_enabled %}
-        await self._memory.ingest_interaction(
+        memory_client = self._registry.get_memory_client()
+        await memory_client.ingest_interaction(
             tenant_id=tenant_id,
             user_id=user_id,
             session_id=session_id,
@@ -246,6 +247,7 @@ class {{ class_name }}Orchestrator:
             if getattr(self, "_a2a_server", None):
                 await self._a2a_server.stop()
 {% endif %}
+            await self._registry.close_all()
             self._started = False
             _LOGGER.info("{{ project_name }} orchestrator stopped")
 

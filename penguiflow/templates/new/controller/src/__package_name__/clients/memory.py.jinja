@@ -1,0 +1,49 @@
+{% if memory_enabled -%}
+"""Memory client for persistent storage."""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+class MemoryClient:
+    """Stub client for memory/RAG service."""
+
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url
+
+    async def start_session(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Start or resume a session."""
+        return {"conscious": []}
+
+    async def auto_retrieve(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        prompt: str,
+    ) -> dict[str, Any]:
+        """Retrieve relevant snippets."""
+        return {"snippets": []}
+
+    async def ingest_interaction(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        user_prompt: str,
+        agent_response: str,
+    ) -> None:
+        """Record interaction for future retrieval."""
+        pass
+{% else -%}
+# Memory flag not enabled; add `--memory` to scaffold memory client.
+{% endif %}

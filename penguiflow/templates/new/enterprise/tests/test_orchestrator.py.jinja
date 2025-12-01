@@ -53,7 +53,10 @@ async def test_execute_returns_agent_response(config: Config) -> None:
     assert response.answer
     assert response.trace_id
 {% if with_streaming %}
+    # Verify streaming is enabled and streams attribute exists
+    assert hasattr(response, "streams")
     assert response.streams is not None
+    # Note: enterprise template may emit "recommendation", "triage", "logs", "diagnostics" streams if tools are called
 {% endif %}
 {% if with_hitl %}
     assert hasattr(response, "pause_token")
@@ -66,7 +69,8 @@ async def test_execute_returns_agent_response(config: Config) -> None:
 async def test_memory_lifecycle_called(config: Config) -> None:
     orchestrator = {{ class_name }}Orchestrator(config)
     tracker = TrackingMemory(config.memory_base_url)
-    orchestrator._memory = tracker  # type: ignore[attr-defined]
+    # Replace the memory client in the registry
+    orchestrator._registry._memory = tracker  # type: ignore[attr-defined]
 
     await orchestrator.execute(
         query="check lifecycle",

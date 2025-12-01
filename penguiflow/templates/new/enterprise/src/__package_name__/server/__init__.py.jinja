@@ -1,0 +1,5 @@
+"""Server components for {{ project_name }}."""
+
+from .handlers import create_http_handler{% if with_a2a %}, create_grpc_handler{% endif %}
+
+__all__ = ["create_http_handler"{% if with_a2a %}, "create_grpc_handler"{% endif %}]

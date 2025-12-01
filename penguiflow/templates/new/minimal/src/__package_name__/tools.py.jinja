@@ -26,7 +26,10 @@ class Answer(BaseModel):
 async def answer_question(args: Question, ctx: ToolContext) -> Answer:
     prefix = ctx.tool_context.get("tenant_id", "anonymous")
 {% if with_streaming %}
-    await ctx.emit_chunk("answer", 0, f"{prefix}: thinking about '{args.text}'")
+    await ctx.emit_chunk("answer", 0, f"{prefix}: thinking about '{args.text}'...")
+{% endif %}
+{% if with_streaming %}
+    await ctx.emit_chunk("answer", 1, f"Answer ready", done=True)
 {% endif %}
     return Answer(answer=f"[{prefix}] {args.text}")
 

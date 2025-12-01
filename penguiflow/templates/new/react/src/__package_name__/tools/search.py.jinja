@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from penguiflow.catalog import tool
 from penguiflow.planner import ToolContext
-{% if with_streaming %}
-from ..telemetry import StatusUpdate
-{% endif %}
+
 from ..models import Query, SearchResult, SearchResults
 
 
@@ -14,10 +12,16 @@ from ..models import Query, SearchResult, SearchResults
 async def search_documents(args: Query, ctx: ToolContext) -> SearchResults:
     tenant = ctx.tool_context.get("tenant_id", "public")
 {% if with_streaming %}
-    publisher = ctx.tool_context.get("status_publisher")
-    if callable(publisher):
-        publisher(StatusUpdate(status="thinking", message=f"Searching for '{args.question}'"))
-    await ctx.emit_chunk("search", 0, f"Searching {tenant} sources...")
+    await ctx.emit_chunk("search", 0, f"Searching {tenant} sources for '{args.question}'...")
+    # Publish status update if callback is available
+    status_publisher = ctx.tool_context.get("status_publisher")
+    if status_publisher:
+        status_publisher({"status": "searching", "tenant": tenant, "question": args.question})
 {% endif %}
     snippet = f"Result for '{args.question}' in tenant '{tenant}'"
+{% if with_streaming %}
+    await ctx.emit_chunk("search", 1, f"Found 1 result", done=True)
+    if status_publisher:
+        status_publisher({"status": "found", "results": 1})
+{% endif %}
     return SearchResults(results=[SearchResult(title="stub", snippet=snippet)])

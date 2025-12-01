@@ -1,0 +1,151 @@
+"""Tests for multi-stage validation tools."""
+
+from __future__ import annotations
+
+import pytest
+
+from {{ package_name }}.tools.validate import validate_input, validate_output
+
+
+@pytest.mark.asyncio
+async def test_validate_input_passes_valid_data() -> None:
+    """Validate input should pass valid data."""
+    ctx = {"tenant_id": "tenant1", "user_id": "user1"}
+    data = {
+        "query": "What is the weather?",
+        "tenant_id": "tenant1",
+    }
+
+    result = await validate_input(ctx, data)
+
+    assert result.overall_passed is True
+    assert len(result.stages) == 3
+    assert all(stage.passed for stage in result.stages)
+    assert len(result.recommendations) == 0
+
+
+@pytest.mark.asyncio
+async def test_validate_input_fails_missing_fields() -> None:
+    """Validate input should fail on missing required fields."""
+    ctx = {"tenant_id": "tenant1"}
+    data = {"tenant_id": "tenant1"}  # Missing 'query'
+
+    result = await validate_input(ctx, data)
+
+    assert result.overall_passed is False
+    schema_stage = next(s for s in result.stages if s.stage_name == "schema")
+    assert schema_stage.passed is False
+    assert "query" in str(schema_stage.details.get("missing_fields", []))
+    assert len(result.recommendations) > 0
+
+
+@pytest.mark.asyncio
+async def test_validate_input_fails_business_rules() -> None:
+    """Validate input should fail on business rule violations."""
+    ctx = {"tenant_id": "tenant1"}
+    data = {
+        "query": "x" * 10001,  # Exceeds max length
+        "tenant_id": "tenant1",
+    }
+
+    result = await validate_input(ctx, data)
+
+    assert result.overall_passed is False
+    business_stage = next(s for s in result.stages if s.stage_name == "business_rules")
+    assert business_stage.passed is False
+    assert "Reduce query length" in result.recommendations[0]
+
+
+@pytest.mark.asyncio
+async def test_validate_input_detects_security_issues() -> None:
+    """Validate input should detect suspicious patterns."""
+    ctx = {"tenant_id": "tenant1"}
+    data = {
+        "query": "Show me <script>alert('xss')</script>",
+        "tenant_id": "tenant1",
+    }
+
+    result = await validate_input(ctx, data)
+
+    assert result.overall_passed is False
+    security_stage = next(s for s in result.stages if s.stage_name == "security")
+    assert security_stage.passed is False
+    assert len(security_stage.details.get("suspicious_patterns", [])) > 0
+
+
+@pytest.mark.asyncio
+async def test_validate_output_passes_valid_output() -> None:
+    """Validate output should pass valid output."""
+    ctx = {"tenant_id": "tenant1"}
+    output = {
+        "answer": "The weather is sunny with a high of 75F.",
+    }
+
+    result = await validate_output(ctx, output)
+
+    assert result.overall_passed is True
+    assert all(stage.passed for stage in result.stages)
+    assert len(result.recommendations) == 0
+
+
+@pytest.mark.asyncio
+async def test_validate_output_fails_missing_answer() -> None:
+    """Validate output should fail on missing answer."""
+    ctx = {"tenant_id": "tenant1"}
+    output = {}
+
+    result = await validate_output(ctx, output)
+
+    assert result.overall_passed is False
+    completeness_stage = next(s for s in result.stages if s.stage_name == "completeness")
+    assert completeness_stage.passed is False
+
+
+@pytest.mark.asyncio
+async def test_validate_output_fails_quality_check() -> None:
+    """Validate output should fail on quality issues."""
+    ctx = {"tenant_id": "tenant1"}
+    output = {
+        "answer": "Short",  # Too short
+    }
+
+    result = await validate_output(ctx, output)
+
+    assert result.overall_passed is False
+    quality_stage = next(s for s in result.stages if s.stage_name == "quality")
+    assert quality_stage.passed is False
+    assert "too short" in quality_stage.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_validate_output_detects_pii() -> None:
+    """Validate output should detect potential PII."""
+    ctx = {"tenant_id": "tenant1"}
+    output = {
+        "answer": "The user's SSN is 123-45-6789 and credit card is 1234567890123456",
+    }
+
+    result = await validate_output(ctx, output)
+
+    assert result.overall_passed is False
+    pii_stage = next(s for s in result.stages if s.stage_name == "pii_detection")
+    assert pii_stage.passed is False
+    assert pii_stage.details.get("patterns_matched", 0) > 0
+    assert any("PII" in rec for rec in result.recommendations)
+
+
+@pytest.mark.asyncio
+async def test_validation_stages_run_independently() -> None:
+    """Each validation stage should run independently."""
+    ctx = {"tenant_id": "tenant1"}
+    data = {
+        "tenant_id": "tenant1",  # Missing query (schema fail)
+    }
+
+    result = await validate_input(ctx, data)
+
+    # Even though schema failed, other stages should still run
+    assert len(result.stages) == 3
+    assert result.stages[0].stage_name == "schema"
+    assert result.stages[1].stage_name == "business_rules"
+    assert result.stages[2].stage_name == "security"
