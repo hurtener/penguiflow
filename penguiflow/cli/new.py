@@ -158,9 +158,11 @@ def run_new(
     Returns:
         NewResult with success flag and created/skipped/error paths.
     """
-    package_name = _normalise_package_name(name)
+    # Use only the final component for display name (handles paths like "foo/bar")
+    display_name = Path(name).name
+    package_name = _normalise_package_name(display_name)
     ctx = TemplateContext(
-        project_name=name,
+        project_name=display_name,
         package_name=package_name,
         class_name=_class_name(package_name),
         template=template,
