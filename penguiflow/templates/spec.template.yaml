@@ -1,0 +1,76 @@
+# Example spec for `penguiflow generate`
+
+agent:
+  name: my-agent
+  description: Example agent project
+  template: react  # minimal|react|parallel|lighthouse|wayfinder|analyst|enterprise
+  flags:
+    streaming: true
+    hitl: false
+    a2a: false
+    memory: true
+
+tools:
+  - name: fetch_data
+    description: Fetch data from API
+    side_effects: read  # pure|read|write|external|stateful
+    tags: ["data", "http"]
+    group: default
+    args:
+      query: str
+      limit: Optional[int]
+    result:
+      items: list[str]
+
+flows:
+  - name: pipeline
+    description: Linear pipeline example
+    nodes:
+      - name: fetch_data
+        description: Fetch data from API
+        policy:
+          validate: both
+          timeout_s: 30
+          max_retries: 1
+          backoff_base: 0.5
+    steps: [fetch_data]
+
+services:
+  memory_iceberg:
+    enabled: false
+    base_url: http://localhost:8000
+  lighthouse:
+    enabled: false
+    base_url: http://localhost:8081
+  wayfinder:
+    enabled: false
+    base_url: http://localhost:8082
+
+llm:
+  primary:
+    model: gpt-4o
+    provider: openai
+  summarizer:
+    enabled: false
+  reflection:
+    enabled: false
+    quality_threshold: 0.8
+    max_revisions: 2
+    criteria:
+      completeness: Addresses all parts of the query
+      accuracy: Factually correct based on observations
+      clarity: Well-explained and coherent
+
+planner:
+  max_iters: 12
+  hop_budget: 8
+  absolute_max_parallel: 5
+  system_prompt_extra: |
+    You are a helpful agent.
+  memory_prompt: |
+    Use memory context to personalize responses.
+  hints:
+    ordering: []
+    parallel_groups: []
+    sequential_only: []
+    disallow: []

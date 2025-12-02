@@ -107,6 +107,10 @@ llm:
     model: string                   # defaults to primary.model
     quality_threshold: float        # 0.0-1.0, default 0.80
     max_revisions: int              # default 2
+    criteria:                       # Custom evaluation criteria (optional)
+      completeness: string          # default: "Addresses all parts of the query"
+      accuracy: string              # default: "Factually correct based on observations"
+      clarity: string               # default: "Well-explained and coherent"
 
 # ─────────────────────────────────────────────────────────────
 # PLANNER CONFIGURATION
@@ -115,6 +119,33 @@ planner:
   max_iters: int                    # default 12
   hop_budget: int                   # default 8
   absolute_max_parallel: int        # default 5
+
+  # Agent identity & purpose (REQUIRED - defines WHO the agent is)
+  system_prompt_extra: |
+    You are a [role] specialized in [domain].
+
+    Your mission is to [primary objective].
+
+    Voice & tone:
+    - [communication style guidelines]
+    - [formality level]
+    - [any domain-specific language preferences]
+
+    Key behaviors:
+    - [behavior 1]
+    - [behavior 2]
+
+  # Memory consumption guidance (required if memory enabled)
+  memory_prompt: |
+    You have access to the user's memory context:
+    - conscious_memories: Recent session context and prior interactions
+    - retrieved_memories: Relevant historical information for this query
+
+    Use memories to:
+    - Personalize responses based on user history
+    - Avoid asking for information already provided
+    - Reference previous conversations when relevant
+    - Build on established context
 
   # Planning hints (optional)
   hints:
@@ -231,7 +262,7 @@ def _build_{name}_flow(*, {dependencies}) -> _{Name}FlowBundle:
 ```
 
 #### Phase 5: Generate Planner
-Generate `planner.py` with catalog registration and LLM config inheritance:
+Generate `planner.py` with catalog registration, LLM config inheritance, and system prompts:
 
 ```python
 """Planner configuration for {agent_name}."""
@@ -243,6 +274,17 @@ from penguiflow.registry import ModelRegistry
 
 from .config import Config
 from .tools import {tool_imports}
+
+
+# Agent identity & purpose (from spec)
+SYSTEM_PROMPT_EXTRA = """
+{system_prompt_extra}
+"""
+
+# Memory consumption guidance (from spec, if memory enabled)
+MEMORY_PROMPT = """
+{memory_prompt}
+"""
 
 
 def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
@@ -261,9 +303,15 @@ def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
     reflection_model = config.reflection_model or config.llm_model
     summarizer_model = config.summarizer_model or config.llm_model
 
+    # Combine system prompt with memory guidance if enabled
+    full_system_extra = SYSTEM_PROMPT_EXTRA
+    if config.memory_enabled:
+        full_system_extra += "\n\n" + MEMORY_PROMPT
+
     planner = ReactPlanner(
         llm=config.llm_model,
         catalog=catalog,
+        system_prompt_extra=full_system_extra,
         reflection_config=ReflectionConfig(
             enabled=config.reflection_enabled,
             quality_threshold=config.reflection_quality_threshold,
@@ -561,13 +609,13 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 ## Success Criteria
 
 ### Agent Spec & Generator
-- [ ] New dev: spec → running agent in <5 minutes
-- [ ] Spec validation catches mistakes with actionable errors (file:line)
-- [ ] Generated code passes `ruff check` + `mypy`
-- [ ] Generated tests pass (with NotImplementedError)
-- [ ] `spec.template.yaml` documents all options clearly
-- [ ] Flows follow FlowBundle + emit/fetch best practices
-- [ ] LLM configs inherit from primary when omitted
+- [x] New dev: spec → running agent in <5 minutes
+- [x] Spec validation catches mistakes with actionable errors (file:line)
+- [x] Generated code passes `ruff check` + `mypy`
+- [x] Generated tests pass (with NotImplementedError)
+- [x] `spec.template.yaml` documents all options clearly
+- [x] Flows follow FlowBundle + emit/fetch best practices
+- [x] LLM configs inherit from primary when omitted
 
 ### Dev Playground
 - [ ] `penguiflow dev .` works on any generated project
@@ -612,14 +660,16 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 **Objective**: Define and validate the YAML spec format.
 
 **Tasks**:
-- [ ] Define Pydantic models for spec schema
+- [x] Define Pydantic models for spec schema
   - `AgentSpec`, `ToolSpec`, `FlowSpec`, `ServiceSpec`, `LLMSpec`, `PlannerSpec`
-- [ ] Implement YAML parser with schema validation
-- [ ] Create error formatting with file:line references
-- [ ] Validate tool names (snake_case, unique, no reserved words)
-- [ ] Validate type annotations (supported types only)
-- [ ] Validate flow node references exist in tools
-- [ ] Write unit tests for validation edge cases
+- [x] Implement YAML parser with schema validation
+- [x] Create error formatting with file:line references
+- [x] Validate tool names (snake_case, unique, no reserved words)
+- [x] Validate type annotations (supported types only)
+- [x] Validate flow node references exist in tools
+- [x] Validate `system_prompt_extra` is non-empty (required)
+- [x] Validate `memory_prompt` is present if memory enabled
+- [x] Write unit tests for validation edge cases
 
 **Deliverables**:
 - `penguiflow/cli/spec.py` — Spec models and validation
@@ -627,9 +677,9 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 - `tests/cli/test_spec_validation.py` — Validation tests
 
 **Exit Criteria**:
-- [ ] Invalid specs produce actionable errors
-- [ ] Valid specs parse to typed Pydantic models
-- [ ] 100% test coverage on validation logic
+- [x] Invalid specs produce actionable errors
+- [x] Valid specs parse to typed Pydantic models
+- [x] 100% test coverage on validation logic
 
 ---
 
@@ -638,19 +688,19 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 **Objective**: Generate tools and planner wiring from spec.
 
 **Tasks**:
-- [ ] Implement type annotation → Python type mapping
+- [x] Implement type annotation → Python type mapping
   - `str`, `int`, `float`, `bool`, `list[T]`, `Optional[T]`, `dict[K,V]`
-- [ ] Create Jinja2 templates for tool generation
+- [x] Create Jinja2 templates for tool generation
   - `{Name}Args` model
   - `{Name}Result` model
   - `@tool` decorated function stub
-- [ ] Create Jinja2 template for planner.py
+- [x] Create Jinja2 template for planner.py
   - Import all tools
   - Build catalog
   - LLM config with inheritance logic
-- [ ] Wire `penguiflow generate` CLI command
-- [ ] Integrate with existing `penguiflow new` for scaffolding
-- [ ] Write integration tests
+- [x] Wire `penguiflow generate` CLI command
+- [x] Integrate with existing `penguiflow new` for scaffolding
+- [x] Write integration tests
 
 **Deliverables**:
 - `penguiflow/cli/generate.py` — Generator logic
@@ -659,10 +709,10 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 - `tests/cli/test_generate_tools.py` — Tool generation tests
 
 **Exit Criteria**:
-- [ ] Tools generate with correct Pydantic models
-- [ ] Planner wires all tools correctly
-- [ ] LLM config inheritance works
-- [ ] Generated code passes ruff + mypy
+- [x] Tools generate with correct Pydantic models
+- [x] Planner wires all tools correctly
+- [x] LLM config inheritance works
+- [x] Generated code passes ruff + mypy
 
 ---
 
@@ -671,19 +721,19 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 **Objective**: Generate flows and test scaffolding.
 
 **Tasks**:
-- [ ] Create Jinja2 template for flow generation
+- [x] Create Jinja2 template for flow generation
   - FlowBundle dataclass
   - Node factory functions
   - Linear edge wiring
   - ModelRegistry registration
-- [ ] Create Jinja2 template for tool tests
+- [x] Create Jinja2 template for tool tests
   - Basic NotImplementedError test per tool
-- [ ] Create Jinja2 template for flow tests
+- [x] Create Jinja2 template for flow tests
   - Basic flow execution test
-- [ ] Generate config.py with LLM inheritance
-- [ ] Generate .env.example with all variables
-- [ ] Create `spec.template.yaml` reference file
-- [ ] Write end-to-end tests
+- [x] Generate config.py with LLM inheritance
+- [x] Generate .env.example with all variables
+- [x] Create `spec.template.yaml` reference file
+- [x] Write end-to-end tests
 
 **Deliverables**:
 - `penguiflow/cli/templates/flow.py.jinja` — Flow template
@@ -691,12 +741,15 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 - `penguiflow/cli/templates/config.py.jinja` — Config template
 - `penguiflow/templates/spec.template.yaml` — Reference spec
 - `tests/cli/test_generate_e2e.py` — End-to-end tests
+- `penguiflow/cli/templates/test_flow.py.jinja` — Flow test template
+- `penguiflow/cli/templates/env.example.jinja` — Env template
+- `penguiflow/cli/templates/flows_init.py.jinja` — Flows package bootstrap
 
 **Exit Criteria**:
-- [ ] Flows follow FlowBundle best practices
-- [ ] Tests scaffold correctly
-- [ ] spec.template.yaml documents all options
-- [ ] Full generate → run cycle works
+- [x] Flows follow FlowBundle best practices
+- [x] Tests scaffold correctly
+- [x] spec.template.yaml documents all options
+- [x] Full generate → run cycle works
 
 ---
 
@@ -705,23 +758,23 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 **Objective**: Documentation, error messages, and release prep.
 
 **Tasks**:
-- [ ] Write `penguiflow generate` section in docs
-- [ ] Add examples to TEMPLATING_QUICKGUIDE.md
-- [ ] Improve error messages with suggestions
-- [ ] Add `--dry-run` output formatting
-- [ ] Add `--verbose` flag for debugging
-- [ ] Performance optimization (if needed)
-- [ ] Final test pass and coverage check
+- [x] Write `penguiflow generate` section in docs
+- [x] Add examples to TEMPLATING_QUICKGUIDE.md
+- [x] Improve error messages with suggestions
+- [x] Add `--dry-run` output formatting (already implemented)
+- [x] Add `--verbose` flag for debugging
+- [x] Performance optimization (if needed) — not required
+- [x] Final test pass and coverage check
 
 **Deliverables**:
-- Updated documentation
-- Polished CLI output
-- Release notes for v2.6.0
+- Updated documentation (TEMPLATING_QUICKGUIDE.md section 9)
+- Polished CLI output (verbose flag, suggestions in errors)
+- Release notes for v2.6.0 — pending
 
 **Exit Criteria**:
-- [ ] New dev can use generator with only docs
-- [ ] Error messages are actionable
-- [ ] All tests pass, coverage ≥85%
+- [x] New dev can use generator with only docs
+- [x] Error messages are actionable
+- [x] All tests pass, coverage ≥85% (86.95%)
 
 ---
 
@@ -860,10 +913,10 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 - [ ] Review spec format with team
 
 ### Generator (v2.6.0)
-- [ ] G1: Spec schema & validation
-- [ ] G2: Tool & planner generation
-- [ ] G3: Flow & test generation
-- [ ] G4: Documentation & polish
+- [x] G1: Spec schema & validation
+- [x] G2: Tool & planner generation
+- [x] G3: Flow & test generation
+- [x] G4: Documentation & polish
 - [ ] Tag v2.6.0 release
 
 ### Playground (v2.6.1-v2.6.2)

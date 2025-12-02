@@ -1,0 +1,64 @@
+"""Configuration for {{ agent_name }}."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass
+class Config:
+    """Environment-driven configuration."""
+
+    llm_model: str = "{{ primary_model }}"
+    summarizer_model: str | None = None
+    reflection_model: str | None = None
+    memory_enabled: bool = {{ memory_enabled }}
+    summarizer_enabled: bool = {{ summarizer_enabled }}
+    reflection_enabled: bool = {{ reflection_enabled }}
+    reflection_quality_threshold: float = {{ reflection_quality_threshold }}
+    reflection_max_revisions: int = {{ reflection_max_revisions }}
+    memory_base_url: str | None = {{ memory_base_url }}
+    lighthouse_base_url: str | None = {{ lighthouse_base_url }}
+    wayfinder_base_url: str | None = {{ wayfinder_base_url }}
+    planner_max_iters: int = {{ planner_max_iters }}
+    planner_hop_budget: int = {{ planner_hop_budget }}
+    planner_absolute_max_parallel: int = {{ planner_absolute_max_parallel }}
+
+    @classmethod
+    def from_env(cls) -> "Config":
+        """Load configuration from environment variables."""
+
+        llm_model = os.getenv("LLM_MODEL", "{{ primary_model }}")
+        summarizer_model = os.getenv("SUMMARIZER_MODEL")
+        reflection_model = os.getenv("REFLECTION_MODEL")
+
+        return cls(
+            llm_model=llm_model,
+            summarizer_model=summarizer_model,
+            reflection_model=reflection_model,
+            memory_enabled=_env_flag("MEMORY_ENABLED", {{ memory_enabled }}),
+            summarizer_enabled=_env_flag("SUMMARIZER_ENABLED", {{ summarizer_enabled }}),
+            reflection_enabled=_env_flag("REFLECTION_ENABLED", {{ reflection_enabled }}),
+            reflection_quality_threshold=float(
+                os.getenv("REFLECTION_QUALITY_THRESHOLD", {{ reflection_quality_threshold }})
+            ),
+            reflection_max_revisions=int(
+                os.getenv("REFLECTION_MAX_REVISIONS", {{ reflection_max_revisions }})
+            ),
+            memory_base_url=os.getenv("MEMORY_BASE_URL", {{ memory_base_url }}),
+            lighthouse_base_url=os.getenv("LIGHTHOUSE_BASE_URL", {{ lighthouse_base_url }}),
+            wayfinder_base_url=os.getenv("WAYFINDER_BASE_URL", {{ wayfinder_base_url }}),
+            planner_max_iters=int(os.getenv("PLANNER_MAX_ITERS", {{ planner_max_iters }})),
+            planner_hop_budget=int(os.getenv("PLANNER_HOP_BUDGET", {{ planner_hop_budget }})),
+            planner_absolute_max_parallel=int(
+                os.getenv("PLANNER_ABSOLUTE_MAX_PARALLEL", {{ planner_absolute_max_parallel }})
+            ),
+        )

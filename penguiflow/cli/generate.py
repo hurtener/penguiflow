@@ -1,0 +1,721 @@
+"""Implementation of `penguiflow generate`."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from importlib import resources
+from pathlib import Path
+from typing import Any, NamedTuple
+
+import click
+
+from .init import CLIError
+from .new import _normalise_package_name, run_new
+from .spec import Spec, TypeExpression, load_spec
+from .spec_errors import SpecValidationError
+
+
+class GenerateResult(NamedTuple):
+    """Result of running `penguiflow generate`."""
+
+    success: bool
+    created: list[str]
+    skipped: list[str]
+    errors: list[str]
+    project_dir: Path
+    package_name: str
+
+
+class GeneratorTemplateError(CLIError):
+    """Raised when a generator template cannot be rendered."""
+
+
+def _snake_to_pascal(value: str) -> str:
+    parts = [part for part in re.split(r"[^0-9a-zA-Z]", value) if part]
+    return "".join(part.capitalize() for part in parts)
+
+
+def _render_type(expr: TypeExpression) -> str:
+    if expr.kind in {"str", "int", "float", "bool"}:
+        return expr.kind
+    if expr.kind == "list":
+        return f"list[{_render_type(expr.args[0])}]"
+    if expr.kind == "optional":
+        return f"{_render_type(expr.args[0])} | None"
+    if expr.kind == "dict":
+        key_expr, value_expr = expr.args
+        return f"dict[{_render_type(key_expr)}, {_render_type(value_expr)}]"
+    return expr.render()
+
+
+def _load_template(name: str) -> str:
+    try:
+        return resources.files("penguiflow.cli.templates").joinpath(name).read_text()
+    except FileNotFoundError as exc:  # pragma: no cover - defensive guard
+        raise GeneratorTemplateError(f"Template '{name}' not found.") from exc
+
+
+def _render_template(name: str, context: dict[str, Any]) -> str:
+    try:
+        from jinja2 import Environment
+    except ImportError as exc:  # pragma: no cover - mirrors new.py guard
+        raise CLIError(
+            "Jinja2 is required for `penguiflow generate`.",
+            hint="Install with `pip install penguiflow[cli]`.",
+        ) from exc
+
+    try:
+        env = Environment(autoescape=False, trim_blocks=True, lstrip_blocks=True)
+        template = env.from_string(_load_template(name))
+        return template.render(**context)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise GeneratorTemplateError(f"Failed to render template '{name}': {exc}") from exc
+
+
+@dataclass(frozen=True)
+class ToolRender:
+    name: str
+    class_name: str
+    description: str
+    side_effects: str
+    tags_literal: str
+    args: list[dict[str, str]]
+    result: list[dict[str, str]]
+
+
+@dataclass(frozen=True)
+class ToolTestRender:
+    name: str
+    class_name: str
+    sample_args_literal: str
+
+
+@dataclass(frozen=True)
+class FlowNodeRender:
+    name: str
+    var_name: str
+    policy_kwargs: str
+
+
+@dataclass(frozen=True)
+class FlowEdgeRender:
+    start: str
+    targets_literal: str
+
+
+@dataclass(frozen=True)
+class FlowRender:
+    name: str
+    description: str
+    bundle_class: str
+    nodes: list[FlowNodeRender]
+    edges: list[FlowEdgeRender]
+
+
+def _tool_render(tool: Any) -> ToolRender:
+    args = [{"name": name, "type_hint": _render_type(expr)} for name, expr in tool.args.items()]
+    result = [{"name": name, "type_hint": _render_type(expr)} for name, expr in tool.result.items()]
+    tags_literal = "[" + ", ".join(f'"{tag}"' for tag in tool.tags) + "]"
+    return ToolRender(
+        name=tool.name,
+        class_name=_snake_to_pascal(tool.name),
+        description=tool.description,
+        side_effects=tool.side_effects,
+        tags_literal=tags_literal,
+        args=args,
+        result=result,
+    )
+
+
+def _sample_value(expr: TypeExpression) -> str:
+    if expr.kind == "str":
+        return '"example"'
+    if expr.kind == "int":
+        return "1"
+    if expr.kind == "float":
+        return "1.0"
+    if expr.kind == "bool":
+        return "True"
+    if expr.kind == "list":
+        return "[]"
+    if expr.kind == "optional":
+        return "None"
+    if expr.kind == "dict":
+        return "{}"
+    return "None"
+
+
+def _planning_hints(spec: Spec) -> dict[str, Any] | None:
+    if spec.planner.hints is None:
+        return None
+    hints = {
+        "ordering": spec.planner.hints.ordering or None,
+        "parallel_groups": spec.planner.hints.parallel_groups or None,
+        "sequential_only": spec.planner.hints.sequential_only or None,
+        "disallow": spec.planner.hints.disallow or None,
+    }
+    return {key: value for key, value in hints.items() if value}
+
+
+def _tool_test_render(tool: Any) -> ToolTestRender:
+    class_name = _snake_to_pascal(tool.name)
+    sample_parts = [f"{name}={_sample_value(expr)}" for name, expr in tool.args.items()]
+    sample_literal = ", ".join(sample_parts)
+    return ToolTestRender(
+        name=tool.name,
+        class_name=class_name,
+        sample_args_literal=sample_literal,
+    )
+
+
+def _render_policy_kwargs(policy: Any | None) -> str:
+    if policy is None:
+        return ""
+    kwargs: list[str] = []
+    if policy.validate_mode is not None:
+        kwargs.append(f'validate="{policy.validate_mode}"')
+    if policy.timeout_s is not None:
+        kwargs.append(f"timeout_s={policy.timeout_s}")
+    if policy.max_retries is not None:
+        kwargs.append(f"max_retries={policy.max_retries}")
+    if policy.backoff_base is not None:
+        kwargs.append(f"backoff_base={policy.backoff_base}")
+    return ", ".join(kwargs)
+
+
+def _flow_renders(spec: Spec) -> list[FlowRender]:
+    flows: list[FlowRender] = []
+    for flow in spec.flows:
+        nodes_by_name = {node.name: node for node in flow.nodes}
+        order: list[str] = list(flow.steps) if flow.steps else [node.name for node in flow.nodes]
+        for name in nodes_by_name:
+            if name not in order:
+                order.append(name)
+
+        # Fill missing node definitions referenced in steps
+        for name in order:
+            if name not in nodes_by_name:
+                nodes_by_name[name] = type(
+                    "AnonNode",
+                    (),
+                    {"name": name, "description": f"Node {name}", "policy": None},
+                )()
+
+        node_renders: list[FlowNodeRender] = []
+        seen: set[str] = set()
+        for name in order:
+            if name in seen:
+                continue
+            node = nodes_by_name[name]
+            node_renders.append(
+                FlowNodeRender(
+                    name=name,
+                    var_name=name,
+                    policy_kwargs=_render_policy_kwargs(getattr(node, "policy", None)),
+                )
+            )
+            seen.add(name)
+
+        edges: list[FlowEdgeRender] = []
+        for idx, name in enumerate(order):
+            target = order[idx + 1] if idx + 1 < len(order) else None
+            targets_literal = f"({target},)" if target else "()"
+            edges.append(
+                FlowEdgeRender(
+                    start=name,
+                    targets_literal=targets_literal,
+                )
+            )
+
+        bundle_class = f"{_snake_to_pascal(flow.name)}FlowBundle"
+        flows.append(
+            FlowRender(
+                name=flow.name,
+                description=flow.description,
+                bundle_class=bundle_class,
+                nodes=node_renders,
+                edges=edges,
+            )
+        )
+    return flows
+
+
+def _write_file(path: Path, content: str, *, force: bool) -> tuple[bool, str | None]:
+    if path.exists() and not force:
+        return False, None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return True, path.as_posix()
+
+
+def _generate_tools(
+    project_dir: Path,
+    package_name: str,
+    spec: Spec,
+    *,
+    dry_run: bool,
+    force: bool,
+) -> tuple[list[str], list[str]]:
+    created: list[str] = []
+    skipped: list[str] = []
+    tools_dir = project_dir / "src" / package_name / "tools"
+
+    tools = [_tool_render(tool) for tool in spec.tools]
+
+    if dry_run:
+        for tool in tools:
+            created.append((tools_dir / f"{tool.name}.py").as_posix())
+        created.append((tools_dir / "__init__.py").as_posix())
+        return created, skipped
+
+    for tool in tools:
+        content = _render_template(
+            "tool.py.jinja",
+            {
+                "tool": tool,
+            },
+        )
+        wrote, path = _write_file(tools_dir / f"{tool.name}.py", content, force=force)
+        if wrote and path:
+            created.append(path)
+        elif not wrote:
+            skipped.append((tools_dir / f"{tool.name}.py").as_posix())
+
+    init_content = _render_template(
+        "tools_init.py.jinja",
+        {"agent_name": spec.agent.name, "tools": tools},
+    )
+    wrote, path = _write_file(tools_dir / "__init__.py", init_content, force=force)
+    if wrote and path:
+        created.append(path)
+    elif not wrote:
+        skipped.append((tools_dir / "__init__.py").as_posix())
+
+    return created, skipped
+
+
+def _generate_planner(
+    project_dir: Path,
+    package_name: str,
+    spec: Spec,
+    *,
+    dry_run: bool,
+    force: bool,
+) -> tuple[list[str], list[str]]:
+    created: list[str] = []
+    skipped: list[str] = []
+    planner_path = project_dir / "src" / package_name / "planner.py"
+
+    planning_hints_literal = repr(_planning_hints(spec)).replace("'", '"')
+
+    content = _render_template(
+        "planner.py.jinja",
+        {
+            "agent_name": spec.agent.name,
+            "system_prompt_extra": spec.planner.system_prompt_extra.strip(),
+            "memory_prompt": (spec.planner.memory_prompt or "").strip(),
+            "include_memory_prompt": spec.planner.memory_prompt is not None and spec.agent.flags.memory,
+            "memory_enabled": spec.agent.flags.memory,
+            "reflection_enabled": bool(spec.llm.reflection and spec.llm.reflection.enabled),
+            "reflection_quality_threshold": spec.llm.reflection.quality_threshold if spec.llm.reflection else 0.8,
+            "reflection_max_revisions": spec.llm.reflection.max_revisions if spec.llm.reflection else 2,
+            "reflection_criteria": spec.llm.reflection.criteria if spec.llm.reflection else None,
+            "summarizer_enabled": bool(spec.llm.summarizer and spec.llm.summarizer.enabled),
+            "primary_model": spec.llm.primary.model,
+            "max_iters": spec.planner.max_iters,
+            "hop_budget": spec.planner.hop_budget,
+            "absolute_max_parallel": spec.planner.absolute_max_parallel,
+            "planning_hints_literal": planning_hints_literal if planning_hints_literal != "None" else "None",
+        },
+    )
+
+    if dry_run:
+        created.append(planner_path.as_posix())
+        return created, skipped
+
+    wrote, path = _write_file(planner_path, content, force=force)
+    if wrote and path:
+        created.append(path)
+    elif not wrote:
+        skipped.append(planner_path.as_posix())
+
+    return created, skipped
+
+
+def _generate_flows(
+    project_dir: Path,
+    package_name: str,
+    spec: Spec,
+    *,
+    dry_run: bool,
+    force: bool,
+) -> tuple[list[str], list[str]]:
+    created: list[str] = []
+    skipped: list[str] = []
+    flows_dir = project_dir / "src" / package_name / "flows"
+
+    flow_renders = _flow_renders(spec)
+    if not flow_renders:
+        return created, skipped
+
+    if dry_run:
+        for flow in flow_renders:
+            created.append((flows_dir / f"{flow.name}.py").as_posix())
+        created.append((flows_dir / "__init__.py").as_posix())
+        return created, skipped
+
+    for flow in flow_renders:
+        content = _render_template(
+            "flow.py.jinja",
+            {
+                "flow": flow,
+            },
+        )
+        wrote, path = _write_file(flows_dir / f"{flow.name}.py", content, force=force)
+        if wrote and path:
+            created.append(path)
+        elif not wrote:
+            skipped.append((flows_dir / f"{flow.name}.py").as_posix())
+
+    init_content = _render_template(
+        "flows_init.py.jinja",
+        {"agent_name": spec.agent.name, "flows": flow_renders},
+    )
+    wrote, path = _write_file(flows_dir / "__init__.py", init_content, force=force)
+    if wrote and path:
+        created.append(path)
+    elif not wrote:
+        skipped.append((flows_dir / "__init__.py").as_posix())
+
+    return created, skipped
+
+
+def _generate_tool_tests(
+    project_dir: Path,
+    package_name: str,
+    spec: Spec,
+    *,
+    dry_run: bool,
+    force: bool,
+) -> tuple[list[str], list[str]]:
+    created: list[str] = []
+    skipped: list[str] = []
+    tests_dir = project_dir / "tests" / "test_tools"
+    renders = [_tool_test_render(tool) for tool in spec.tools]
+
+    if dry_run:
+        for render in renders:
+            created.append((tests_dir / f"test_{render.name}.py").as_posix())
+        return created, skipped
+
+    for render in renders:
+        content = _render_template(
+            "test_tool.py.jinja",
+            {
+                "tool": render,
+                "package_name": package_name,
+            },
+        )
+        path = tests_dir / f"test_{render.name}.py"
+        wrote, written_path = _write_file(path, content, force=force)
+        if wrote and written_path:
+            created.append(written_path)
+        elif not wrote:
+            skipped.append(path.as_posix())
+
+    return created, skipped
+
+
+def _generate_flow_tests(
+    project_dir: Path,
+    package_name: str,
+    spec: Spec,
+    *,
+    dry_run: bool,
+    force: bool,
+) -> tuple[list[str], list[str]]:
+    created: list[str] = []
+    skipped: list[str] = []
+    tests_dir = project_dir / "tests" / "test_flows"
+    flows = _flow_renders(spec)
+
+    if not flows:
+        return created, skipped
+
+    if dry_run:
+        for flow in flows:
+            created.append((tests_dir / f"test_{flow.name}.py").as_posix())
+        return created, skipped
+
+    for flow in flows:
+        content = _render_template(
+            "test_flow.py.jinja",
+            {
+                "flow": flow,
+                "package_name": package_name,
+            },
+        )
+        path = tests_dir / f"test_{flow.name}.py"
+        wrote, written_path = _write_file(path, content, force=force)
+        if wrote and written_path:
+            created.append(written_path)
+        elif not wrote:
+            skipped.append(path.as_posix())
+
+    return created, skipped
+
+
+def _generate_config(
+    project_dir: Path,
+    package_name: str,
+    spec: Spec,
+    *,
+    dry_run: bool,
+    force: bool,
+) -> tuple[list[str], list[str]]:
+    created: list[str] = []
+    skipped: list[str] = []
+    config_path = project_dir / "src" / package_name / "config.py"
+
+    memory_base = repr(spec.services.memory_iceberg.base_url) if spec.services.memory_iceberg.base_url else "None"
+    lighthouse_base = repr(spec.services.lighthouse.base_url) if spec.services.lighthouse.base_url else "None"
+    wayfinder_base = repr(spec.services.wayfinder.base_url) if spec.services.wayfinder.base_url else "None"
+
+    content = _render_template(
+        "config.py.jinja",
+        {
+            "agent_name": spec.agent.name,
+            "primary_model": spec.llm.primary.model,
+            "memory_enabled": spec.agent.flags.memory,
+            "summarizer_enabled": bool(spec.llm.summarizer and spec.llm.summarizer.enabled),
+            "reflection_enabled": bool(spec.llm.reflection and spec.llm.reflection.enabled),
+            "reflection_quality_threshold": spec.llm.reflection.quality_threshold if spec.llm.reflection else 0.8,
+            "reflection_max_revisions": spec.llm.reflection.max_revisions if spec.llm.reflection else 2,
+            "memory_base_url": memory_base,
+            "lighthouse_base_url": lighthouse_base,
+            "wayfinder_base_url": wayfinder_base,
+            "planner_max_iters": spec.planner.max_iters,
+            "planner_hop_budget": spec.planner.hop_budget,
+            "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,
+        },
+    )
+
+    if dry_run:
+        created.append(config_path.as_posix())
+        return created, skipped
+
+    wrote, path = _write_file(config_path, content, force=force)
+    if wrote and path:
+        created.append(path)
+    elif not wrote:
+        skipped.append(config_path.as_posix())
+
+    return created, skipped
+
+
+def _generate_env_example(
+    project_dir: Path,
+    spec: Spec,
+    *,
+    dry_run: bool,
+    force: bool,
+) -> tuple[list[str], list[str]]:
+    created: list[str] = []
+    skipped: list[str] = []
+    env_path = project_dir / ".env.example"
+
+    content = _render_template(
+        "env.example.jinja",
+        {
+            "primary_model": spec.llm.primary.model,
+            "memory_enabled": str(spec.agent.flags.memory).lower(),
+            "summarizer_enabled": str(bool(spec.llm.summarizer and spec.llm.summarizer.enabled)).lower(),
+            "reflection_enabled": str(bool(spec.llm.reflection and spec.llm.reflection.enabled)).lower(),
+            "memory_base_url": spec.services.memory_iceberg.base_url or "http://localhost:8000",
+            "lighthouse_base_url": spec.services.lighthouse.base_url or "http://localhost:8081",
+            "wayfinder_base_url": spec.services.wayfinder.base_url or "http://localhost:8082",
+            "planner_max_iters": spec.planner.max_iters,
+            "planner_hop_budget": spec.planner.hop_budget,
+            "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,
+        },
+    )
+
+    if dry_run:
+        created.append(env_path.as_posix())
+        return created, skipped
+
+    wrote, path = _write_file(env_path, content, force=force)
+    if wrote and path:
+        created.append(path)
+    elif not wrote:
+        skipped.append(env_path.as_posix())
+
+    return created, skipped
+
+
+def _scaffold_project(
+    spec: Spec,
+    *,
+    output_dir: Path | None,
+    dry_run: bool,
+    force: bool,
+    quiet: bool,
+) -> tuple[Path, list[str], list[str], list[str]]:
+    flags = spec.agent.flags
+    result = run_new(
+        name=spec.agent.name,
+        template=spec.agent.template,
+        force=force,
+        dry_run=dry_run,
+        output_dir=output_dir,
+        quiet=quiet,
+        with_streaming=flags.streaming,
+        with_hitl=flags.hitl,
+        with_a2a=flags.a2a,
+        no_memory=not flags.memory,
+    )
+    project_dir = (output_dir or Path.cwd()) / spec.agent.name
+    return project_dir, list(result.created), list(result.skipped), list(result.errors)
+
+
+def run_generate(
+    *,
+    spec_path: Path,
+    output_dir: Path | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+    quiet: bool = False,
+    verbose: bool = False,
+) -> GenerateResult:
+    """Generate tools and planner from an agent spec."""
+
+    if verbose:
+        click.echo(f"Loading spec from {spec_path}...")
+
+    try:
+        spec = load_spec(spec_path)
+    except SpecValidationError:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive guard
+        raise CLIError(f"Failed to load spec: {exc}") from exc
+
+    if verbose:
+        click.echo(f"  Agent: {spec.agent.name}")
+        click.echo(f"  Template: {spec.agent.template}")
+        click.echo(f"  Tools: {len(spec.tools)}")
+        click.echo(f"  Flows: {len(spec.flows)}")
+        click.echo(f"  LLM: {spec.llm.primary.model}")
+
+    created: list[str] = []
+    skipped: list[str] = []
+    errors: list[str] = []
+
+    if verbose:
+        click.echo("\nScaffolding project structure...")
+
+    project_dir, created_new, skipped_new, errors_new = _scaffold_project(
+        spec,
+        output_dir=output_dir,
+        dry_run=dry_run,
+        force=force,
+        quiet=quiet,
+    )
+    created.extend(created_new)
+    skipped.extend(skipped_new)
+    errors.extend(errors_new)
+
+    package_name = _normalise_package_name(spec.agent.name)
+
+    if verbose:
+        click.echo(f"  Package name: {package_name}")
+
+    try:
+        if verbose:
+            click.echo("\nGenerating tools...")
+        tool_created, tool_skipped = _generate_tools(
+            project_dir, package_name, spec, dry_run=dry_run, force=force
+        )
+        created.extend(tool_created)
+        skipped.extend(tool_skipped)
+        if verbose:
+            click.echo(f"  {len(tool_created)} tools generated")
+
+        if verbose:
+            click.echo("Generating planner...")
+        planner_created, planner_skipped = _generate_planner(
+            project_dir, package_name, spec, dry_run=dry_run, force=force
+        )
+        created.extend(planner_created)
+        skipped.extend(planner_skipped)
+
+        if verbose:
+            click.echo("Generating flows...")
+        flow_created, flow_skipped = _generate_flows(
+            project_dir, package_name, spec, dry_run=dry_run, force=force
+        )
+        created.extend(flow_created)
+        skipped.extend(flow_skipped)
+        if verbose and flow_created:
+            click.echo(f"  {len(flow_created)} flows generated")
+
+        if verbose:
+            click.echo("Generating tool tests...")
+        tool_test_created, tool_test_skipped = _generate_tool_tests(
+            project_dir, package_name, spec, dry_run=dry_run, force=force
+        )
+        created.extend(tool_test_created)
+        skipped.extend(tool_test_skipped)
+
+        if verbose:
+            click.echo("Generating flow tests...")
+        flow_test_created, flow_test_skipped = _generate_flow_tests(
+            project_dir, package_name, spec, dry_run=dry_run, force=force
+        )
+        created.extend(flow_test_created)
+        skipped.extend(flow_test_skipped)
+
+        if verbose:
+            click.echo("Generating config...")
+        config_created, config_skipped = _generate_config(
+            project_dir, package_name, spec, dry_run=dry_run, force=force
+        )
+        created.extend(config_created)
+        skipped.extend(config_skipped)
+
+        if verbose:
+            click.echo("Generating .env.example...")
+        env_created, env_skipped = _generate_env_example(
+            project_dir, spec, dry_run=dry_run, force=force
+        )
+        created.extend(env_created)
+        skipped.extend(env_skipped)
+    except (GeneratorTemplateError, CLIError, SpecValidationError):
+        raise
+    except Exception as exc:  # pragma: no cover - defensive guard
+        errors.append(str(exc))
+
+    success = len(errors) == 0
+
+    if verbose:
+        click.echo(f"\nSummary: {len(created)} created, {len(skipped)} skipped, {len(errors)} errors")
+
+    if not quiet:
+        for path in created:
+            click.echo(f"✓ Created {path}")
+        for path in skipped:
+            click.echo(f"⚠ Skipped {path} (exists, use --force to overwrite)")
+        for path in errors:
+            click.echo(f"✗ Error: {path}", err=True)
+
+    return GenerateResult(
+        success=success,
+        created=created,
+        skipped=skipped,
+        errors=errors,
+        project_dir=project_dir,
+        package_name=package_name,
+    )
+
+
+__all__ = ["run_generate", "GenerateResult", "GeneratorTemplateError"]

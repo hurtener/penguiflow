@@ -1,0 +1,16 @@
+"""Tests for {{ tool.name }} tool."""
+
+from __future__ import annotations
+
+import pytest
+
+from {{ package_name }}.tools import {{ tool.name }}, {{ tool.class_name }}Args
+
+
+@pytest.mark.asyncio
+async def test_{{ tool.name }}_not_implemented() -> None:
+    """Tool stub raises NotImplementedError until implemented."""
+    args = {{ tool.class_name }}Args({{ tool.sample_args_literal }})
+
+    with pytest.raises(NotImplementedError):
+        await {{ tool.name }}(args, ctx=None)

@@ -169,5 +169,78 @@ def new(
         sys.exit(1)
 
 
+@app.command()
+@click.option(
+    "--spec",
+    "-s",
+    "spec_path",
+    required=True,
+    type=click.Path(exists=True, path_type=str),
+    help="Path to the agent spec YAML file.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=str),
+    default=None,
+    help="Directory where the project should be created (defaults to cwd).",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite existing files if they already exist.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show which files would be created without writing them.",
+)
+@click.option(
+    "--quiet",
+    "-q",
+    is_flag=True,
+    help="Suppress output messages.",
+)
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    help="Show detailed generation progress.",
+)
+def generate(
+    spec_path: str,
+    output_dir: str | None,
+    force: bool,
+    dry_run: bool,
+    quiet: bool,
+    verbose: bool,
+) -> None:
+    """Generate tools and planner code from an agent spec."""
+    from pathlib import Path
+
+    from .generate import run_generate
+    from .init import CLIError
+    from .spec_errors import SpecValidationError
+
+    try:
+        result = run_generate(
+            spec_path=Path(spec_path),
+            output_dir=Path(output_dir) if output_dir else None,
+            dry_run=dry_run,
+            force=force,
+            quiet=quiet,
+            verbose=verbose,
+        )
+        if not result.success:
+            sys.exit(1)
+    except SpecValidationError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+    except CLIError as e:
+        click.echo(f"✗ {e.message}", err=True)
+        if e.hint:
+            click.echo(f"  Hint: {e.hint}", err=True)
+        sys.exit(1)
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()

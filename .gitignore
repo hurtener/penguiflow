@@ -10,6 +10,7 @@ __pycache__/
 .Python
 build/
 develop-eggs/
+test_generation/
 dist/
 downloads/
 eggs/

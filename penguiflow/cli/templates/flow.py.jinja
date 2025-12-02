@@ -1,0 +1,76 @@
+"""Flow: {{ flow.description }}."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from penguiflow.core import PenguiFlow, create
+from penguiflow.node import Node, NodePolicy
+from penguiflow.registry import ModelRegistry
+from penguiflow.types import Message
+
+
+@dataclass(slots=True)
+class {{ flow.bundle_class }}:
+    """Flow bundle for {{ flow.name }}."""
+
+    flow: PenguiFlow
+    registry: ModelRegistry
+{% for node in flow.nodes %}
+    {{ node.var_name }}: Node
+{% endfor %}
+
+
+{% for node in flow.nodes %}
+def _make_{{ node.var_name }}() -> Node:
+    """Create node '{{ node.name }}'."""
+
+    async def _{{ node.var_name }}(message: Message, _ctx: Any) -> Message:
+        base_message = (
+            message if isinstance(message, Message) else Message.model_validate(message)
+        )
+        payload = base_message.payload
+
+        # TODO: Implement {{ node.name }} logic
+        result = payload
+
+        return base_message.model_copy(update={"payload": result})
+
+    return Node(
+        _{{ node.var_name }},
+        name="{{ node.name }}",
+        policy=NodePolicy({{ node.policy_kwargs }}),
+    )
+
+
+{% endfor %}
+def build_{{ flow.name }}_flow() -> {{ flow.bundle_class }}:
+    """Create PenguiFlow DAG for {{ flow.description }}."""
+{% for node in flow.nodes %}
+    {{ node.var_name }} = _make_{{ node.var_name }}()
+{% endfor %}
+
+    edges = [
+{%- for edge in flow.edges %}
+        ({{ edge.start }}, {{ edge.targets_literal }}),
+{%- endfor %}
+    ]
+
+    flow = create(*edges)
+
+    registry = ModelRegistry()
+{% for node in flow.nodes %}
+    registry.register("{{ node.name }}", Message, Message)
+{% endfor %}
+
+    return {{ flow.bundle_class }}(
+        flow=flow,
+        registry=registry,
+{% for node in flow.nodes %}
+        {{ node.var_name }}={{ node.var_name }},
+{% endfor %}
+    )
+
+
+__all__ = ["{{ flow.bundle_class }}", "build_{{ flow.name }}_flow"]
