@@ -36,6 +36,8 @@ The PenguiFlow CLI scaffolds production-ready agent projects with best practices
    - [Spec Format](#spec-format)
    - [Generator Command](#generator-command)
    - [Example Spec](#example-spec)
+   - [Tested Template Examples](#tested-template-examples)
+   - [Memory Configuration](#memory-configuration)
 10. [Project Structure](#project-structure)
 11. [Configuration](#configuration)
 12. [Running Your Agent](#running-your-agent)
@@ -1328,6 +1330,300 @@ agent.yaml:23 tools[1].args.query - Unsupported type 'Query': use str, int, floa
 agent.yaml:45 planner.system_prompt_extra - Required field is empty
   Suggestion: Define who your agent is and what it does
 ```
+
+---
+
+### Tested Template Examples
+
+The following specs have been tested and verified to generate valid, runnable projects.
+
+#### React Template (Recommended Start)
+
+A simple conversational agent with a greeting tool:
+
+```yaml
+# hello_world.yaml
+name: hello-agent
+description: Hello world demo agent
+template: react
+
+# Shorthand format (equivalent to agent.flags.memory: false)
+memory: false
+
+llm:
+  provider: openrouter
+  model: anthropic/claude-sonnet-4
+
+tools:
+  - name: greet
+    description: Greet a user by name
+    args:
+      - name: name
+        type: str
+    result:
+      - name: greeting
+        type: str
+
+planner:
+  system_prompt_extra: |
+    You are a friendly assistant that greets users.
+    Use the greet tool to generate personalized greetings.
+```
+
+Generate and run:
+
+```bash
+penguiflow generate --spec=hello_world.yaml
+cd hello-agent
+uv sync && cp .env.example .env
+# Edit .env to add your API key
+uv run python -m hello_agent
+```
+
+---
+
+#### Parallel Template (Multi-Source)
+
+Batch processing agent that fetches from multiple sources:
+
+```yaml
+# parallel_agent.yaml
+name: parallel-agent
+description: Parallel data fetching agent
+template: parallel
+
+memory: true  # Enable memory integration
+
+llm:
+  provider: openrouter
+  model: anthropic/claude-sonnet-4
+
+tools:
+  - name: fetch_data
+    description: Fetch data from a specified source
+    tags: ["fetch", "parallel"]
+    side_effects: read
+    args:
+      - name: source_id
+        type: str
+    result:
+      - name: data
+        type: dict
+
+  - name: process_data
+    description: Process and transform fetched data
+    tags: ["process"]
+    side_effects: pure
+    args:
+      - name: data
+        type: dict
+    result:
+      - name: processed
+        type: dict
+
+services:
+  memory_iceberg:
+    enabled: true
+    base_url: http://localhost:8000
+
+planner:
+  absolute_max_parallel: 4
+  system_prompt_extra: |
+    You are a data aggregation assistant.
+    Fetch from multiple sources in parallel and combine results.
+  memory_prompt: |
+    Use retrieved memories to understand user preferences
+    for data sources and processing options.
+```
+
+---
+
+#### Enterprise Template (Production-Ready)
+
+Full-featured enterprise agent with observability and resilience:
+
+```yaml
+# enterprise_agent.yaml
+name: enterprise-agent
+description: Production-grade enterprise support agent
+template: enterprise
+
+memory: true
+
+llm:
+  provider: openrouter
+  model: anthropic/claude-sonnet-4
+  reflection:
+    enabled: true
+    quality_threshold: 0.85
+    max_revisions: 2
+
+tools:
+  - name: audit_log
+    description: Log audit events for compliance tracking
+    tags: ["audit", "compliance"]
+    side_effects: write
+    args:
+      - name: event_type
+        type: str
+      - name: details
+        type: dict
+    result:
+      - name: log_id
+        type: str
+
+  - name: validate_permissions
+    description: Validate user permissions for a resource
+    tags: ["security", "permissions"]
+    side_effects: read
+    args:
+      - name: user_id
+        type: str
+      - name: resource
+        type: str
+    result:
+      - name: allowed
+        type: bool
+
+services:
+  memory_iceberg:
+    enabled: true
+    base_url: http://localhost:8000
+
+planner:
+  max_iters: 15
+  hop_budget: 10
+  system_prompt_extra: |
+    You are an enterprise support agent with full audit capabilities.
+    Always validate permissions before accessing sensitive resources.
+    Log all significant actions for compliance.
+  memory_prompt: |
+    Consider the user's role, recent interactions, and permission history
+    when determining access levels and providing assistance.
+```
+
+---
+
+#### Flow Template (DAG Pipelines)
+
+Agent with PenguiFlow DAG for data processing pipelines:
+
+```yaml
+# flow_agent.yaml
+name: flow-agent
+description: ETL pipeline agent with DAG orchestration
+template: react  # Use react as base, flows add DAG capability
+
+memory: true
+
+llm:
+  provider: openrouter
+  model: anthropic/claude-sonnet-4
+
+tools:
+  - name: input
+    description: Receive and validate input data
+    args:
+      - name: source
+        type: str
+    result:
+      - name: data
+        type: dict
+
+  - name: process
+    description: Transform and enrich data
+    args:
+      - name: data
+        type: dict
+    result:
+      - name: processed
+        type: dict
+
+  - name: output
+    description: Store processed results
+    args:
+      - name: processed
+        type: dict
+    result:
+      - name: status
+        type: str
+
+# Define PenguiFlow DAG
+flows:
+  - name: data_pipeline
+    description: Simple data processing pipeline
+    nodes:
+      - name: input
+        next: [process]
+      - name: process
+        next: [output]
+      - name: output
+        next: []
+
+services:
+  memory_iceberg:
+    enabled: true
+    base_url: http://localhost:8000
+
+planner:
+  system_prompt_extra: |
+    You are a data pipeline orchestrator.
+    Use the flow tools to process data through the pipeline.
+  memory_prompt: |
+    Reference past pipeline executions to optimize processing.
+```
+
+This generates both tools and a `flows/` directory with PenguiFlow DAG definitions:
+
+```
+flow-agent/
+├── src/flow_agent/
+│   ├── tools/
+│   │   ├── input.py
+│   │   ├── process.py
+│   │   └── output.py
+│   └── flows/
+│       ├── __init__.py
+│       └── data_pipeline.py   # PenguiFlow DAG
+└── ...
+```
+
+The generated flow can be used as a subflow within the planner or run independently.
+
+---
+
+#### Memory Configuration
+
+Memory can be configured at two levels:
+
+**1. Shorthand (top-level):**
+```yaml
+memory: false  # Disable memory
+```
+
+**2. Full flags:**
+```yaml
+agent:
+  name: my-agent
+  flags:
+    memory: true
+    streaming: true
+    hitl: false
+    a2a: false
+```
+
+When memory is enabled, the generator:
+- Adds `memory_enabled: bool = True` to `config.py`
+- Creates `clients/memory.py` with `MemoryClient` stub
+- Wires memory integration in `orchestrator.py`
+- Adds `MEMORY_PROMPT` handling in `planner.py`
+
+When memory is disabled:
+- `memory_enabled: bool = False` in `config.py`
+- No memory client initialization
+- `llm_context` passed as empty dict
+
+---
 
 ### Workflow
 

@@ -286,7 +286,9 @@ def _generate_tools(
         "tools_init.py.jinja",
         {"agent_name": spec.agent.name, "tools": tools},
     )
-    wrote, path = _write_file(tools_dir / "__init__.py", init_content, force=force)
+    # Always force-overwrite tools/__init__.py since it's dynamically generated
+    # from spec tools, superseding any template-provided version
+    wrote, path = _write_file(tools_dir / "__init__.py", init_content, force=True)
     if wrote and path:
         created.append(path)
     elif not wrote:
@@ -334,7 +336,8 @@ def _generate_planner(
         created.append(planner_path.as_posix())
         return created, skipped
 
-    wrote, path = _write_file(planner_path, content, force=force)
+    # Always force-overwrite planner.py since it's dynamically generated from spec
+    wrote, path = _write_file(planner_path, content, force=True)
     if wrote and path:
         created.append(path)
     elif not wrote:
@@ -382,7 +385,8 @@ def _generate_flows(
         "flows_init.py.jinja",
         {"agent_name": spec.agent.name, "flows": flow_renders},
     )
-    wrote, path = _write_file(flows_dir / "__init__.py", init_content, force=force)
+    # Always force-overwrite flows/__init__.py since it's dynamically generated
+    wrote, path = _write_file(flows_dir / "__init__.py", init_content, force=True)
     if wrote and path:
         created.append(path)
     elif not wrote:

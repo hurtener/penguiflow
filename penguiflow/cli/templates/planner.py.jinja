@@ -36,10 +36,10 @@ def _planner_models(config: Config) -> tuple[str, str | None, str | None]:
 def _planner_prompts(config: Config) -> str:
     prompt = SYSTEM_PROMPT_EXTRA
     memory_enabled = getattr(config, "memory_enabled", {{ memory_enabled }})
-    {% if include_memory_prompt -%}
+{% if include_memory_prompt %}
     if memory_enabled:
         prompt = prompt + "\\n\\n" + MEMORY_PROMPT
-    {%- endif %}
+{% endif %}
     return prompt
 
 

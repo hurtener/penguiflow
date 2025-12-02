@@ -52,9 +52,9 @@ def build_{{ flow.name }}_flow() -> {{ flow.bundle_class }}:
 {% endfor %}
 
     edges = [
-{%- for edge in flow.edges %}
+{% for edge in flow.edges %}
         ({{ edge.start }}, {{ edge.targets_literal }}),
-{%- endfor %}
+{% endfor %}
     ]
 
     flow = create(*edges)

@@ -10,10 +10,10 @@ from penguiflow.planner import ToolContext
 class {{ tool.class_name }}Args(BaseModel):
     """{{ tool.description }} input."""
 {% if tool.args %}
-{%- for field in tool.args %}
+{% for field in tool.args %}
     {{ field.name }}: {{ field.type_hint }}
-{%- endfor %}
-{% else %}
+{% endfor %}
+{%- else %}
     pass
 {% endif %}
 
@@ -21,10 +21,10 @@ class {{ tool.class_name }}Args(BaseModel):
 class {{ tool.class_name }}Result(BaseModel):
     """{{ tool.description }} output."""
 {% if tool.result %}
-{%- for field in tool.result %}
+{% for field in tool.result %}
     {{ field.name }}: {{ field.type_hint }}
-{%- endfor %}
-{% else %}
+{% endfor %}
+{%- else %}
     pass
 {% endif %}
 
