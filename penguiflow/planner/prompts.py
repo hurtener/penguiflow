@@ -197,12 +197,10 @@ Current date: {current_date}
     # OUTPUT FORMAT (NON-NEGOTIABLE)
     # ─────────────────────────────────────────────────────────────
     prompt_sections.append("""<output_format>
-You MUST respond with valid JSON matching the PlannerAction schema. No exceptions.
+Think briefly in plain text, then respond with a single JSON object that matches the PlannerAction schema.
 
-Never output plain text, markdown, or explanations outside of JSON.
-Never wrap your response in code blocks or add commentary.
-
-Your entire response must be parseable as a single JSON object.
+Write your JSON inside one markdown code block (```json ... ```).
+Do not emit multiple JSON objects or extra commentary after the code block.
 </output_format>""")
 
     # ─────────────────────────────────────────────────────────────

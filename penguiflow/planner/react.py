@@ -12,7 +12,7 @@ from copy import deepcopy
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, Literal, get_args, get_origin
 from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
@@ -91,6 +91,69 @@ def _coerce_tool_context(
     if not isinstance(tool_context, Mapping):
         raise TypeError("tool_context must be a mapping")
     return dict(tool_context)
+
+
+def _default_for_annotation(annotation: Any) -> Any:
+    """Generate a lightweight placeholder for a required field."""
+
+    origin = get_origin(annotation)
+    if origin is Literal:
+        values = get_args(annotation)
+        if values:
+            return values[0]
+
+    if origin is None:
+        if annotation is str:
+            return "unknown"
+        if annotation is bool:
+            return False
+        if annotation is int:
+            return 0
+        if annotation is float:
+            return 0.0
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            return {}
+    else:
+        if origin in (list, set, tuple, Sequence):
+            return []
+        if origin in (dict, Mapping):
+            return {}
+        if origin is type(None):
+            return None
+
+        for arg in get_args(annotation):
+            if arg is type(None):
+                continue
+            candidate = _default_for_annotation(arg)
+            if candidate is not None:
+                return candidate
+
+    return "<auto>"
+
+
+def _autofill_missing_args(
+    spec: NodeSpec,
+    args: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], tuple[str, ...]] | None:
+    """Fill required args with safe defaults to avoid repeated validation loops."""
+
+    provided: dict[str, Any] = dict(args or {})
+    filled: dict[str, Any] = {}
+
+    for field_name, field_info in spec.args_model.model_fields.items():
+        if field_name in provided and provided[field_name] is not None:
+            continue
+        if not field_info.is_required():
+            continue
+
+        placeholder = _default_for_annotation(field_info.annotation)
+        provided[field_name] = placeholder
+        filled[field_name] = placeholder
+
+    if not filled:
+        return None
+
+    return provided, tuple(filled.keys())
 
 
 
@@ -1236,13 +1299,39 @@ class ReactPlanner:
                 try:
                     parsed_args = spec.args_model.model_validate(action.args or {})
                 except ValidationError as exc:
-                    error = prompts.render_validation_error(
-                        spec.name,
-                        json.dumps(exc.errors(), ensure_ascii=False),
-                    )
-                    trajectory.steps.append(TrajectoryStep(action=action, error=error))
-                    trajectory.summary = None
-                    continue
+                    autofilled = _autofill_missing_args(spec, action.args)
+                    if autofilled is not None:
+                        autofilled_args, filled_fields = autofilled
+                        try:
+                            parsed_args = spec.args_model.model_validate(autofilled_args)
+                            action.args = autofilled_args
+                            logger.info(
+                                "planner_autofill_args",
+                                extra={
+                                    "tool": spec.name,
+                                    "filled": list(filled_fields),
+                                },
+                            )
+                        except ValidationError as autofill_exc:
+                            error = prompts.render_validation_error(
+                                spec.name,
+                                json.dumps(
+                                    autofill_exc.errors(), ensure_ascii=False
+                                ),
+                            )
+                            trajectory.steps.append(
+                                TrajectoryStep(action=action, error=error)
+                            )
+                            trajectory.summary = None
+                            continue
+                    else:
+                        error = prompts.render_validation_error(
+                            spec.name,
+                            json.dumps(exc.errors(), ensure_ascii=False),
+                        )
+                        trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                        trajectory.summary = None
+                        continue
 
                 ctx = _PlannerContext(self, trajectory)
                 try:

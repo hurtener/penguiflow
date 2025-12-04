@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any, get_args, get_origin
 
@@ -22,14 +23,29 @@ from .trajectory import Trajectory, TrajectorySummary
 logger = logging.getLogger("penguiflow.planner")
 
 
+def _extract_json_from_text(text: str) -> str:
+    """Extract JSON object content from mixed text + fenced code blocks."""
+
+    text = text.strip()
+    fence_match = re.search(r"```(?:json)?\\s*(\\{.*?\\})\\s*```", text, re.DOTALL)
+    if fence_match:
+        return fence_match.group(1)
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start : end + 1]
+    return text
+
+
 def _coerce_llm_response(result: str | tuple[str, float]) -> tuple[str, float]:
     """Normalise JSON LLM client responses to ``(content, cost)`` tuples."""
 
     if isinstance(result, tuple):
         content, cost = result
-        return content, float(cost)
+        return _extract_json_from_text(content), float(cost)
     if isinstance(result, str):
-        return result, 0.0
+        return _extract_json_from_text(result), 0.0
     msg = (
         "Expected JSONLLMClient to return a string or (string, float) tuple, "
         f"received {type(result)!r}"
@@ -37,13 +53,20 @@ def _coerce_llm_response(result: str | tuple[str, float]) -> tuple[str, float]:
     raise TypeError(msg)
 
 
-def _sanitize_json_schema(schema: dict[str, Any], *, strict_mode: bool = False) -> dict[str, Any]:
+def _sanitize_json_schema(
+    schema: dict[str, Any],
+    *,
+    strict_mode: bool = False,
+    require_all_fields: bool = False,
+) -> dict[str, Any]:
     """Remove advanced JSON schema constraints for broader provider compatibility.
 
     Args:
         schema: The JSON schema to sanitize.
         strict_mode: If True, adds 'additionalProperties: false' to all object schemas
                      as required by OpenAI/OpenRouter structured outputs.
+        require_all_fields: If True, marks all object properties as required (used for
+                            providers that demand exhaustive required lists).
     """
 
     if not isinstance(schema, dict):
@@ -70,11 +93,19 @@ def _sanitize_json_schema(schema: dict[str, Any], *, strict_mode: bool = False) 
 
         if key == "properties" and isinstance(value, dict):
             sanitized[key] = {
-                prop_name: _sanitize_json_schema(prop_schema, strict_mode=strict_mode)
+                prop_name: _sanitize_json_schema(
+                    prop_schema,
+                    strict_mode=strict_mode,
+                    require_all_fields=require_all_fields,
+                )
                 for prop_name, prop_schema in value.items()
             }
         elif key == "items" and isinstance(value, dict):
-            sanitized[key] = _sanitize_json_schema(value, strict_mode=strict_mode)
+            sanitized[key] = _sanitize_json_schema(
+                value,
+                strict_mode=strict_mode,
+                require_all_fields=require_all_fields,
+            )
         elif key == "additionalProperties":
             # In strict mode, we need additionalProperties: false
             # If it's a dict schema (for typed additional props), skip sanitizing but note
@@ -88,15 +119,40 @@ def _sanitize_json_schema(schema: dict[str, Any], *, strict_mode: bool = False) 
             else:
                 sanitized[key] = value
         elif key == "allOf" and isinstance(value, list):
-            sanitized[key] = [_sanitize_json_schema(item, strict_mode=strict_mode) for item in value]
+            sanitized[key] = [
+                _sanitize_json_schema(
+                    item,
+                    strict_mode=strict_mode,
+                    require_all_fields=require_all_fields,
+                )
+                for item in value
+            ]
         elif key == "anyOf" and isinstance(value, list):
-            sanitized[key] = [_sanitize_json_schema(item, strict_mode=strict_mode) for item in value]
+            sanitized[key] = [
+                _sanitize_json_schema(
+                    item,
+                    strict_mode=strict_mode,
+                    require_all_fields=require_all_fields,
+                )
+                for item in value
+            ]
         elif key == "oneOf" and isinstance(value, list):
-            sanitized[key] = [_sanitize_json_schema(item, strict_mode=strict_mode) for item in value]
+            sanitized[key] = [
+                _sanitize_json_schema(
+                    item,
+                    strict_mode=strict_mode,
+                    require_all_fields=require_all_fields,
+                )
+                for item in value
+            ]
         elif key == "$defs" and isinstance(value, dict):
             # Process nested definitions (used by Pydantic for referenced models)
             sanitized[key] = {
-                def_name: _sanitize_json_schema(def_schema, strict_mode=strict_mode)
+                def_name: _sanitize_json_schema(
+                    def_schema,
+                    strict_mode=strict_mode,
+                    require_all_fields=require_all_fields,
+                )
                 for def_name, def_schema in value.items()
             }
         else:
@@ -105,15 +161,48 @@ def _sanitize_json_schema(schema: dict[str, Any], *, strict_mode: bool = False) 
     # Add additionalProperties: false for object schemas in strict mode
     # This is required by OpenAI/OpenRouter structured outputs API
     if strict_mode:
-        is_object_schema = (
-            sanitized.get("type") == "object" or
-            "properties" in sanitized
-        )
+        is_object_schema = sanitized.get("type") == "object" or "properties" in sanitized
         if is_object_schema:
-            # Always set to false in strict mode, overriding any existing value
             sanitized["additionalProperties"] = False
+            properties = sanitized.get("properties", {}) or {}
+            if properties and require_all_fields:
+                required_keys = set(sanitized.get("required", []))
+                required_keys.update(properties.keys())
+                if required_keys:
+                    sanitized["required"] = sorted(required_keys)
 
     return sanitized
+
+
+def _response_format_policy(model_name: str) -> str:
+    """Select response_format strategy based on model/provider capabilities."""
+
+    lower = model_name.lower()
+
+    weak_schema_models = (
+        "anthropic" in lower
+        or "claude" in lower
+        or "xai" in lower
+        or "grok" in lower
+        or "mistral" in lower
+        or "gemini" in lower
+        or "google" in lower
+        or "llama" in lower
+        or "qwen" in lower
+        or "deepseek" in lower
+        or "cohere" in lower
+    )
+
+    openai_like = (
+        ("gpt-4" in lower or "gpt-3.5" in lower or "o1" in lower or "o3" in lower)
+        and "openai" in lower
+    ) or model_name.startswith("openai/")
+
+    if weak_schema_models:
+        return "json_object"
+    if openai_like:
+        return "strict_schema"
+    return "sanitized_schema"
 
 
 def _artifact_placeholder(value: Any) -> str:
@@ -231,62 +320,32 @@ class _LiteLLMJSONClient:
         params["messages"] = list(messages)
         if self._json_schema_mode and response_format is not None:
             model_name = self._llm if isinstance(self._llm, str) else self._llm.get("model", "")
-            model_lower = model_name.lower()
-
-            # Providers that need constraint removal (minimum, maximum, etc.)
-            needs_constraint_removal = (
-                model_name.startswith("databricks/")
-                or "databricks" in model_lower
-                or "groq" in model_lower
-                or "cerebras" in model_lower
-            )
-
-            # Models that DON'T support strict JSON schema mode
-            # These models work better with just response_format: {"type": "json_object"}
-            # rather than full JSON schema with strict mode
-            no_strict_schema_support = (
-                "anthropic" in model_lower
-                or "claude" in model_lower
-                or "gemini" in model_lower
-                or "google" in model_lower
-                or "mistral" in model_lower
-                or "llama" in model_lower
-                or "qwen" in model_lower
-                or "deepseek" in model_lower
-                or "cohere" in model_lower
-            )
-
-            # Models that fully support OpenAI-style strict JSON schema
-            supports_strict_schema = (
-                ("gpt-4" in model_lower or "gpt-3.5" in model_lower or "o1" in model_lower or "o3" in model_lower)
-                and "openai" in model_lower
-            ) or (
-                model_name.startswith("openai/")
-            )
+            policy = _response_format_policy(model_name)
 
             if "json_schema" in response_format:
-                if no_strict_schema_support:
-                    # For models without strict schema support, use simple JSON mode
-                    # and let the prompt guide the structure
+                schema_payload = response_format["json_schema"]
+                sanitized_format = dict(response_format)
+                sanitized_schema = _sanitize_json_schema(
+                    schema_payload["schema"],
+                    strict_mode=policy != "json_object",
+                    require_all_fields=policy == "strict_schema",
+                )
+
+                if policy == "json_object":
                     params["response_format"] = {"type": "json_object"}
                     logger.debug(
                         "json_schema_downgraded",
                         extra={
                             "model": model_name,
-                            "reason": "no_strict_schema_support",
+                            "reason": "json_object_policy",
                             "fallback": "json_object",
                         },
                     )
-                elif supports_strict_schema:
-                    # OpenAI models: use full strict schema with additionalProperties: false
-                    sanitized_format = dict(response_format)
+                elif policy == "strict_schema":
                     sanitized_format["json_schema"] = {
-                        "name": response_format["json_schema"]["name"],
+                        "name": schema_payload["name"],
                         "strict": True,
-                        "schema": _sanitize_json_schema(
-                            response_format["json_schema"]["schema"],
-                            strict_mode=True,
-                        ),
+                        "schema": sanitized_schema,
                     }
                     params["response_format"] = sanitized_format
                     logger.debug(
@@ -294,14 +353,9 @@ class _LiteLLMJSONClient:
                         extra={"model": model_name, "strict_mode": True},
                     )
                 else:
-                    # Unknown model: try schema without strict mode, sanitize for compatibility
-                    sanitized_format = dict(response_format)
                     sanitized_format["json_schema"] = {
-                        "name": response_format["json_schema"]["name"],
-                        "schema": _sanitize_json_schema(
-                            response_format["json_schema"]["schema"],
-                            strict_mode=True,  # Still add additionalProperties: false
-                        ),
+                        "name": schema_payload["name"],
+                        "schema": sanitized_schema,
                     }
                     params["response_format"] = sanitized_format
                     logger.debug(
