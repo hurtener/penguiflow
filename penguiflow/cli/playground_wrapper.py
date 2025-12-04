@@ -40,11 +40,9 @@ class AgentWrapper(Protocol):
         context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
-    ) -> ChatResult:
-        ...
+    ) -> ChatResult: ...
 
-    async def shutdown(self) -> None:
-        ...
+    async def shutdown(self) -> None: ...
 
 
 class _EventRecorder:

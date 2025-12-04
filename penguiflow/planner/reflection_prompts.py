@@ -115,9 +115,7 @@ def build_revision_prompt(
     else:
         suggestion_lines = "- Address the critique feedback above"
 
-    thought_section = (
-        f"Previous reasoning: {original_thought}\n\n" if original_thought else ""
-    )
+    thought_section = f"Previous reasoning: {original_thought}\n\n" if original_thought else ""
 
     instructions = (
         "Please revise your answer to address these concerns. "
@@ -128,7 +126,7 @@ def build_revision_prompt(
     return f"""Your previous answer received this feedback:
 
 **Score**: {critique.score:.2f}
-**Issues**: {', '.join(critique.issues) if critique.issues else 'None noted'}
+**Issues**: {", ".join(critique.issues) if critique.issues else "None noted"}
 **Suggestions**:
 {suggestion_lines}
 

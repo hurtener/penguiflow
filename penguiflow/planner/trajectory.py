@@ -51,8 +51,7 @@ class TrajectoryStep:
             payload["llm_observation"] = self.llm_observation
         if self.streams:
             payload["streams"] = {
-                stream_id: [dict(chunk) for chunk in chunks]
-                for stream_id, chunks in self.streams.items()
+                stream_id: [dict(chunk) for chunk in chunks] for stream_id, chunks in self.streams.items()
             }
         return payload
 
@@ -86,9 +85,7 @@ class Trajectory:
         tool_context: dict[str, Any] | None = None
         if self.tool_context is not None:
             try:
-                tool_context = json.loads(
-                    json.dumps(self.tool_context, ensure_ascii=False)
-                )
+                tool_context = json.loads(json.dumps(self.tool_context, ensure_ascii=False))
             except (TypeError, ValueError):
                 tool_context = None
         return {
@@ -98,9 +95,7 @@ class Trajectory:
             "artifacts": dict(self.artifacts),
             "sources": [dict(src) for src in self.sources],
             "steps": self.to_history(),
-            "summary": self.summary.model_dump(mode="json")
-            if self.summary
-            else None,
+            "summary": self.summary.model_dump(mode="json") if self.summary else None,
             "hint_state": dict(self.hint_state),
             "resume_user_input": self.resume_user_input,
         }

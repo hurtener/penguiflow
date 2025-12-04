@@ -27,4 +27,3 @@ def format_flow_event(event: FlowEvent) -> dict[str, Any]:
 
 
 __all__ = ["format_flow_event"]
-

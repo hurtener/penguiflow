@@ -99,9 +99,7 @@ def parse_type_annotation(annotation: str) -> TypeExpression:
             key_expr = _parse(dict_match.group("key").strip())
             value_expr = _parse(dict_match.group("value").strip())
             if key_expr.kind not in _PRIMITIVE_TYPES:
-                raise UnsupportedTypeAnnotation(
-                    "dict keys must be primitive types (str, int, float, bool)."
-                )
+                raise UnsupportedTypeAnnotation("dict keys must be primitive types (str, int, float, bool).")
             return TypeExpression(raw=candidate, kind="dict", args=(key_expr, value_expr))
 
         raise UnsupportedTypeAnnotation(
@@ -188,9 +186,7 @@ def _normalize_loc(loc: Sequence[Any]) -> SpecPath:
     return tuple(normalized)
 
 
-def _errors_from_pydantic(
-    error: ValidationError, *, lines: LineIndex
-) -> list[SpecErrorDetail]:
+def _errors_from_pydantic(error: ValidationError, *, lines: LineIndex) -> list[SpecErrorDetail]:
     details: list[SpecErrorDetail] = []
     for err in error.errors():
         path = _normalize_loc(err.get("loc", ()))
@@ -217,9 +213,7 @@ class AgentFlagsSpec(BaseModel):
 class AgentSpec(BaseModel):
     name: str
     description: str
-    template: Literal[
-        "minimal", "react", "parallel", "lighthouse", "wayfinder", "analyst", "enterprise"
-    ]
+    template: Literal["minimal", "react", "parallel", "lighthouse", "wayfinder", "analyst", "enterprise"]
     flags: AgentFlagsSpec = Field(default_factory=AgentFlagsSpec)
 
     model_config = ConfigDict(extra="forbid")
@@ -266,9 +260,7 @@ class ToolSpec(BaseModel):
 
     @field_validator("args", "result", mode="before")
     @classmethod
-    def _parse_types(
-        cls, value: dict[str, str] | None
-    ) -> dict[str, TypeExpression]:
+    def _parse_types(cls, value: dict[str, str] | None) -> dict[str, TypeExpression]:
         if value is None:
             return {}
         if not isinstance(value, dict):
@@ -304,9 +296,7 @@ class FlowDependencySpec(BaseModel):
 
 
 class FlowNodePolicySpec(BaseModel):
-    validate_mode: Literal["in", "out", "both", "none"] | None = Field(
-        default=None, alias="validate"
-    )
+    validate_mode: Literal["in", "out", "both", "none"] | None = Field(default=None, alias="validate")
     timeout_s: float | None = None
     max_retries: int | None = None
     backoff_base: float | None = None
@@ -350,9 +340,7 @@ class FlowNodeSpec(BaseModel):
         if not value.strip():
             raise ValueError("type identifier cannot be empty when provided.")
         if not _PASCAL_CASE_PATTERN.match(value):
-            raise ValueError(
-                f"type identifier '{value}' must be PascalCase (start with uppercase, alphanumeric only)."
-            )
+            raise ValueError(f"type identifier '{value}' must be PascalCase (start with uppercase, alphanumeric only).")
         return value
 
 
@@ -618,10 +606,7 @@ def _validate_flows(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail]:
             if step_name not in allowed_steps:
                 errors.append(
                     SpecErrorDetail(
-                        message=(
-                            f"Flow step '{step_name}' is not defined in nodes and "
-                            "must reference a known tool."
-                        ),
+                        message=(f"Flow step '{step_name}' is not defined in nodes and must reference a known tool."),
                         path=step_path,
                         line=step_line,
                     )
@@ -655,11 +640,7 @@ def _validate_services(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail]:
 def _validate_cross_fields(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail]:
     errors: list[SpecErrorDetail] = []
     if spec.agent.flags.memory and not spec.planner.memory_prompt:
-        line = (
-            lines.line_for(("planner", "memory_prompt"))
-            or lines.line_for(("planner",))
-            or lines.line_for(())
-        )
+        line = lines.line_for(("planner", "memory_prompt")) or lines.line_for(("planner",)) or lines.line_for(())
         errors.append(
             SpecErrorDetail(
                 message="planner.memory_prompt is required when memory is enabled.",

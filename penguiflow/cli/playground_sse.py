@@ -24,11 +24,19 @@ async def stream_queue(
     """Yield SSE frames from an asyncio queue until a sentinel is received."""
     try:
         while True:
-            item = await queue.get()
-            if item is SSESentinel:
-                break
-            if isinstance(item, bytes):
-                yield item
+            try:
+                # Use timeout to allow checking for cancellation periodically
+                item = await asyncio.wait_for(queue.get(), timeout=1.0)
+                if item is SSESentinel:
+                    break
+                if isinstance(item, bytes):
+                    yield item
+            except TimeoutError:
+                # Continue waiting - this allows cancellation to be processed
+                continue
+    except asyncio.CancelledError:
+        # Graceful shutdown - don't re-raise
+        pass
     finally:
         if unsubscribe is not None:
             await unsubscribe()
@@ -61,3 +69,14 @@ class EventBroker:
                 queue.put_nowait(frame)
             except asyncio.QueueFull:
                 continue
+
+    async def close(self) -> None:
+        """Signal all subscribers to exit and clear subscriptions."""
+
+        for queues in list(self._subscribers.values()):
+            for queue in list(queues):
+                try:
+                    queue.put_nowait(SSESentinel)
+                except asyncio.QueueFull:
+                    pass
+        self._subscribers.clear()

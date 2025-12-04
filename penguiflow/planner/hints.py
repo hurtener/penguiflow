@@ -22,10 +22,7 @@ class _PlanningHints:
         if not payload:
             return cls((), (), set(), set(), (), None, {})
         ordering = tuple(str(item) for item in payload.get("ordering_hints", ()))
-        parallel_groups = tuple(
-            tuple(str(node) for node in group)
-            for group in payload.get("parallel_groups", ())
-        )
+        parallel_groups = tuple(tuple(str(node) for node in group) for group in payload.get("parallel_groups", ()))
         sequential = {str(item) for item in payload.get("sequential_only", ())}
         disallow = {str(item) for item in payload.get("disallow_nodes", ())}
         prefer = tuple(str(item) for item in payload.get("prefer_nodes", ()))

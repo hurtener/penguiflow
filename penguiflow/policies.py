@@ -14,10 +14,12 @@ from .node import Node
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
     from .core import Context
 else:  # pragma: no cover - runtime fallback
+
     class Context:  # type: ignore[too-many-ancestors]
         """Placeholder context type for runtime annotations."""
 
         pass
+
 
 RoutingDecisionType: TypeAlias = None | Node | str | Sequence[Node | str]
 
@@ -47,15 +49,11 @@ class RoutingRequest:
 class RoutingPolicy(Protocol):
     """Protocol for routing policies used by router nodes."""
 
-    def select(
-        self, request: RoutingRequest
-    ) -> RoutingDecisionType | Awaitable[RoutingDecisionType]:
+    def select(self, request: RoutingRequest) -> RoutingDecisionType | Awaitable[RoutingDecisionType]:
         """Return the desired routing targets for *request*."""
 
 
-PolicyCallable = Callable[
-    [RoutingRequest], RoutingDecisionType | Awaitable[RoutingDecisionType]
-]
+PolicyCallable = Callable[[RoutingRequest], RoutingDecisionType | Awaitable[RoutingDecisionType]]
 PolicyLike = RoutingPolicy | PolicyCallable
 
 

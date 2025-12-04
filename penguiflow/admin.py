@@ -26,9 +26,7 @@ class _Args(argparse.Namespace):
 def _resolve_factory(spec: str) -> Callable[[], Any]:
     module_name, _, attr = spec.partition(":")
     if not module_name or not attr:
-        raise ValueError(
-            "state store spec must be in the form 'package.module:callable'"
-        )
+        raise ValueError("state store spec must be in the form 'package.module:callable'")
     module = importlib.import_module(module_name)
     try:
         factory = getattr(module, attr)
@@ -48,10 +46,7 @@ async def load_state_store(spec: str) -> StateStore:
         instance = await instance
     required = ("save_event", "load_history", "save_remote_binding")
     if not all(hasattr(instance, attr) for attr in required):  # pragma: no cover
-        raise TypeError(
-            "StateStore factories must implement "
-            "save_event/load_history/save_remote_binding"
-        )
+        raise TypeError("StateStore factories must implement save_event/load_history/save_remote_binding")
     return instance
 
 
@@ -64,9 +59,7 @@ def _trim_events(events: Sequence[StoredEvent], tail: int | None) -> list[Stored
     return items[-tail:]
 
 
-def render_events(
-    events: Sequence[StoredEvent], *, tail: int | None = None
-) -> list[str]:
+def render_events(events: Sequence[StoredEvent], *, tail: int | None = None) -> list[str]:
     """Return JSON line representations of ``events`` (optionally tail-truncated)."""
 
     trimmed = _trim_events(events, tail)
@@ -107,10 +100,7 @@ async def _cmd_replay(args: _Args) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="penguiflow-admin",
-        description=(
-            "Inspect PenguiFlow trace history via configured StateStore "
-            "adapters."
-        ),
+        description=("Inspect PenguiFlow trace history via configured StateStore adapters."),
     )
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
@@ -171,4 +161,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover - manual invocation
     raise SystemExit(main())
-

@@ -222,7 +222,8 @@ Field meanings:
 - next_node: Name of the tool to call, or null when finished
 - args: Arguments for the tool (when next_node is set) or final answer structure (when finished)
 - plan: For parallel execution - list of {node, args} to run concurrently
-- join: For parallel execution - how to combine results. If there is no join/aggregator tool in the catalog, combine the parallel outputs yourself in the final answer instead of calling a missing tool.
+- join: For parallel execution - how to combine results. If there is no join/aggregator tool in \
+the catalog, combine the parallel outputs yourself in the final answer instead of calling a missing tool.
 </action_schema>""")
 
     # ─────────────────────────────────────────────────────────────

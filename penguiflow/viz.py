@@ -52,7 +52,7 @@ def flow_to_mermaid(flow: PenguiFlow, *, direction: str = "TD") -> str:
 
     for node in nodes:
         label = _escape_label(node.label)
-        lines.append(f"    {node.identifier}[\"{label}\"]")
+        lines.append(f'    {node.identifier}["{label}"]')
         for class_name in node.classes:
             used_definitions.add(class_name)
 
@@ -92,7 +92,7 @@ def flow_to_dot(flow: PenguiFlow, *, rankdir: str = "TB") -> str:
     for node in nodes:
         attributes: list[str] = [f'label="{node.label}"']
         if "endpoint" in node.classes:
-            attributes.append('shape=oval')
+            attributes.append("shape=oval")
             attributes.append('style="filled"')
             attributes.append('fillcolor="#e0f2fe"')
         elif "controller_loop" in node.classes:
@@ -104,9 +104,7 @@ def flow_to_dot(flow: PenguiFlow, *, rankdir: str = "TB") -> str:
     for edge in edges:
         if edge.label:
             edge_label = _escape_label(edge.label)
-            lines.append(
-                f"    {edge.source} -> {edge.target} [label=\"{edge_label}\"]"
-            )
+            lines.append(f'    {edge.source} -> {edge.target} [label="{edge_label}"]')
         else:
             lines.append(f"    {edge.source} -> {edge.target}")
 
@@ -181,5 +179,4 @@ def _unique_id(label: str, used: set[str]) -> str:
 
 
 def _escape_label(label: str) -> str:
-    return label.replace("\"", "\\\"")
-
+    return label.replace('"', '\\"')

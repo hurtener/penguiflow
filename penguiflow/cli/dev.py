@@ -27,9 +27,7 @@ def _load_env_file(env_path: Path) -> dict[str, str]:
         key = key.strip()
         value = value.strip()
         # Remove surrounding quotes if present
-        if (value.startswith('"') and value.endswith('"')) or (
-            value.startswith("'") and value.endswith("'")
-        ):
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
             value = value[1:-1]
         values[key] = value
     return values

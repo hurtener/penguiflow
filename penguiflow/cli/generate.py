@@ -478,9 +478,7 @@ def _generate_flow_orchestrators(
 
     if dry_run:
         for flow in flow_renders:
-            created.append(
-                (project_dir / "src" / package_name / f"{flow.name}_orchestrator.py").as_posix()
-            )
+            created.append((project_dir / "src" / package_name / f"{flow.name}_orchestrator.py").as_posix())
         return created, skipped
 
     for flow in flow_renders:
@@ -741,9 +739,7 @@ def run_generate(
     try:
         if verbose:
             click.echo("\nGenerating tools...")
-        tool_created, tool_skipped = _generate_tools(
-            project_dir, package_name, spec, dry_run=dry_run, force=force
-        )
+        tool_created, tool_skipped = _generate_tools(project_dir, package_name, spec, dry_run=dry_run, force=force)
         created.extend(tool_created)
         skipped.extend(tool_skipped)
         if verbose:
@@ -759,9 +755,7 @@ def run_generate(
 
         if verbose:
             click.echo("Generating flows...")
-        flow_created, flow_skipped = _generate_flows(
-            project_dir, package_name, spec, dry_run=dry_run, force=force
-        )
+        flow_created, flow_skipped = _generate_flows(project_dir, package_name, spec, dry_run=dry_run, force=force)
         created.extend(flow_created)
         skipped.extend(flow_skipped)
         if verbose and flow_created:
@@ -795,17 +789,13 @@ def run_generate(
 
         if verbose:
             click.echo("Generating config...")
-        config_created, config_skipped = _generate_config(
-            project_dir, package_name, spec, dry_run=dry_run, force=force
-        )
+        config_created, config_skipped = _generate_config(project_dir, package_name, spec, dry_run=dry_run, force=force)
         created.extend(config_created)
         skipped.extend(config_skipped)
 
         if verbose:
             click.echo("Generating .env.example...")
-        env_created, env_skipped = _generate_env_example(
-            project_dir, spec, dry_run=dry_run, force=force
-        )
+        env_created, env_skipped = _generate_env_example(project_dir, spec, dry_run=dry_run, force=force)
         created.extend(env_created)
         skipped.extend(env_skipped)
     except (GeneratorTemplateError, CLIError, SpecValidationError):
@@ -848,12 +838,7 @@ class InitResult(NamedTuple):
 def _load_init_template(name: str) -> str:
     """Load a template from the init/ subdirectory."""
     try:
-        return (
-            resources.files("penguiflow.cli.templates")
-            .joinpath("init")
-            .joinpath(name)
-            .read_text()
-        )
+        return resources.files("penguiflow.cli.templates").joinpath("init").joinpath(name).read_text()
     except FileNotFoundError as exc:  # pragma: no cover - defensive guard
         raise GeneratorTemplateError(f"Init template '{name}' not found.") from exc
 

@@ -265,7 +265,9 @@ class _ArtifactCollector:
 
         collected: dict[str, Any] = {}
         for field_name, field_info in out_model.model_fields.items():
-            extra = field_info.json_schema_extra or {}
+            extra = field_info.json_schema_extra
+            if not isinstance(extra, Mapping):
+                extra = {}
             if extra.get("artifact") and field_name in observation:
                 collected[field_name] = observation[field_name]
 
@@ -312,7 +314,9 @@ def _source_field_map(model: type[BaseModel]) -> dict[str, str]:
 
     mapping: dict[str, str] = {}
     for field_name, field_info in model.model_fields.items():
-        extra = field_info.json_schema_extra or {}
+        extra = field_info.json_schema_extra
+        if not isinstance(extra, Mapping):
+            extra = {}
         target = extra.get("source_field")
         if target is None and field_name in Source.model_fields:
             target = field_name

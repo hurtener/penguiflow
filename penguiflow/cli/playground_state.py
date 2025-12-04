@@ -16,35 +16,30 @@ class PlaygroundStateStore(Protocol):
         trace_id: str,
         session_id: str,
         trajectory: Trajectory,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     async def get_trajectory(
         self,
         trace_id: str,
         session_id: str,
-    ) -> Trajectory | None:
-        ...
+    ) -> Trajectory | None: ...
 
     async def list_traces(
         self,
         session_id: str,
         limit: int = 50,
-    ) -> list[str]:
-        ...
+    ) -> list[str]: ...
 
     async def save_event(
         self,
         trace_id: str,
         event: PlannerEvent,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     async def get_events(
         self,
         trace_id: str,
-    ) -> list[PlannerEvent]:
-        ...
+    ) -> list[PlannerEvent]: ...
 
 
 class InMemoryStateStore(PlaygroundStateStore):

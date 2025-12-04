@@ -17,8 +17,7 @@ class JSONLLMClient(Protocol):
         *,
         messages: Sequence[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
-    ) -> str | tuple[str, float]:
-        ...
+    ) -> str | tuple[str, float]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,12 +224,8 @@ class ReflectionConfig(BaseModel):
 class ClarificationResponse(BaseModel):
     """Response when planner cannot satisfy query after reflection failures."""
 
-    text: str = Field(
-        description="Honest explanation of what was tried and why it didn't work"
-    )
-    confidence: Literal["satisfied", "unsatisfied"] = Field(
-        description="Whether the query was satisfactorily answered"
-    )
+    text: str = Field(description="Honest explanation of what was tried and why it didn't work")
+    confidence: Literal["satisfied", "unsatisfied"] = Field(description="Whether the query was satisfactorily answered")
     attempted_approaches: list[str] = Field(
         default_factory=list,
         description="List of approaches/tools tried to answer the query",

@@ -34,9 +34,7 @@ __all__ = [
 
 _MAX_TRACE_HISTORY = 64
 _TRACE_HISTORY: OrderedDict[str, list[FlowEvent]] = OrderedDict()
-_RECORDER_STATE: WeakKeyDictionary[PenguiFlow, _RecorderState] = (
-    WeakKeyDictionary()
-)
+_RECORDER_STATE: WeakKeyDictionary[PenguiFlow, _RecorderState] = WeakKeyDictionary()
 
 
 def _register_trace_history(trace_id: str, events: list[FlowEvent]) -> None:
@@ -117,8 +115,7 @@ class _StubContext:
 
     async def emit_chunk(self, *_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError(
-            "FlowTestKit stub context does not support emit_chunk; provide a custom"
-            " context via the 'ctx' parameter"
+            "FlowTestKit stub context does not support emit_chunk; provide a custom context via the 'ctx' parameter"
         )
 
 
@@ -222,10 +219,7 @@ async def assert_preserves_message_envelope(
     result = await func(sample, context)
     if not isinstance(result, Message):
         produced = type(result).__name__
-        raise AssertionError(
-            "Node "
-            f"'{node_name}' must return a Message but produced {produced}"
-        )
+        raise AssertionError(f"Node '{node_name}' must return a Message but produced {produced}")
 
     mismatches: list[str] = []
     if result.headers != sample.headers:
@@ -235,9 +229,7 @@ async def assert_preserves_message_envelope(
 
     if mismatches:
         joined = ", ".join(mismatches)
-        raise AssertionError(
-            f"Node '{node_name}' altered Message {joined}; preserve the envelope"
-        )
+        raise AssertionError(f"Node '{node_name}' altered Message {joined}; preserve the envelope")
 
     return result
 
@@ -248,23 +240,14 @@ def assert_node_sequence(trace_id: str, expected: Sequence[str]) -> None:
     expected_nodes = list(expected)
     events = _TRACE_HISTORY.get(trace_id, [])
     if not events:
-        raise AssertionError(
-            "No recorded events for trace_id="
-            f"{trace_id!r}; run a flow with run_one first."
-        )
+        raise AssertionError(f"No recorded events for trace_id={trace_id!r}; run a flow with run_one first.")
 
     actual_nodes = [
-        event.node_name or event.node_id or "<anonymous>"
-        for event in events
-        if event.event_type == "node_start"
+        event.node_name or event.node_id or "<anonymous>" for event in events if event.event_type == "node_start"
     ]
     actual_nodes = [name for name, _ in groupby(actual_nodes)]
     if actual_nodes != expected_nodes:
-        raise AssertionError(
-            "Node sequence mismatch:\n"
-            f"  expected: {expected_nodes}\n"
-            f"  actual:   {actual_nodes}"
-        )
+        raise AssertionError(f"Node sequence mismatch:\n  expected: {expected_nodes}\n  actual:   {actual_nodes}")
 
 
 def get_recorded_events(trace_id: str) -> tuple[FlowEvent, ...]:
@@ -308,10 +291,7 @@ class _ErrorSimulation:
     async def __call__(self, message: Any, _ctx: Any) -> Any:
         self._attempts += 1
         if self._attempts <= self._fail_times:
-            text = (
-                f"[{self._code}] simulated failure in {self._node_name}"
-                f" (attempt {self._attempts})"
-            )
+            text = f"[{self._code}] simulated failure in {self._node_name} (attempt {self._attempts})"
             raise self._exception_factory(text)
 
         if self._result_factory is None:
@@ -351,6 +331,7 @@ def simulate_error(
         return exception_type(text)
 
     if result_factory is None and result is not None:
+
         async def _const_result(_: Any) -> Any:
             return result
 
@@ -371,4 +352,3 @@ def simulate_error(
     # internal class.
     _runner.simulation = simulation  # type: ignore[attr-defined]
     return _runner
-

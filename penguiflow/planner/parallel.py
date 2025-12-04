@@ -28,9 +28,7 @@ class _BranchExecutionResult:
     pause: PlannerPause | None = None
 
 
-async def _run_parallel_branch(
-    planner: Any, spec: Any, args: BaseModel, ctx: Any
-) -> _BranchExecutionResult:
+async def _run_parallel_branch(planner: Any, spec: Any, args: BaseModel, ctx: Any) -> _BranchExecutionResult:
     try:
         raw = await spec.node.func(args, ctx)
     except _PlannerPauseSignal as signal:
@@ -77,11 +75,7 @@ async def execute_parallel_plan(
     for plan_item in action.plan:
         spec = planner._spec_by_name.get(plan_item.node)
         if spec is None:
-            validation_errors.append(
-                prompts.render_invalid_node(
-                    plan_item.node, list(planner._spec_by_name.keys())
-                )
-            )
+            validation_errors.append(prompts.render_invalid_node(plan_item.node, list(planner._spec_by_name.keys())))
             continue
         try:
             parsed_args = spec.args_model.model_validate(plan_item.args or {})
@@ -103,7 +97,7 @@ async def execute_parallel_plan(
 
     ctx = planner._make_context(trajectory)
     results = await asyncio.gather(
-        *( _run_parallel_branch(planner, spec, parsed_args, ctx) for (_, spec, parsed_args) in entries )
+        *(_run_parallel_branch(planner, spec, parsed_args, ctx) for (_, spec, parsed_args) in entries)
     )
 
     branch_payloads: list[dict[str, Any]] = []
@@ -130,9 +124,7 @@ async def execute_parallel_plan(
             obs_json = outcome.observation.model_dump(mode="json")
             payload["observation"] = obs_json
             success_payloads.append(obs_json)
-            llm_payload["observation"] = _redact_artifacts(
-                spec.out_model, obs_json
-            )
+            llm_payload["observation"] = _redact_artifacts(spec.out_model, obs_json)
             if artifact_collector is not None:
                 artifact_collector.collect(spec.name, spec.out_model, obs_json)
             if source_collector is not None:
@@ -172,9 +164,7 @@ async def execute_parallel_plan(
             "reason": "pause",
         }
         llm_observation["join"] = observation["join"]
-        trajectory.steps.append(
-            TrajectoryStep(action=action, observation=observation, llm_observation=llm_observation)
-        )
+        trajectory.steps.append(TrajectoryStep(action=action, observation=observation, llm_observation=llm_observation))
         trajectory.summary = None
         await planner._record_pause(pause_result, trajectory, tracker)
         return observation, pause_result
@@ -190,9 +180,7 @@ async def execute_parallel_plan(
     if action.join is not None:
         join_spec = planner._spec_by_name.get(action.join.node)
         if join_spec is None:
-            join_error = prompts.render_invalid_node(
-                action.join.node, list(planner._spec_by_name.keys())
-            )
+            join_error = prompts.render_invalid_node(action.join.node, list(planner._spec_by_name.keys()))
         elif failure_entries:
             join_payload = {
                 "node": join_spec.name,
@@ -226,8 +214,7 @@ async def execute_parallel_plan(
             elif action.join.inject is None:
                 implicit_join_injection = True
                 logger.warning(
-                    "Implicit join injection is deprecated. "
-                    "Use explicit 'inject' mapping for join tool '%s'.",
+                    "Implicit join injection is deprecated. Use explicit 'inject' mapping for join tool '%s'.",
                     join_spec.name,
                 )
                 join_fields = join_spec.args_model.model_fields
@@ -239,15 +226,9 @@ async def execute_parallel_plan(
                     join_args_template["branches"] = list(branch_payloads)
                 if "failures" in join_fields and "failures" not in join_args_template:
                     join_args_template["failures"] = []
-                if (
-                    "success_count" in join_fields
-                    and "success_count" not in join_args_template
-                ):
+                if "success_count" in join_fields and "success_count" not in join_args_template:
                     join_args_template["success_count"] = len(success_payloads)
-                if (
-                    "failure_count" in join_fields
-                    and "failure_count" not in join_args_template
-                ):
+                if "failure_count" in join_fields and "failure_count" not in join_args_template:
                     join_args_template["failure_count"] = len(failure_entries)
 
             if join_error is None:
@@ -284,21 +265,14 @@ async def execute_parallel_plan(
                             },
                         }
                         observation["join"] = join_payload
-                        trajectory.steps.append(
-                            TrajectoryStep(action=action, observation=observation)
-                        )
+                        trajectory.steps.append(TrajectoryStep(action=action, observation=observation))
                         trajectory.summary = None
                         await planner._record_pause(signal.pause, trajectory, tracker)
                         return observation, signal.pause
                     except Exception as exc:  # pragma: no cover - handled in planner tests
                         tracker.record_hop()
-                        join_error = (
-                            f"tool '{join_spec.name}' raised "
-                            f"{exc.__class__.__name__}: {exc}"
-                        )
-                        join_failure = planner._build_failure_payload(
-                            join_spec, join_args, exc
-                        )
+                        join_error = f"tool '{join_spec.name}' raised {exc.__class__.__name__}: {exc}"
+                        join_failure = planner._build_failure_payload(join_spec, join_args, exc)
                     else:
                         try:
                             join_model = join_spec.out_model.model_validate(join_raw)
@@ -324,9 +298,7 @@ async def execute_parallel_plan(
                             }
                             join_llm_payload = {
                                 "node": join_spec.name,
-                                "observation": _redact_artifacts(
-                                    join_spec.out_model, join_json
-                                ),
+                                "observation": _redact_artifacts(join_spec.out_model, join_json),
                             }
 
     if action.join is not None and "join" not in observation:
@@ -335,11 +307,7 @@ async def execute_parallel_plan(
             llm_observation["join"] = join_llm_payload or join_payload
         else:
             join_name = (
-                join_spec.name
-                if join_spec is not None
-                else action.join.node
-                if action.join is not None
-                else "join"
+                join_spec.name if join_spec is not None else action.join.node if action.join is not None else "join"
             )
             join_entry: dict[str, Any] = {"node": join_name}
             if join_error is not None:
@@ -353,9 +321,7 @@ async def execute_parallel_plan(
                 observation["join"] = join_entry
                 llm_observation["join"] = join_entry
 
-    trajectory.steps.append(
-        TrajectoryStep(action=action, observation=observation, llm_observation=llm_observation)
-    )
+    trajectory.steps.append(TrajectoryStep(action=action, observation=observation, llm_observation=llm_observation))
     trajectory.summary = None
     return observation, None
 

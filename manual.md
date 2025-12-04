@@ -8093,7 +8093,7 @@ flow = create(node.to(), state_store=postgres_store)
 card = A2AAgentCard(
     name="Main Agent",
     description="Primary orchestration entrypoint",
-    version="2.5.0",
+    version="2.6.0",
     skills=[
         A2ASkill(
             name="orchestrate",

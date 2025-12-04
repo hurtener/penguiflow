@@ -1,5 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { marked } from "marked";
+
+  // Configure marked for safe, minimal markdown rendering
+  marked.setOptions({
+    breaks: true, // Convert \n to <br>
+    gfm: true, // GitHub Flavored Markdown
+  });
 
   type ChatMessage = {
     id: string;
@@ -106,6 +113,26 @@
 
   let chatEventSource: EventSource | null = null;
   let followEventSource: EventSource | null = null;
+
+  // Reference to chat body for auto-scrolling
+  let chatBodyEl: HTMLDivElement | null = null;
+
+  // Auto-scroll to bottom when new messages arrive
+  $effect(() => {
+    // Track chatMessages length to trigger on new messages
+    const _msgCount = chatMessages.length;
+    // Also track if any message is streaming (text updates)
+    const _streamingText = chatMessages.find((m) => m.isStreaming)?.text;
+
+    if (chatBodyEl) {
+      // Use requestAnimationFrame to ensure DOM has updated
+      requestAnimationFrame(() => {
+        if (chatBodyEl) {
+          chatBodyEl.scrollTop = chatBodyEl.scrollHeight;
+        }
+      });
+    }
+  });
 
   onMount(() => {
     loadMeta();
@@ -424,6 +451,16 @@
       return null;
     }
   };
+
+  // Render markdown to HTML (synchronous for streaming compatibility)
+  const renderMarkdown = (text: string): string => {
+    if (!text) return "";
+    try {
+      return marked.parse(text, { async: false }) as string;
+    } catch {
+      return text;
+    }
+  };
 </script>
 
 <div class="page">
@@ -508,7 +545,7 @@
         <div class="pill ghost">DEV PLAYGROUND</div>
       </div>
 
-      <div class="chat-body">
+      <div class="chat-body" bind:this={chatBodyEl}>
         {#if hasNoMessages}
           <div class="empty">
             <div class="empty-icon">✶</div>
@@ -519,7 +556,7 @@
           {#each chatMessages as msg (msg.id)}
             <div class={`message-row ${msg.role === "agent" ? "agent" : "user"}`}>
               <div class={`bubble ${msg.role}`}>
-                <div>{msg.text}</div>
+                <div class="markdown-content">{@html renderMarkdown(msg.text)}</div>
                 {#if msg.isStreaming}
                   <div class="typing">
                     <span></span><span></span><span></span>

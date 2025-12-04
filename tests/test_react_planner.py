@@ -451,29 +451,25 @@ async def test_react_planner_recovers_from_invalid_node() -> None:
 
 
 @pytest.mark.asyncio()
-async def test_react_planner_reports_validation_error() -> None:
+async def test_react_planner_autofills_missing_args() -> None:
+    """Test that missing required args are autofilled with defaults."""
     client = StubClient(
         [
-            {"thought": "bad", "next_node": "retrieve", "args": {}},
-            {
-                "thought": "triage",
-                "next_node": "triage",
-                "args": {"question": "Q"},
-            },
-            {
-                "thought": "retrieve",
-                "next_node": "retrieve",
-                "args": {"intent": "docs"},
-            },
+            # Args empty - will be autofilled with defaults
+            {"thought": "retrieve", "next_node": "retrieve", "args": {}},
             {"thought": "finish", "next_node": None, "args": {"raw_answer": "ok"}},
         ]
     )
     planner = make_planner(client)
 
-    result = await planner.run("Test validation path")
+    result = await planner.run("Test autofill path")
 
-    errors = [step["error"] for step in result.metadata["steps"] if step["error"]]
-    assert any("did not validate" in err for err in errors)
+    # Should complete without validation errors because autofill kicks in
+    assert result.reason == "answer_complete"
+    # First step should have observation (tool was called successfully with autofilled args)
+    steps = result.metadata["steps"]
+    assert len(steps) >= 1
+    assert steps[0]["observation"] is not None
 
 
 @pytest.mark.asyncio()
@@ -670,9 +666,10 @@ async def test_react_planner_litellm_guard_raises_runtime_error() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_step_repairs_invalid_action() -> None:
+    # Use input that cannot be salvaged - not valid JSON at all
     client = StubClient(
         [
-            "{}",
+            "not valid json {{{",
             {
                 "thought": "recover",
                 "next_node": "triage",
@@ -688,6 +685,24 @@ async def test_react_planner_step_repairs_invalid_action() -> None:
     assert len(client.calls) == 2
     repair_message = client.calls[1][-1]["content"]
     assert "invalid JSON" in repair_message
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_step_salvages_empty_json() -> None:
+    """Test that empty JSON {} is salvaged into a valid finish action."""
+    client = StubClient(
+        [
+            "{}",
+        ]
+    )
+    planner = make_planner(client)
+    trajectory = Trajectory(query="salvage test")
+
+    action = await planner.step(trajectory)
+    # Empty JSON should be salvaged to a finish action (next_node=None)
+    assert action.next_node is None
+    assert action.thought == "planning next step"
+    assert len(client.calls) == 1  # No repair needed
 
 
 @pytest.mark.asyncio()

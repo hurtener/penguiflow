@@ -119,8 +119,7 @@ class DSPyLLMClient:
             import dspy
         except ModuleNotFoundError as exc:  # pragma: no cover
             raise RuntimeError(
-                "DSPy is not installed. Install penguiflow[planner] or provide "
-                "a custom llm_client."
+                "DSPy is not installed. Install penguiflow[planner] or provide a custom llm_client."
             ) from exc
 
         # Configure DSPy LM
@@ -171,12 +170,8 @@ class DSPyLLMClient:
         attrs = {
             "__doc__": f"Generate a structured {schema_name} output with proper type safety.",
             "__annotations__": {"messages": str, "response": output_schema},
-            "messages": dspy.InputField(
-                desc="Conversation history and user query requiring structured output"
-            ),
-            "response": dspy.OutputField(
-                desc=f"Structured {schema_name} output"
-            ),
+            "messages": dspy.InputField(desc="Conversation history and user query requiring structured output"),
+            "response": dspy.OutputField(desc=f"Structured {schema_name} output"),
         }
         return type(f"{schema_name}Signature", (dspy.Signature,), attrs)
 
@@ -286,9 +281,7 @@ class DSPyLLMClient:
                                 "dspy_invalid_json",
                                 extra={"response": response_str[:500]},
                             )
-                            raise RuntimeError(
-                                "DSPy returned output that could not be coerced to JSON"
-                            )
+                            raise RuntimeError("DSPy returned output that could not be coerced to JSON")
                     else:
                         raise RuntimeError("DSPy returned no response field")
 

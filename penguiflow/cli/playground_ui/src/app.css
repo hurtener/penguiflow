@@ -762,6 +762,127 @@ details summary {
   align-items: center;
 }
 
+/* ========== MARKDOWN CONTENT ========== */
+.markdown-content {
+  word-break: break-word;
+}
+
+.markdown-content p {
+  margin: 0 0 0.5em 0;
+}
+
+.markdown-content p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4 {
+  font-weight: 700;
+  margin: 0.75em 0 0.25em 0;
+}
+
+.markdown-content h1:first-child,
+.markdown-content h2:first-child,
+.markdown-content h3:first-child,
+.markdown-content h4:first-child {
+  margin-top: 0;
+}
+
+.markdown-content h1 { font-size: 1.25em; }
+.markdown-content h2 { font-size: 1.15em; }
+.markdown-content h3 { font-size: 1.05em; }
+.markdown-content h4 { font-size: 1em; }
+
+.markdown-content ul,
+.markdown-content ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.markdown-content li {
+  margin: 0.25em 0;
+}
+
+.markdown-content code {
+  background: #f4f0ea;
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-family: "SFMono-Regular", ui-monospace, Menlo, monospace;
+  font-size: 0.9em;
+}
+
+.markdown-content pre {
+  background: #f8f4ee;
+  border: 1px solid #e8e1d7;
+  border-radius: 8px;
+  padding: 0.75em;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+
+.markdown-content pre code {
+  background: none;
+  padding: 0;
+  font-size: 0.85em;
+}
+
+.markdown-content blockquote {
+  border-left: 3px solid #31a6a0;
+  margin: 0.5em 0;
+  padding-left: 0.75em;
+  color: #6f6961;
+  font-style: italic;
+}
+
+.markdown-content a {
+  color: #1f6c68;
+  text-decoration: underline;
+}
+
+.markdown-content a:hover {
+  color: #106c67;
+}
+
+.markdown-content strong {
+  font-weight: 700;
+}
+
+.markdown-content em {
+  font-style: italic;
+}
+
+.markdown-content hr {
+  border: none;
+  border-top: 1px solid #e8e1d7;
+  margin: 0.75em 0;
+}
+
+.markdown-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5em 0;
+  font-size: 0.9em;
+}
+
+.markdown-content th,
+.markdown-content td {
+  border: 1px solid #e8e1d7;
+  padding: 0.4em 0.6em;
+  text-align: left;
+}
+
+.markdown-content th {
+  background: #f4f0ea;
+  font-weight: 600;
+}
+
+.markdown-content img {
+  max-width: 100%;
+  border-radius: 8px;
+}
+
 /* ========== RESPONSIVE ========== */
 @media (max-width: 1200px) {
   .page {

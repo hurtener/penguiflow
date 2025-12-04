@@ -394,9 +394,7 @@ def discover_agent(project_root: Path | None = None) -> DiscoveryResult:
 
 def _instantiate_orchestrator(cls: type[Any], config: Any | None) -> Any:
     signature = inspect.signature(cls)
-    params = [
-        param for name, param in signature.parameters.items() if name != "self"
-    ]
+    params = [param for name, param in signature.parameters.items() if name != "self"]
     if not params:
         return cls()
     first = params[0]
@@ -489,9 +487,16 @@ def create_playground_app(
         try:
             yield
         finally:  # pragma: no cover - exercised in integration
-            await agent_wrapper.shutdown()
+            try:
+                await broker.close()
+            finally:
+                await agent_wrapper.shutdown()
 
     app = FastAPI(title="PenguiFlow Playground", version="0.1.0", lifespan=_lifespan)
+
+    @app.on_event("shutdown")
+    async def _shutdown_events() -> None:  # pragma: no cover - exercised at runtime
+        await broker.close()
 
     if ui_dir.exists():
         # Mount assets directory for JS/CSS
@@ -696,19 +701,27 @@ def create_playground_app(
                 )
                 for frame in stored_frames:
                     yield frame
+
+                if not follow or queue is None:
+                    return
+
+                while True:
+                    try:
+                        # Use timeout to allow checking for cancellation periodically
+                        item = await asyncio.wait_for(queue.get(), timeout=1.0)
+                        if item is SSESentinel:
+                            break
+                        if isinstance(item, bytes):
+                            yield item
+                    except TimeoutError:
+                        # Continue waiting - this allows cancellation to be processed
+                        continue
+            except asyncio.CancelledError:
+                # Graceful shutdown - don't re-raise
+                pass
             finally:
                 if unsubscribe:
                     await unsubscribe()
-
-            if not follow or queue is None:
-                return
-
-            while True:
-                item = await queue.get()
-                if item is SSESentinel:
-                    break
-                if isinstance(item, bytes):
-                    yield item
 
         return StreamingResponse(
             _event_stream(),
