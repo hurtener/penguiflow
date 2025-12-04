@@ -151,6 +151,21 @@ def test_run_generate_creates_planner_and_tools(tmp_path: Path) -> None:
     assert "LLM_MODEL" in env_content
     assert "PLANNER_MAX_ITERS" in env_content
 
+    # Test agent.yaml is persisted for playground discovery
+    agent_yaml = project_dir / "agent.yaml"
+    assert agent_yaml.exists(), "agent.yaml should be created for playground discovery"
+    agent_yaml_content = agent_yaml.read_text()
+    assert "demo-gen" in agent_yaml_content
+    assert "fetch_data" in agent_yaml_content
+
+    # Test ENV_SETUP.md is generated with provider docs
+    env_setup_md = project_dir / "ENV_SETUP.md"
+    assert env_setup_md.exists(), "ENV_SETUP.md should be created"
+    env_setup_content = env_setup_md.read_text()
+    assert "OPENAI_API_KEY" in env_setup_content
+    assert "ANTHROPIC_API_KEY" in env_setup_content
+    assert "demo-gen" in env_setup_content or "demo_gen" in env_setup_content
+
 
 def test_generate_cli_dry_run(tmp_path: Path) -> None:
     spec_path = tmp_path / "spec.yaml"

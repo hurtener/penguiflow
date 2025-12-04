@@ -103,7 +103,21 @@ def init(
     help="Do not open the browser automatically.",
 )
 def dev(project_root: str, host: str, port: int, no_browser: bool) -> None:
-    """Launch the playground backend + UI for a project."""
+    """Launch the playground backend + UI for a project.
+
+    IMPORTANT: The playground runs in penguiflow's Python environment, not the
+    agent project's venv. To use LLM features, ensure the agent project has
+    penguiflow[planner] installed, or install dependencies in penguiflow's venv:
+
+    \b
+    # Option 1: Install agent in editable mode (recommended)
+    cd <project_root> && uv sync
+    cd <penguiflow_dir> && uv pip install -e <project_root>
+
+    \b
+    # Option 2: Install litellm directly
+    uv pip install litellm
+    """
     from pathlib import Path
 
     try:

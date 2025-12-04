@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
-from penguiflow.planner import PlannerPause, ReactPlanner
+from penguiflow.planner import PlannerEvent, PlannerPause, ReactPlanner
 from penguiflow.planner.react import (
     PlannerAction,
     ReflectionConfig,
@@ -1348,7 +1348,6 @@ async def test_react_planner_absolute_max_parallel_enforced() -> None:
 @pytest.mark.asyncio()
 async def test_react_planner_event_callback_receives_events() -> None:
     """Event callback should receive all planner events."""
-    from penguiflow.planner import PlannerEvent
 
     events: list[PlannerEvent] = []
 
@@ -1390,7 +1389,6 @@ async def test_react_planner_event_callback_receives_events() -> None:
 @pytest.mark.asyncio()
 async def test_react_planner_captures_stream_chunks() -> None:
     """Streaming chunks should be emitted as events and persisted."""
-    from penguiflow.planner import PlannerEvent
 
     chunk_events: list[dict[str, Any]] = []
 

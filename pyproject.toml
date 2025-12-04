@@ -122,6 +122,7 @@ omit = [
     "*/tests/*",
     "*/__pycache__/*",
     "*/.venv/*",
+    "*/planner/dspy_client.py",
 ]
 
 [tool.coverage.report]

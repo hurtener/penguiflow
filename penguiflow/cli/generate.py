@@ -660,6 +660,47 @@ def _generate_env_example(
     return created, skipped
 
 
+def _generate_env_setup_docs(
+    project_dir: Path,
+    spec: Spec,
+    *,
+    dry_run: bool,
+    force: bool,
+) -> tuple[list[str], list[str]]:
+    """Generate ENV_SETUP.md with provider-specific API key documentation."""
+    created: list[str] = []
+    skipped: list[str] = []
+    docs_path = project_dir / "ENV_SETUP.md"
+    package_name = _normalise_package_name(spec.agent.name)
+
+    content = _render_template(
+        "ENV_SETUP.md.jinja",
+        {
+            "agent_name": spec.agent.name,
+            "package_name": package_name,
+            "primary_model": spec.llm.primary.model,
+            "memory_enabled": str(spec.agent.flags.memory).lower(),
+            "summarizer_enabled": str(bool(spec.llm.summarizer and spec.llm.summarizer.enabled)).lower(),
+            "reflection_enabled": str(bool(spec.llm.reflection and spec.llm.reflection.enabled)).lower(),
+            "planner_max_iters": spec.planner.max_iters,
+            "planner_hop_budget": spec.planner.hop_budget,
+            "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,
+        },
+    )
+
+    if dry_run:
+        created.append(docs_path.as_posix())
+        return created, skipped
+
+    wrote, path = _write_file(docs_path, content, force=force)
+    if wrote and path:
+        created.append(path)
+    elif not wrote:
+        skipped.append(docs_path.as_posix())
+
+    return created, skipped
+
+
 def _scaffold_project(
     spec: Spec,
     *,
@@ -798,6 +839,23 @@ def run_generate(
         env_created, env_skipped = _generate_env_example(project_dir, spec, dry_run=dry_run, force=force)
         created.extend(env_created)
         skipped.extend(env_skipped)
+
+        if verbose:
+            click.echo("Generating ENV_SETUP.md...")
+        env_docs_created, env_docs_skipped = _generate_env_setup_docs(project_dir, spec, dry_run=dry_run, force=force)
+        created.extend(env_docs_created)
+        skipped.extend(env_docs_skipped)
+
+        # Persist spec as agent.yaml so playground can discover it
+        if verbose:
+            click.echo("Saving agent.yaml...")
+        agent_yaml_path = project_dir / "agent.yaml"
+        if not agent_yaml_path.exists() or force:
+            if not dry_run:
+                agent_yaml_path.write_text(spec_path.read_text(encoding="utf-8"), encoding="utf-8")
+            created.append(agent_yaml_path.as_posix())
+        else:
+            skipped.append(agent_yaml_path.as_posix())
     except (GeneratorTemplateError, CLIError, SpecValidationError):
         raise
     except Exception as exc:  # pragma: no cover - defensive guard
