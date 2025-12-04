@@ -85,7 +85,7 @@ async def test_tool_policy_filters_catalog() -> None:
     policy = ToolPolicy(allowed_tools={"tool_a", "tool_b"})
     client = StubClient(
         [
-            {"thought": "Done", "next_node": None, "args": {"answer": "OK"}},
+            {"thought": "Done", "next_node": None, "args": {"raw_answer": "OK"}},
         ]
     )
 
@@ -124,7 +124,7 @@ async def test_tool_policy_denies_tools() -> None:
     )
     client = StubClient(
         [
-            {"thought": "Done", "next_node": None, "args": {"answer": "OK"}},
+            {"thought": "Done", "next_node": None, "args": {"raw_answer": "OK"}},
         ]
     )
 
@@ -156,7 +156,7 @@ async def test_tool_policy_requires_tags() -> None:
 
     policy = ToolPolicy(require_tags={"safe"})
     client = StubClient([
-        {"thought": "Done", "next_node": None, "args": {"answer": "OK"}},
+        {"thought": "Done", "next_node": None, "args": {"raw_answer": "OK"}},
     ])
 
     planner = ReactPlanner(llm_client=client, catalog=catalog, tool_policy=policy)
@@ -201,7 +201,7 @@ async def test_tool_policy_llm_error_on_forbidden_tool() -> None:
             {
                 "thought": "Done",
                 "next_node": None,
-                "args": {"answer": "OK"},
+                "args": {"raw_answer": "OK"},
             },
         ]
     )

@@ -62,6 +62,20 @@ class _StreamingPlanner:
             )
             self._event_callback(
                 PlannerEvent(
+                    event_type="artifact_chunk",
+                    ts=time.time(),
+                    trajectory_step=0,
+                    extra={
+                        "stream_id": "viz",
+                        "seq": 0,
+                        "chunk": {"partial": True},
+                        "done": False,
+                        "artifact_type": "chart",
+                    },
+                )
+            )
+            self._event_callback(
+                PlannerEvent(
                     event_type="step_complete",
                     ts=time.time(),
                     trajectory_step=0,
@@ -89,6 +103,9 @@ async def test_chat_stream_emits_events_and_done() -> None:
 
     events = _parse_sse(raw_lines)
     assert any(name == "chunk" for name, _ in events)
+    assert any(name == "artifact_chunk" for name, _ in events)
+    artifact_payload = next(payload for name, payload in events if name == "artifact_chunk")
+    assert artifact_payload["chunk"] == {"partial": True}
     done = next((payload for name, payload in events if name == "done"), None)
     assert done is not None
     trace_id = done["trace_id"]
@@ -115,12 +132,14 @@ async def test_events_endpoint_replays_history() -> None:
             lines: list[str] = []
             async for idx, line in _enumerate_async(stream.aiter_lines()):
                 lines.append(line)
-                if idx >= 2:
+                # Need at least 12 lines to capture connected + chunk + artifact_chunk + step events
+                if idx >= 11:
                     break
 
         events = _parse_sse(lines)
         assert events
         assert all(payload.get("trace_id") == trace_id for _, payload in events if payload)
+        assert any(name == "artifact_chunk" for name, _ in events)
 
         trajectory_response = await client.get(f"/trajectory/{trace_id}", params={"session_id": "sess-2"})
         assert trajectory_response.status_code == 200

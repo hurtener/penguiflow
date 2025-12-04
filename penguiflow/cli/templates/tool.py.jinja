@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field
+
 from penguiflow.catalog import tool
 from penguiflow.planner import ToolContext
 
@@ -24,8 +27,13 @@ class {{ tool.class_name }}Result(BaseModel):
 {% for field in tool.result %}
     {{ field.name }}: {{ field.type_hint }}
 {% endfor %}
-{%- else %}
-    pass
+{% else %}
+    summary: str = Field(description="Short description of the outcome")
+    details: dict[str, Any] | None = Field(
+        default=None,
+        description="Heavy data for downstream consumers (redacted from LLM context).",
+        json_schema_extra={"artifact": True},
+    )
 {% endif %}
 
 

@@ -59,10 +59,21 @@ def _collect_streams(metadata: Mapping[str, Any]) -> dict[str, list[dict[str, An
 
 def _extract_answer(payload: Any) -> str:
     """Normalize answer text from planner payloads."""
+    if isinstance(payload, Mapping):
+        # Check domain-specific keys first, then generic fallbacks
+        for key in ("raw_answer", "summary", "answer", "text", "content", "message", "greeting", "response", "result"):
+            if key in payload:
+                value = payload.get(key)
+                if value is not None:
+                    return str(value)
+        return str(payload)
     if isinstance(payload, QueryExecution):
         return payload.summary or "Query executed"
-    if isinstance(payload, dict) and "summary" in payload:
-        return str(payload.get("summary", "Query executed"))
+    for attr in ("raw_answer", "summary", "answer", "text", "content", "message", "greeting", "response", "result"):
+        if hasattr(payload, attr):
+            value = getattr(payload, attr)
+            if value is not None:
+                return str(value)
     return str(payload)
 
 

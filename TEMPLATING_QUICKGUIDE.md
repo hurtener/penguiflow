@@ -1,6 +1,8 @@
 # PenguiFlow Templating Quickguide
 
 > **Version**: 2.6 | **Last Updated**: December 2025
+>
+> **v2.7 Update**: Planner now returns structured `FinalPayload` with `raw_answer` field. See [Extracting Answers from Payload](#4-extracting-answers-from-payload) for the recommended pattern.
 
 The PenguiFlow CLI scaffolds production-ready agent projects with best practices baked in. This guide covers every template, flag, and pattern you need to ship agents fast.
 
@@ -1992,7 +1994,49 @@ async def record_planner_event(self, event: FlowEvent) -> FlowEvent:
     return event
 ```
 
-### 4. Memory Integration
+### 4. Extracting Answers from Payload
+
+**v2.7+ uses structured `FinalPayload` with `raw_answer` field:**
+
+```python
+# DO: Extract raw_answer from FinalPayload
+def _extract_answer(payload: dict) -> str:
+    """Extract answer text from planner payload.
+
+    Tries keys in priority order for backward compatibility:
+    1. raw_answer (v2.7+)
+    2. answer (legacy)
+    3. text (legacy)
+    4. result (legacy)
+    """
+    for key in ("raw_answer", "answer", "text", "result"):
+        if key in payload:
+            return str(payload.get(key))
+
+    # Fallback: serialize entire payload
+    return str(payload)
+
+# Usage in orchestrator
+async def execute(self, query: str, ...) -> AgentResponse:
+    result = await self._planner.run(...)
+
+    payload = result.payload
+    answer_text = _extract_answer(payload)
+
+    return AgentResponse(
+        answer=answer_text,
+        artifacts=payload.get("artifacts", {}),
+        confidence=payload.get("confidence"),
+        sources=payload.get("sources", []),
+    )
+```
+
+**Why this pattern?**
+- Handles both v2.7+ (`raw_answer`) and legacy formats
+- Gracefully degrades if planner doesn't use structured output
+- Centralizes extraction logic for maintainability
+
+### 5. Memory Integration
 
 ```python
 # DO: Follow the lifecycle
@@ -2012,15 +2056,19 @@ async def execute(self, query: str, ...) -> AgentResponse:
         ...
     )
 
-    # 4. Ingest interaction
+    # 4. Extract answer (v2.7+ uses raw_answer)
+    payload = result.payload
+    answer_text = _extract_answer(payload)
+
+    # 5. Ingest interaction
     await self._memory.ingest_interaction(
         user_prompt=query,
-        agent_response=result.answer,
+        agent_response=answer_text,
         ...
     )
 ```
 
-### 5. Production Checklist
+### 6. Production Checklist
 
 - [ ] Configure proper `LLM_MODEL` for production
 - [ ] Set `LOG_LEVEL=INFO` (not DEBUG)

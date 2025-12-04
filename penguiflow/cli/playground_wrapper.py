@@ -108,7 +108,7 @@ def _normalise_metadata(metadata: Any) -> dict[str, Any] | None:
 
 def _extract_from_dict(data: Mapping[str, Any]) -> str | None:
     """Extract answer from a dict using common answer keys."""
-    for key in ("answer", "text", "content", "message", "greeting", "response", "result"):
+    for key in ("raw_answer", "answer", "text", "content", "message", "greeting", "response", "result"):
         if key in data:
             value = data[key]
             return str(value) if value is not None else None
@@ -116,6 +116,12 @@ def _extract_from_dict(data: Mapping[str, Any]) -> str | None:
 
 
 def _normalise_answer(payload: Any) -> str | None:
+    """Extract the human-readable answer from a planner payload.
+
+    Per RFC_STRUCTURED_PLANNER_OUTPUT, FinalPayload.raw_answer is guaranteed
+    to be a string by the ReactPlanner. This function handles various payload
+    formats for backward compatibility.
+    """
     if payload is None:
         return None
     if isinstance(payload, str):
@@ -132,11 +138,11 @@ def _normalise_answer(payload: Any) -> str | None:
                             return result
                     elif obs is not None:
                         return str(obs)
-        # Check common answer keys at top level
+        # Standard path: extract from common answer keys (raw_answer first)
         result = _extract_from_dict(payload)
         if result is not None:
             return result
-    for attr in ("answer", "text", "content", "message", "greeting", "response", "result"):
+    for attr in ("raw_answer", "answer", "text", "content", "message", "greeting", "response", "result"):
         if hasattr(payload, attr):
             value = getattr(payload, attr)
             return str(value) if value is not None else None
@@ -162,6 +168,10 @@ def _build_trajectory(
         "steps": steps,
         "hint_state": {},
     }
+    if "artifacts" in metadata:
+        payload["artifacts"] = metadata["artifacts"]
+    if "sources" in metadata:
+        payload["sources"] = metadata["sources"]
     if "summary" in metadata and metadata["summary"] is not None:
         payload["summary"] = metadata["summary"]
     return Trajectory.from_serialised(payload)

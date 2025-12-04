@@ -1,4 +1,3 @@
-<svelte:options runes={true} />
 <script lang="ts">
   import { onMount } from "svelte";
 
@@ -25,6 +24,7 @@
   };
 
   type PlannerEventPayload = {
+    id: string;
     event: string;
     trace_id?: string;
     session_id?: string;
@@ -36,6 +36,32 @@
     text?: string;
     done?: boolean;
     ts?: number;
+    chunk?: unknown;
+    artifact_type?: string;
+    meta?: Record<string, unknown>;
+  };
+
+  type SpecError = {
+    id: string;
+    message: string;
+    line?: number | null;
+  };
+
+  type ServiceInfo = {
+    name: string;
+    status: string;
+    url: string | null;
+  };
+
+  type ToolInfo = {
+    name: string;
+    desc: string;
+    tags: string[];
+  };
+
+  type ConfigItem = {
+    label: string;
+    value: string | number | boolean | null;
   };
 
   let agentMeta = $state({
@@ -48,12 +74,12 @@
     flows: 0,
   });
 
-  let plannerConfig = $state<{ label: string; value: string | number | null }[]>([]);
-  let services = $state<{ name: string; status: string; url: string | null }[]>([]);
-  let catalog = $state<{ name: string; desc: string; tags: string[] }[]>([]);
+  let plannerConfig = $state<ConfigItem[]>([]);
+  let services = $state<ServiceInfo[]>([]);
+  let catalog = $state<ToolInfo[]>([]);
   let specContent = $state("");
   let specValid = $state<"pending" | "valid" | "error">("pending");
-  let specErrors = $state<{ message: string; line?: number | null }[]>([]);
+  let specErrors = $state<SpecError[]>([]);
 
   const formatTime = (ts: number) =>
     new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -65,17 +91,37 @@
   let chatMessages = $state<ChatMessage[]>([]);
   let timeline = $state<TimelineStep[]>([]);
   let plannerEvents = $state<PlannerEventPayload[]>([]);
+  let artifactStreams = $state<Record<string, unknown[]>>({});
   let activeTraceId = $state<string | null>(null);
   let isSending = $state(false);
   let validationStatus = $state<"pending" | "valid" | "error">("pending");
-   let eventFilter = $state<Set<string>>(new Set());
+  let eventFilter = $state<Set<string>>(new Set());
   let pauseEvents = $state(false);
 
-  let eventSource: EventSource | null = null;
+  // Derived state for computed checks
+  let hasNoMessages = $derived(chatMessages.length === 0);
+  let hasNoTimeline = $derived(timeline.length === 0);
+  let hasNoEvents = $derived(plannerEvents.length === 0);
+  let hasArtifacts = $derived(Object.keys(artifactStreams).length > 0);
 
-  onMount(async () => {
-    await loadMeta();
-    await loadSpec();
+  let chatEventSource: EventSource | null = null;
+  let followEventSource: EventSource | null = null;
+
+  onMount(() => {
+    loadMeta();
+    loadSpec();
+
+    // Cleanup EventSources on unmount
+    return () => {
+      if (chatEventSource) {
+        chatEventSource.close();
+        chatEventSource = null;
+      }
+      if (followEventSource) {
+        followEventSource.close();
+        followEventSource = null;
+      }
+    };
   });
 
   const loadSpec = async () => {
@@ -87,7 +133,10 @@
       specContent = data.content;
       specValid = data.valid ? "valid" : "error";
       validationStatus = specValid;
-      specErrors = data.errors || [];
+      specErrors = (data.errors || []).map((err: { message: string; line?: number | null }, idx: number) => ({
+        id: `err-${idx}`,
+        ...err,
+      }));
     } catch (err) {
       console.error("spec load failed", err);
     }
@@ -110,16 +159,19 @@
       };
       plannerConfig =
         data.planner && Object.keys(data.planner).length
-          ? Object.entries(data.planner).map(([label, value]) => ({ label, value }))
+          ? Object.entries(data.planner).map(([label, value]) => ({
+              label,
+              value: value as string | number | boolean | null,
+            }))
           : [];
       services =
-        data.services?.map((svc: any) => ({
+        data.services?.map((svc: { name: string; enabled: boolean; url?: string }) => ({
           name: svc.name,
           status: svc.enabled ? "enabled" : "disabled",
-          url: svc.url || "",
+          url: svc.url || null,
         })) ?? [];
       catalog =
-        data.tools?.map((tool: any) => ({
+        data.tools?.map((tool: { name: string; description: string; tags?: string[] }) => ({
           name: tool.name,
           desc: tool.description,
           tags: tool.tags ?? [],
@@ -129,10 +181,17 @@
     }
   };
 
-  const resetStream = () => {
-    if (eventSource) {
-      eventSource.close();
-      eventSource = null;
+  const resetChatStream = () => {
+    if (chatEventSource) {
+      chatEventSource.close();
+      chatEventSource = null;
+    }
+  };
+
+  const resetFollowStream = () => {
+    if (followEventSource) {
+      followEventSource.close();
+      followEventSource = null;
     }
   };
 
@@ -142,67 +201,88 @@
       return;
     }
     isSending = true;
+    artifactStreams = {};
     const userMessage: ChatMessage = {
       id: randomId(),
       role: "user",
       text: query,
       ts: Date.now(),
     };
-    chatMessages = [...chatMessages, userMessage];
+    chatMessages.push(userMessage);
 
+    const agentMsgId = randomId();
     const agentMsg: ChatMessage = {
-      id: randomId(),
+      id: agentMsgId,
       role: "agent",
       text: "",
       isStreaming: true,
       ts: Date.now(),
     };
-    chatMessages = [...chatMessages, agentMsg];
+    chatMessages.push(agentMsg);
 
     const url = new URL("/chat/stream", window.location.origin);
     url.searchParams.set("query", query);
     url.searchParams.set("session_id", sessionId);
 
-    resetStream();
-    eventSource = new EventSource(url.toString());
+    resetChatStream();
+    chatEventSource = new EventSource(url.toString());
+
+    // Find the agent message by id for updates (handles reactivity correctly)
+    const findAgentMsg = () => chatMessages.find((m) => m.id === agentMsgId);
 
     const handler = (eventName: string) => (evt: MessageEvent) => {
       const data = safeParse(evt.data);
       if (!data) return;
+      const msg = findAgentMsg();
+      if (!msg) return;
+
       if (eventName === "chunk") {
-        agentMsg.text = `${agentMsg.text}${data.text ?? ""}`;
-        chatMessages = [...chatMessages];
+        msg.text = `${msg.text}${data.text ?? ""}`;
+      } else if (eventName === "artifact_chunk") {
+        const streamId = data.stream_id ?? "artifact";
+        const existing = artifactStreams[streamId] ?? [];
+        artifactStreams[streamId] = [...existing, data.chunk];
+        plannerEvents.unshift({ id: randomId(), ...data, event: "artifact_chunk" });
+        if (plannerEvents.length > 120) plannerEvents.length = 120;
       } else if (eventName === "step" || eventName === "event") {
-        plannerEvents = [data, ...plannerEvents].slice(0, 120);
+        // Only add if not already present (prevent duplicates from follow stream)
+        const isDuplicate = plannerEvents.some(
+          (e) => e.node === data.node && e.thought === data.thought && e.latency_ms === data.latency_ms
+        );
+        if (!isDuplicate) {
+          plannerEvents.unshift({ id: randomId(), ...data, event: eventName });
+          if (plannerEvents.length > 120) plannerEvents.length = 120;
+        }
       } else if (eventName === "done") {
-        agentMsg.text = data.answer ?? agentMsg.text;
-        agentMsg.isStreaming = false;
+        msg.text = data.answer ?? msg.text;
+        msg.isStreaming = false;
         activeTraceId = data.trace_id ?? activeTraceId;
         fetchTrajectory(data.trace_id, sessionId);
         startEventFollow();
-        chatMessages = [...chatMessages];
         isSending = false;
-        resetStream();
+        resetChatStream();
       } else if (eventName === "error") {
-        agentMsg.text = data.error ?? "Unexpected error";
-        agentMsg.isStreaming = false;
-        chatMessages = [...chatMessages];
+        msg.text = data.error ?? "Unexpected error";
+        msg.isStreaming = false;
         isSending = false;
-        resetStream();
+        resetChatStream();
       }
     };
 
-    eventSource.addEventListener("chunk", handler("chunk"));
-    eventSource.addEventListener("step", handler("step"));
-    eventSource.addEventListener("event", handler("event"));
-    eventSource.addEventListener("done", handler("done"));
-    eventSource.addEventListener("error", handler("error"));
+    chatEventSource.addEventListener("chunk", handler("chunk"));
+    chatEventSource.addEventListener("artifact_chunk", handler("artifact_chunk"));
+    chatEventSource.addEventListener("step", handler("step"));
+    chatEventSource.addEventListener("event", handler("event"));
+    chatEventSource.addEventListener("done", handler("done"));
+    chatEventSource.addEventListener("error", handler("error"));
 
-    eventSource.onerror = () => {
+    chatEventSource.onerror = () => {
+      const msg = findAgentMsg();
+      if (msg) {
+        msg.isStreaming = false;
+      }
       isSending = false;
-      agentMsg.isStreaming = false;
-      resetStream();
-      chatMessages = [...chatMessages];
+      resetChatStream();
     };
 
     chatInput = "";
@@ -212,6 +292,8 @@
     try {
       const resp = await fetch(`/trajectory/${traceId}?session_id=${encodeURIComponent(session)}`);
       if (!resp.ok) return;
+      // Race condition protection: only update if this trace is still active
+      if (activeTraceId !== traceId) return;
       const payload = await resp.json();
       timeline = parseTrajectory(payload);
     } catch (err) {
@@ -219,18 +301,33 @@
     }
   };
 
-  const parseTrajectory = (payload: any): TimelineStep[] => {
+  interface TrajectoryStep {
+    action?: {
+      next_node?: string;
+      plan?: { node: string }[];
+      thought?: string;
+      args?: Record<string, unknown>;
+    };
+    observation?: Record<string, unknown>;
+    latency_ms?: number;
+    metadata?: {
+      reflection?: { score?: number };
+    };
+    error?: boolean;
+  }
+
+  const parseTrajectory = (payload: { steps?: TrajectoryStep[] }): TimelineStep[] => {
     const steps = payload?.steps ?? [];
-    return steps.map((step: any, idx: number) => {
+    return steps.map((step, idx) => {
       const action = step.action ?? {};
       return {
-        id: `${idx}`,
+        id: `step-${idx}`,
         name: action.next_node ?? action.plan?.[0]?.node ?? "step",
         thought: action.thought,
         args: action.args,
         result: step.observation,
-        latencyMs: step.latency_ms ?? null,
-        reflectionScore: step?.metadata?.reflection?.score ?? null,
+        latencyMs: step.latency_ms ?? undefined,
+        reflectionScore: step.metadata?.reflection?.score ?? undefined,
         status: step.error ? "error" : "ok",
       };
     });
@@ -238,26 +335,44 @@
 
   const startEventFollow = () => {
     if (!activeTraceId) return;
+
+    // Close any existing follow stream before starting a new one
+    resetFollowStream();
+
     const url = new URL("/events", window.location.origin);
     url.searchParams.set("trace_id", activeTraceId);
     url.searchParams.set("session_id", sessionId);
     url.searchParams.set("follow", "true");
 
-    const es = new EventSource(url.toString());
+    followEventSource = new EventSource(url.toString());
     const listener = (evt: MessageEvent) => {
       const data = safeParse(evt.data);
       if (!data) return;
       if (pauseEvents) return;
-      if (eventFilter.size && !eventFilter.has((data.event as string) || "")) {
+      const incomingEvent = (evt.type as string) || (data.event as string) || "";
+      if (eventFilter.size && !eventFilter.has(incomingEvent)) {
         return;
       }
-      plannerEvents = [data, ...plannerEvents].slice(0, 200);
+      if (incomingEvent === "artifact_chunk") {
+        const streamId = data.stream_id ?? "artifact";
+        const existing = artifactStreams[streamId] ?? [];
+        artifactStreams[streamId] = [...existing, data.chunk];
+      }
+      // Only add if not already present (prevent duplicates)
+      const isDuplicate = plannerEvents.some(
+        (e) => e.node === data.node && e.thought === data.thought && e.latency_ms === data.latency_ms
+      );
+      if (!isDuplicate) {
+        plannerEvents.unshift({ id: randomId(), ...data, event: incomingEvent || data.event || "event" });
+        if (plannerEvents.length > 200) plannerEvents.length = 200;
+      }
     };
-    es.addEventListener("event", listener);
-    es.addEventListener("step", listener);
-    es.addEventListener("chunk", listener);
-    es.onmessage = listener;
-    es.onerror = () => es.close();
+    followEventSource.addEventListener("event", listener);
+    followEventSource.addEventListener("step", listener);
+    followEventSource.addEventListener("chunk", listener);
+    followEventSource.addEventListener("artifact_chunk", listener);
+    followEventSource.onmessage = listener;
+    followEventSource.onerror = () => resetFollowStream();
   };
 
   const validateSpec = async () => {
@@ -270,7 +385,10 @@
       const data = await resp.json();
       specValid = data.valid ? "valid" : "error";
       validationStatus = specValid;
-      specErrors = data.errors || [];
+      specErrors = (data.errors || []).map((err: { message: string; line?: number | null }, idx: number) => ({
+        id: `val-err-${idx}`,
+        ...err,
+      }));
     } catch (err) {
       console.error("validate failed", err);
     }
@@ -286,7 +404,11 @@
       if (!resp.ok) {
         specValid = "error";
         validationStatus = "error";
-        specErrors = await resp.json();
+        const errors = await resp.json();
+        specErrors = (errors || []).map((err: { message: string; line?: number | null }, idx: number) => ({
+          id: `gen-err-${idx}`,
+          ...err,
+        }));
         return;
       }
       validationStatus = "valid";
@@ -295,9 +417,9 @@
     }
   };
 
-  const safeParse = (raw: string): any | null => {
+  const safeParse = (raw: string): Record<string, unknown> | null => {
     try {
-      return JSON.parse(raw);
+      return JSON.parse(raw) as Record<string, unknown>;
     } catch {
       return null;
     }
@@ -315,7 +437,7 @@
         <div class="pill subtle">{agentMeta.version || agentMeta.template}</div>
       </div>
       <div class="badges">
-        {#each agentMeta.flags as flag}
+        {#each agentMeta.flags as flag, idx (idx)}
           <span class="pill ghost">{flag}</span>
         {/each}
       </div>
@@ -352,7 +474,7 @@
       <pre class="spec-view">{specContent}</pre>
       {#if specErrors.length}
         <div class="errors">
-          {#each specErrors as err}
+          {#each specErrors as err (err.id)}
             <div class="error-row">⚠️ {err.message}</div>
           {/each}
         </div>
@@ -365,7 +487,7 @@
         <button class="primary-btn" onclick={generateProject}>Generate</button>
       </div>
       <div class="stepper">
-        {#each ["Validation", "Scaffold", "Tools", "Flows", "Planner", "Tests", "Config"] as step, idx}
+        {#each ["Validation", "Scaffold", "Tools", "Flows", "Planner", "Tests", "Config"] as step, idx (step)}
           <div class="step">
             <div class="step-icon">{idx + 1}</div>
             <div class="step-label">{step}</div>
@@ -387,7 +509,7 @@
       </div>
 
       <div class="chat-body">
-        {#if chatMessages.length === 0}
+        {#if hasNoMessages}
           <div class="empty">
             <div class="empty-icon">✶</div>
             <div class="empty-title">Ready to test agent behavior.</div>
@@ -439,14 +561,15 @@
           <div class="pill subtle">trace {activeTraceId.slice(0, 8)}</div>
         {/if}
       </div>
-      {#if timeline.length === 0}
+      {#if hasNoTimeline}
         <div class="empty inline">
           <div class="empty-title">No trajectory yet</div>
           <div class="empty-sub">Send a prompt to see steps.</div>
         </div>
       {:else}
+        {#key activeTraceId}
         <div class="timeline">
-          {#each timeline as step}
+          {#each timeline as step (step.id)}
             <div class="timeline-item">
               <div class="line"></div>
               <div class="dot {step.status}"></div>
@@ -475,6 +598,7 @@
             </div>
           {/each}
         </div>
+        {/key}
       {/if}
     </div>
   </main>
@@ -507,17 +631,18 @@
             <option value="step">step</option>
             <option value="event">event</option>
             <option value="chunk">chunk</option>
+            <option value="artifact_chunk">artifact_chunk</option>
           </select>
         </div>
       </div>
       <div class="events-body">
-        {#if plannerEvents.length === 0}
+        {#if hasNoEvents}
           <div class="empty inline">
             <div class="empty-title">No events yet</div>
             <div class="empty-sub">Events will appear during runs.</div>
           </div>
         {:else}
-          {#each plannerEvents as evt, idx}
+          {#each plannerEvents as evt, idx (evt.id)}
             <div class="event-row" class:alt={idx % 2 === 0}>
               <div class="pill ghost small">{evt.event ?? "event"}</div>
               <div class="event-main">
@@ -525,12 +650,23 @@
                 <div class="muted tiny">{evt.thought ?? ""}</div>
               </div>
               {#if evt.latency_ms}
-                <div class="pill subtle small">{evt.latency_ms} ms</div>
+                <div class="pill subtle small">{(evt.latency_ms / 1000).toFixed(2)}s</div>
               {/if}
             </div>
           {/each}
         {/if}
       </div>
+      {#if hasArtifacts}
+        <div class="section">
+          <div class="title-small">Artifact Streams</div>
+          {#each Object.entries(artifactStreams) as [streamId, chunks] (streamId)}
+            <div class="artifact-row">
+              <div class="pill ghost small">{streamId}</div>
+              <pre>{JSON.stringify(chunks[chunks.length - 1], null, 2)}</pre>
+            </div>
+          {/each}
+        </div>
+      {/if}
     </div>
 
     <div class="card config-card">
@@ -538,7 +674,7 @@
       <div class="section">
         <div class="section-label">Planner Config</div>
         <div class="tile-grid">
-          {#each plannerConfig as item}
+          {#each plannerConfig as item (item.label)}
             <div class="tile">
               <div class="tile-label">{item.label}</div>
               <div class="tile-value">{item.value}</div>
@@ -548,7 +684,7 @@
       </div>
       <div class="section">
         <div class="section-label">Services</div>
-        {#each services as svc}
+        {#each services as svc (svc.name)}
           <div class="service-row">
             <div>
               <div class="service-name">{svc.name}</div>
@@ -560,14 +696,14 @@
       </div>
       <div class="section">
         <div class="section-label">Tool Catalog</div>
-        {#each catalog as tool}
+        {#each catalog as tool (tool.name)}
           <div class="tool-row">
             <div>
               <div class="tool-name">{tool.name}</div>
               <div class="muted tiny">{tool.desc}</div>
             </div>
             <div class="tag-row">
-              {#each tool.tags as tag}
+              {#each tool.tags as tag, tagIdx (`${tool.name}-${tagIdx}`)}
                 <span class="pill ghost small">{tag}</span>
               {/each}
             </div>

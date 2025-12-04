@@ -1,186 +1,46 @@
-"""Prompt helpers for the React planner."""
+# Proposed ReactPlanner System Prompt
 
-from __future__ import annotations
+**Status:** Draft for Review
+**Date:** 2025-12-04
 
-import json
-from collections.abc import Mapping, Sequence
-from typing import Any
+---
 
+## Design Principles
 
-def render_summary(summary: Mapping[str, Any]) -> str:
-    return "Trajectory summary: " + _compact_json(summary)
+1. **Provider-agnostic**: No mention of specific LLM providers (Anthropic, OpenAI, etc.)
+2. **Structured sections**: Clear separation of concerns using labeled sections
+3. **Time-aware**: Inject current date for temporal reasoning
+4. **Graceful degradation**: Guide behavior when things go wrong
+5. **Tone guidance**: Consistent behavior across interactions
+6. **Schema-first**: JSON output is non-negotiable
 
+---
 
-def render_resume_user_input(user_input: str) -> str:
-    return f"Resume input: {user_input}"
+## Proposed Template
 
-
-def render_planning_hints(hints: Mapping[str, Any]) -> str:
-    lines: list[str] = []
-    constraints = hints.get("constraints")
-    if constraints:
-        lines.append(f"Respect the following constraints: {constraints}")
-    preferred = hints.get("preferred_order")
-    if preferred:
-        lines.append(f"Preferred order (if feasible): {preferred}")
-    parallels = hints.get("parallel_groups")
-    if parallels:
-        lines.append(f"Allowed parallel groups: {parallels}")
-    disallowed = hints.get("disallow_nodes")
-    if disallowed:
-        lines.append(f"Disallowed tools: {disallowed}")
-    preferred_nodes = hints.get("preferred_nodes")
-    if preferred_nodes:
-        lines.append(f"Preferred tools: {preferred_nodes}")
-    budget = hints.get("budget")
-    if budget:
-        lines.append(f"Budget hints: {budget}")
-    if not lines:
-        return ""
-    return "\n".join(lines)
-
-
-def render_disallowed_node(node_name: str) -> str:
-    return f"tool '{node_name}' is not permitted by constraints. Choose an allowed tool or revise the plan."
-
-
-def render_ordering_hint_violation(expected: Sequence[str], proposed: str) -> str:
-    order = ", ".join(expected)
-    return f"Ordering hint reminder: follow the preferred sequence [{order}]. Proposed: {proposed}. Revise the plan."
-
-
-def render_parallel_limit(max_parallel: int) -> str:
-    return f"Parallel action exceeds max_parallel={max_parallel}. Reduce parallel fan-out."
-
-
-def render_sequential_only(node_name: str) -> str:
-    return f"tool '{node_name}' must run sequentially. Do not include it in a parallel plan."
-
-
-def render_parallel_setup_error(errors: Sequence[str]) -> str:
-    detail = "; ".join(errors)
-    return f"Parallel plan invalid: {detail}. Revise the plan and retry."
-
-
-def render_empty_parallel_plan() -> str:
-    return "Parallel plan must include at least one branch in 'plan'."
-
-
-def render_parallel_with_next_node(next_node: str) -> str:
-    return f"Parallel plan cannot set next_node='{next_node}'. Use 'join' to continue or finish the run explicitly."
-
-
-def render_parallel_unknown_failure(node_name: str) -> str:
-    return f"tool '{node_name}' failed during parallel execution. Investigate the tool and adjust the plan."
-
-
-def build_summarizer_messages(
-    query: str,
-    history: Sequence[Mapping[str, Any]],
-    base_summary: Mapping[str, Any],
-) -> list[dict[str, str]]:
-    return [
-        {
-            "role": "system",
-            "content": (
-                "You are a summariser producing compact JSON state. "
-                "Respond with valid JSON matching the TrajectorySummary schema."
-            ),
-        },
-        {
-            "role": "user",
-            "content": _compact_json(
-                {
-                    "query": query,
-                    "history": list(history),
-                    "current_summary": dict(base_summary),
-                }
-            ),
-        },
-    ]
-
-
-def _compact_json(data: Any) -> str:
-    return json.dumps(data, ensure_ascii=False, sort_keys=True)
-
-
-def render_tool(record: Mapping[str, Any]) -> str:
-    args_schema = _compact_json(record["args_schema"])
-    out_schema = _compact_json(record["out_schema"])
-    tags = ", ".join(record.get("tags", ()))
-    scopes = ", ".join(record.get("auth_scopes", ()))
-    parts = [
-        f"- name: {record['name']}",
-        f"  desc: {record['desc']}",
-        f"  side_effects: {record['side_effects']}",
-        f"  args_schema: {args_schema}",
-        f"  out_schema: {out_schema}",
-    ]
-    if tags:
-        parts.append(f"  tags: {tags}")
-    if scopes:
-        parts.append(f"  auth_scopes: {scopes}")
-    if record.get("cost_hint"):
-        parts.append(f"  cost_hint: {record['cost_hint']}")
-    if record.get("latency_hint_ms") is not None:
-        parts.append(f"  latency_hint_ms: {record['latency_hint_ms']}")
-    if record.get("safety_notes"):
-        parts.append(f"  safety_notes: {record['safety_notes']}")
-    if record.get("extra"):
-        parts.append(f"  extra: {_compact_json(record['extra'])}")
-    return "\n".join(parts)
-
-
+```python
 def build_system_prompt(
     catalog: Sequence[Mapping[str, Any]],
     *,
     extra: str | None = None,
     planning_hints: Mapping[str, Any] | None = None,
-    current_date: str | None = None,
+    current_date: str | None = None,  # NEW: injected date (no time for cache efficiency)
 ) -> str:
-    """Build comprehensive system prompt for the planner.
+    """Build comprehensive system prompt for the planner."""
 
-    The library provides baseline behavior: context (including memories) is injected
-    via the user prompt. Use `extra` to specify format-specific interpretation rules
-    that your application requires.
-
-    Args:
-        catalog: Tool catalog (rendered tool specs)
-        extra: Optional instructions for interpreting custom context structures.
-               This is where you define how the planner should use memories or other
-               domain-specific data passed via llm_context.
-
-               Common patterns:
-               - Memory as JSON object: "context.memories contains user preferences
-                 as {key: value}; prioritize them when selecting tools."
-               - Memory as text: "context.knowledge is free-form notes; extract
-                 relevant facts as needed."
-               - Historical context: "context.previous_failures lists failed attempts;
-                 avoid repeating the same tool sequence."
-
-        planning_hints: Optional planning constraints and preferences (ordering,
-                       disallowed nodes, parallel limits, etc.)
-
-        current_date: Optional date string (YYYY-MM-DD). If not provided, defaults
-                     to today's date. Date-only (no time) for better LLM cache hits.
-
-    Returns:
-        Complete system prompt string combining baseline rules + tools + extra + hints
-    """
     rendered_tools = "\n".join(render_tool(item) for item in catalog)
 
     # Default to current date if not provided (date-only for better cache hits)
     if current_date is None:
         from datetime import date
-
         current_date = date.today().isoformat()  # "YYYY-MM-DD"
 
-    prompt_sections: list[str] = []
+    prompt_sections = []
 
     # ─────────────────────────────────────────────────────────────
     # IDENTITY & ROLE
     # ─────────────────────────────────────────────────────────────
-    prompt_sections.append(f"""<identity>
+    prompt_sections.append("""<identity>
 You are an autonomous reasoning agent that solves tasks by selecting and orchestrating tools.
 Your name and voice on how to answer will come at the end of the prompt in additional_guidance.
 
@@ -191,7 +51,7 @@ Your role is to:
 - Know when you have enough information to answer and when you need more
 
 Current date: {current_date}
-</identity>""")
+</identity>""".format(current_date=current_date))
 
     # ─────────────────────────────────────────────────────────────
     # OUTPUT FORMAT (NON-NEGOTIABLE)
@@ -249,14 +109,14 @@ Optional fields you may include in args:
 - "requires_followup": true if you need clarification from the user
 - "warnings": ["string", ...] for any caveats, limitations, or data quality concerns
 
-Do NOT include heavy data (charts, files, large JSON) in args - artifacts from tool outputs are collected automatically.
+Do NOT include heavy data (charts, files, large JSON) in args - artifacts from tool outputs are collected automatically and will be available to the downstream system.
 
 Example finish:
 {
   "thought": "I have analyzed the sales data and generated the chart. Ready to answer.",
   "next_node": null,
   "args": {
-    "raw_answer": "Q4 2024 revenue increased 15% YoY to $1.2M. December was strongest.",
+    "raw_answer": "Based on the Q4 2024 sales data, revenue increased 15% year-over-year to $1.2M. The attached chart visualizes the monthly trend, showing strongest performance in December.",
     "confidence": 0.92,
     "route": "analytics"
   }
@@ -352,7 +212,6 @@ In your raw_answer:
 - Avoid unnecessary caveats, but do note important limitations
 - Don't apologize unless you've actually made an error
 - These are safe defaults. Your tone or voice can be changed in the additional_guidance section.
-- you can use markdown formatting if suggested in additional_guidance.
 
 In your thought field:
 - Be concise and factual
@@ -381,9 +240,8 @@ If you cannot complete the task after reasonable attempts:
     # ─────────────────────────────────────────────────────────────
     # AVAILABLE TOOLS
     # ─────────────────────────────────────────────────────────────
-    no_tools_msg = "(No tools available - provide direct answers based on your knowledge)"
     tools_section = f"""<available_tools>
-{rendered_tools if rendered_tools else no_tools_msg}
+{rendered_tools if rendered_tools else "(No tools available - you can only provide direct answers based on your knowledge)"}
 </available_tools>"""
     prompt_sections.append(tools_section)
 
@@ -406,98 +264,121 @@ If you cannot complete the task after reasonable attempts:
 </planning_constraints>""")
 
     return "\n\n".join(prompt_sections)
+```
 
+---
 
-def build_user_prompt(query: str, llm_context: Mapping[str, Any] | None = None) -> str:
-    """Build user prompt with query and optional LLM context.
+## Key Differences from Current Prompt
 
-    This is the baseline mechanism for injecting memories and other context into
-    the planner. The structure/format is developer-defined; use system_prompt_extra
-    to document interpretation semantics if needed.
+| Aspect | Current | Proposed |
+|--------|---------|----------|
+| Lines | ~20 | ~150 |
+| Structure | Flat numbered list | Tagged sections |
+| Date awareness | None | Injected `{current_date}` (date-only for cache efficiency) |
+| Role definition | 1 sentence | Full identity section |
+| Finish guidance | 1 line | Full section with example |
+| Error handling | None | Dedicated section |
+| Tone guidance | None | Dedicated section |
+| Reasoning guidance | None | Dedicated section |
+| Examples | None | Finish example included |
 
-    Args:
-        query: The user's question or request
-        llm_context: Optional context visible to LLM. Can contain memories,
-                    status_history, knowledge bases, or any custom structure.
-                    Should NOT include internal metadata like tenant_id or trace_id.
+---
 
-                    Examples:
-                    - {"memories": {"user_pref_lang": "python"}}
-                    - {"knowledge": "User prefers concise answers."}
-                    - {"previous_failures": ["tool_a timed out", "tool_b invalid args"]}
+## Implementation Notes
 
-    Returns:
-        JSON string with query and context
-    """
-    if llm_context:
-        # Filter out 'query' if present to avoid duplication
-        context_dict = {k: v for k, v in llm_context.items() if k != "query"}
-        if context_dict:
-            return _compact_json({"query": query, "context": context_dict})
-    return _compact_json({"query": query})
+### 1. Date Injection
 
+The `build_system_prompt` function should accept an optional `current_date` parameter:
 
-def render_observation(
+```python
+def build_system_prompt(
+    catalog: Sequence[Mapping[str, Any]],
     *,
-    observation: Any | None,
-    error: str | None,
-    failure: Mapping[str, Any] | None = None,
+    extra: str | None = None,
+    planning_hints: Mapping[str, Any] | None = None,
+    current_date: str | None = None,  # NEW
 ) -> str:
-    payload: dict[str, Any] = {}
-    if observation is not None:
-        payload["observation"] = observation
-    if error:
-        payload["error"] = error
-    if failure:
-        payload["failure"] = dict(failure)
-    if not payload:
-        payload["observation"] = None
-    return _compact_json(payload)
+```
 
+If not provided, default to today's date:
 
-def render_hop_budget_violation(limit: int) -> str:
-    return (
-        "Hop budget exhausted; you have used all available tool calls. "
-        "Finish with the best answer so far or reply with no_path."
-        f" (limit={limit})"
-    )
+```python
+if current_date is None:
+    from datetime import date
+    current_date = date.today().isoformat()  # "YYYY-MM-DD"
+```
 
+**Why date-only (no time)?**
+- System prompts are often cached by LLM providers
+- Including hours/minutes would invalidate cache every minute
+- Date-only allows cache hits for an entire day
+- Time-sensitive queries are rare; date is sufficient for most temporal reasoning
 
-def render_deadline_exhausted() -> str:
-    return "Deadline reached. Provide the best available conclusion or return no_path."
+### 2. ReactPlanner Integration
 
+In `react.py`, pass the date when building the prompt:
 
-def render_validation_error(node_name: str, error: str) -> str:
-    return f"args for tool '{node_name}' did not validate: {error}. Return corrected JSON."
+```python
+from datetime import date
 
+self._system_prompt = prompts.build_system_prompt(
+    self._catalog,
+    extra=system_prompt_extra,
+    planning_hints=planning_hints,
+    current_date=date.today().isoformat(),
+)
+```
 
-def render_output_validation_error(node_name: str, error: str) -> str:
-    return (
-        f"tool '{node_name}' returned data that did not validate: {error}. "
-        "Ensure the tool output matches the declared schema."
-    )
+Or allow it to be configured for testing:
 
+```python
+def __init__(
+    self,
+    ...,
+    date_source: Callable[[], str] | None = None,  # For testing
+):
+    self._date_source = date_source or (lambda: date.today().isoformat())
+```
 
-def render_invalid_node(node_name: str, available: Sequence[str]) -> str:
-    options = ", ".join(sorted(available))
-    return f"tool '{node_name}' is not in the catalog. Choose one of: {options}."
+### 3. Section Tags
 
+Using `<section_name>` tags (similar to Claude's prompt) because:
+- Works across all LLM providers
+- Creates clear visual separation
+- Allows LLMs to reference sections by name
+- Easy to parse if needed for debugging
 
-def render_invalid_join_injection_source(source: str, available: Sequence[str]) -> str:
-    options = ", ".join(available)
-    return f"join.inject uses unknown source '{source}'. Choose one of: {options}."
+---
 
+## Testing Considerations
 
-def render_join_validation_error(node_name: str, error: str, *, suggest_inject: bool) -> str:
-    message = f"args for join tool '{node_name}' did not validate: {error}. Return corrected JSON."
-    if suggest_inject:
-        message += " Provide 'join.inject' to map parallel outputs to this join tool."
-    return message
+The prompt should be tested with:
 
+1. **Simple queries**: Verify it finishes correctly with `raw_answer`
+2. **Multi-step queries**: Verify it chains tools appropriately
+3. **Error scenarios**: Verify graceful degradation
+4. **Parallel tasks**: Verify correct `plan` and `join` usage
+5. **Ambiguous queries**: Verify it handles uncertainty well
+6. **Date-sensitive queries**: Verify it uses the injected date
 
-def render_repair_message(error: str) -> str:
-    return (
-        "Previous response was invalid JSON or schema mismatch: "
-        f"{error}. Reply with corrected JSON only. "
-        "When finishing, set next_node to null and include raw_answer in args."
-    )
+---
+
+## Migration
+
+1. Update `build_system_prompt` signature to add `current_datetime`
+2. Update `ReactPlanner.__init__` to pass datetime
+3. Run existing tests to ensure backward compatibility
+4. Add new tests for datetime injection
+5. Update documentation
+
+---
+
+## Open Questions
+
+1. **Should sections be configurable?** Some deployments might want to disable certain sections (e.g., parallel execution guidance if not using it).
+
+2. **Localization**: Should the prompt support multiple languages, or always be English regardless of user query language?
+
+3. **Token budget**: The longer prompt uses more tokens. Should we have a "compact mode" for token-constrained scenarios?
+
+4. **Agent personality**: Should there be a way to inject personality/persona into the identity section for branded agents?

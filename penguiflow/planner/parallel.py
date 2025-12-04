@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from . import prompts
+from .llm import _redact_artifacts
 from .models import PlannerAction, PlannerPause
 from .pause import _PlannerPauseSignal
 from .trajectory import Trajectory, TrajectoryStep
@@ -56,6 +57,8 @@ async def execute_parallel_plan(
     action: PlannerAction,
     trajectory: Trajectory,
     tracker: Any,
+    artifact_collector: Any | None = None,
+    source_collector: Any | None = None,
 ) -> tuple[Any | None, PlannerPause | None]:
     if action.next_node is not None:
         error = prompts.render_parallel_with_next_node(action.next_node)
@@ -104,6 +107,7 @@ async def execute_parallel_plan(
     )
 
     branch_payloads: list[dict[str, Any]] = []
+    llm_branch_payloads: list[dict[str, Any]] = []
     success_payloads: list[Any] = []
     failure_entries: list[dict[str, Any]] = []
     pause_result: PlannerPause | None = None
@@ -114,20 +118,30 @@ async def execute_parallel_plan(
             "node": spec.name,
             "args": parsed_args.model_dump(mode="json"),
         }
+        llm_payload: dict[str, Any] = dict(payload)
         if outcome.pause is not None and pause_result is None:
             pause_result = outcome.pause
             payload["pause"] = {
                 "reason": outcome.pause.reason,
                 "payload": dict(outcome.pause.payload),
             }
+            llm_payload["pause"] = payload["pause"]
         elif outcome.observation is not None:
             obs_json = outcome.observation.model_dump(mode="json")
             payload["observation"] = obs_json
             success_payloads.append(obs_json)
+            llm_payload["observation"] = _redact_artifacts(
+                spec.out_model, obs_json
+            )
+            if artifact_collector is not None:
+                artifact_collector.collect(spec.name, spec.out_model, obs_json)
+            if source_collector is not None:
+                source_collector.collect(spec.out_model, obs_json)
             planner._record_hint_progress(spec.name, trajectory)
         else:
             error_text = outcome.error or prompts.render_parallel_unknown_failure(spec.name)
             payload["error"] = error_text
+            llm_payload["error"] = error_text
             if outcome.failure is not None:
                 payload["failure"] = dict(outcome.failure)
                 failure_entries.append(
@@ -140,10 +154,15 @@ async def execute_parallel_plan(
             else:
                 failure_entries.append({"node": spec.name, "error": error_text})
         branch_payloads.append(payload)
+        llm_branch_payloads.append(llm_payload)
 
     stats = {"success": len(success_payloads), "failed": len(failure_entries)}
     observation: dict[str, Any] = {
         "branches": branch_payloads,
+        "stats": stats,
+    }
+    llm_observation: dict[str, Any] = {
+        "branches": llm_branch_payloads,
         "stats": stats,
     }
 
@@ -152,12 +171,16 @@ async def execute_parallel_plan(
             "status": "skipped",
             "reason": "pause",
         }
-        trajectory.steps.append(TrajectoryStep(action=action, observation=observation))
+        llm_observation["join"] = observation["join"]
+        trajectory.steps.append(
+            TrajectoryStep(action=action, observation=observation, llm_observation=llm_observation)
+        )
         trajectory.summary = None
         await planner._record_pause(pause_result, trajectory, tracker)
         return observation, pause_result
 
     join_payload: dict[str, Any] | None = None
+    join_llm_payload: dict[str, Any] | None = None
     join_error: str | None = None
     join_failure: Mapping[str, Any] | None = None
     join_spec: Any | None = None
@@ -288,14 +311,28 @@ async def execute_parallel_plan(
                         else:
                             tracker.record_hop()
                             planner._record_hint_progress(join_spec.name, trajectory)
+                            join_json = join_model.model_dump(mode="json")
+                            if artifact_collector is not None:
+                                artifact_collector.collect(
+                                    join_spec.name,
+                                    join_spec.out_model,
+                                    join_json,
+                                )
                             join_payload = {
                                 "node": join_spec.name,
-                                "observation": join_model.model_dump(mode="json"),
+                                "observation": join_json,
+                            }
+                            join_llm_payload = {
+                                "node": join_spec.name,
+                                "observation": _redact_artifacts(
+                                    join_spec.out_model, join_json
+                                ),
                             }
 
     if action.join is not None and "join" not in observation:
         if join_payload is not None:
             observation["join"] = join_payload
+            llm_observation["join"] = join_llm_payload or join_payload
         else:
             join_name = (
                 join_spec.name
@@ -311,10 +348,14 @@ async def execute_parallel_plan(
                 join_entry["failure"] = dict(join_failure)
             if "error" in join_entry or "failure" in join_entry:
                 observation["join"] = join_entry
+                llm_observation["join"] = join_entry
             elif action.join is not None and join_spec is None:
                 observation["join"] = join_entry
+                llm_observation["join"] = join_entry
 
-    trajectory.steps.append(TrajectoryStep(action=action, observation=observation))
+    trajectory.steps.append(
+        TrajectoryStep(action=action, observation=observation, llm_observation=llm_observation)
+    )
     trajectory.summary = None
     return observation, None
 

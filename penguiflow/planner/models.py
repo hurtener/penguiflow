@@ -25,7 +25,7 @@ class JSONLLMClient(Protocol):
 class PlannerEvent:
     """Structured event emitted during planner execution for observability."""
 
-    event_type: str  # step_start, step_complete, llm_call, pause, resume, finish
+    event_type: str  # step_start, step_complete, llm_call, pause, resume, finish, stream_chunk, artifact_chunk
     ts: float
     trajectory_step: int
     thought: str | None = None
@@ -85,6 +85,67 @@ class ParallelJoin(BaseModel):
     node: str
     args: dict[str, Any] = Field(default_factory=dict)
     inject: JoinInjection | None = None
+
+
+class Source(BaseModel):
+    """Citation or reference used in a response."""
+
+    title: str
+    url: str | None = None
+    snippet: str | None = None
+    relevance_score: float | None = None
+
+
+class SuggestedAction(BaseModel):
+    """Recommended follow-up action for downstream consumers."""
+
+    action_id: str
+    label: str
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class FinalPayload(BaseModel):
+    """Standard structure for planner final answers."""
+
+    raw_answer: str = Field(description="Human-readable answer text.")
+    artifacts: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Heavy tool outputs collected during execution.",
+    )
+    confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Optional confidence score from planner/reflection.",
+    )
+    sources: list[Source] = Field(
+        default_factory=list,
+        description="Citations gathered from retrieval tools.",
+    )
+    route: str | None = Field(
+        default=None,
+        description="Categorization of the answer type.",
+    )
+    suggested_actions: list[SuggestedAction] = Field(
+        default_factory=list,
+        description="Suggested next steps for the user or UI.",
+    )
+    requires_followup: bool = Field(
+        default=False,
+        description="True if user input/clarification is needed.",
+    )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Non-fatal issues encountered during execution.",
+    )
+    language: str | None = Field(
+        default=None,
+        description="ISO 639-1 language code for the answer.",
+    )
+    extra: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Domain-specific fields not covered by the standard schema.",
+    )
 
 
 class PlannerAction(BaseModel):
@@ -206,5 +267,8 @@ __all__ = [
     "ReflectionConfig",
     "ReflectionCritique",
     "ReflectionCriteria",
+    "FinalPayload",
+    "Source",
+    "SuggestedAction",
     "ToolPolicy",
 ]

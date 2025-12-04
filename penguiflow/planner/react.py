@@ -8,6 +8,7 @@ import logging
 import time
 import warnings
 from collections import ChainMap, defaultdict
+from copy import deepcopy
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -28,6 +29,8 @@ from .llm import (
     _estimate_size,
     _LiteLLMJSONClient,
     _sanitize_json_schema,
+    _redact_artifacts,
+    _unwrap_model,
     build_messages,
     critique_answer,
     generate_clarification,
@@ -48,6 +51,8 @@ from .models import (
     ReflectionConfig,
     ReflectionCriteria,
     ReflectionCritique,
+    FinalPayload,
+    Source,
     ToolPolicy,
 )
 from .parallel import execute_parallel_plan
@@ -101,6 +106,245 @@ class _StreamChunk:
     ts: float
 
 
+@dataclass(slots=True)
+class _ArtifactChunk:
+    """Streaming artifact chunk captured during planning."""
+
+    stream_id: str
+    seq: int
+    chunk: Any
+    done: bool
+    artifact_type: str | None
+    meta: Mapping[str, Any]
+    ts: float
+
+
+class _ArtifactCollector:
+    """Collect artifact-marked fields during planner execution."""
+
+    def __init__(self, existing: Mapping[str, Any] | None = None) -> None:
+        self._artifacts: dict[str, Any] = dict(existing or {})
+
+    def collect(
+        self,
+        node_name: str,
+        out_model: type[BaseModel],
+        observation: Mapping[str, Any],
+    ) -> None:
+        if not isinstance(observation, Mapping):
+            return
+
+        collected: dict[str, Any] = {}
+        for field_name, field_info in out_model.model_fields.items():
+            extra = field_info.json_schema_extra or {}
+            if extra.get("artifact") and field_name in observation:
+                collected[field_name] = observation[field_name]
+
+        if not collected:
+            return
+
+        existing = self._artifacts.get(node_name, {})
+        merged = dict(existing)
+        merged.update(collected)
+        self._artifacts[node_name] = merged
+
+    def snapshot(self) -> dict[str, Any]:
+        return deepcopy(self._artifacts)
+
+
+def _model_json_schema_extra(model: type[BaseModel]) -> Mapping[str, Any]:
+    """Return json_schema_extra from model config (ConfigDict or legacy Config)."""
+
+    config_extra: Mapping[str, Any] | None = None
+    config = getattr(model, "model_config", None)
+    if isinstance(config, Mapping):
+        raw_extra = config.get("json_schema_extra")
+        if isinstance(raw_extra, Mapping):
+            config_extra = raw_extra
+
+    legacy_config = getattr(model, "Config", None)
+    if legacy_config is not None:
+        legacy_extra = getattr(legacy_config, "json_schema_extra", None)
+        if isinstance(legacy_extra, Mapping):
+            config_extra = {**(config_extra or {}), **legacy_extra}
+
+    return config_extra or {}
+
+
+def _produces_sources(model: type[BaseModel]) -> bool:
+    """Check whether the model declares that it produces sources."""
+
+    extra = _model_json_schema_extra(model)
+    return bool(extra.get("produces_sources"))
+
+
+def _source_field_map(model: type[BaseModel]) -> dict[str, str]:
+    """Build mapping of model field names to Source fields."""
+
+    mapping: dict[str, str] = {}
+    for field_name, field_info in model.model_fields.items():
+        extra = field_info.json_schema_extra or {}
+        target = extra.get("source_field")
+        if target is None and field_name in Source.model_fields:
+            target = field_name
+        if target:
+            mapping[field_name] = str(target)
+    return mapping
+
+
+def _extract_source_payloads(
+    out_model: type[BaseModel],
+    observation: Any,
+) -> list[Mapping[str, Any]]:
+    """Extract potential Source payloads from an observation."""
+
+    if observation is None:
+        return []
+    if isinstance(observation, BaseModel):
+        observation = observation.model_dump(mode="json")
+    if not isinstance(observation, Mapping):
+        return []
+
+    payloads: list[Mapping[str, Any]] = []
+
+    if _produces_sources(out_model):
+        mapping = _source_field_map(out_model)
+        if mapping:
+            payload = {
+                target: observation.get(field_name)
+                for field_name, target in mapping.items()
+                if field_name in observation
+            }
+            if payload:
+                payloads.append(payload)
+
+    for field_name, field_info in out_model.model_fields.items():
+        nested_model = _unwrap_model(field_info.annotation)
+        if nested_model is None:
+            continue
+        nested_value = observation.get(field_name)
+        if nested_value is None:
+            continue
+
+        if isinstance(nested_value, Sequence) and not isinstance(
+            nested_value, (str, bytes, bytearray, Mapping)
+        ):
+            for item in nested_value:
+                payloads.extend(_extract_source_payloads(nested_model, item))
+        elif isinstance(nested_value, Mapping) or isinstance(nested_value, BaseModel):
+            payloads.extend(_extract_source_payloads(nested_model, nested_value))
+
+    return payloads
+
+
+class _SourceCollector:
+    """Collect Source objects emitted by tools during execution."""
+
+    def __init__(self, existing: Sequence[Mapping[str, Any]] | None = None) -> None:
+        self._sources: list[Source] = []
+        self._seen: set[tuple[str, str | None, str | None]] = set()
+        for src in existing or []:
+            self._add(src)
+
+    def _add(self, payload: Mapping[str, Any] | Source) -> None:
+        try:
+            model = payload if isinstance(payload, Source) else Source.model_validate(payload)
+        except ValidationError as exc:
+            logger.debug("source_validation_failed", extra={"error": str(exc)})
+            return
+
+        key = (model.title, model.url, model.snippet)
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        self._sources.append(model)
+
+    def collect(self, out_model: type[BaseModel], observation: Mapping[str, Any]) -> None:
+        if not isinstance(observation, Mapping):
+            return
+        for payload in _extract_source_payloads(out_model, observation):
+            self._add(payload)
+
+    def snapshot(self) -> list[Mapping[str, Any]]:
+        return [src.model_dump(mode="json") for src in self._sources]
+
+
+def _normalise_artifact_value(value: Any) -> Any:
+    """Best-effort conversion of artifact chunks to JSON-serialisable payloads."""
+
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
+    try:
+        json.dumps(value, ensure_ascii=False)
+        return value
+    except Exception:
+        try:
+            return json.loads(json.dumps(value, default=str, ensure_ascii=False))
+        except Exception:
+            return repr(value)
+
+
+def _fallback_answer(last_observation: Any) -> str:
+    """Provide a safe fallback answer when planner args are missing.
+
+    This function extracts a human-readable answer string from various payload formats.
+    Per RFC_STRUCTURED_PLANNER_OUTPUT, the result must be a plain string (not JSON).
+    """
+
+    if isinstance(last_observation, Mapping):
+        # First pass: check for answer-like keys (prioritized order)
+        for key in ("raw_answer", "answer", "text", "result", "output", "response",
+                    "message", "content", "greeting", "joke", "reply", "summary",
+                    "explanation", "description", "body"):
+            if key in last_observation:
+                value = last_observation[key]
+                if isinstance(value, str):
+                    return value
+                if isinstance(value, Mapping):
+                    # Recursively extract from nested dict
+                    return _fallback_answer(value)
+                if value is not None:
+                    return str(value)
+
+        # Second pass: check if there's a nested 'args' dict with answer-like keys
+        if "args" in last_observation and isinstance(last_observation["args"], Mapping):
+            nested = _fallback_answer(last_observation["args"])
+            if nested != "No answer produced.":
+                return nested
+
+        # Third pass: if observation has exactly one string value > 10 chars, use it
+        # (excluding 'thought' and 'next_node' which are planner metadata)
+        excluded_keys = {"thought", "next_node", "plan", "join"}
+        string_values = [
+            v for k, v in last_observation.items()
+            if k not in excluded_keys and isinstance(v, str) and len(v) > 10
+        ]
+        if len(string_values) == 1:
+            return string_values[0]
+
+        # Fourth pass: use 'thought' as last resort if it looks like an answer
+        # (i.e., it doesn't start with typical thinking phrases)
+        thought = last_observation.get("thought", "")
+        if isinstance(thought, str) and len(thought) > 20:
+            thinking_phrases = (
+                "i need to", "i should", "i will", "let me", "i'll",
+                "first,", "now i", "the user", "based on", "looking at",
+                "i can see", "i notice", "according to",
+            )
+            thought_lower = thought.lower().strip()
+            if not any(thought_lower.startswith(p) for p in thinking_phrases):
+                return thought
+
+    if isinstance(last_observation, str):
+        return last_observation
+    if last_observation is not None:
+        try:
+            return json.dumps(last_observation, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(last_observation)
+    return "No answer produced."
+
+
 class _PlannerContext(ToolContext):
     __slots__ = (
         "_llm_context",
@@ -108,6 +352,8 @@ class _PlannerContext(ToolContext):
         "_planner",
         "_trajectory",
         "_chunks",
+        "_artifact_chunks",
+        "_artifact_seq",
         "_meta_warned",
     )
 
@@ -117,6 +363,8 @@ class _PlannerContext(ToolContext):
         self._planner = planner
         self._trajectory = trajectory
         self._chunks: list[_StreamChunk] = []
+        self._artifact_chunks: list[_ArtifactChunk] = []
+        self._artifact_seq: defaultdict[str, int] = defaultdict(int)
         self._meta_warned = False
 
     @property
@@ -174,10 +422,51 @@ class _PlannerContext(ToolContext):
             )
         )
 
+    async def emit_artifact(
+        self,
+        stream_id: str,
+        chunk: Any,
+        *,
+        done: bool = False,
+        artifact_type: str | None = None,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Emit a streaming artifact chunk during tool execution."""
+
+        serialised_chunk = _normalise_artifact_value(chunk)
+        seq = self._artifact_seq[stream_id]
+        self._artifact_seq[stream_id] += 1
+        record = _ArtifactChunk(
+            stream_id=stream_id,
+            seq=seq,
+            chunk=serialised_chunk,
+            done=done,
+            artifact_type=artifact_type or type(chunk).__name__,
+            meta=dict(meta or {}),
+            ts=self._planner._time_source(),
+        )
+        self._artifact_chunks.append(record)
+
+        self._planner._emit_event(
+            PlannerEvent(
+                event_type="artifact_chunk",
+                ts=record.ts,
+                trajectory_step=len(self._trajectory.steps),
+                extra={
+                    "stream_id": stream_id,
+                    "seq": seq,
+                    "chunk": serialised_chunk,
+                    "done": done,
+                    "artifact_type": record.artifact_type,
+                    "meta": dict(meta or {}),
+                },
+            )
+        )
+
     def _collect_chunks(self) -> dict[str, list[dict[str, Any]]]:
         """Collect streaming chunks grouped by stream identifier."""
 
-        if not self._chunks:
+        if not self._chunks and not self._artifact_chunks:
             return {}
 
         streams: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -191,10 +480,24 @@ class _PlannerContext(ToolContext):
                     "ts": chunk.ts,
                 }
             )
+        for artifact in self._artifact_chunks:
+            streams[artifact.stream_id].append(
+                {
+                    "seq": artifact.seq,
+                    "chunk": artifact.chunk,
+                    "artifact_type": artifact.artifact_type,
+                    "done": artifact.done,
+                    "meta": dict(artifact.meta),
+                    "ts": artifact.ts,
+                }
+            )
 
         for stream_chunks in streams.values():
             stream_chunks.sort(key=lambda payload: payload["seq"])
 
+        self._chunks.clear()
+        self._artifact_chunks.clear()
+        self._artifact_seq.clear()
         return dict(streams)
 
     async def pause(
@@ -624,6 +927,8 @@ class ReactPlanner:
         tracker: _ConstraintTracker | None,
     ) -> PlannerFinish | PlannerPause:
         last_observation: Any | None = None
+        artifact_collector = _ArtifactCollector(trajectory.artifacts)
+        source_collector = _SourceCollector(trajectory.sources)
         self._active_trajectory = trajectory
         if tracker is None:
             tracker = _ConstraintTracker(
@@ -640,6 +945,8 @@ class ReactPlanner:
                         "deadline_exhausted",
                         extra={"step": len(trajectory.steps)},
                     )
+                    trajectory.artifacts = artifact_collector.snapshot()
+                    trajectory.sources = source_collector.snapshot()
                     return self._finish(
                         trajectory,
                         reason="budget_exhausted",
@@ -684,12 +991,18 @@ class ReactPlanner:
 
                 if action.plan:
                     parallel_observation, pause = await self._execute_parallel_plan(
-                        action, trajectory, tracker
+                        action,
+                        trajectory,
+                        tracker,
+                        artifact_collector,
+                        source_collector,
                     )
                     if pause is not None:
                         return pause
                     trajectory.summary = None
                     last_observation = parallel_observation
+                    trajectory.artifacts = artifact_collector.snapshot()
+                    trajectory.sources = source_collector.snapshot()
                     trajectory.resume_user_input = None
                     continue
 
@@ -769,6 +1082,7 @@ class ReactPlanner:
                                     # Ensure proper structure for downstream consumers (like FinalAnswer model)
                                     if isinstance(candidate_answer, dict):
                                         # Update existing dict with clarification
+                                        candidate_answer["raw_answer"] = clarification_text
                                         candidate_answer["text"] = clarification_text
 
                                         # Ensure required fields are present
@@ -804,6 +1118,7 @@ class ReactPlanner:
                                                 route = getattr(obs, "route", "unknown")
 
                                         candidate_answer = {
+                                            "raw_answer": clarification_text,
                                             "text": clarification_text,
                                             "route": route,
                                             "artifacts": {},
@@ -886,15 +1201,23 @@ class ReactPlanner:
                             if critique.feedback:
                                 metadata_reflection["feedback"] = critique.feedback
 
-                    payload = candidate_answer
                     metadata_extra: dict[str, Any] | None = None
                     if metadata_reflection is not None:
                         metadata_extra = {"reflection": metadata_reflection}
 
+                    trajectory.artifacts = artifact_collector.snapshot()
+                    trajectory.sources = source_collector.snapshot()
+                    final_payload = self._build_final_payload(
+                        candidate_answer,
+                        last_observation,
+                        trajectory.artifacts,
+                        trajectory.sources,
+                    )
+
                     return self._finish(
                         trajectory,
                         reason="answer_complete",
-                        payload=payload,
+                        payload=final_payload.model_dump(mode="json"),
                         thought=action.thought,
                         constraints=tracker,
                         metadata_extra=metadata_extra,
@@ -982,16 +1305,26 @@ class ReactPlanner:
                     last_observation = None
                     continue
 
+                observation_json = observation.model_dump(mode="json")
+
+                artifact_collector.collect(spec.name, spec.out_model, observation_json)
+                source_collector.collect(spec.out_model, observation_json)
+
                 trajectory.steps.append(
                     TrajectoryStep(
                         action=action,
-                        observation=observation,
+                        observation=observation_json,
+                        llm_observation=_redact_artifacts(
+                            spec.out_model, observation_json
+                        ),
                         streams=step_chunks or None,
                     )
                 )
                 tracker.record_hop()
                 trajectory.summary = None
-                last_observation = observation.model_dump(mode="json")
+                last_observation = observation_json
+                trajectory.artifacts = artifact_collector.snapshot()
+                trajectory.sources = source_collector.snapshot()
                 self._record_hint_progress(spec.name, trajectory)
                 trajectory.resume_user_input = None
 
@@ -1014,6 +1347,8 @@ class ReactPlanner:
                     if tracker.deadline_triggered
                     else prompts.render_hop_budget_violation(self._hop_budget or 0)
                 )
+                trajectory.artifacts = artifact_collector.snapshot()
+                trajectory.sources = source_collector.snapshot()
                 return self._finish(
                     trajectory,
                     reason="budget_exhausted",
@@ -1021,6 +1356,8 @@ class ReactPlanner:
                     thought=thought,
                     constraints=tracker,
                 )
+            trajectory.artifacts = artifact_collector.snapshot()
+            trajectory.sources = source_collector.snapshot()
             return self._finish(
                 trajectory,
                 reason="no_path",
@@ -1072,8 +1409,17 @@ class ReactPlanner:
         action: PlannerAction,
         trajectory: Trajectory,
         tracker: _ConstraintTracker,
+        artifact_collector: _ArtifactCollector,
+        source_collector: _SourceCollector,
     ) -> tuple[Any | None, PlannerPause | None]:
-        return await execute_parallel_plan(self, action, trajectory, tracker)
+        return await execute_parallel_plan(
+            self,
+            action,
+            trajectory,
+            tracker,
+            artifact_collector,
+            source_collector,
+        )
 
     def _make_context(self, trajectory: Trajectory) -> _PlannerContext:
         return _PlannerContext(self, trajectory)
@@ -1201,6 +1547,93 @@ class ReactPlanner:
         if suggestion:
             payload["suggestion"] = str(suggestion)
         return payload
+
+    def _build_final_payload(
+        self,
+        args: Mapping[str, Any] | Any | None,
+        last_observation: Any,
+        artifacts: Mapping[str, Any],
+        sources: Sequence[Mapping[str, Any]] | None,
+    ) -> FinalPayload:
+        logger.debug(
+            "build_final_payload_start",
+            extra={
+                "args_type": type(args).__name__,
+                "args_value": str(args)[:500] if args else None,
+                "last_observation_type": type(last_observation).__name__ if last_observation else None,
+                "last_observation_value": str(last_observation)[:500] if last_observation else None,
+            },
+        )
+
+        payload_data: dict[str, Any] = {}
+        if isinstance(args, BaseModel):
+            payload_data.update(args.model_dump(mode="json"))
+        elif isinstance(args, Mapping):
+            payload_data.update(args)
+        elif args is not None:
+            payload_data["raw_answer"] = _fallback_answer(args)
+
+        if not payload_data.get("raw_answer"):
+            # Try args first (the LLM's answer), then last_observation
+            for source in (args, last_observation):
+                if source is not None:
+                    extracted = _fallback_answer(source)
+                    logger.debug(
+                        "fallback_answer_extraction",
+                        extra={
+                            "source_type": type(source).__name__,
+                            "extracted": extracted[:200] if extracted else None,
+                        },
+                    )
+                    if extracted and extracted != "No answer produced.":
+                        payload_data["raw_answer"] = extracted
+                        break
+            else:
+                logger.warning(
+                    "no_answer_extracted",
+                    extra={
+                        "args": str(args)[:200] if args else None,
+                        "last_observation": str(last_observation)[:200] if last_observation else None,
+                    },
+                )
+                payload_data["raw_answer"] = "No answer produced."
+
+        payload_data["artifacts"] = dict(artifacts)
+        if sources is not None:
+            payload_data["sources"] = list(sources)
+
+        known_fields = set(FinalPayload.model_fields)
+        extra_payload: dict[str, Any] = {}
+        existing_extra = payload_data.get("extra")
+        if isinstance(existing_extra, Mapping):
+            extra_payload.update(existing_extra)
+
+        for key in list(payload_data.keys()):
+            if key not in known_fields:
+                extra_payload[key] = payload_data.pop(key)
+
+        if extra_payload:
+            payload_data["extra"] = extra_payload
+
+        try:
+            return FinalPayload.model_validate(payload_data)
+        except ValidationError as exc:
+            logger.warning(
+                "final_payload_validation_failed",
+                extra={"error": str(exc)},
+            )
+            # Try args first, then last_observation (consistent with above)
+            raw_answer = "No answer produced."
+            for source in (args, last_observation):
+                if source is not None:
+                    extracted = _fallback_answer(source)
+                    if extracted and extracted != "No answer produced.":
+                        raw_answer = extracted
+                        break
+            return FinalPayload(
+                raw_answer=raw_answer,
+                artifacts=dict(artifacts),
+            )
 
     async def pause(
         self, reason: PlannerPauseReason, payload: Mapping[str, Any] | None = None
@@ -1382,6 +1815,8 @@ class ReactPlanner:
             "thought": thought,
             "steps": trajectory.to_history(),
             "step_count": len(trajectory.steps),
+            "artifacts": dict(trajectory.artifacts),
+            "sources": list(trajectory.sources),
         }
         metadata["cost"] = self._cost_tracker.snapshot()
         if constraints is not None:
@@ -1429,6 +1864,7 @@ __all__ = [
     "ReflectionConfig",
     "ReflectionCriteria",
     "ReflectionCritique",
+    "FinalPayload",
     "ReactPlanner",
     "_sanitize_json_schema",
     "Trajectory",

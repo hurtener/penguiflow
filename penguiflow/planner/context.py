@@ -52,6 +52,17 @@ class ToolContext(Protocol):
     ) -> Awaitable[None]:
         """Emit a streaming chunk."""
 
+    def emit_artifact(
+        self,
+        stream_id: str,
+        chunk: Any,
+        *,
+        done: bool = False,
+        artifact_type: str | None = None,
+        meta: Mapping[str, Any] | None = None,
+    ) -> Awaitable[None]:
+        """Emit a streaming artifact chunk (e.g., partial chart config)."""
+
 
 # Helper alias for tools that can accept either planner ToolContext or flow Context
 AnyContext = ToolContext | FlowContext

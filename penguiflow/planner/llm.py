@@ -6,7 +6,9 @@ import asyncio
 import json
 import logging
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, get_args, get_origin
+
+from pydantic import BaseModel
 
 from . import prompts
 from .models import (
@@ -35,8 +37,14 @@ def _coerce_llm_response(result: str | tuple[str, float]) -> tuple[str, float]:
     raise TypeError(msg)
 
 
-def _sanitize_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """Remove advanced JSON schema constraints for broader provider compatibility."""
+def _sanitize_json_schema(schema: dict[str, Any], *, strict_mode: bool = False) -> dict[str, Any]:
+    """Remove advanced JSON schema constraints for broader provider compatibility.
+
+    Args:
+        schema: The JSON schema to sanitize.
+        strict_mode: If True, adds 'additionalProperties: false' to all object schemas
+                     as required by OpenAI/OpenRouter structured outputs.
+    """
 
     if not isinstance(schema, dict):
         return schema
@@ -62,23 +70,126 @@ def _sanitize_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
 
         if key == "properties" and isinstance(value, dict):
             sanitized[key] = {
-                prop_name: _sanitize_json_schema(prop_schema)
+                prop_name: _sanitize_json_schema(prop_schema, strict_mode=strict_mode)
                 for prop_name, prop_schema in value.items()
             }
         elif key == "items" and isinstance(value, dict):
-            sanitized[key] = _sanitize_json_schema(value)
-        elif key == "additionalProperties" and isinstance(value, dict):
-            sanitized[key] = _sanitize_json_schema(value)
+            sanitized[key] = _sanitize_json_schema(value, strict_mode=strict_mode)
+        elif key == "additionalProperties":
+            # In strict mode, we need additionalProperties: false
+            # If it's a dict schema (for typed additional props), skip sanitizing but note
+            # that OpenAI strict mode doesn't support typed additionalProperties
+            if strict_mode:
+                # For strict mode, additionalProperties must be false (not true or a schema)
+                # We'll handle this after the loop
+                continue
+            elif isinstance(value, dict):
+                sanitized[key] = _sanitize_json_schema(value, strict_mode=strict_mode)
+            else:
+                sanitized[key] = value
         elif key == "allOf" and isinstance(value, list):
-            sanitized[key] = [_sanitize_json_schema(item) for item in value]
+            sanitized[key] = [_sanitize_json_schema(item, strict_mode=strict_mode) for item in value]
         elif key == "anyOf" and isinstance(value, list):
-            sanitized[key] = [_sanitize_json_schema(item) for item in value]
+            sanitized[key] = [_sanitize_json_schema(item, strict_mode=strict_mode) for item in value]
         elif key == "oneOf" and isinstance(value, list):
-            sanitized[key] = [_sanitize_json_schema(item) for item in value]
+            sanitized[key] = [_sanitize_json_schema(item, strict_mode=strict_mode) for item in value]
+        elif key == "$defs" and isinstance(value, dict):
+            # Process nested definitions (used by Pydantic for referenced models)
+            sanitized[key] = {
+                def_name: _sanitize_json_schema(def_schema, strict_mode=strict_mode)
+                for def_name, def_schema in value.items()
+            }
         else:
             sanitized[key] = value
 
+    # Add additionalProperties: false for object schemas in strict mode
+    # This is required by OpenAI/OpenRouter structured outputs API
+    if strict_mode:
+        is_object_schema = (
+            sanitized.get("type") == "object" or
+            "properties" in sanitized
+        )
+        if is_object_schema:
+            # Always set to false in strict mode, overriding any existing value
+            sanitized["additionalProperties"] = False
+
     return sanitized
+
+
+def _artifact_placeholder(value: Any) -> str:
+    """Create a compact placeholder for artifact fields."""
+
+    type_name = type(value).__name__
+    size_hint: str | None = None
+    try:
+        if isinstance(value, (str, bytes, bytearray, Sequence)) and not isinstance(
+            value, Mapping
+        ):
+            size_hint = str(len(value))
+        elif isinstance(value, Mapping):
+            size_hint = str(len(value))
+    except Exception:
+        size_hint = None
+    return f"<artifact:{type_name}>" if size_hint is None else f"<artifact:{type_name} size={size_hint}>"
+
+
+def _unwrap_model(annotation: Any) -> type[BaseModel] | None:
+    """Extract a BaseModel subclass from a possibly-nested annotation."""
+
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+
+    origin = get_origin(annotation)
+    if origin is None:
+        return None
+
+    for arg in get_args(annotation):
+        model = _unwrap_model(arg)
+        if model is not None:
+            return model
+    return None
+
+
+def _redact_artifacts(
+    out_model: type[BaseModel],
+    observation: Mapping[str, Any] | None,
+) -> Any:
+    """Redact artifact-marked fields from an observation for LLM context."""
+
+    if observation is None:
+        return {}
+    if not isinstance(observation, Mapping):
+        return observation
+
+    redacted: dict[str, Any] = {}
+    fields = getattr(out_model, "model_fields", {}) or {}
+
+    for field_name, value in observation.items():
+        field_info = fields.get(field_name)
+        extra = field_info.json_schema_extra or {} if field_info is not None else {}
+        if extra.get("artifact"):
+            redacted[field_name] = _artifact_placeholder(value)
+            continue
+
+        nested_model: type[BaseModel] | None = None
+        if field_info is not None:
+            nested_model = _unwrap_model(field_info.annotation)
+
+        if nested_model and isinstance(value, Mapping):
+            redacted[field_name] = _redact_artifacts(nested_model, value)
+            continue
+        if nested_model and isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            redacted[field_name] = [
+                _redact_artifacts(nested_model, item) if isinstance(item, Mapping) else item
+                for item in value
+            ]
+            continue
+
+        redacted[field_name] = value
+
+    return redacted
 
 
 class _LiteLLMJSONClient:
@@ -120,24 +231,87 @@ class _LiteLLMJSONClient:
         params["messages"] = list(messages)
         if self._json_schema_mode and response_format is not None:
             model_name = self._llm if isinstance(self._llm, str) else self._llm.get("model", "")
-            needs_sanitization = (
+            model_lower = model_name.lower()
+
+            # Providers that need constraint removal (minimum, maximum, etc.)
+            needs_constraint_removal = (
                 model_name.startswith("databricks/")
-                or "databricks" in model_name.lower()
-                or "groq" in model_name.lower()
-                or "cerebras" in model_name.lower()
+                or "databricks" in model_lower
+                or "groq" in model_lower
+                or "cerebras" in model_lower
             )
 
-            if needs_sanitization and "json_schema" in response_format:
-                sanitized_format = dict(response_format)
-                sanitized_format["json_schema"] = {
-                    "name": response_format["json_schema"]["name"],
-                    "schema": _sanitize_json_schema(response_format["json_schema"]["schema"]),
-                }
-                params["response_format"] = sanitized_format
-                logger.debug(
-                    "json_schema_sanitized",
-                    extra={"model": model_name, "reason": "provider_compatibility"},
-                )
+            # Models that DON'T support strict JSON schema mode
+            # These models work better with just response_format: {"type": "json_object"}
+            # rather than full JSON schema with strict mode
+            no_strict_schema_support = (
+                "anthropic" in model_lower
+                or "claude" in model_lower
+                or "gemini" in model_lower
+                or "google" in model_lower
+                or "mistral" in model_lower
+                or "llama" in model_lower
+                or "qwen" in model_lower
+                or "deepseek" in model_lower
+                or "cohere" in model_lower
+            )
+
+            # Models that fully support OpenAI-style strict JSON schema
+            supports_strict_schema = (
+                ("gpt-4" in model_lower or "gpt-3.5" in model_lower or "o1" in model_lower or "o3" in model_lower)
+                and "openai" in model_lower
+            ) or (
+                model_name.startswith("openai/")
+            )
+
+            if "json_schema" in response_format:
+                if no_strict_schema_support:
+                    # For models without strict schema support, use simple JSON mode
+                    # and let the prompt guide the structure
+                    params["response_format"] = {"type": "json_object"}
+                    logger.debug(
+                        "json_schema_downgraded",
+                        extra={
+                            "model": model_name,
+                            "reason": "no_strict_schema_support",
+                            "fallback": "json_object",
+                        },
+                    )
+                elif supports_strict_schema:
+                    # OpenAI models: use full strict schema with additionalProperties: false
+                    sanitized_format = dict(response_format)
+                    sanitized_format["json_schema"] = {
+                        "name": response_format["json_schema"]["name"],
+                        "strict": True,
+                        "schema": _sanitize_json_schema(
+                            response_format["json_schema"]["schema"],
+                            strict_mode=True,
+                        ),
+                    }
+                    params["response_format"] = sanitized_format
+                    logger.debug(
+                        "json_schema_strict",
+                        extra={"model": model_name, "strict_mode": True},
+                    )
+                else:
+                    # Unknown model: try schema without strict mode, sanitize for compatibility
+                    sanitized_format = dict(response_format)
+                    sanitized_format["json_schema"] = {
+                        "name": response_format["json_schema"]["name"],
+                        "schema": _sanitize_json_schema(
+                            response_format["json_schema"]["schema"],
+                            strict_mode=True,  # Still add additionalProperties: false
+                        ),
+                    }
+                    params["response_format"] = sanitized_format
+                    logger.debug(
+                        "json_schema_sanitized",
+                        extra={
+                            "model": model_name,
+                            "strict_mode": False,
+                            "schema_sanitized": True,
+                        },
+                    )
             else:
                 params["response_format"] = response_format
 
@@ -234,11 +408,23 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
             sort_keys=True,
         )
         history_messages.append({"role": "assistant", "content": action_payload})
+        observation_payload = step.serialise_for_llm()
+        if (
+            step.llm_observation is None
+            and step.action.next_node
+            and isinstance(observation_payload, Mapping)
+        ):
+            spec = getattr(planner, "_spec_by_name", {}).get(step.action.next_node)
+            if spec is not None:
+                observation_payload = _redact_artifacts(
+                    spec.out_model, observation_payload
+                )
+
         history_messages.append(
             {
                 "role": "user",
                 "content": prompts.render_observation(
-                    observation=step._serialise_observation(),
+                    observation=observation_payload,
                     error=step.error,
                     failure=step.failure,
                 ),
@@ -280,11 +466,23 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
                 ),
             }
         )
+        last_observation_payload = last_step.serialise_for_llm()
+        if (
+            last_step.llm_observation is None
+            and last_step.action.next_node
+            and isinstance(last_observation_payload, Mapping)
+        ):
+            spec = getattr(planner, "_spec_by_name", {}).get(last_step.action.next_node)
+            if spec is not None:
+                last_observation_payload = _redact_artifacts(
+                    spec.out_model, last_observation_payload
+                )
+
         condensed.append(
             {
                 "role": "user",
                 "content": prompts.render_observation(
-                    observation=last_step._serialise_observation(),
+                    observation=last_observation_payload,
                     error=last_step.error,
                     failure=last_step.failure,
                 ),
@@ -548,6 +746,7 @@ __all__ = [
     "_coerce_llm_response",
     "_sanitize_json_schema",
     "_estimate_size",
+    "_redact_artifacts",
     "build_messages",
     "summarise_trajectory",
     "critique_answer",

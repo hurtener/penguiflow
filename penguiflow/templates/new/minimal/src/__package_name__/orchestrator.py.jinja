@@ -56,6 +56,26 @@ def _collect_streams(metadata: Mapping[str, Any]) -> dict[str, list[dict[str, An
     return streams
 
 
+def _extract_answer(payload: Any) -> str | None:
+    """Normalise planner payloads to a displayable answer."""
+
+    if payload is None:
+        return None
+    if isinstance(payload, Mapping):
+        for key in ("raw_answer", "answer", "text", "content", "message", "greeting", "response", "result"):
+            if key in payload:
+                value = payload.get(key)
+                return None if value is None else str(value)
+        return str(payload)
+
+    for attr in ("raw_answer", "answer", "text", "content", "message", "greeting", "response", "result"):
+        if hasattr(payload, attr):
+            value = getattr(payload, attr)
+            return None if value is None else str(value)
+
+    return str(payload)
+
+
 class ScriptedLLM:
     """Deterministic JSON responses for planner tests."""
 
@@ -198,7 +218,7 @@ class {{ class_name }}Orchestrator:
             raise {{ class_name }}FlowError("Planner did not finish successfully")
 
         payload: Any = result.payload
-        answer_text = payload.answer if isinstance(payload, Answer) else str(payload)
+        answer_text = _extract_answer(payload)
 
 {% if memory_enabled %}
         await self._memory.ingest_interaction(
@@ -260,7 +280,7 @@ class {{ class_name }}Orchestrator:
             raise {{ class_name }}FlowError("Planner did not finish successfully")
 
         payload: Any = result.payload
-        answer_text = payload.answer if isinstance(payload, Answer) else str(payload)
+        answer_text = _extract_answer(payload)
 
 {% if memory_enabled %}
         await self._memory.ingest_interaction(

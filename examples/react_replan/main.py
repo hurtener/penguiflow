@@ -114,7 +114,7 @@ async def main() -> None:
             {
                 "thought": "final",
                 "next_node": None,
-                "args": {"answer": "Cached docs describe the latest metrics."},
+                "args": {"raw_answer": "Cached docs describe the latest metrics."},
             },
         ]
     )

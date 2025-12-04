@@ -128,7 +128,7 @@ async def build_planner() -> ReactPlanner:
         {
             "thought": "finish after merge",
             "next_node": None,
-            "args": {"answer": "Merged available search results."},
+            "args": {"raw_answer": "Merged available search results."},
         },
     ]
 

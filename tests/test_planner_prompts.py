@@ -53,3 +53,47 @@ def test_render_helpers() -> None:
     assert "ghost" in invalid
     repair = prompts.render_repair_message("oops")
     assert "oops" in repair
+
+
+def test_build_system_prompt_includes_current_date() -> None:
+    prompt = prompts.build_system_prompt([], current_date="2025-12-04")
+    assert "Current date: 2025-12-04" in prompt
+
+
+def test_build_system_prompt_default_date() -> None:
+    from datetime import date
+
+    prompt = prompts.build_system_prompt([])
+    expected_date = date.today().isoformat()
+    assert f"Current date: {expected_date}" in prompt
+
+
+def test_build_system_prompt_has_tagged_sections() -> None:
+    prompt = prompts.build_system_prompt([])
+    # Check for key tagged sections
+    assert "<identity>" in prompt
+    assert "</identity>" in prompt
+    assert "<output_format>" in prompt
+    assert "<action_schema>" in prompt
+    assert "<finishing>" in prompt
+    assert "<tool_usage>" in prompt
+    assert "<parallel_execution>" in prompt
+    assert "<reasoning>" in prompt
+    assert "<tone>" in prompt
+    assert "<error_handling>" in prompt
+    assert "<available_tools>" in prompt
+
+
+def test_build_system_prompt_extra_in_tagged_section() -> None:
+    prompt = prompts.build_system_prompt([], extra="Custom instructions")
+    assert "<additional_guidance>" in prompt
+    assert "Custom instructions" in prompt
+    assert "</additional_guidance>" in prompt
+
+
+def test_build_system_prompt_planning_hints_in_tagged_section() -> None:
+    hints = {"constraints": "No external calls"}
+    prompt = prompts.build_system_prompt([], planning_hints=hints)
+    assert "<planning_constraints>" in prompt
+    assert "No external calls" in prompt
+    assert "</planning_constraints>" in prompt

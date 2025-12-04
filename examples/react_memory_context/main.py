@@ -103,7 +103,7 @@ async def main() -> None:
             {
                 "thought": "done",
                 "next_node": None,
-                "args": {"answer": "Python is great for data science"},
+                "args": {"raw_answer": "Python is great for data science"},
             },
         ]
     )
@@ -141,7 +141,7 @@ async def main() -> None:
             {
                 "thought": "done",
                 "next_node": None,
-                "args": {"answer": "JavaScript is popular for web development"},
+                "args": {"raw_answer": "JavaScript is popular for web development"},
             },
         ]
     )
@@ -182,7 +182,7 @@ async def main() -> None:
             {
                 "thought": "done",
                 "next_node": None,
-                "args": {"answer": "Python excels in data science"},
+                "args": {"raw_answer": "Python excels in data science"},
             },
         ]
     )
