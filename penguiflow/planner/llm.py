@@ -269,7 +269,7 @@ def _response_format_policy(model_name: str) -> str:
     lower = model_name.lower()
 
     if "maverick" in lower:
-        return "no_format"
+        return "json_object"
 
     weak_schema_models = (
         "anthropic" in lower
