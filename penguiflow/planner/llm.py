@@ -7,6 +7,7 @@ import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import Any, get_args, get_origin
 
 from pydantic import BaseModel
@@ -46,10 +47,7 @@ def _coerce_llm_response(result: str | tuple[str, float]) -> tuple[str, float]:
         return _extract_json_from_text(content), float(cost)
     if isinstance(result, str):
         return _extract_json_from_text(result), 0.0
-    msg = (
-        "Expected JSONLLMClient to return a string or (string, float) tuple, "
-        f"received {type(result)!r}"
-    )
+    msg = f"Expected JSONLLMClient to return a string or (string, float) tuple, received {type(result)!r}"
     raise TypeError(msg)
 
 
@@ -58,6 +56,7 @@ def _sanitize_json_schema(
     *,
     strict_mode: bool = False,
     require_all_fields: bool = False,
+    inline_defs: bool = False,
 ) -> dict[str, Any]:
     """Remove advanced JSON schema constraints for broader provider compatibility.
 
@@ -67,6 +66,8 @@ def _sanitize_json_schema(
                      as required by OpenAI/OpenRouter structured outputs.
         require_all_fields: If True, marks all object properties as required (used for
                             providers that demand exhaustive required lists).
+        inline_defs: If True, replaces local $defs references with inline schemas to
+                     satisfy providers that cannot resolve $refs in response_format.
     """
 
     if not isinstance(schema, dict):
@@ -171,13 +172,104 @@ def _sanitize_json_schema(
                 if required_keys:
                     sanitized["required"] = sorted(required_keys)
 
+    if inline_defs:
+        sanitized = _inline_defs(sanitized, sanitized.get("$defs", {}))
+
     return sanitized
+
+
+def _build_minimal_planner_schema() -> dict[str, Any]:
+    """OpenAI-strict-friendly PlannerAction schema without $refs or advanced features."""
+
+    join_injection = {
+        "type": "object",
+        "properties": {
+            "mapping": {
+                "type": "object",
+                "additionalProperties": False,
+            },
+        },
+        "required": ["mapping"],
+        "additionalProperties": False,
+    }
+
+    join_obj = {
+        "type": "object",
+        "properties": {
+            "node": {"type": "string"},
+            "args": {"type": "object", "additionalProperties": False},
+            "inject": {"anyOf": [join_injection, {"type": "null"}], "default": None},
+        },
+        "required": ["node", "args", "inject"],
+        "additionalProperties": False,
+    }
+
+    parallel_call = {
+        "type": "object",
+        "properties": {
+            "node": {"type": "string"},
+            "args": {"type": "object", "additionalProperties": False},
+        },
+        "required": ["node", "args"],
+        "additionalProperties": False,
+    }
+
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "thought": {"type": "string"},
+            "next_node": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+            "args": {
+                "anyOf": [{"type": "object", "additionalProperties": False}, {"type": "null"}],
+                "default": None,
+            },
+            "plan": {
+                "anyOf": [
+                    {
+                        "type": "array",
+                        "items": parallel_call,
+                    },
+                    {"type": "null"},
+                ],
+                "default": None,
+            },
+            "join": {"anyOf": [join_obj, {"type": "null"}], "default": None},
+        },
+        "required": ["thought", "next_node", "args", "plan", "join"],
+        "additionalProperties": False,
+    }
+    return schema
+
+
+def _inline_defs(schema: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
+    """Inline local $defs references (limited scope for response_format)."""
+
+    def resolve(node: Any) -> Any:
+        if isinstance(node, dict):
+            if "$ref" in node and isinstance(node["$ref"], str):
+                ref = node["$ref"]
+                if ref.startswith("#/$defs/"):
+                    key = ref.split("/")[-1]
+                    if key in defs:
+                        return resolve(deepcopy(defs[key]))
+            return {k: resolve(v) for k, v in node.items() if k != "$defs"}
+        if isinstance(node, list):
+            return [resolve(item) for item in node]
+        return node
+
+    inlined = resolve(schema)
+    if isinstance(inlined, dict):
+        inlined.pop("$defs", None)
+    return inlined
 
 
 def _response_format_policy(model_name: str) -> str:
     """Select response_format strategy based on model/provider capabilities."""
 
     lower = model_name.lower()
+
+    if "maverick" in lower:
+        return "no_format"
 
     weak_schema_models = (
         "anthropic" in lower
@@ -194,14 +286,15 @@ def _response_format_policy(model_name: str) -> str:
     )
 
     openai_like = (
-        ("gpt-4" in lower or "gpt-3.5" in lower or "o1" in lower or "o3" in lower)
-        and "openai" in lower
+        "openai" in lower
+        or (lower.startswith("gpt-") and "oss" not in lower)
+        or (("gpt-" in lower or "o1" in lower or "o3" in lower) and "openrouter" in lower)
     ) or model_name.startswith("openai/")
 
     if weak_schema_models:
         return "json_object"
     if openai_like:
-        return "strict_schema"
+        return "json_object"
     return "sanitized_schema"
 
 
@@ -211,9 +304,7 @@ def _artifact_placeholder(value: Any) -> str:
     type_name = type(value).__name__
     size_hint: str | None = None
     try:
-        if isinstance(value, (str, bytes, bytearray, Sequence)) and not isinstance(
-            value, Mapping
-        ):
+        if isinstance(value, (str, bytes, bytearray, Sequence)) and not isinstance(value, Mapping):
             size_hint = str(len(value))
         elif isinstance(value, Mapping):
             size_hint = str(len(value))
@@ -267,12 +358,9 @@ def _redact_artifacts(
         if nested_model and isinstance(value, Mapping):
             redacted[field_name] = _redact_artifacts(nested_model, value)
             continue
-        if nested_model and isinstance(value, Sequence) and not isinstance(
-            value, (str, bytes, bytearray)
-        ):
+        if nested_model and isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
             redacted[field_name] = [
-                _redact_artifacts(nested_model, item) if isinstance(item, Mapping) else item
-                for item in value
+                _redact_artifacts(nested_model, item) if isinstance(item, Mapping) else item for item in value
             ]
             continue
 
@@ -307,8 +395,7 @@ class _LiteLLMJSONClient:
             import litellm
         except ModuleNotFoundError as exc:  # pragma: no cover - import guard
             raise RuntimeError(
-                "LiteLLM is not installed. Install penguiflow[planner] or provide "
-                "a custom llm_client."
+                "LiteLLM is not installed. Install penguiflow[planner] or provide a custom llm_client."
             ) from exc
 
         params: dict[str, Any]
@@ -325,13 +412,17 @@ class _LiteLLMJSONClient:
             if "json_schema" in response_format:
                 schema_payload = response_format["json_schema"]
                 sanitized_format = dict(response_format)
-                sanitized_schema = _sanitize_json_schema(
-                    schema_payload["schema"],
-                    strict_mode=policy != "json_object",
-                    require_all_fields=policy == "strict_schema",
-                )
 
-                if policy == "json_object":
+                if policy == "no_format":
+                    params["response_format"] = {"type": "text"}
+                    logger.debug(
+                        "json_schema_disabled",
+                        extra={
+                            "model": model_name,
+                            "reason": "no_format_policy",
+                        },
+                    )
+                elif policy == "json_object":
                     params["response_format"] = {"type": "json_object"}
                     logger.debug(
                         "json_schema_downgraded",
@@ -342,6 +433,7 @@ class _LiteLLMJSONClient:
                         },
                     )
                 elif policy == "strict_schema":
+                    sanitized_schema = _build_minimal_planner_schema()
                     sanitized_format["json_schema"] = {
                         "name": schema_payload["name"],
                         "strict": True,
@@ -353,6 +445,12 @@ class _LiteLLMJSONClient:
                         extra={"model": model_name, "strict_mode": True},
                     )
                 else:
+                    sanitized_schema = _sanitize_json_schema(
+                        schema_payload["schema"],
+                        strict_mode=True,
+                        require_all_fields=False,
+                        inline_defs=False,
+                    )
                     sanitized_format["json_schema"] = {
                         "name": schema_payload["name"],
                         "schema": sanitized_schema,
@@ -379,10 +477,7 @@ class _LiteLLMJSONClient:
                     if content is None:
                         raise RuntimeError("LiteLLM returned empty content")
 
-                    cost = float(
-                        response.get("_hidden_params", {}).get("response_cost", 0.0)
-                        or 0.0
-                    )
+                    cost = float(response.get("_hidden_params", {}).get("response_cost", 0.0) or 0.0)
                     logger.debug(
                         "llm_call_success",
                         extra={
@@ -403,7 +498,7 @@ class _LiteLLMJSONClient:
                 last_error = exc
                 error_type = exc.__class__.__name__
                 if "RateLimit" in error_type or "ServiceUnavailable" in error_type:
-                    backoff_s = 2 ** attempt
+                    backoff_s = 2**attempt
                     logger.warning(
                         "llm_retry",
                         extra={
@@ -463,16 +558,10 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
         )
         history_messages.append({"role": "assistant", "content": action_payload})
         observation_payload = step.serialise_for_llm()
-        if (
-            step.llm_observation is None
-            and step.action.next_node
-            and isinstance(observation_payload, Mapping)
-        ):
+        if step.llm_observation is None and step.action.next_node and isinstance(observation_payload, Mapping):
             spec = getattr(planner, "_spec_by_name", {}).get(step.action.next_node)
             if spec is not None:
-                observation_payload = _redact_artifacts(
-                    spec.out_model, observation_payload
-                )
+                observation_payload = _redact_artifacts(spec.out_model, observation_payload)
 
         history_messages.append(
             {
@@ -489,9 +578,7 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
         history_messages.append(
             {
                 "role": "user",
-                "content": prompts.render_resume_user_input(
-                    trajectory.resume_user_input
-                ),
+                "content": prompts.render_resume_user_input(trajectory.resume_user_input),
             }
         )
 
@@ -528,9 +615,7 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
         ):
             spec = getattr(planner, "_spec_by_name", {}).get(last_step.action.next_node)
             if spec is not None:
-                last_observation_payload = _redact_artifacts(
-                    spec.out_model, last_observation_payload
-                )
+                last_observation_payload = _redact_artifacts(spec.out_model, last_observation_payload)
 
         condensed.append(
             {
@@ -546,17 +631,13 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
         condensed.append(
             {
                 "role": "user",
-                "content": prompts.render_resume_user_input(
-                    trajectory.resume_user_input
-                ),
+                "content": prompts.render_resume_user_input(trajectory.resume_user_input),
             }
         )
     return condensed
 
 
-async def summarise_trajectory(
-    planner: Any, trajectory: Trajectory
-) -> TrajectorySummary:
+async def summarise_trajectory(planner: Any, trajectory: Trajectory) -> TrajectorySummary:
     if trajectory.summary is not None:
         return trajectory.summary
 
@@ -612,8 +693,7 @@ async def critique_answer(
 
     client = (
         planner._reflection_client
-        if planner._reflection_config.use_separate_llm
-        and planner._reflection_client is not None
+        if planner._reflection_config.use_separate_llm and planner._reflection_client is not None
         else planner._client
     )
     if client is None:
@@ -621,9 +701,7 @@ async def critique_answer(
 
     from . import reflection_prompts
 
-    system_prompt = reflection_prompts.build_critique_system_prompt(
-        planner._reflection_config.criteria
-    )
+    system_prompt = reflection_prompts.build_critique_system_prompt(planner._reflection_config.criteria)
     user_prompt = reflection_prompts.build_critique_user_prompt(
         trajectory.query,
         candidate,
@@ -647,10 +725,7 @@ async def critique_answer(
     planner._cost_tracker.record_reflection_call(cost)
     critique = ReflectionCritique.model_validate_json(raw)
 
-    if (
-        critique.score >= planner._reflection_config.quality_threshold
-        and not critique.passed
-    ):
+    if critique.score >= planner._reflection_config.quality_threshold and not critique.passed:
         critique.passed = True
 
     return critique
@@ -697,9 +772,7 @@ When you cannot satisfactorily answer a query with available tools/data, you sho
 
 Your goal is to guide the user toward providing what you need to answer their query properly."""
 
-    attempted_tools = [
-        step.action.next_node for step in trajectory.steps if step.action.next_node
-    ]
+    attempted_tools = [step.action.next_node for step in trajectory.steps if step.action.next_node]
     attempts_summary = "\n".join([f"- {tool}" for tool in attempted_tools]) if attempted_tools else "None recorded"
 
     user_prompt = f"""The query was: "{trajectory.query}"
@@ -716,7 +789,7 @@ I attempted to answer this query but the quality was deemed unsatisfactory (scor
 {critique.feedback}
 
 **Issues identified:**
-{chr(10).join([f'- {issue}' for issue in critique.issues]) if critique.issues else 'None specified'}
+{chr(10).join([f"- {issue}" for issue in critique.issues]) if critique.issues else "None specified"}
 
 Given this situation, generate a STRUCTURED clarification response with:
 1. `text`: Honest explanation of limitations and what was tried
@@ -738,13 +811,8 @@ Be transparent, helpful, and guide the user toward providing what's needed."""
 
     if isinstance(planner._client, DSPyLLMClient):
         if planner._clarification_client is None:
-            logger.warning(
-                "clarification_client_missing",
-                extra={"client_type": "DSPy"}
-            )
-            planner._clarification_client = DSPyLLMClient.from_base_client(
-                planner._client, ClarificationResponse
-            )
+            logger.warning("clarification_client_missing", extra={"client_type": "DSPy"})
+            planner._clarification_client = DSPyLLMClient.from_base_client(planner._client, ClarificationResponse)
         client: JSONLLMClient = planner._clarification_client
     else:
         client = planner._client
@@ -767,7 +835,7 @@ Be transparent, helpful, and guide the user toward providing what's needed."""
     clarification = ClarificationResponse.model_validate_json(raw)
 
     attempts_list = chr(10).join(
-        [f"  {i+1}. {approach}" for i, approach in enumerate(clarification.attempted_approaches)]
+        [f"  {i + 1}. {approach}" for i, approach in enumerate(clarification.attempted_approaches)]
     )
     questions_list = chr(10).join([f"  - {q}" for q in clarification.clarifying_questions])
     suggestions_list = chr(10).join([f"  - {s}" for s in clarification.suggestions])

@@ -1872,8 +1872,11 @@ class ReactPlanner:
 
     def _emit_event(self, event: PlannerEvent) -> None:
         """Emit a planner event for observability."""
-        # Log the event
-        logger.info(event.event_type, extra=event.to_payload())
+        # Log the event (strip reserved logging keys to avoid collisions)
+        payload = event.to_payload()
+        for reserved in ("args", "msg", "levelname", "levelno", "exc_info"):
+            payload.pop(reserved, None)
+        logger.info(event.event_type, extra=payload)
 
         # Invoke callback if provided
         if self._event_callback is not None:
