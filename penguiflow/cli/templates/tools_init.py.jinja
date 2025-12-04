@@ -8,12 +8,23 @@ from penguiflow.registry import ModelRegistry
 from .{{ tool.name }} import {{ tool.name }}, {{ tool.class_name }}Args, {{ tool.class_name }}Result
 {% endfor %}
 
+# Import FinalAnswer from models if available (used by orchestrator)
+try:
+    from ..models import FinalAnswer
+except ImportError:
+    from pydantic import BaseModel
+
+    class FinalAnswer(BaseModel):
+        """Final answer payload for the planner."""
+        text: str
+
 __all__ = [
 {% for tool in tools %}
     "{{ tool.name }}",
     "{{ tool.class_name }}Args",
     "{{ tool.class_name }}Result",
 {% endfor %}
+    "FinalAnswer",
     "build_catalog_bundle",
 ]
 

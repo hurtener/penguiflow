@@ -620,9 +620,9 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 ### Dev Playground
 - [ ] `penguiflow dev .` works on any generated project
 - [ ] Works on any existing ReactPlanner project
-- [ ] Trajectory visible within 1 second of step completion
-- [ ] Events stream in real-time
-- [ ] Session isolation prevents context leaking
+- [x] Trajectory visible within 1 second of step completion
+- [x] Events stream in real-time
+- [x] Session isolation prevents context leaking
 - [ ] StateStore protocol documented for downstream swapping
 - [ ] Svelte UI loads without npm/build step for end user
 
@@ -785,19 +785,19 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 **Objective**: FastAPI server with agent discovery and wrapping.
 
 **Tasks**:
-- [ ] Implement agent discovery logic
+- [x] Implement agent discovery logic
   - Find `*Orchestrator` classes
   - Find `build_planner()` functions
   - Handle `__main__.py` entry points
-- [ ] Create `PlaygroundStateStore` protocol
-- [ ] Implement `InMemoryStateStore` with session isolation
-- [ ] Create agent wrapper interface
+- [x] Create `PlaygroundStateStore` protocol
+- [x] Implement `InMemoryStateStore` with session isolation
+- [x] Create agent wrapper interface
   - Adapt orchestrators to common interface
   - Hook into event_callback
-- [ ] Implement FastAPI endpoints
+- [x] Implement FastAPI endpoints
   - `POST /chat`
   - `GET /health`
-- [ ] Write unit tests for discovery and wrapping
+- [x] Write unit tests for discovery and wrapping
 
 **Deliverables**:
 - `penguiflow/cli/playground.py` — Main module
@@ -806,9 +806,9 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 - `tests/cli/test_playground_backend.py` — Backend tests
 
 **Exit Criteria**:
-- [ ] Agent discovery works on generated projects
-- [ ] StateStore isolates sessions correctly
-- [ ] `/chat` endpoint returns responses
+- [x] Agent discovery works on generated projects
+- [x] StateStore isolates sessions correctly
+- [x] `/chat` endpoint returns responses
 
 ---
 
@@ -817,17 +817,17 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 **Objective**: SSE streaming for responses and events.
 
 **Tasks**:
-- [ ] Implement SSE endpoint for chat streaming
+- [x] Implement SSE endpoint for chat streaming
   - `GET /chat/stream`
   - Chunk events, step events, done event
-- [ ] Implement SSE endpoint for planner events
+- [x] Implement SSE endpoint for planner events
   - `GET /events`
   - Real-time PlannerEvent forwarding
-- [ ] Implement trajectory endpoint
+- [x] Implement trajectory endpoint
   - `GET /trajectory/{trace_id}`
   - Requires StateStore
-- [ ] Add session_id parameter handling
-- [ ] Write streaming tests
+- [x] Add session_id parameter handling
+- [x] Write streaming tests
 
 **Deliverables**:
 - SSE endpoints in playground.py
@@ -835,9 +835,9 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 - `tests/cli/test_playground_streaming.py` — Streaming tests
 
 **Exit Criteria**:
-- [ ] Streaming responses work end-to-end
-- [ ] Events stream in real-time
-- [ ] Trajectory retrieval works
+- [x] Streaming responses work end-to-end
+- [x] Events stream in real-time
+- [x] Trajectory retrieval works
 
 ---
 
@@ -846,24 +846,24 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 **Objective**: Build and bundle Svelte 5 frontend.
 
 **Tasks**:
-- [ ] Set up Svelte 5 project structure
-- [ ] Implement Chat component
+- [x] Set up Svelte 5 project structure
+- [x] Implement Chat component
   - Query input
   - Streaming response display
   - Session history sidebar
-- [ ] Implement Trajectory component
+- [x] Implement Trajectory component
   - Step timeline
   - Collapsible JSON for args/results
   - Latency badges
   - Reflection scores
-- [ ] Implement Events component
+- [x] Implement Events component
   - Real-time event stream
   - Filter dropdown
   - Latency highlighting
-- [ ] Implement Config panel (read-only)
-- [ ] Style with minimal CSS (no heavy frameworks)
-- [ ] Build and bundle as static assets
-- [ ] Integrate with FastAPI StaticFiles
+- [x] Implement Config panel (read-only)
+- [x] Style with minimal CSS (no heavy frameworks)
+- [x] Build and bundle as static assets
+- [x] Integrate with FastAPI StaticFiles
 
 **Deliverables**:
 - `penguiflow/cli/playground_ui/` — Svelte source
@@ -871,9 +871,9 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 - Build script for regenerating assets
 
 **Exit Criteria**:
-- [ ] UI loads without npm for end user
-- [ ] All panels functional
-- [ ] Responsive on desktop
+- [x] UI loads without npm for end user
+- [x] All panels functional
+- [x] Responsive on desktop
 
 ---
 
@@ -882,26 +882,40 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 **Objective**: Wire CLI command and polish experience.
 
 **Tasks**:
-- [ ] Implement `penguiflow dev` CLI command
+- [x] Implement `penguiflow dev` CLI command
   - Project directory argument
   - `--port` flag
   - `--no-browser` flag
-- [ ] Auto-open browser on start
-- [ ] Add startup banner with URLs
-- [ ] Handle graceful shutdown
-- [ ] Add hot-reload hint (manual refresh)
-- [ ] Write end-to-end tests
-- [ ] Documentation
+- [x] Auto-open browser on start
+- [x] Add startup banner with URLs
+- [x] Handle graceful shutdown
+- [x] Add hot-reload hint (manual refresh)
+- [x] Write end-to-end tests
+- [x] Documentation
 
 **Deliverables**:
 - CLI command in `penguiflow/cli/main.py`
 - Updated documentation
 - Release notes for v2.6.1/v2.6.2
 
+---
+
+#### Phase P5: UI/Data Wiring & Packaging Polish (post-P4)
+
+**Objective**: Connect live backend data into UI and finalize packaging flow.
+
+**Tasks**:
+- [x] Bind spec/validation/generator panels to real endpoints
+- [x] Replace placeholder config/catalog data with live API responses
+- [x] Implement event filtering/pause controls in UI
+- [x] Ensure wheel sdist/wheel ship built UI assets (dist) without requiring npm on install
+- [x] Add release script/hook to build UI before publish
+- [x] Document dev vs release build steps for the UI
+
 **Exit Criteria**:
-- [ ] `penguiflow dev .` works on any project
-- [ ] Browser opens automatically
-- [ ] Clean shutdown on Ctrl+C
+- [x] `penguiflow dev .` works on any project
+- [x] Browser opens automatically
+- [x] Clean shutdown on Ctrl+C
 
 ---
 
@@ -920,7 +934,7 @@ data: {"event_type": "step_complete", "node_name": "search", "latency_ms": 123, 
 - [ ] Tag v2.6.0 release
 
 ### Playground (v2.6.1-v2.6.2)
-- [ ] P1: Backend foundation
+- [x] P1: Backend foundation
 - [ ] P2: Streaming & events
 - [ ] P3: Svelte UI development
 - [ ] P4: CLI integration & polish

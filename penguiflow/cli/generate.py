@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -96,12 +96,21 @@ class FlowNodeRender:
     name: str
     var_name: str
     policy_kwargs: str
+    input_type: str | None = None
+    output_type: str | None = None
+    uses: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class FlowDependencyRender:
+    name: str
+    type_hint: str
 
 
 @dataclass(frozen=True)
 class FlowEdgeRender:
     start: str
-    targets_literal: str
+    target: str | None  # None for terminal node
 
 
 @dataclass(frozen=True)
@@ -109,8 +118,12 @@ class FlowRender:
     name: str
     description: str
     bundle_class: str
+    orchestrator_class: str
+    error_class: str
+    dependencies: list[FlowDependencyRender]
     nodes: list[FlowNodeRender]
     edges: list[FlowEdgeRender]
+    has_typed_payloads: bool
 
 
 def _tool_render(tool: Any) -> ToolRender:
@@ -204,15 +217,36 @@ def _flow_renders(spec: Spec) -> list[FlowRender]:
 
         node_renders: list[FlowNodeRender] = []
         seen: set[str] = set()
+        has_typed_payloads = False
+
         for name in order:
             if name in seen:
                 continue
             node = nodes_by_name[name]
+
+            # Extract input/output types if present
+            input_type = None
+            output_type = None
+            uses: list[str] = []
+
+            # Check if node has type annotations (from spec extensions)
+            if hasattr(node, "input_type") and node.input_type:
+                input_type = str(node.input_type)
+                has_typed_payloads = True
+            if hasattr(node, "output_type") and node.output_type:
+                output_type = str(node.output_type)
+                has_typed_payloads = True
+            if hasattr(node, "uses") and node.uses:
+                uses = list(node.uses)
+
             node_renders.append(
                 FlowNodeRender(
                     name=name,
                     var_name=name,
                     policy_kwargs=_render_policy_kwargs(getattr(node, "policy", None)),
+                    input_type=input_type,
+                    output_type=output_type,
+                    uses=uses,
                 )
             )
             seen.add(name)
@@ -220,22 +254,50 @@ def _flow_renders(spec: Spec) -> list[FlowRender]:
         edges: list[FlowEdgeRender] = []
         for idx, name in enumerate(order):
             target = order[idx + 1] if idx + 1 < len(order) else None
-            targets_literal = f"({target},)" if target else "()"
             edges.append(
                 FlowEdgeRender(
                     start=name,
-                    targets_literal=targets_literal,
+                    target=target,
                 )
             )
 
+        # Collect dependencies (for now, empty - can be extended from spec)
+        dependencies: list[FlowDependencyRender] = []
+        if hasattr(flow, "dependencies") and flow.dependencies:
+            # Dependencies can be a dict or list, handle both
+            if isinstance(flow.dependencies, dict):
+                for dep_name, dep_type in flow.dependencies.items():
+                    dependencies.append(
+                        FlowDependencyRender(
+                            name=dep_name,
+                            type_hint=str(dep_type),
+                        )
+                    )
+            else:
+                # Assume it's a list of objects with name and type_hint
+                for dep in flow.dependencies:
+                    dependencies.append(
+                        FlowDependencyRender(
+                            name=dep.name,
+                            type_hint=str(dep.type_hint),
+                        )
+                    )
+
         bundle_class = f"{_snake_to_pascal(flow.name)}FlowBundle"
+        orchestrator_class = f"{_snake_to_pascal(flow.name)}Orchestrator"
+        error_class = f"{_snake_to_pascal(flow.name)}Error"
+
         flows.append(
             FlowRender(
                 name=flow.name,
                 description=flow.description,
                 bundle_class=bundle_class,
+                orchestrator_class=orchestrator_class,
+                error_class=error_class,
+                dependencies=dependencies,
                 nodes=node_renders,
                 edges=edges,
+                has_typed_payloads=has_typed_payloads,
             )
         )
     return flows
@@ -245,6 +307,9 @@ def _write_file(path: Path, content: str, *, force: bool) -> tuple[bool, str | N
     if path.exists() and not force:
         return False, None
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Ensure content ends with newline for Python files
+    if path.suffix == ".py" and content and not content.endswith("\n"):
+        content = content + "\n"
     path.write_text(content)
     return True, path.as_posix()
 
@@ -391,6 +456,45 @@ def _generate_flows(
         created.append(path)
     elif not wrote:
         skipped.append((flows_dir / "__init__.py").as_posix())
+
+    return created, skipped
+
+
+def _generate_flow_orchestrators(
+    project_dir: Path,
+    package_name: str,
+    spec: Spec,
+    *,
+    dry_run: bool,
+    force: bool,
+) -> tuple[list[str], list[str]]:
+    """Generate orchestrator files for each flow."""
+    created: list[str] = []
+    skipped: list[str] = []
+
+    flow_renders = _flow_renders(spec)
+    if not flow_renders:
+        return created, skipped
+
+    if dry_run:
+        for flow in flow_renders:
+            created.append(
+                (project_dir / "src" / package_name / f"{flow.name}_orchestrator.py").as_posix()
+            )
+        return created, skipped
+
+    for flow in flow_renders:
+        content = _render_template(
+            "flow_orchestrator.py.jinja",
+            {"flow": flow, "agent_name": spec.agent.name},
+        )
+        orchestrator_path = project_dir / "src" / package_name / f"{flow.name}_orchestrator.py"
+        # Always force-write orchestrators since they're dynamically generated
+        wrote, path = _write_file(orchestrator_path, content, force=True)
+        if wrote and path:
+            created.append(path)
+        elif not wrote:
+            skipped.append(orchestrator_path.as_posix())
 
     return created, skipped
 
@@ -664,6 +768,16 @@ def run_generate(
             click.echo(f"  {len(flow_created)} flows generated")
 
         if verbose:
+            click.echo("Generating flow orchestrators...")
+        orchestrator_created, orchestrator_skipped = _generate_flow_orchestrators(
+            project_dir, package_name, spec, dry_run=dry_run, force=force
+        )
+        created.extend(orchestrator_created)
+        skipped.extend(orchestrator_skipped)
+        if verbose and orchestrator_created:
+            click.echo(f"  {len(orchestrator_created)} orchestrators generated")
+
+        if verbose:
             click.echo("Generating tool tests...")
         tool_test_created, tool_test_skipped = _generate_tool_tests(
             project_dir, package_name, spec, dry_run=dry_run, force=force
@@ -722,4 +836,130 @@ def run_generate(
     )
 
 
-__all__ = ["run_generate", "GenerateResult", "GeneratorTemplateError"]
+class InitResult(NamedTuple):
+    """Result of running `penguiflow generate --init`."""
+
+    success: bool
+    created: list[str]
+    spec_path: Path
+    project_dir: Path
+
+
+def _load_init_template(name: str) -> str:
+    """Load a template from the init/ subdirectory."""
+    try:
+        return (
+            resources.files("penguiflow.cli.templates")
+            .joinpath("init")
+            .joinpath(name)
+            .read_text()
+        )
+    except FileNotFoundError as exc:  # pragma: no cover - defensive guard
+        raise GeneratorTemplateError(f"Init template '{name}' not found.") from exc
+
+
+def _render_init_template(name: str, context: dict[str, Any]) -> str:
+    """Render a template from the init/ subdirectory."""
+    try:
+        from jinja2 import Environment
+    except ImportError as exc:  # pragma: no cover
+        raise CLIError(
+            "Jinja2 is required for `penguiflow generate --init`.",
+            hint="Install with `pip install penguiflow[cli]`.",
+        ) from exc
+
+    try:
+        env = Environment(autoescape=False, trim_blocks=True, lstrip_blocks=True)
+        template = env.from_string(_load_init_template(name))
+        return template.render(**context)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise GeneratorTemplateError(f"Failed to render init template '{name}': {exc}") from exc
+
+
+def run_init_spec(
+    agent_name: str,
+    *,
+    output_dir: Path | None = None,
+    force: bool = False,
+    quiet: bool = False,
+) -> InitResult:
+    """Initialize a spec workspace with sample spec and documentation.
+
+    Creates:
+    - {agent_name}.yaml - Sample spec file
+    - PENGUIFLOW.md - Development guide
+    - AGENTS.md - AI assistant instructions
+    """
+    # Normalize agent name
+    agent_name = agent_name.lower().replace(" ", "-").replace("_", "-")
+    package_name = _normalise_package_name(agent_name)
+
+    # Determine output directory
+    if output_dir is None:
+        project_dir = Path.cwd() / agent_name
+    else:
+        project_dir = output_dir / agent_name
+
+    # Create directory
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    created: list[str] = []
+    context = {
+        "agent_name": agent_name,
+        "package_name": package_name,
+    }
+
+    # Generate spec file
+    spec_path = project_dir / f"{agent_name}.yaml"
+    if spec_path.exists() and not force:
+        if not quiet:
+            click.echo(f"⚠ Skipped {spec_path} (exists, use --force to overwrite)")
+    else:
+        spec_content = _render_init_template("sample_spec.yaml.jinja", context)
+        spec_path.write_text(spec_content)
+        created.append(spec_path.as_posix())
+        if not quiet:
+            click.echo(f"✓ Created {spec_path}")
+
+    # Generate PENGUIFLOW.md
+    guide_path = project_dir / "PENGUIFLOW.md"
+    if guide_path.exists() and not force:
+        if not quiet:
+            click.echo(f"⚠ Skipped {guide_path} (exists, use --force to overwrite)")
+    else:
+        guide_content = _render_init_template("PENGUIFLOW.md.jinja", context)
+        guide_path.write_text(guide_content)
+        created.append(guide_path.as_posix())
+        if not quiet:
+            click.echo(f"✓ Created {guide_path}")
+
+    # Generate AGENTS.md
+    agents_path = project_dir / "AGENTS.md"
+    if agents_path.exists() and not force:
+        if not quiet:
+            click.echo(f"⚠ Skipped {agents_path} (exists, use --force to overwrite)")
+    else:
+        agents_content = _render_init_template("AGENTS.md.jinja", context)
+        agents_path.write_text(agents_content)
+        created.append(agents_path.as_posix())
+        if not quiet:
+            click.echo(f"✓ Created {agents_path}")
+
+    if not quiet:
+        click.echo()
+        click.echo(f"Spec workspace initialized in {project_dir}/")
+        click.echo()
+        click.echo("Next steps:")
+        click.echo(f"  1. Edit {spec_path.name} to define your agent")
+        click.echo(f"  2. Run: penguiflow generate --spec {spec_path}")
+        click.echo()
+
+    return InitResult(
+        success=True,
+        created=created,
+        spec_path=spec_path,
+        project_dir=project_dir,
+    )
+
+
+__all__ = ["run_generate", "run_init_spec", "GenerateResult", "InitResult", "GeneratorTemplateError"]

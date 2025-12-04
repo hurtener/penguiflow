@@ -1,0 +1,202 @@
+# AI Assistant Instructions
+
+> Context for AI coding assistants (Claude Code, Cursor, Copilot, Cody, etc.)
+
+This project uses **PenguiFlow v2.6** for agent scaffolding and orchestration.
+
+---
+
+## Project Overview
+
+- **Agent**: {{ agent_name }}
+- **Spec File**: `{{ agent_name }}.yaml`
+- **Package**: `{{ package_name }}`
+- **Template**: Will be set when you run `penguiflow generate`
+
+---
+
+## Workflow
+
+### 1. Edit the Spec
+
+The `{{ agent_name }}.yaml` file defines:
+- Agent configuration (name, template, flags)
+- LLM settings (provider, model)
+- Tools (functions the agent can call)
+- Flows (optional multi-step pipelines)
+- Planner settings (prompts, limits)
+
+### 2. Generate the Project
+
+```bash
+# Validate first
+penguiflow generate --spec {{ agent_name }}.yaml --dry-run
+
+# Generate
+penguiflow generate --spec {{ agent_name }}.yaml
+
+# If regenerating, use --force to overwrite
+penguiflow generate --spec {{ agent_name }}.yaml --force
+```
+
+### 3. Implement Tools
+
+Generated tools are stubs. Find them in `src/{{ package_name }}/tools/`.
+
+---
+
+## Key Conventions
+
+### Tool Names
+- Must be `snake_case`: `search_documents`, not `searchDocuments`
+- Avoid Python reserved words
+
+### Type Annotations
+Supported types in spec:
+- `str`, `int`, `float`, `bool`
+- `list[T]` (e.g., `list[str]`)
+- `dict[K, V]` (e.g., `dict[str, int]`)
+- `Optional[T]` (e.g., `Optional[int]`)
+
+### Tool Implementation Pattern
+
+```python
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+
+@tool(desc="Description shown to LLM", tags=["tag"], side_effects="read")
+async def my_tool(args: MyToolArgs, ctx: ToolContext) -> MyToolResult:
+    # Access context
+    llm_data = ctx.llm_context.get("key")      # Read-only LLM context
+    runtime_data = ctx.tool_context.get("key")  # Mutable runtime context
+
+    # Implementation
+    result = await do_something(args.param)
+
+    return MyToolResult(output=result)
+```
+
+### Side Effects
+
+| Value | Meaning |
+|-------|---------|
+| `pure` | No side effects, deterministic |
+| `read` | Reads external state |
+| `write` | Writes/mutates external state |
+| `external` | Calls external APIs |
+| `stateful` | Maintains internal state |
+
+---
+
+## Common Tasks
+
+### Add a New Tool
+
+1. Add to `{{ agent_name }}.yaml`:
+```yaml
+tools:
+  - name: new_tool
+    description: "What this tool does"
+    args:
+      input_param: str
+    result:
+      output_field: str
+```
+
+2. Regenerate: `penguiflow generate --spec {{ agent_name }}.yaml --force`
+
+3. Implement in `src/{{ package_name }}/tools/new_tool.py`
+
+### Add a Flow (Pipeline)
+
+1. Add to `{{ agent_name }}.yaml`:
+```yaml
+flows:
+  - name: my_pipeline
+    description: "What this pipeline does"
+    nodes:
+      - name: step_one
+        description: "First step"
+      - name: step_two
+        description: "Second step"
+    steps: [step_one, step_two]
+```
+
+2. Regenerate with `--force`
+
+3. Flow and orchestrator generated in `src/{{ package_name }}/flows/`
+
+### Modify System Prompt
+
+Edit `planner.system_prompt_extra` in `{{ agent_name }}.yaml`, then regenerate.
+
+---
+
+## File Locations
+
+| File | Purpose |
+|------|---------|
+| `{{ agent_name }}.yaml` | Agent specification |
+| `src/{{ package_name }}/config.py` | Environment config |
+| `src/{{ package_name }}/orchestrator.py` | Main entry point |
+| `src/{{ package_name }}/planner.py` | Tool catalog, prompts |
+| `src/{{ package_name }}/tools/*.py` | Tool implementations |
+| `src/{{ package_name }}/flows/*.py` | Flow definitions |
+| `.env` | Environment variables (API keys) |
+
+---
+
+## Commands
+
+```bash
+# Generate from spec
+penguiflow generate --spec {{ agent_name }}.yaml
+
+# Validate spec without generating
+penguiflow generate --spec {{ agent_name }}.yaml --dry-run
+
+# Force regenerate (overwrites files)
+penguiflow generate --spec {{ agent_name }}.yaml --force
+
+# Run the agent
+uv run python -m {{ package_name }} "Your query"
+
+# Run tests
+uv run pytest
+```
+
+---
+
+## Don't Modify (Regenerated Files)
+
+These files are overwritten on regenerate:
+- `src/{{ package_name }}/tools/__init__.py`
+- `src/{{ package_name }}/planner.py`
+- `src/{{ package_name }}/flows/__init__.py`
+- `src/{{ package_name }}/flows/*.py`
+- `src/{{ package_name }}/config.py`
+
+**Safe to modify:**
+- Individual tool files (`tools/*.py` except `__init__.py`)
+- `orchestrator.py` (use `--force` carefully)
+- Test files
+- `.env`
+
+---
+
+## Debugging
+
+### Verbose Generation
+```bash
+penguiflow generate --spec {{ agent_name }}.yaml --verbose
+```
+
+### Check Generated Code Syntax
+```bash
+python -m py_compile src/{{ package_name }}/tools/*.py
+```
+
+### Run Single Tool Test
+```bash
+uv run pytest tests/test_tools/test_my_tool.py -v
+```

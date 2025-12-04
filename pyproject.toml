@@ -16,6 +16,8 @@ dependencies = [
     "pydantic>=2.6",
     "click>=8.1",
     "pyyaml>=6.0",
+    "fastapi>=0.118",
+    "uvicorn>=0.32",
 ]
 
 [project.optional-dependencies]
@@ -31,9 +33,12 @@ dev = [
     "httpx>=0.27",
     "jinja2>=3.1",
     "pyyaml>=6.0",
+    "uvicorn>=0.32",
 ]
 cli = [
     "jinja2>=3.1",
+    "fastapi>=0.118",
+    "uvicorn>=0.32",
 ]
 a2a-server = [
     "fastapi>=0.118",
@@ -53,6 +58,7 @@ Homepage = "https://github.com/penguiflow/penguiflow"
 [tool.setuptools]
 packages = { find = { include = ["penguiflow*", "penguiflow_a2a*", "examples*"] } }
 include-package-data = true
+exclude-package-data = { "penguiflow" = ["cli/playground_ui/src/*", "cli/playground_ui/src/**/*", "cli/playground_ui/package.json", "cli/playground_ui/tsconfig.json", "cli/playground_ui/vite.config.ts"] }
 
 [tool.setuptools.package-data]
 "penguiflow" = [
@@ -61,6 +67,8 @@ include-package-data = true
     "templates/*.yaml",
     "cli/templates/*",
     "cli/templates/**/*",
+    "cli/playground_ui/dist/*",
+    "cli/playground_ui/dist/**/*",
 ]
 
 [tool.uv]

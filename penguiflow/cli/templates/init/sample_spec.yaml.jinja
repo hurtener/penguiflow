@@ -1,0 +1,154 @@
+# PenguiFlow Agent Specification
+# Generated with penguiflow v2.6
+# Docs: See PENGUIFLOW.md in this directory
+
+# ============================================================================
+# AGENT CONFIGURATION
+# ============================================================================
+agent:
+  name: {{ agent_name }}                    # Package name (snake_case)
+  description: "TODO: Describe your agent"  # What does this agent do?
+  template: react                           # Options: minimal, react, parallel, enterprise
+  flags:
+    memory: false      # Enable Memory Iceberg integration
+    # streaming: false # Enable streaming responses
+    # hitl: false      # Human-in-the-loop (enterprise template)
+    # a2a: false       # Agent-to-agent communication (enterprise template)
+
+# ============================================================================
+# LLM CONFIGURATION
+# ============================================================================
+llm:
+  primary:
+    provider: openrouter              # Options: openrouter, openai, anthropic, azure
+    model: anthropic/claude-sonnet-4  # Model identifier for your provider
+
+  # Optional: Use a different model for summarization
+  # summarizer:
+  #   enabled: true
+  #   provider: openrouter
+  #   model: anthropic/claude-haiku
+
+  # Optional: Enable self-reflection before final answers
+  # reflection:
+  #   enabled: true
+  #   quality_threshold: 0.8    # 0.0-1.0, retry if below threshold
+  #   max_revisions: 2
+
+# ============================================================================
+# TOOLS
+# Each tool becomes a Python function with Pydantic input/output models
+# ============================================================================
+tools:
+  # Example: A search tool
+  - name: search_documents              # Must be snake_case
+    description: "Search the knowledge base for relevant documents"
+    tags: ["search", "retrieval"]       # For categorization
+    side_effects: read                  # pure | read | write | external | stateful
+    args:
+      query: str                        # Required argument
+      top_k: Optional[int]              # Optional argument
+    result:
+      documents: list[str]
+      scores: list[float]
+
+  # Example: A write tool
+  # - name: save_note
+  #   description: "Save a note to the user's notebook"
+  #   tags: ["write", "notes"]
+  #   side_effects: write
+  #   args:
+  #     title: str
+  #     content: str
+  #   result:
+  #     note_id: str
+  #     created_at: str
+
+# ============================================================================
+# FLOWS (Optional)
+# Define PenguiFlow DAGs for complex processing pipelines
+# ============================================================================
+# flows:
+#   - name: processing_pipeline
+#     description: "Multi-step data processing"
+#
+#     # Dependencies injected into the flow
+#     dependencies:
+#       - name: parser
+#         type_hint: DocumentParser
+#       - name: embedder
+#         type_hint: EmbeddingService
+#
+#     # Flow nodes (each references a tool)
+#     nodes:
+#       - name: parse_input
+#         description: "Parse raw input"
+#         input_type: RawPayload        # Generates Pydantic model
+#         output_type: ParsedPayload
+#         policy:
+#           validate: both              # in | out | both | none
+#           timeout_s: 60.0
+#           max_retries: 2
+#           backoff_base: 1.0
+#         uses: [parser]                # Which dependencies this node uses
+#
+#       - name: embed_content
+#         description: "Generate embeddings"
+#         input_type: ParsedPayload
+#         output_type: EmbeddedPayload
+#         policy:
+#           timeout_s: 120.0
+#         uses: [embedder]
+#
+#     # Execution order
+#     steps: [parse_input, embed_content]
+
+# ============================================================================
+# SERVICES (Optional)
+# External service integrations
+# ============================================================================
+services:
+  memory_iceberg:
+    enabled: false                      # Set to true if agent.flags.memory is true
+    base_url: http://localhost:8000
+  # lighthouse:
+  #   enabled: false
+  #   base_url: http://localhost:8081
+  # wayfinder:
+  #   enabled: false
+  #   base_url: http://localhost:8082
+
+# ============================================================================
+# PLANNER CONFIGURATION
+# ============================================================================
+planner:
+  max_iters: 12              # Maximum planning iterations
+  hop_budget: 8              # Maximum tool calls per run
+  absolute_max_parallel: 5   # Max parallel tool executions
+
+  # System prompt extension - define your agent's personality and capabilities
+  system_prompt_extra: |
+    You are a helpful assistant that can search and analyze documents.
+
+    ## Your Capabilities
+    - Search the knowledge base using the search_documents tool
+    - Provide clear, well-structured answers
+
+    ## Guidelines
+    - Always cite your sources
+    - If you don't know something, say so
+    - Ask clarifying questions when needed
+
+  # Memory prompt - used when memory is enabled
+  # memory_prompt: |
+  #   Use the conversation history to:
+  #   - Remember user preferences
+  #   - Avoid repeating information
+  #   - Personalize responses
+
+  # Optional: Hints for tool usage patterns
+  # hints:
+  #   ordering: [search_documents, analyze_results]  # Preferred tool order
+  #   parallel_groups: [[fetch_a, fetch_b]]          # Tools that can run in parallel
+  #   sequential_only: [save_note]                   # Tools that must run alone
+  #   disallow: [dangerous_tool]                     # Never use these tools

@@ -22,6 +22,7 @@ from .spec_errors import (
 
 _TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 _RESERVED_TOOL_NAMES = set(keyword.kwlist) | {"__init__", "__call__"}
+_PASCAL_CASE_PATTERN = re.compile(r"^[A-Z][a-zA-Z0-9]*$")
 
 
 def _suggest_snake_case(name: str) -> str | None:
@@ -279,6 +280,29 @@ class ToolSpec(BaseModel):
         return parsed
 
 
+class FlowDependencySpec(BaseModel):
+    """Flow-level dependency definition (e.g., parser, retriever)."""
+
+    name: str
+    type_hint: str
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("name")
+    @classmethod
+    def _require_name(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("flow dependency name is required.")
+        return value
+
+    @field_validator("type_hint")
+    @classmethod
+    def _require_type_hint(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("flow dependency type_hint is required.")
+        return value
+
+
 class FlowNodePolicySpec(BaseModel):
     validate_mode: Literal["in", "out", "both", "none"] | None = Field(
         default=None, alias="validate"
@@ -298,6 +322,9 @@ class FlowNodeSpec(BaseModel):
     name: str
     description: str
     policy: FlowNodePolicySpec | None = None
+    input_type: str | None = None
+    output_type: str | None = None
+    uses: list[str] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -315,10 +342,24 @@ class FlowNodeSpec(BaseModel):
             raise ValueError("flow node description is required.")
         return value
 
+    @field_validator("input_type", "output_type")
+    @classmethod
+    def _validate_type_identifier(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("type identifier cannot be empty when provided.")
+        if not _PASCAL_CASE_PATTERN.match(value):
+            raise ValueError(
+                f"type identifier '{value}' must be PascalCase (start with uppercase, alphanumeric only)."
+            )
+        return value
+
 
 class FlowSpec(BaseModel):
     name: str
     description: str
+    dependencies: list[FlowDependencySpec] = Field(default_factory=list)
     nodes: list[FlowNodeSpec] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)
 
@@ -518,6 +559,17 @@ def _validate_flows(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail]:
                 )
             )
 
+        # Validate dependency names are unique
+        dependency_names = {dep.name for dep in flow.dependencies}
+        if len(dependency_names) != len(flow.dependencies):
+            errors.append(
+                SpecErrorDetail(
+                    message="Flow dependency names must be unique within a flow.",
+                    path=("flows", flow_idx, "dependencies"),
+                    line=lines.line_for(("flows", flow_idx, "dependencies")),
+                )
+            )
+
         for node_idx, node in enumerate(flow.nodes):
             node_path = ("flows", flow_idx, "nodes", node_idx, "name")
             node_line = lines.line_for(node_path)
@@ -537,6 +589,19 @@ def _validate_flows(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail]:
                         line=node_line,
                     )
                 )
+
+            # Validate node 'uses' references only defined dependencies
+            for uses_idx, dep_name in enumerate(node.uses):
+                if dep_name not in dependency_names:
+                    uses_path = ("flows", flow_idx, "nodes", node_idx, "uses", uses_idx)
+                    uses_line = lines.line_for(uses_path)
+                    errors.append(
+                        SpecErrorDetail(
+                            message=f"Node '{node.name}' references undefined dependency '{dep_name}'.",
+                            path=uses_path,
+                            line=uses_line,
+                        )
+                    )
 
         allowed_steps = set(node_names) | tool_names
         for step_idx, step_name in enumerate(flow.steps):
@@ -645,6 +710,7 @@ def load_spec(path: str | Path) -> Spec:
 __all__ = [
     "AgentFlagsSpec",
     "AgentSpec",
+    "FlowDependencySpec",
     "FlowNodePolicySpec",
     "FlowNodeSpec",
     "FlowSpec",
