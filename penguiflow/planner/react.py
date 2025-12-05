@@ -248,6 +248,129 @@ class _ArtifactChunk:
     ts: float
 
 
+class _StreamingArgsExtractor:
+    """Extracts 'args' field content from streaming JSON chunks for real-time display.
+
+    This class buffers incoming JSON chunks and detects when the LLM is generating
+    a "finish" action (next_node is null). Once detected, it extracts the args field
+    content character-by-character for streaming to the UI.
+
+    The args field is typically a dict like {"answer": "..."} or {"raw_answer": "..."},
+    so we need to look for the string value inside the object.
+    """
+
+    __slots__ = ("_buffer", "_is_finish_action", "_in_args_string", "_escape_next", "_emitted_count")
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._is_finish_action = False
+        self._in_args_string = False  # Inside the actual string value we want to stream
+        self._escape_next = False
+        self._emitted_count = 0
+
+    @property
+    def is_finish_action(self) -> bool:
+        return self._is_finish_action
+
+    @property
+    def emitted_count(self) -> int:
+        return self._emitted_count
+
+    def feed(self, chunk: str) -> list[str]:
+        """Feed a chunk of streaming JSON, return list of args content to emit.
+
+        Returns individual characters or small strings from the args field
+        that should be streamed to the UI.
+        """
+        self._buffer += chunk
+        emits: list[str] = []
+
+        # Detect finish action by looking for "next_node": null
+        if not self._is_finish_action:
+            normalized = self._buffer.replace(" ", "").replace("\n", "")
+            if '"next_node":null' in normalized:
+                self._is_finish_action = True
+
+        # Once we know it's a finish, look for args content
+        # The args is a dict like {"answer": "..."} or {"raw_answer": "..."}
+        # We need to find the string value inside
+        if self._is_finish_action and not self._in_args_string:
+            import re
+            # Look for "args": { ... "answer"/"raw_answer": " pattern
+            # Match: "args" : { "answer" : "  or "args":{"raw_answer":"
+            args_value_match = re.search(
+                r'"args"\s*:\s*\{\s*"(?:answer|raw_answer)"\s*:\s*"',
+                self._buffer
+            )
+            if args_value_match:
+                self._in_args_string = True
+                # Keep only content after the opening quote of the value
+                self._buffer = self._buffer[args_value_match.end():]
+
+        # Extract string content character by character
+        if self._in_args_string:
+            extracted = self._extract_string_content()
+            if extracted:
+                emits.extend(extracted)
+                self._emitted_count += len(extracted)
+
+        return emits
+
+    def _extract_string_content(self) -> list[str]:
+        """Extract characters from a JSON string, handling escapes."""
+        result: list[str] = []
+        i = 0
+
+        while i < len(self._buffer):
+            char = self._buffer[i]
+
+            if self._escape_next:
+                # Handle escape sequence
+                self._escape_next = False
+                if char == 'n':
+                    result.append('\n')
+                elif char == 't':
+                    result.append('\t')
+                elif char == 'r':
+                    result.append('\r')
+                elif char == '"':
+                    result.append('"')
+                elif char == '\\':
+                    result.append('\\')
+                elif char == 'u' and i + 4 < len(self._buffer):
+                    # Unicode escape \uXXXX
+                    try:
+                        hex_val = self._buffer[i + 1:i + 5]
+                        result.append(chr(int(hex_val, 16)))
+                        i += 4
+                    except (ValueError, IndexError):
+                        result.append(char)
+                else:
+                    result.append(char)
+                i += 1
+                continue
+
+            if char == '\\':
+                self._escape_next = True
+                i += 1
+                continue
+
+            if char == '"':
+                # End of string - stop processing
+                self._in_args_string = False
+                self._buffer = self._buffer[i + 1:]
+                break
+
+            result.append(char)
+            i += 1
+
+        # Keep unprocessed buffer
+        if self._in_args_string:
+            self._buffer = self._buffer[i:]
+
+        return result
+
+
 class _ArtifactCollector:
     """Collect artifact-marked fields during planner execution."""
 
@@ -1335,31 +1458,8 @@ class ReactPlanner:
                         trajectory.artifacts,
                         trajectory.sources,
                     )
-                    if self._stream_final_response and self._event_callback is not None:
-                        raw_answer = final_payload.raw_answer or ""
-                        if raw_answer:
-                            # Chunk raw answer to improve perceived streaming
-                            chunk_size = 200
-                            chunks = [raw_answer[i : i + chunk_size] for i in range(0, len(raw_answer), chunk_size)]
-                            for idx, chunk in enumerate(chunks):
-                                done = idx == len(chunks) - 1
-                                self._emit_event(
-                                    PlannerEvent(
-                                        event_type="llm_stream_chunk",
-                                        ts=self._time_source(),
-                                        trajectory_step=len(trajectory.steps),
-                                        extra={"text": chunk, "done": done, "phase": "answer"},
-                                    )
-                                )
-                        else:
-                            self._emit_event(
-                                PlannerEvent(
-                                    event_type="llm_stream_chunk",
-                                    ts=self._time_source(),
-                                    trajectory_step=len(trajectory.steps),
-                                    extra={"text": "", "done": True, "phase": "answer"},
-                                )
-                            )
+                    # Note: Real-time streaming of args content happens during LLM call
+                    # via _StreamingArgsExtractor in step(). No post-hoc chunking needed.
 
                     return self._finish(
                         trajectory,
@@ -1563,17 +1663,60 @@ class ReactPlanner:
                 )
             )
 
-            def _emit_llm_chunk(text: str, done: bool) -> None:
+            # Create extractor to detect finish actions and stream args content
+            args_extractor = _StreamingArgsExtractor()
+
+            def _emit_llm_chunk(
+                text: str,
+                done: bool,
+                *,
+                _extractor: _StreamingArgsExtractor = args_extractor,
+            ) -> None:
                 if self._event_callback is None:
                     return
-                self._emit_event(
-                    PlannerEvent(
-                        event_type="llm_stream_chunk",
-                        ts=self._time_source(),
-                        trajectory_step=len(trajectory.steps),
-                        extra={"text": text, "done": done, "phase": "action"},
-                    )
+
+                # DEBUG: Log incoming chunks
+                logger.debug(
+                    "llm_chunk_received",
+                    extra={"text": text[:100] if text else "", "done": done, "buffer_len": len(_extractor._buffer)},
                 )
+
+                # Feed chunk to extractor to detect args content
+                args_chars = _extractor.feed(text)
+
+                # DEBUG: Log extractor state
+                logger.debug(
+                    "extractor_state",
+                    extra={
+                        "is_finish": _extractor.is_finish_action,
+                        "in_args_string": _extractor._in_args_string,
+                        "chars_extracted": len(args_chars),
+                    },
+                )
+
+                # Emit args content as "answer" phase for real-time display
+                if args_chars:
+                    # Batch small chars into reasonable chunks for efficiency
+                    args_text = "".join(args_chars)
+                    self._emit_event(
+                        PlannerEvent(
+                            event_type="llm_stream_chunk",
+                            ts=self._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={"text": args_text, "done": False, "phase": "answer"},
+                        )
+                    )
+
+                # Emit done signal when LLM finishes and it was a finish action
+                if done and _extractor.is_finish_action:
+                    self._emit_event(
+                        PlannerEvent(
+                            event_type="llm_stream_chunk",
+                            ts=self._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={"text": "", "done": True, "phase": "answer"},
+                        )
+                    )
 
             llm_result = await self._client.complete(
                 messages=messages,
