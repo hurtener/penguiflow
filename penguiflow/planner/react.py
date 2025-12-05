@@ -1335,6 +1335,31 @@ class ReactPlanner:
                         trajectory.artifacts,
                         trajectory.sources,
                     )
+                    if self._stream_final_response and self._event_callback is not None:
+                        raw_answer = final_payload.raw_answer or ""
+                        if raw_answer:
+                            # Chunk raw answer to improve perceived streaming
+                            chunk_size = 200
+                            chunks = [raw_answer[i : i + chunk_size] for i in range(0, len(raw_answer), chunk_size)]
+                            for idx, chunk in enumerate(chunks):
+                                done = idx == len(chunks) - 1
+                                self._emit_event(
+                                    PlannerEvent(
+                                        event_type="llm_stream_chunk",
+                                        ts=self._time_source(),
+                                        trajectory_step=len(trajectory.steps),
+                                        extra={"text": chunk, "done": done, "phase": "answer"},
+                                    )
+                                )
+                        else:
+                            self._emit_event(
+                                PlannerEvent(
+                                    event_type="llm_stream_chunk",
+                                    ts=self._time_source(),
+                                    trajectory_step=len(trajectory.steps),
+                                    extra={"text": "", "done": True, "phase": "answer"},
+                                )
+                            )
 
                     return self._finish(
                         trajectory,
@@ -1546,7 +1571,7 @@ class ReactPlanner:
                         event_type="llm_stream_chunk",
                         ts=self._time_source(),
                         trajectory_step=len(trajectory.steps),
-                        extra={"text": text, "done": done},
+                        extra={"text": text, "done": done, "phase": "action"},
                     )
                 )
 

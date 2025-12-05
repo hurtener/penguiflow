@@ -216,3 +216,8 @@ When `stream_final_response=False`:
 | **Breaking Changes** | None |
 | **New Parameter** | `stream_final_response: bool = False` |
 | **Delivery Mechanism** | `event_callback` with `event_type="llm_stream_chunk"` |
+
+### UI/Playground implementation (current state)
+- `llm_stream_chunk` carries `phase`: `"action"` for planner JSON vs `"answer"` for user-facing text.
+- Action-phase chunks drive a thinking indicator; answer-phase chunks stream into the chat bubble. Planner events/trajectory remain unchanged.
+- SSE backend forwards phase; the Svelte UI consumes it and stops overwriting the final answer once streaming finishes.

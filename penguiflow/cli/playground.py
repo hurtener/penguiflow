@@ -237,6 +237,7 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
             {
                 "text": extra.get("text", ""),
                 "done": extra.get("done", False),
+                "phase": extra.get("phase"),
             }
         )
         return format_sse("llm_stream_chunk", payload)

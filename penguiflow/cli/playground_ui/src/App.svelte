@@ -13,6 +13,7 @@
     role: "user" | "agent";
     text: string;
     isStreaming?: boolean;
+    isThinking?: boolean;
     ts: number;
     traceId?: string;
     latencyMs?: number;
@@ -264,9 +265,14 @@
       if (!msg) return;
 
       if (eventName === "chunk" || eventName === "llm_stream_chunk") {
-        msg.text = `${msg.text}${(data.text as string) ?? ""}`;
-        if (data.done) {
-          msg.isStreaming = false;
+        const phase = data.phase as string | undefined;
+        if (phase === "action") {
+          msg.isThinking = !data.done;
+        } else {
+          msg.text = `${msg.text}${(data.text as string) ?? ""}`;
+          if (data.done) {
+            msg.isStreaming = false;
+          }
         }
       } else if (eventName === "artifact_chunk") {
         const streamId = (data.stream_id as string) ?? "artifact";
@@ -284,7 +290,9 @@
           if (plannerEvents.length > 120) plannerEvents.length = 120;
         }
       } else if (eventName === "done") {
-        msg.text = (data.answer as string) ?? msg.text;
+        if (!msg.text || msg.text.trim() === "") {
+          msg.text = (data.answer as string) ?? msg.text;
+        }
         msg.isStreaming = false;
         activeTraceId = (data.trace_id as string) ?? activeTraceId;
         fetchTrajectory(data.trace_id as string, sessionId);
@@ -390,9 +398,7 @@
         artifactStreams[streamId] = [...existing, data.chunk];
       }
       if (incomingEvent === "llm_stream_chunk") {
-        // Surface final-answer streaming in the planner event log for visibility
-        plannerEvents.unshift({ id: randomId(), ...data, event: "llm_stream_chunk" });
-        if (plannerEvents.length > 200) plannerEvents.length = 200;
+        // Do not flood plannerEvents; streaming is rendered in the chat bubble
         return;
       }
       // Only add if not already present (prevent duplicates)
@@ -568,7 +574,7 @@
             <div class={`message-row ${msg.role === "agent" ? "agent" : "user"}`}>
               <div class={`bubble ${msg.role}`}>
                 <div class="markdown-content">{@html renderMarkdown(msg.text)}</div>
-                {#if msg.isStreaming}
+                {#if msg.isStreaming || msg.isThinking}
                   <div class="typing">
                     <span></span><span></span><span></span>
                   </div>
