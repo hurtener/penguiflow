@@ -9,58 +9,146 @@ This document explains how to configure environment variables for your agent.
    cp .env.example .env
    ```
 
-2. Set your LLM provider API key (see Provider Configuration below)
+2. Set your LLM provider API key (see Your Configuration below)
 
 3. Run your agent:
    ```bash
    uv run {{ package_name }}
-   # or
+   # or use the playground:
    penguiflow dev .
    ```
 
-## LLM Provider Configuration
+## Your Agent Configuration
 
-PenguiFlow uses [LiteLLM](https://docs.litellm.ai/) for LLM integration. Set the appropriate API key based on your provider:
+Your agent is configured to use:
+- **Model**: `{{ primary_model }}`
+{% if primary_provider %}- **Provider**: `{{ primary_provider }}`{% endif %}
 
-### OpenAI
+{% if primary_provider == "openrouter" %}
+### OpenRouter Setup (Your Configured Provider)
+
 ```bash
-OPENAI_API_KEY=sk-...
+OPENROUTER_API_KEY=sk-or-v1-...
+LLM_MODEL={{ primary_model }}
+```
+
+Get your API key at: https://openrouter.ai/keys
+
+{% elif primary_provider == "anthropic" %}
+### Anthropic Setup (Your Configured Provider)
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-api03-...
+LLM_MODEL={{ primary_model }}
+```
+
+Get your API key at: https://console.anthropic.com/settings/keys
+
+{% elif primary_provider == "azure" %}
+### Azure OpenAI Setup (Your Configured Provider)
+
+```bash
+AZURE_API_KEY=...
+AZURE_API_BASE=https://your-resource.openai.azure.com/
+AZURE_API_VERSION=2024-02-15-preview
+LLM_MODEL={{ primary_model }}
+```
+
+{% elif primary_provider == "google" or primary_provider == "gemini" %}
+### Google Gemini Setup (Your Configured Provider)
+
+```bash
+GEMINI_API_KEY=...
+LLM_MODEL={{ primary_model }}
+```
+
+Get your API key at: https://aistudio.google.com/app/apikey
+
+{% elif primary_provider == "bedrock" %}
+### AWS Bedrock Setup (Your Configured Provider)
+
+```bash
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION_NAME=us-east-1
+LLM_MODEL={{ primary_model }}
+```
+
+{% else %}
+### OpenAI Setup (Your Configured Provider)
+
+```bash
+OPENAI_API_KEY=sk-proj-...
+LLM_MODEL={{ primary_model }}
+```
+
+Get your API key at: https://platform.openai.com/api-keys
+
+{% endif %}
+
+---
+
+## Other Providers (Reference)
+
+PenguiFlow uses [LiteLLM](https://docs.litellm.ai/) for LLM integration. You can switch providers by changing your `.env`:
+
+<details>
+<summary>OpenAI</summary>
+
+```bash
+OPENAI_API_KEY=sk-proj-...
 LLM_MODEL=gpt-4o
 ```
+</details>
 
-### Anthropic (Claude)
+<details>
+<summary>Anthropic (Claude)</summary>
+
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_API_KEY=sk-ant-api03-...
 LLM_MODEL=anthropic/claude-sonnet-4-20250514
 ```
+</details>
 
-### OpenRouter
+<details>
+<summary>OpenRouter</summary>
+
 ```bash
-OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_API_KEY=sk-or-v1-...
 LLM_MODEL=openrouter/anthropic/claude-sonnet-4-20250514
 ```
+</details>
 
-### Azure OpenAI
+<details>
+<summary>Azure OpenAI</summary>
+
 ```bash
 AZURE_API_KEY=...
 AZURE_API_BASE=https://your-resource.openai.azure.com/
 AZURE_API_VERSION=2024-02-15-preview
 LLM_MODEL=azure/your-deployment-name
 ```
+</details>
 
-### Google (Gemini)
+<details>
+<summary>Google (Gemini)</summary>
+
 ```bash
 GEMINI_API_KEY=...
 LLM_MODEL=gemini/gemini-1.5-pro
 ```
+</details>
 
-### AWS Bedrock
+<details>
+<summary>AWS Bedrock</summary>
+
 ```bash
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 AWS_REGION_NAME=us-east-1
 LLM_MODEL=bedrock/anthropic.claude-3-sonnet-20240229-v1:0
 ```
+</details>
 
 ## Environment Variables Reference
 

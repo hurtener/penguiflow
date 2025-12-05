@@ -572,6 +572,88 @@ def _generate_flow_tests(
     return created, skipped
 
 
+def _generate_conftest(
+    project_dir: Path,
+    package_name: str,
+    agent_name: str,
+    *,
+    dry_run: bool,
+    force: bool,
+) -> tuple[list[str], list[str]]:
+    """Generate tests/conftest.py with correct package_name."""
+    created: list[str] = []
+    skipped: list[str] = []
+    path = project_dir / "tests" / "conftest.py"
+
+    if dry_run:
+        created.append(path.as_posix())
+        return created, skipped
+
+    content = _render_template(
+        "conftest.py.jinja",
+        {
+            "agent_name": agent_name,
+            "package_name": package_name,
+        },
+    )
+    wrote, written_path = _write_file(path, content, force=force)
+    if wrote and written_path:
+        created.append(written_path)
+    elif not wrote:
+        skipped.append(path.as_posix())
+
+    return created, skipped
+
+
+def _generate_readme(
+    project_dir: Path,
+    package_name: str,
+    spec: Spec,
+    *,
+    dry_run: bool,
+    force: bool,
+) -> tuple[list[str], list[str]]:
+    """Generate README.md with spec-aware content."""
+    created: list[str] = []
+    skipped: list[str] = []
+    path = project_dir / "README.md"
+
+    # Build tools info for template
+    tool_infos = []
+    for tool in spec.tools:
+        tool_infos.append({
+            "name": tool.name,
+            "description": tool.description or "No description provided.",
+        })
+
+    content = _render_template(
+        "README.md.jinja",
+        {
+            "agent_name": spec.agent.name,
+            "agent_description": spec.agent.description,
+            "package_name": package_name,
+            "primary_provider": spec.llm.primary.provider,
+            "primary_model": spec.llm.primary.model,
+            "max_iters": spec.planner.max_iters,
+            "hop_budget": spec.planner.hop_budget,
+            "reflection_enabled": bool(spec.llm.reflection and spec.llm.reflection.enabled),
+            "tools": tool_infos,
+        },
+    )
+
+    if dry_run:
+        created.append(path.as_posix())
+        return created, skipped
+
+    wrote, written_path = _write_file(path, content, force=force)
+    if wrote and written_path:
+        created.append(written_path)
+    elif not wrote:
+        skipped.append(path.as_posix())
+
+    return created, skipped
+
+
 def _generate_config(
     project_dir: Path,
     package_name: str,
@@ -635,6 +717,7 @@ def _generate_env_example(
         "env.example.jinja",
         {
             "primary_model": spec.llm.primary.model,
+            "primary_provider": spec.llm.primary.provider,
             "memory_enabled": str(spec.agent.flags.memory).lower(),
             "summarizer_enabled": str(bool(spec.llm.summarizer and spec.llm.summarizer.enabled)).lower(),
             "reflection_enabled": str(bool(spec.llm.reflection and spec.llm.reflection.enabled)).lower(),
@@ -679,6 +762,7 @@ def _generate_env_setup_docs(
             "agent_name": spec.agent.name,
             "package_name": package_name,
             "primary_model": spec.llm.primary.model,
+            "primary_provider": spec.llm.primary.provider,
             "memory_enabled": str(spec.agent.flags.memory).lower(),
             "summarizer_enabled": str(bool(spec.llm.summarizer and spec.llm.summarizer.enabled)).lower(),
             "reflection_enabled": str(bool(spec.llm.reflection and spec.llm.reflection.enabled)).lower(),
@@ -828,23 +912,43 @@ def run_generate(
         created.extend(flow_test_created)
         skipped.extend(flow_test_skipped)
 
+        # Generate conftest.py with correct package_name (always force to ensure
+        # the DummyToolContext fixture imports from the correct package)
+        if verbose:
+            click.echo("Generating tests/conftest.py...")
+        conftest_created, conftest_skipped = _generate_conftest(
+            project_dir, package_name, spec.agent.name, dry_run=dry_run, force=True
+        )
+        created.extend(conftest_created)
+        skipped.extend(conftest_skipped)
+
+        # Config files MUST reflect spec values, so always force-overwrite them
+        # even if they were created by scaffold (which uses generic defaults like "stub-llm").
+        # This ensures spec values like llm.primary.model are correctly propagated.
         if verbose:
             click.echo("Generating config...")
-        config_created, config_skipped = _generate_config(project_dir, package_name, spec, dry_run=dry_run, force=force)
+        config_created, config_skipped = _generate_config(project_dir, package_name, spec, dry_run=dry_run, force=True)
         created.extend(config_created)
         skipped.extend(config_skipped)
 
         if verbose:
             click.echo("Generating .env.example...")
-        env_created, env_skipped = _generate_env_example(project_dir, spec, dry_run=dry_run, force=force)
+        env_created, env_skipped = _generate_env_example(project_dir, spec, dry_run=dry_run, force=True)
         created.extend(env_created)
         skipped.extend(env_skipped)
 
         if verbose:
             click.echo("Generating ENV_SETUP.md...")
-        env_docs_created, env_docs_skipped = _generate_env_setup_docs(project_dir, spec, dry_run=dry_run, force=force)
+        env_docs_created, env_docs_skipped = _generate_env_setup_docs(project_dir, spec, dry_run=dry_run, force=True)
         created.extend(env_docs_created)
         skipped.extend(env_docs_skipped)
+
+        # Generate README with spec-aware content (always force to include agent description and tools)
+        if verbose:
+            click.echo("Generating README.md...")
+        readme_created, readme_skipped = _generate_readme(project_dir, package_name, spec, dry_run=dry_run, force=True)
+        created.extend(readme_created)
+        skipped.extend(readme_skipped)
 
         # Persist spec as agent.yaml so playground can discover it
         if verbose:

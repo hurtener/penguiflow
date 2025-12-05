@@ -16,6 +16,6 @@ async def analyze_results(args: SearchResults, ctx: ToolContext) -> FinalAnswer:
 {% endif %}
     summary = "; ".join(hit.snippet for hit in args.results) or "No results found."
 {% if with_streaming %}
-    await ctx.emit_chunk("analysis", 1, f"Summary complete", done=True)
+    await ctx.emit_chunk("analysis", 1, "Summary complete", done=True)
 {% endif %}
     return FinalAnswer(text=f"{user}: {summary}")

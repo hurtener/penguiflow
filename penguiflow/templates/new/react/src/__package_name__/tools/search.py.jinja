@@ -20,7 +20,7 @@ async def search_documents(args: Query, ctx: ToolContext) -> SearchResults:
 {% endif %}
     snippet = f"Result for '{args.question}' in tenant '{tenant}'"
 {% if with_streaming %}
-    await ctx.emit_chunk("search", 1, f"Found 1 result", done=True)
+    await ctx.emit_chunk("search", 1, "Found 1 result", done=True)
     if status_publisher:
         status_publisher({"status": "found", "results": 1})
 {% endif %}

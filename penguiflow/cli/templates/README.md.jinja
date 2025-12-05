@@ -1,0 +1,115 @@
+# {{ agent_name }}
+
+{{ agent_description | default("AI agent built with PenguiFlow") }}
+
+## Quick Start
+
+```bash
+# Install dependencies
+uv sync
+
+# Set up environment variables
+cp .env.example .env
+# Edit .env with your API keys (see ENV_SETUP.md for details)
+
+# Run the agent
+uv run python -m {{ package_name }}
+```
+
+## Configuration
+
+This agent uses **{{ primary_provider | default("openai") }}** with model `{{ primary_model | default("gpt-4o") }}`.
+
+Key settings (via environment or `config.py`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLM_MODEL` | `{{ primary_model | default("gpt-4o") }}` | LLM model identifier |
+| `PLANNER_MAX_ITERS` | `{{ max_iters | default(10) }}` | Maximum planning iterations |
+| `PLANNER_HOP_BUDGET` | `{{ hop_budget | default(6) }}` | Maximum tool hops |
+{% if reflection_enabled %}| `REFLECTION_ENABLED` | `true` | Enable reflection after tool calls |
+{% endif %}
+
+See `ENV_SETUP.md` for complete environment setup instructions.
+
+## Project Structure
+
+```
+{{ package_name }}/
+├── orchestrator.py     # Main entry point
+├── planner.py          # ReactPlanner configuration
+├── config.py           # Environment-driven settings
+├── models.py           # Pydantic data models
+{% if tools %}├── tools/              # Agent tools
+{% for tool in tools %}│   ├── {{ tool.name }}.py
+{% endfor %}{% endif %}└── __main__.py         # CLI entry point
+```
+
+## Tools
+
+{% if tools %}This agent includes {{ tools | length }} tool(s):
+
+{% for tool in tools %}
+### {{ tool.name }}
+
+{{ tool.description | default("No description provided.") }}
+
+{% endfor %}{% else %}No tools configured. Add tools in `src/{{ package_name }}/tools/`.
+{% endif %}
+
+## Development
+
+```bash
+# Run tests
+uv run pytest
+
+# Type checking
+uv run mypy src/
+
+# Lint
+uv run ruff check src/
+```
+
+## Customization
+
+### Adding New Tools
+
+1. Create a new tool file in `src/{{ package_name }}/tools/`
+2. Define input/output models and the async tool function
+3. Register the tool in `tools/__init__.py`
+
+### Adjusting Prompts
+
+Pass `system_prompt_extra` to `ReactPlanner` in `planner.py`:
+
+```python
+planner = ReactPlanner(
+    llm=config.llm_model,
+    nodes=nodes,
+    registry=registry,
+    system_prompt_extra="Your custom instructions here...",
+)
+```
+
+### Switching LLM Providers
+
+Update your `.env` file with the appropriate API key and model:
+
+```bash
+# OpenAI
+OPENAI_API_KEY=sk-...
+LLM_MODEL=gpt-4o
+
+# Anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+LLM_MODEL=anthropic/claude-3-5-sonnet
+
+# OpenRouter
+OPENROUTER_API_KEY=sk-or-...
+LLM_MODEL=openrouter/openai/gpt-4o
+```
+
+## Learn More
+
+- [PenguiFlow Documentation](https://github.com/yourorg/penguiflow)
+- [ReactPlanner Integration Guide](./REACT_PLANNER_INTEGRATION_GUIDE.md)

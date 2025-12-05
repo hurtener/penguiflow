@@ -1,23 +1,70 @@
 # {{ project_name }}
 
-Simple PenguiFlow agent scaffold using the `{{ template }}` template.
+Minimal PenguiFlow agent scaffold - the simplest starting point for building agents.
 
-## Quickstart
+## Quick Start
 
 ```bash
+# Install dependencies
 uv sync
+
+# Set up environment variables
+cp .env.example .env
+# Edit .env with your API keys
+
+# Run the agent
 uv run python -m {{ package_name }}
 ```
 
+## Project Structure
+
+```
+{{ package_name }}/
+├── orchestrator.py     # Main entry point
+├── tools.py            # All tools in one file
+├── config.py           # Environment-driven settings
+├── models.py           # Pydantic data models
+└── __main__.py         # CLI entry point
+```
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLM_MODEL` | `stub-llm` | LLM model identifier |
+| `PLANNER_MAX_ITERS` | `10` | Maximum planning iterations |
+| `PLANNER_HOP_BUDGET` | `6` | Maximum tool hops |
+
+## Use a Real LLM
+
+1. Set your API key in `.env`:
+   ```bash
+   OPENAI_API_KEY=sk-...
+   LLM_MODEL=gpt-4o
+   ```
+
+2. In `orchestrator.py`, replace `ScriptedLLM` with:
+   ```python
+   planner = ReactPlanner(
+       llm=config.llm_model,
+       nodes=nodes,
+       registry=registry,
+   )
+   ```
+
 ## Developing
 
-- Update `src/{{ package_name }}/tools.py` with your tools.
-- Wire memory or observability as needed (placeholders included).
-- Run tests with `uv run pytest`.
+1. Add tools in `src/{{ package_name }}/tools.py`
+2. Define input/output models in `models.py`
+3. Wire memory or observability as needed
 
-## Use a real LLM and adjust prompts
+## Testing
 
-- Set `LLM_MODEL` and your provider key (e.g., `OPENAI_API_KEY`) in the environment.
-- Swap `ScriptedLLM` in `orchestrator.py` by passing `llm=config.llm_model` to `ReactPlanner` (LiteLLM path), or use `DSPyLLMClient(llm=config.llm_model)` as `llm_client`.
-- Any client with `.complete(messages=[...], response_format=...)` works if you prefer custom wiring.
-- To nudge prompts, pass `system_prompt_extra` and/or `planning_hints` to `ReactPlanner` instead of editing `penguiflow.planner.prompts` directly.
+```bash
+uv run pytest
+```
+
+## Learn More
+
+- [PenguiFlow Documentation](https://github.com/yourorg/penguiflow)
+- Consider the `react` template for more structured projects

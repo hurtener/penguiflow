@@ -5,16 +5,18 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from penguiflow.errors import FlowError
 from penguiflow.planner import PlannerFinish, PlannerPause, ReactPlanner
-{% if memory_enabled %}
-from .clients.memory import MemoryClient
-{% endif %}
+
 {% if with_a2a %}
 from .a2a import A2AServer
+{% endif %}
+{% if memory_enabled %}
+from .clients.memory import MemoryClient
 {% endif %}
 from .config import Config
 from .telemetry import AgentTelemetry

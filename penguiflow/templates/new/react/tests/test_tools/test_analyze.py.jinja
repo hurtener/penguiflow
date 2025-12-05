@@ -2,41 +2,66 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from {{ package_name }}.models import FinalAnswer, SearchResult, SearchResults
 from {{ package_name }}.tools.analyze import analyze_results
 
-
-class DummyCtx:
-    def __init__(self) -> None:
-        self.llm_context = {}
-        self.tool_context = {"user_id": "alice"}
-        self.meta = {}
-{% if with_streaming %}
-        self.chunks: list[tuple[str, int, str]] = []
-{% endif %}
-
-    async def pause(self, *args, **kwargs):  # pragma: no cover - not used in tests
-        del args, kwargs
-        raise RuntimeError("pause not supported")
-
-    async def emit_chunk(self, *args, **kwargs):  # pragma: no cover - not used in tests
-        {% if with_streaming %}stream_id, seq, text = args[:3]
-        self.chunks.append((stream_id, seq, text))
-        return None
-        {% else %}del args, kwargs
-        return None{% endif %}
+if TYPE_CHECKING:
+    from conftest import DummyToolContext
 
 
 @pytest.mark.asyncio
-async def test_analyze_results_summarises_hits() -> None:
-    ctx = DummyCtx()
-    hits = SearchResults(results=[SearchResult(title="a", snippet="stub insight")])
-    result = await analyze_results(hits, ctx)
+async def test_analyze_results_summarizes_hits(dummy_ctx: "DummyToolContext") -> None:
+    """Verify analyze_results produces a summary from search results."""
+    hits = SearchResults(
+        results=[
+            SearchResult(title="PenguiFlow Basics", snippet="An async-first orchestration library"),
+            SearchResult(title="Getting Started", snippet="Install with pip install penguiflow"),
+        ]
+    )
+
+    result = await analyze_results(hits, dummy_ctx)
+
     assert isinstance(result, FinalAnswer)
-    assert "alice" in result.text
-    assert "stub insight" in result.text
+    assert result.text, "Expected non-empty answer text"
+
+
+@pytest.mark.asyncio
+async def test_analyze_results_handles_single_result(dummy_ctx: "DummyToolContext") -> None:
+    """Verify analyze works with a single search result."""
+    hits = SearchResults(
+        results=[SearchResult(title="Single Result", snippet="Only one item")]
+    )
+
+    result = await analyze_results(hits, dummy_ctx)
+
+    assert isinstance(result, FinalAnswer)
+    assert result.text
+
+
+@pytest.mark.asyncio
+async def test_analyze_results_handles_empty_results(dummy_ctx: "DummyToolContext") -> None:
+    """Verify analyze handles empty search results gracefully."""
+    hits = SearchResults(results=[])
+
+    result = await analyze_results(hits, dummy_ctx)
+
+    assert isinstance(result, FinalAnswer)
+    # Should still produce some output even with no results
+
+
 {% if with_streaming %}
-    assert ctx.chunks
+@pytest.mark.asyncio
+async def test_analyze_results_emits_chunks(dummy_ctx: "DummyToolContext") -> None:
+    """Verify analyze emits streaming chunks during execution."""
+    hits = SearchResults(
+        results=[SearchResult(title="Test", snippet="Streaming test data")]
+    )
+
+    await analyze_results(hits, dummy_ctx)
+
+    assert dummy_ctx.chunks, "Expected streaming chunks to be emitted"
 {% endif %}

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from penguiflow.catalog import build_catalog
-from penguiflow.planner import ReactPlanner, ReflectionConfig, ReflectionCriteria
+from penguiflow.planner import ReactPlanner{% if reflection_enabled %}, ReflectionConfig{% if reflection_criteria %}, ReflectionCriteria{% endif %}{% endif %}
 
 from .config import Config
 from .tools import build_catalog_bundle
@@ -26,19 +26,12 @@ class PlannerBundle:
     registry: Any
 
 
-def _planner_models(config: Config) -> tuple[str, str | None, str | None]:
-    primary_llm = getattr(config, "llm_model", "{{ primary_model }}") or "{{ primary_model }}"
-    summarizer_model = getattr(config, "summarizer_model", None)
-    reflection_model = getattr(config, "reflection_model", None)
-    return primary_llm, summarizer_model, reflection_model
-
-
-def _planner_prompts(config: Config) -> str:
+def _build_system_prompt(config: Config) -> str:
+    """Build the system prompt, optionally including memory context."""
     prompt = SYSTEM_PROMPT_EXTRA
-    memory_enabled = getattr(config, "memory_enabled", {{ memory_enabled }})
 {% if include_memory_prompt %}
-    if memory_enabled:
-        prompt = prompt + "\\n\\n" + MEMORY_PROMPT
+    if config.memory_enabled:
+        prompt = prompt + "\n\n" + MEMORY_PROMPT
 {% endif %}
     return prompt
 
@@ -49,39 +42,46 @@ def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
     nodes, registry = build_catalog_bundle()
     catalog = build_catalog(nodes, registry)
 
-    primary_llm, summarizer_model, reflection_model = _planner_models(config)
-
-    reflection_enabled = {{ reflection_enabled }}
-    reflection_cfg = None
-    if reflection_enabled:
-        reflection_cfg = ReflectionConfig(
-            enabled=True,
-            quality_threshold={{ reflection_quality_threshold }},
-            max_revisions={{ reflection_max_revisions }},
+{% if reflection_enabled %}
+    reflection_cfg = ReflectionConfig(
+        enabled=True,
+        quality_threshold=config.reflection_quality_threshold,
+        max_revisions=config.reflection_max_revisions,
 {% if reflection_criteria %}
-            criteria=ReflectionCriteria(
-                completeness="{{ reflection_criteria.completeness }}",
-                accuracy="{{ reflection_criteria.accuracy }}",
-                clarity="{{ reflection_criteria.clarity }}",
-            ),
+        criteria=ReflectionCriteria(
+            completeness="{{ reflection_criteria.completeness }}",
+            accuracy="{{ reflection_criteria.accuracy }}",
+            clarity="{{ reflection_criteria.clarity }}",
+        ),
 {% endif %}
-        )
-    summarizer_llm = summarizer_model or primary_llm if {{ summarizer_enabled }} else None
-    reflection_llm = reflection_model or primary_llm if reflection_enabled else None
+    )
+{% else %}
+    reflection_cfg = None
+{% endif %}
 
-    planning_hints: dict[str, Any] | None = {{ planning_hints_literal }}
+{% if summarizer_enabled %}
+    summarizer_llm = config.summarizer_model or config.llm_model
+{% else %}
+    summarizer_llm = None
+{% endif %}
+
+{% if reflection_enabled %}
+    reflection_llm = config.reflection_model or config.llm_model
+{% else %}
+    reflection_llm = None
+{% endif %}
 
     planner = ReactPlanner(
-        llm=primary_llm,
+        llm=config.llm_model,
         catalog=catalog,
-        system_prompt_extra=_planner_prompts(config),
-        max_iters=getattr(config, "planner_max_iters", {{ max_iters }}),
-        hop_budget=getattr(config, "planner_hop_budget", {{ hop_budget }}),
-        absolute_max_parallel=getattr(config, "planner_absolute_max_parallel", {{ absolute_max_parallel }}),
+        system_prompt_extra=_build_system_prompt(config),
+        max_iters=config.planner_max_iters,
+        hop_budget=config.planner_hop_budget,
+        absolute_max_parallel=config.planner_absolute_max_parallel,
         summarizer_llm=summarizer_llm,
         reflection_config=reflection_cfg,
         reflection_llm=reflection_llm,
-        planning_hints=planning_hints,
+        planning_hints={{ planning_hints_literal }},
         event_callback=event_callback,
     )
 

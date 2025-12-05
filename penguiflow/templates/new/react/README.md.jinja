@@ -2,22 +2,109 @@
 
 ReactPlanner-based agent scaffold with observability, memory stubs, and tests.
 
-## Quickstart
+## Quick Start
 
 ```bash
+# Install dependencies
 uv sync
+
+# Set up environment variables
+cp .env.example .env
+# Edit .env with your API keys
+
+# Run the agent
 uv run python -m {{ package_name }}
 ```
 
-## Customize
+## Project Structure
 
-- Add tools in `src/{{ package_name }}/tools/`.
-- Update `planner.py` to switch to a real LLM client.
-- Wire telemetry/memory to your environment.
+```
+{{ package_name }}/
+├── orchestrator.py     # Main entry point
+├── planner.py          # ReactPlanner configuration
+├── config.py           # Environment-driven settings
+├── models.py           # Pydantic data models
+├── tools/              # Agent tools
+│   ├── search.py       # Example search tool
+│   └── analyze.py      # Example analysis tool
+└── __main__.py         # CLI entry point
+```
 
-## Use a real LLM and adjust prompts
+## Configuration
 
-- Set `LLM_MODEL` and your provider key (e.g., `OPENAI_API_KEY`) in the environment.
-- In `planner.py`, replace `ScriptedLLM` by passing `llm=config.llm_model` to `ReactPlanner` (LiteLLM path), or use `DSPyLLMClient(llm=config.llm_model)` as `llm_client`.
-- Custom clients just need `.complete(messages=[...], response_format=...)`.
-- To nudge prompts, pass `system_prompt_extra` and/or `planning_hints` to `ReactPlanner` instead of editing `penguiflow.planner.prompts` directly.
+Key settings (via environment or `config.py`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLM_MODEL` | `stub-llm` | LLM model identifier |
+| `PLANNER_MAX_ITERS` | `10` | Maximum planning iterations |
+| `PLANNER_HOP_BUDGET` | `6` | Maximum tool hops |
+
+## Use a Real LLM
+
+1. Set your API key in `.env`:
+   ```bash
+   # OpenAI
+   OPENAI_API_KEY=sk-...
+   LLM_MODEL=gpt-4o
+
+   # Anthropic
+   ANTHROPIC_API_KEY=sk-ant-...
+   LLM_MODEL=anthropic/claude-3-5-sonnet
+
+   # OpenRouter
+   OPENROUTER_API_KEY=sk-or-...
+   LLM_MODEL=openrouter/openai/gpt-4o
+   ```
+
+2. In `planner.py`, replace `ScriptedLLM` with:
+   ```python
+   planner = ReactPlanner(
+       llm=config.llm_model,  # LiteLLM path
+       nodes=nodes,
+       registry=registry,
+   )
+   ```
+
+   Or use DSPy:
+   ```python
+   from dspy import LLMClient
+   llm_client = LLMClient(llm=config.llm_model)
+   planner = ReactPlanner(
+       llm_client=llm_client,
+       nodes=nodes,
+       registry=registry,
+   )
+   ```
+
+## Customization
+
+### Add New Tools
+
+1. Create tool file in `src/{{ package_name }}/tools/`
+2. Define input/output models and async tool function
+3. Register in `tools/__init__.py`
+
+### Adjust Prompts
+
+Pass `system_prompt_extra` or `planning_hints` to `ReactPlanner`:
+
+```python
+planner = ReactPlanner(
+    llm=config.llm_model,
+    nodes=nodes,
+    registry=registry,
+    system_prompt_extra="Your custom instructions...",
+)
+```
+
+## Testing
+
+```bash
+uv run pytest
+```
+
+## Learn More
+
+- [PenguiFlow Documentation](https://github.com/yourorg/penguiflow)
+- See `REACT_PLANNER_INTEGRATION_GUIDE.md` for detailed planner configuration

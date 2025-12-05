@@ -1,6 +1,7 @@
 """Tool: {{ tool.description }}"""
 
 from __future__ import annotations
+{% if not tool.result %}
 
 from typing import Any
 
@@ -8,6 +9,13 @@ from pydantic import BaseModel, Field
 
 from penguiflow.catalog import tool
 from penguiflow.planner import ToolContext
+{% else %}
+
+from pydantic import BaseModel
+
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+{% endif %}
 
 
 class {{ tool.class_name }}Args(BaseModel):
@@ -37,8 +45,15 @@ class {{ tool.class_name }}Result(BaseModel):
 {% endif %}
 
 
-@tool(desc="{{ tool.description }}", tags={{ tool.tags_literal }}, side_effects="{{ tool.side_effects }}")
+@tool(
+    desc="{{ tool.description }}",
+    tags={{ tool.tags_literal }},
+    side_effects="{{ tool.side_effects }}",
+)
 async def {{ tool.name }}(args: {{ tool.class_name }}Args, ctx: ToolContext) -> {{ tool.class_name }}Result:
-    """TODO: Implement {{ tool.name }} logic."""
-    del ctx  # avoid unused-variable lint warnings until implemented
+    """{{ tool.description }}
+
+    TODO: Implement the actual logic.
+    """
+    del ctx  # Remove when implementing - ctx provides emit_chunk(), pause(), etc.
     raise NotImplementedError("Implement {{ tool.name }}")
