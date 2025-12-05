@@ -8,7 +8,7 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from typing import Any, get_args, get_origin
+from typing import Any, Callable, get_args, get_origin
 
 from pydantic import BaseModel
 
@@ -378,18 +378,22 @@ class _LiteLLMJSONClient:
         json_schema_mode: bool,
         max_retries: int = 3,
         timeout_s: float = 60.0,
+        streaming_enabled: bool = False,
     ) -> None:
         self._llm = llm
         self._temperature = temperature
         self._json_schema_mode = json_schema_mode
         self._max_retries = max_retries
         self._timeout_s = timeout_s
+        self._streaming_enabled = streaming_enabled
 
     async def complete(
         self,
         *,
         messages: Sequence[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
         try:
             import litellm
@@ -467,10 +471,82 @@ class _LiteLLMJSONClient:
             else:
                 params["response_format"] = response_format
 
+        allow_streaming = (
+            stream
+            and self._streaming_enabled
+            and (
+                not isinstance(params.get("response_format"), Mapping)
+                or params.get("response_format", {}).get("type") in (None, "json_object", "json_schema")
+            )
+        )
+
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
             try:
                 async with asyncio.timeout(self._timeout_s):
+                    if allow_streaming and on_stream_chunk is not None:
+                        stream_params = dict(params)
+                        stream_params["stream"] = True
+                        stream_opts = dict(stream_params.get("stream_options") or {})
+                        stream_opts.setdefault("include_usage", True)
+                        stream_params["stream_options"] = stream_opts
+
+                        response = await litellm.acompletion(**stream_params)
+                        pieces: list[str] = []
+                        usage_payload: Mapping[str, Any] | None = None
+
+                        async for chunk in response:
+                            chunk_usage = (
+                                chunk.get("usage")
+                                if isinstance(chunk, Mapping)
+                                else getattr(chunk, "usage", None)
+                            )
+                            if chunk_usage:
+                                usage_payload = chunk_usage
+
+                            delta_content: str | None = None
+                            if isinstance(chunk, Mapping):
+                                choices = chunk.get("choices") or []
+                                if choices:
+                                    delta = choices[0].get("delta") or {}
+                                    delta_content = delta.get("content")
+                            else:
+                                try:
+                                    delta = getattr(getattr(chunk, "choices", [])[0], "delta", None)
+                                    if delta is not None:
+                                        delta_content = getattr(delta, "content", None)
+                                except Exception:
+                                    delta_content = None
+
+                            if delta_content:
+                                pieces.append(delta_content)
+                                try:
+                                    on_stream_chunk(delta_content, False)
+                                except Exception:
+                                    logger.exception("llm_stream_chunk_callback_error")
+
+                        try:
+                            on_stream_chunk("", True)
+                        except Exception:
+                            logger.exception("llm_stream_chunk_callback_error")
+
+                        content = "".join(pieces)
+                        cost = 0.0
+                        if usage_payload:
+                            try:
+                                cost = float(
+                                    litellm.completion_cost(
+                                        model=stream_params.get("model", ""),
+                                        prompt_tokens=usage_payload.get("prompt_tokens", 0),
+                                        completion_tokens=usage_payload.get("completion_tokens", 0),
+                                    )
+                                    or 0.0
+                                )
+                            except Exception:
+                                cost = 0.0
+
+                        return content, cost
+
                     response = await litellm.acompletion(**params)
                     choice = response["choices"][0]
                     content = choice["message"]["content"]

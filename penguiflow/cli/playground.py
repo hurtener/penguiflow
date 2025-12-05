@@ -232,6 +232,15 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
         )
         return format_sse("artifact_chunk", payload)
 
+    if event.event_type == "llm_stream_chunk":
+        payload.update(
+            {
+                "text": extra.get("text", ""),
+                "done": extra.get("done", False),
+            }
+        )
+        return format_sse("llm_stream_chunk", payload)
+
     if event.node_name:
         payload["node"] = event.node_name
     if event.latency_ms is not None:

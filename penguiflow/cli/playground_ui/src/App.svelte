@@ -263,10 +263,13 @@
       const msg = findAgentMsg();
       if (!msg) return;
 
-      if (eventName === "chunk") {
-        msg.text = `${msg.text}${data.text ?? ""}`;
+      if (eventName === "chunk" || eventName === "llm_stream_chunk") {
+        msg.text = `${msg.text}${(data.text as string) ?? ""}`;
+        if (data.done) {
+          msg.isStreaming = false;
+        }
       } else if (eventName === "artifact_chunk") {
-        const streamId = data.stream_id ?? "artifact";
+        const streamId = (data.stream_id as string) ?? "artifact";
         const existing = artifactStreams[streamId] ?? [];
         artifactStreams[streamId] = [...existing, data.chunk];
         plannerEvents.unshift({ id: randomId(), ...data, event: "artifact_chunk" });
@@ -281,15 +284,15 @@
           if (plannerEvents.length > 120) plannerEvents.length = 120;
         }
       } else if (eventName === "done") {
-        msg.text = data.answer ?? msg.text;
+        msg.text = (data.answer as string) ?? msg.text;
         msg.isStreaming = false;
-        activeTraceId = data.trace_id ?? activeTraceId;
-        fetchTrajectory(data.trace_id, sessionId);
+        activeTraceId = (data.trace_id as string) ?? activeTraceId;
+        fetchTrajectory(data.trace_id as string, sessionId);
         startEventFollow();
         isSending = false;
         resetChatStream();
       } else if (eventName === "error") {
-        msg.text = data.error ?? "Unexpected error";
+        msg.text = (data.error as string) ?? "Unexpected error";
         msg.isStreaming = false;
         isSending = false;
         resetChatStream();
@@ -298,6 +301,7 @@
 
     chatEventSource.addEventListener("chunk", handler("chunk"));
     chatEventSource.addEventListener("artifact_chunk", handler("artifact_chunk"));
+    chatEventSource.addEventListener("llm_stream_chunk", handler("llm_stream_chunk"));
     chatEventSource.addEventListener("step", handler("step"));
     chatEventSource.addEventListener("event", handler("event"));
     chatEventSource.addEventListener("done", handler("done"));
@@ -381,22 +385,29 @@
         return;
       }
       if (incomingEvent === "artifact_chunk") {
-        const streamId = data.stream_id ?? "artifact";
+        const streamId = (data.stream_id as string) ?? "artifact";
         const existing = artifactStreams[streamId] ?? [];
         artifactStreams[streamId] = [...existing, data.chunk];
+      }
+      if (incomingEvent === "llm_stream_chunk") {
+        // Surface final-answer streaming in the planner event log for visibility
+        plannerEvents.unshift({ id: randomId(), ...data, event: "llm_stream_chunk" });
+        if (plannerEvents.length > 200) plannerEvents.length = 200;
+        return;
       }
       // Only add if not already present (prevent duplicates)
       const isDuplicate = plannerEvents.some(
         (e) => e.node === data.node && e.thought === data.thought && e.latency_ms === data.latency_ms
       );
       if (!isDuplicate) {
-        plannerEvents.unshift({ id: randomId(), ...data, event: incomingEvent || data.event || "event" });
+        plannerEvents.unshift({ id: randomId(), ...data, event: incomingEvent || (data.event as string) || "event" });
         if (plannerEvents.length > 200) plannerEvents.length = 200;
       }
     };
     followEventSource.addEventListener("event", listener);
     followEventSource.addEventListener("step", listener);
     followEventSource.addEventListener("chunk", listener);
+    followEventSource.addEventListener("llm_stream_chunk", listener);
     followEventSource.addEventListener("artifact_chunk", listener);
     followEventSource.onmessage = listener;
     followEventSource.onerror = () => resetFollowStream();

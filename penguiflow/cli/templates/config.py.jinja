@@ -57,6 +57,7 @@ class Config:
     planner_max_iters: int = {{ planner_max_iters }}
     planner_hop_budget: int = {{ planner_hop_budget }}
     planner_absolute_max_parallel: int = {{ planner_absolute_max_parallel }}
+    planner_stream_final_response: bool = {{ planner_stream_final_response }}
 
     @classmethod
     def from_env(cls) -> Config:
@@ -85,4 +86,5 @@ class Config:
             planner_max_iters=_env_int("PLANNER_MAX_ITERS", {{ planner_max_iters }}),
             planner_hop_budget=_env_int("PLANNER_HOP_BUDGET", {{ planner_hop_budget }}),
             planner_absolute_max_parallel=_env_int("PLANNER_ABSOLUTE_MAX_PARALLEL", {{ planner_absolute_max_parallel }}),
+            planner_stream_final_response=_env_flag("PLANNER_STREAM_FINAL_RESPONSE", {{ planner_stream_final_response }}),
         )

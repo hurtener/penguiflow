@@ -686,6 +686,7 @@ def _generate_config(
             "planner_max_iters": spec.planner.max_iters,
             "planner_hop_budget": spec.planner.hop_budget,
             "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,
+            "planner_stream_final_response": spec.planner.stream_final_response,
         },
     )
 
@@ -727,6 +728,7 @@ def _generate_env_example(
             "planner_max_iters": spec.planner.max_iters,
             "planner_hop_budget": spec.planner.hop_budget,
             "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,
+            "planner_stream_final_response": spec.planner.stream_final_response,
         },
     )
 
@@ -769,6 +771,7 @@ def _generate_env_setup_docs(
             "planner_max_iters": spec.planner.max_iters,
             "planner_hop_budget": spec.planner.hop_budget,
             "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,
+            "planner_stream_final_response": spec.planner.stream_final_response,
         },
     )
 

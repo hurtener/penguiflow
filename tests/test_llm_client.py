@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Any
+from typing import Any, AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -286,6 +286,51 @@ class TestLiteLLMJSONClient:
             )
             with pytest.raises(ValueError, match="Invalid request"):
                 await client.complete(messages=[{"role": "user", "content": "test"}])
+
+    @pytest.mark.asyncio
+    async def test_streaming_with_usage_and_chunks(self, mock_litellm: MagicMock) -> None:
+        async def _stream() -> AsyncIterator[dict[str, Any]]:
+            yield {"choices": [{"delta": {"content": '{"raw_answer": "Hel' }}], "usage": None}
+            yield {
+                "choices": [{"delta": {"content": 'lo"}'}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }
+
+        mock_litellm.acompletion = AsyncMock(return_value=_stream())
+
+        def completion_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+            assert model == "gpt-4o"
+            assert prompt_tokens == 10
+            assert completion_tokens == 5
+            return 0.123
+
+        mock_litellm.completion_cost = completion_cost  # type: ignore[attr-defined]
+
+        chunks: list[tuple[str, bool]] = []
+
+        def on_chunk(text: str, done: bool) -> None:
+            chunks.append((text, done))
+
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                "gpt-4o",
+                temperature=0.0,
+                json_schema_mode=False,
+                streaming_enabled=True,
+            )
+            content, cost = await client.complete(
+                messages=[{"role": "user", "content": "hello"}],
+                stream=True,
+                on_stream_chunk=on_chunk,
+            )
+
+        assert content == '{"raw_answer": "Hello"}'
+        assert chunks == [
+            ('{"raw_answer": "Hel', False),
+            ('lo"}', False),
+            ("", True),
+        ]
+        assert cost == pytest.approx(0.123)
 
     @pytest.mark.asyncio
     async def test_sanitized_schema_policy(self, mock_litellm: MagicMock) -> None:

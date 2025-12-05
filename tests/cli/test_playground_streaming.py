@@ -83,6 +83,22 @@ class _StreamingPlanner:
                     node_name="answer",
                 )
             )
+            self._event_callback(
+                PlannerEvent(
+                    event_type="llm_stream_chunk",
+                    ts=time.time(),
+                    trajectory_step=0,
+                    extra={"text": "final...", "done": False},
+                )
+            )
+            self._event_callback(
+                PlannerEvent(
+                    event_type="llm_stream_chunk",
+                    ts=time.time(),
+                    trajectory_step=0,
+                    extra={"text": "answer", "done": True},
+                )
+            )
         return PlannerFinish(
             reason="answer_complete",
             payload={"answer": f"echo:{query}"},
@@ -104,6 +120,7 @@ async def test_chat_stream_emits_events_and_done() -> None:
     events = _parse_sse(raw_lines)
     assert any(name == "chunk" for name, _ in events)
     assert any(name == "artifact_chunk" for name, _ in events)
+    assert any(name == "llm_stream_chunk" for name, _ in events)
     artifact_payload = next(payload for name, payload in events if name == "artifact_chunk")
     assert artifact_payload["chunk"] == {"partial": True}
     done = next((payload for name, payload in events if name == "done"), None)

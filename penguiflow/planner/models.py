@@ -24,7 +24,7 @@ class JSONLLMClient(Protocol):
 class PlannerEvent:
     """Structured event emitted during planner execution for observability."""
 
-    event_type: str  # step_start, step_complete, llm_call, pause, resume, finish, stream_chunk, artifact_chunk
+    event_type: str  # step_start, step_complete, llm_call, pause, resume, finish, stream_chunk, artifact_chunk, llm_stream_chunk
     ts: float
     trajectory_step: int
     thought: str | None = None

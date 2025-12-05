@@ -83,6 +83,7 @@ def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
         reflection_llm=reflection_llm,
         planning_hints={{ planning_hints_literal }},
         event_callback=event_callback,
+        stream_final_response=config.planner_stream_final_response,
     )
 
     return PlannerBundle(planner=planner, registry=registry)

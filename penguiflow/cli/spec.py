@@ -457,6 +457,7 @@ class PlannerSpec(BaseModel):
     system_prompt_extra: str
     memory_prompt: str | None = None
     hints: PlannerHintsSpec | None = None
+    stream_final_response: bool = False
 
     model_config = ConfigDict(extra="forbid")
 

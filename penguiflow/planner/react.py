@@ -800,12 +800,14 @@ class ReactPlanner:
         reflection_config: ReflectionConfig | None = None,
         reflection_llm: str | Mapping[str, Any] | None = None,
         tool_policy: ToolPolicy | None = None,
+        stream_final_response: bool = False,
     ) -> None:
         if catalog is None:
             if nodes is None or registry is None:
                 raise ValueError("Either catalog or (nodes and registry) must be provided")
             catalog = build_catalog(nodes, registry)
 
+        self._stream_final_response = stream_final_response
         self._tool_policy = tool_policy
         specs = list(catalog)
         if tool_policy is not None:
@@ -916,6 +918,7 @@ class ReactPlanner:
                 json_schema_mode=json_schema_mode,
                 max_retries=llm_max_retries,
                 timeout_s=llm_timeout_s,
+                streaming_enabled=stream_final_response,
             )
 
         # LiteLLM-based separate clients (override DSPy if explicitly provided)
@@ -1523,9 +1526,35 @@ class ReactPlanner:
             if response_format is None and getattr(self._client, "expects_json_schema", False):
                 response_format = self._action_schema
 
+            stream_allowed = (
+                self._stream_final_response
+                and isinstance(self._client, _LiteLLMJSONClient)
+                and (
+                    response_format is None
+                    or (
+                        isinstance(response_format, Mapping)
+                        and response_format.get("type") in ("json_object", "json_schema")
+                    )
+                )
+            )
+
+            def _emit_llm_chunk(text: str, done: bool) -> None:
+                if self._event_callback is None:
+                    return
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="llm_stream_chunk",
+                        ts=self._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        extra={"text": text, "done": done},
+                    )
+                )
+
             llm_result = await self._client.complete(
                 messages=messages,
                 response_format=response_format,
+                stream=stream_allowed,
+                on_stream_chunk=_emit_llm_chunk if stream_allowed else None,
             )
             raw, cost = _coerce_llm_response(llm_result)
             last_raw = raw
