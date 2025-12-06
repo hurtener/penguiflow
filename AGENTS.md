@@ -3,8 +3,8 @@
 ## Snapshot
 - Built the entire library in under 14 days; no downstream consumers right now, so risk is mostly examples/back-compat.
 - Baseline: v2.3 ReAct planner is in place on top of the v2.1 distributed/A2A core.
-- Immediate focus: v2.4 API Refinement & Production Hardening (plan.md).
-- Next: v2.5 endgame polish (adaptive re-plan, budgets, parallel polish).
+- Immediate focus: v2.6 Streaming Support & Spec Generation.
+- Completed: v2.5 CLI scaffolding, v2.4 API refinement.
 
 ## Completed
 - v2.1 Distributed & A2A: StateStore, MessageBus, RemoteTransport, A2A server adapter; streaming/cancel propagation; telemetry/durability hooks.
@@ -23,10 +23,17 @@ Phases (from plan.md):
 
 Guardrails: keep compatibility shims, add deprecation warnings, add tests for new APIs and join inject; keep prompt parity after refactor (snapshot/fixture tests).
 
-## v2.5 Endgame (after 2.4)
-- Adaptive re-plan on failure with constraint manager (deadline/hop budgets) and structured error channel — already in `planner/react.py`.
-- Token-aware trajectory compression with optional cheaper summarizer LLM; pause/resume durability via StateStore when present — already implemented.
-- Parallel fan-out + joins with approvals/await-input patterns and examples (`react_parallel`, `react_pause_resume`, `react_replan`) — implemented; join_k-style semantics are not yet integrated into the planner executor.
+## v2.6 Streaming Support (current)
+- `JSONLLMClient` protocol now supports `stream` and `on_stream_chunk` parameters.
+- All templates updated to support streaming callbacks.
+- Spec generation for tool documentation.
+
+## v2.5 CLI Scaffolding (completed)
+- Full `penguiflow new` command with 9 project templates.
+- Enhancement flags: `--with-streaming`, `--with-hitl`, `--with-a2a`, `--no-memory`.
+- Adaptive re-plan on failure with constraint manager (deadline/hop budgets) and structured error channel.
+- Token-aware trajectory compression with optional cheaper summarizer LLM; pause/resume durability via StateStore.
+- Parallel fan-out + joins with approvals/await-input patterns.
 
 ## Non-Goals
 - No heavy dependencies; remain asyncio + Pydantic v2; no built-in endpoints/UI/storage.

@@ -44,9 +44,14 @@ It provides:
   configured `StateStore` for debugging.
 * **Built-in CLI** — `penguiflow init` generates VS Code snippets/launch/tasks/settings for planner development (travels with the pip package).
 
-### v2.5 - CLI Scaffolding & Extended Planner (current)
+### v2.6 - Streaming Support (current)
 
-**CLI Scaffolding System:**
+**Streaming Enhancements:**
+- `JSONLLMClient` protocol now supports `stream` and `on_stream_chunk` parameters
+- All templates updated to support streaming callbacks
+- Improved token-level streaming for real-time responses
+
+**v2.5 CLI Scaffolding (included):**
 - Full `penguiflow new` command with 9 project templates
 - **Tier 1 (Core):** `minimal`, `react`, `parallel` — foundational patterns
 - **Tier 2 (Service):** `lighthouse`, `wayfinder`, `analyst` — domain-ready agents
@@ -64,7 +69,7 @@ It provides:
 ### CLI Quickstart
 
 ```bash
-# Project scaffolding (NEW in v2.5)
+# Project scaffolding
 uv run penguiflow new my-agent --template react        # ReactPlanner with memory
 uv run penguiflow new my-agent --template enterprise   # Multi-tenant enterprise setup
 uv run penguiflow new my-agent --template parallel --with-streaming  # Parallel + SSE
@@ -794,8 +799,9 @@ playbook latency. Copy them into product repos to watch for regressions over tim
 
 ## 🔮 Roadmap
 
-* **v2.5 (current)**: CLI scaffolding system with 9 templates and enhancement flags, extended ReactPlanner with ToolContext protocol and explicit context splits.
-* **v2.x**: streaming, per-trace cancellation, deadlines/budgets, metadata propagation, observability hooks, visualizer, routing policies, traceable errors, and FlowTestKit.
+* **v2.6 (current)**: Streaming support with `stream` and `on_stream_chunk` parameters in `JSONLLMClient` protocol.
+* **v2.5**: CLI scaffolding system with 9 templates and enhancement flags, extended ReactPlanner with ToolContext protocol and explicit context splits.
+* **v2.x**: per-trace cancellation, deadlines/budgets, metadata propagation, observability hooks, visualizer, routing policies, traceable errors, and FlowTestKit.
 * **Future**: optional distributed runners, richer third-party observability adapters, and extended template library.
 
 ---

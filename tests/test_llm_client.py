@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from penguiflow.planner.llm import (
-    _LiteLLMJSONClient,
     _coerce_llm_response,
     _extract_json_from_text,
+    _LiteLLMJSONClient,
     _response_format_policy,
     _sanitize_json_schema,
 )
