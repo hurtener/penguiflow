@@ -10,8 +10,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from penguiflow.planner.llm import (
+    _artifact_placeholder,
+    _build_minimal_planner_schema,
     _coerce_llm_response,
     _extract_json_from_text,
+    _inline_defs,
     _LiteLLMJSONClient,
     _response_format_policy,
     _sanitize_json_schema,
@@ -361,3 +364,185 @@ class TestLiteLLMJSONClient:
             if "json_schema" in rf:
                 schema = rf["json_schema"].get("schema", {})
                 assert schema.get("additionalProperties") is False
+
+
+class TestBuildMinimalPlannerSchema:
+    def test_builds_valid_schema(self) -> None:
+        schema = _build_minimal_planner_schema()
+        assert schema["type"] == "object"
+        assert "thought" in schema["properties"]
+        assert "next_node" in schema["properties"]
+        assert "args" in schema["properties"]
+        assert "plan" in schema["properties"]
+        assert "join" in schema["properties"]
+        assert "required" in schema
+        assert schema["additionalProperties"] is False
+
+
+class TestInlineDefs:
+    def test_inlines_simple_ref(self) -> None:
+        defs = {"MyType": {"type": "string"}}
+        schema = {
+            "type": "object",
+            "properties": {"field": {"$ref": "#/$defs/MyType"}},
+            "$defs": defs,
+        }
+        result = _inline_defs(schema, defs)
+        assert result["properties"]["field"] == {"type": "string"}
+        assert "$defs" not in result
+
+    def test_inlines_nested_refs(self) -> None:
+        defs = {
+            "Inner": {"type": "integer"},
+            "Outer": {"type": "object", "properties": {"value": {"$ref": "#/$defs/Inner"}}},
+        }
+        schema = {
+            "type": "object",
+            "properties": {"nested": {"$ref": "#/$defs/Outer"}},
+            "$defs": defs,
+        }
+        result = _inline_defs(schema, defs)
+        assert result["properties"]["nested"]["properties"]["value"] == {"type": "integer"}
+
+    def test_handles_lists(self) -> None:
+        defs = {"Item": {"type": "string"}}
+        schema = {
+            "type": "array",
+            "items": [{"$ref": "#/$defs/Item"}, {"type": "number"}],
+            "$defs": defs,
+        }
+        result = _inline_defs(schema, defs)
+        assert result["items"][0] == {"type": "string"}
+        assert result["items"][1] == {"type": "number"}
+
+    def test_handles_missing_ref(self) -> None:
+        schema = {"type": "object", "properties": {"field": {"$ref": "#/$defs/Missing"}}}
+        result = _inline_defs(schema, {})
+        # Should keep the ref if not found in defs
+        assert result["properties"]["field"] == {"$ref": "#/$defs/Missing"}
+
+
+class TestArtifactPlaceholder:
+    def test_string_artifact(self) -> None:
+        result = _artifact_placeholder("hello world")
+        assert result == "<artifact:str size=11>"
+
+    def test_bytes_artifact(self) -> None:
+        result = _artifact_placeholder(b"binary data")
+        assert result == "<artifact:bytes size=11>"
+
+    def test_list_artifact(self) -> None:
+        result = _artifact_placeholder([1, 2, 3])
+        assert result == "<artifact:list size=3>"
+
+    def test_dict_artifact(self) -> None:
+        result = _artifact_placeholder({"a": 1, "b": 2})
+        assert result == "<artifact:dict size=2>"
+
+    def test_object_without_len(self) -> None:
+        class NoLen:
+            pass
+        result = _artifact_placeholder(NoLen())
+        assert result == "<artifact:NoLen>"
+
+
+class TestSanitizeJsonSchemaAdvanced:
+    def test_require_all_fields(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"a": {"type": "string"}, "b": {"type": "integer"}},
+            "required": ["a"],
+        }
+        result = _sanitize_json_schema(schema, strict_mode=True, require_all_fields=True)
+        assert set(result["required"]) == {"a", "b"}
+
+    def test_inline_defs_option(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"field": {"$ref": "#/$defs/MyType"}},
+            "$defs": {"MyType": {"type": "string"}},
+        }
+        result = _sanitize_json_schema(schema, inline_defs=True)
+        assert "$defs" not in result
+        assert result["properties"]["field"] == {"type": "string"}
+
+    def test_all_of_sanitization(self) -> None:
+        schema = {
+            "allOf": [
+                {"type": "object", "properties": {"x": {"type": "string", "minLength": 1}}},
+            ]
+        }
+        result = _sanitize_json_schema(schema, strict_mode=True)
+        assert "minLength" not in result["allOf"][0]["properties"]["x"]
+
+    def test_one_of_sanitization(self) -> None:
+        schema = {
+            "oneOf": [
+                {"type": "string", "maxLength": 100},
+                {"type": "integer", "maximum": 10},
+            ]
+        }
+        result = _sanitize_json_schema(schema)
+        assert "maxLength" not in result["oneOf"][0]
+        assert "maximum" not in result["oneOf"][1]
+
+    def test_any_of_sanitization(self) -> None:
+        schema = {
+            "anyOf": [
+                {"type": "string", "pattern": ".*"},
+                {"type": "null"},
+            ]
+        }
+        result = _sanitize_json_schema(schema)
+        assert "pattern" not in result["anyOf"][0]
+
+    def test_defs_sanitization(self) -> None:
+        schema = {
+            "type": "object",
+            "$defs": {
+                "MyDef": {"type": "string", "minLength": 5},
+            },
+        }
+        result = _sanitize_json_schema(schema)
+        assert "minLength" not in result["$defs"]["MyDef"]
+
+    def test_additional_properties_dict_sanitized(self) -> None:
+        schema = {
+            "type": "object",
+            "additionalProperties": {"type": "string", "maxLength": 50},
+        }
+        result = _sanitize_json_schema(schema, strict_mode=False)
+        # additionalProperties with dict schema should be recursively sanitized
+        assert "maxLength" not in result["additionalProperties"]
+
+
+class TestResponseFormatPolicyExtended:
+    def test_xai_returns_json_object(self) -> None:
+        assert _response_format_policy("xai/grok-2") == "json_object"
+
+    def test_grok_returns_json_object(self) -> None:
+        assert _response_format_policy("grok-beta") == "json_object"
+
+    def test_mistral_returns_json_object(self) -> None:
+        assert _response_format_policy("mistral/mistral-large") == "json_object"
+
+    def test_llama_returns_json_object(self) -> None:
+        assert _response_format_policy("meta-llama/llama-3") == "json_object"
+
+    def test_qwen_returns_json_object(self) -> None:
+        assert _response_format_policy("qwen/qwen-2.5") == "json_object"
+
+    def test_deepseek_returns_json_object(self) -> None:
+        assert _response_format_policy("deepseek/deepseek-coder") == "json_object"
+
+    def test_cohere_returns_json_object(self) -> None:
+        assert _response_format_policy("cohere/command-r") == "json_object"
+
+    def test_openrouter_gpt_returns_json_object(self) -> None:
+        assert _response_format_policy("openrouter/gpt-4") == "json_object"
+
+    def test_o1_model_returns_json_object(self) -> None:
+        assert _response_format_policy("openrouter/o1-preview") == "json_object"
+
+    def test_o3_model_returns_json_object(self) -> None:
+        assert _response_format_policy("openrouter/o3-mini") == "json_object"

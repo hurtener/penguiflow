@@ -97,3 +97,72 @@ def test_build_system_prompt_planning_hints_in_tagged_section() -> None:
     assert "<planning_constraints>" in prompt
     assert "No external calls" in prompt
     assert "</planning_constraints>" in prompt
+
+
+def test_render_planning_hints_comprehensive() -> None:
+    hints = {
+        "constraints": "Stay within budget",
+        "preferred_order": ["step1", "step2"],
+        "parallel_groups": [["a", "b"]],
+        "disallow_nodes": ["dangerous"],
+        "preferred_nodes": ["safe"],
+        "budget": {"max_hops": 10},
+    }
+    result = prompts.render_planning_hints(hints)
+    assert "Stay within budget" in result
+    assert "Preferred order" in result
+    assert "Allowed parallel groups" in result
+    assert "Disallowed tools" in result
+    assert "Preferred tools" in result
+    assert "Budget hints" in result
+
+
+def test_render_planning_hints_empty() -> None:
+    result = prompts.render_planning_hints({})
+    assert result == ""
+
+
+def test_render_disallowed_node() -> None:
+    result = prompts.render_disallowed_node("forbidden_tool")
+    assert "forbidden_tool" in result
+    assert "not permitted" in result
+
+
+def test_render_ordering_hint_violation() -> None:
+    result = prompts.render_ordering_hint_violation(["first", "second"], "third")
+    assert "first, second" in result
+    assert "third" in result
+
+
+def test_render_parallel_limit() -> None:
+    result = prompts.render_parallel_limit(5)
+    assert "max_parallel=5" in result
+
+
+def test_render_sequential_only() -> None:
+    result = prompts.render_sequential_only("serial_tool")
+    assert "serial_tool" in result
+    assert "sequentially" in result
+
+
+def test_render_parallel_setup_error() -> None:
+    result = prompts.render_parallel_setup_error(["error1", "error2"])
+    assert "error1" in result
+    assert "error2" in result
+
+
+def test_render_empty_parallel_plan() -> None:
+    result = prompts.render_empty_parallel_plan()
+    assert "at least one branch" in result
+
+
+def test_render_parallel_with_next_node() -> None:
+    result = prompts.render_parallel_with_next_node("next_tool")
+    assert "next_tool" in result
+    assert "cannot set next_node" in result
+
+
+def test_render_parallel_unknown_failure() -> None:
+    result = prompts.render_parallel_unknown_failure("failed_tool")
+    assert "failed_tool" in result
+    assert "failed" in result

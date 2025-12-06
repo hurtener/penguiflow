@@ -15,6 +15,7 @@ from penguiflow import (
     log_flow_events,
     testkit,
 )
+from penguiflow.testkit import _StubContext
 
 
 @pytest.mark.asyncio
@@ -200,4 +201,92 @@ async def test_run_one_with_log_flow_events_records_error_payload(
 
     assert latency_events and latency_events[0][0] == "node_error"
     assert latency_events[0][1] > 0.0
+
+
+@pytest.mark.asyncio
+async def test_stub_context_emit_methods() -> None:
+    ctx = _StubContext()
+    # These should not raise
+    await ctx.emit("test")
+    ctx.emit_nowait("test")
+    # emit_chunk should raise
+    with pytest.raises(RuntimeError, match="does not support emit_chunk"):
+        await ctx.emit_chunk("chunk")
+
+
+@pytest.mark.asyncio
+async def test_simulate_error_with_result() -> None:
+    simulated = testkit.simulate_error(
+        "test_node",
+        FlowErrorCode.NODE_EXCEPTION,
+        fail_times=1,
+        result="fixed_result",
+    )
+    message = Message(payload="input", headers=Headers(tenant="test"))
+
+    # First call should fail
+    with pytest.raises(RuntimeError):
+        await simulated(message, None)
+
+    # Second call should succeed with fixed result
+    result = await simulated(message, None)
+    assert result == "fixed_result"
+
+
+def test_simulate_error_rejects_both_result_and_factory() -> None:
+    with pytest.raises(ValueError, match="only one of"):
+        testkit.simulate_error(
+            "test",
+            FlowErrorCode.NODE_EXCEPTION,
+            result="value",
+            result_factory=lambda x: x,
+        )
+
+
+@pytest.mark.asyncio
+async def test_assert_preserves_envelope_with_node_object() -> None:
+    async def simple_node(message: Message, _ctx: Any) -> Message:
+        return message.model_copy(update={"payload": "modified"})
+
+    node = Node(simple_node, name="simple", policy=NodePolicy(validate="none"))
+    message = Message(payload="test", headers=Headers(tenant="acme"))
+
+    result = await testkit.assert_preserves_message_envelope(node, message=message)
+    assert result.payload == "modified"
+
+
+@pytest.mark.asyncio
+async def test_assert_preserves_envelope_rejects_trace_id_mutation() -> None:
+    async def mutate_trace(message: Message, _ctx: Any) -> Message:
+        return Message(
+            payload=message.payload,
+            headers=message.headers,
+            trace_id="different-trace-id",
+        )
+
+    message = Message(payload="test", headers=Headers(tenant="acme"))
+
+    with pytest.raises(AssertionError, match="trace_id"):
+        await testkit.assert_preserves_message_envelope(mutate_trace, message=message)
+
+
+@pytest.mark.asyncio
+async def test_assert_preserves_envelope_rejects_sync_function() -> None:
+    def sync_node(message: Message, _ctx: Any) -> Message:
+        return message
+
+    with pytest.raises(TypeError, match="async node"):
+        await testkit.assert_preserves_message_envelope(sync_node)
+
+
+@pytest.mark.asyncio
+async def test_run_one_rejects_non_message() -> None:
+    async def noop(message: Message, _ctx: Any) -> Message:
+        return message
+
+    node = Node(noop, name="noop", policy=NodePolicy(validate="none"))
+    flow = create(node.to())
+
+    with pytest.raises(TypeError, match="Message instance"):
+        await testkit.run_one(flow, "not a message")  # type: ignore
 
