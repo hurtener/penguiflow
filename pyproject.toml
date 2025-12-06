@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "penguiflow"
-version = "2.5.0"
+version = "2.6.0"
 description = "Async-first orchestration library for multi-agent and data pipelines"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,6 +15,9 @@ authors = [
 dependencies = [
     "pydantic>=2.6",
     "click>=8.1",
+    "pyyaml>=6.0",
+    "fastapi>=0.118",
+    "uvicorn>=0.32",
 ]
 
 [project.optional-dependencies]
@@ -29,9 +32,13 @@ dev = [
     "fastapi>=0.118",
     "httpx>=0.27",
     "jinja2>=3.1",
+    "pyyaml>=6.0",
+    "uvicorn>=0.32",
 ]
 cli = [
     "jinja2>=3.1",
+    "fastapi>=0.118",
+    "uvicorn>=0.32",
 ]
 a2a-server = [
     "fastapi>=0.118",
@@ -51,11 +58,17 @@ Homepage = "https://github.com/penguiflow/penguiflow"
 [tool.setuptools]
 packages = { find = { include = ["penguiflow*", "penguiflow_a2a*", "examples*"] } }
 include-package-data = true
+exclude-package-data = { "penguiflow" = ["cli/playground_ui/src/*", "cli/playground_ui/src/**/*", "cli/playground_ui/package.json", "cli/playground_ui/tsconfig.json", "cli/playground_ui/vite.config.ts"] }
 
 [tool.setuptools.package-data]
 "penguiflow" = [
     "templates/vscode/*",
     "templates/new/**/*",
+    "templates/*.yaml",
+    "cli/templates/*",
+    "cli/templates/**/*",
+    "cli/playground_ui/dist/*",
+    "cli/playground_ui/dist/**/*",
 ]
 
 [tool.uv]
@@ -75,6 +88,7 @@ dev = [
     "fastapi>=0.118",
     "httpx>=0.27",
     "jinja2>=3.1",
+    "pyyaml>=6.0",
 ]
 
 [tool.ruff]
@@ -108,6 +122,7 @@ omit = [
     "*/tests/*",
     "*/__pycache__/*",
     "*/.venv/*",
+    "*/planner/dspy_client.py",
 ]
 
 [tool.coverage.report]

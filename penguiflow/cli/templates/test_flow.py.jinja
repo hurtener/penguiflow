@@ -1,0 +1,35 @@
+"""Tests for {{ flow.name }} flow."""
+
+from __future__ import annotations
+
+import pytest
+
+from penguiflow.core import FlowError
+from penguiflow.types import Headers, Message
+
+from {{ package_name }}.flows import build_{{ flow.name }}_flow
+
+
+@pytest.mark.asyncio
+async def test_{{ flow.name }}_flow_runs() -> None:
+    """Flow executes end-to-end for a basic message."""
+    bundle = build_{{ flow.name }}_flow()
+    flow = bundle.flow
+    registry = bundle.registry
+
+    flow.run(registry=registry)
+
+    try:
+        payload = {"input": "demo"}
+        message = Message(payload=payload, headers=Headers(tenant="demo"))
+
+        await flow.emit(message)
+        result = await flow.fetch()
+
+        if isinstance(result, FlowError):
+            raise AssertionError(f"Flow errored: {result}")
+
+        assert isinstance(result, Message)
+        assert result.payload == payload
+    finally:
+        await flow.stop()

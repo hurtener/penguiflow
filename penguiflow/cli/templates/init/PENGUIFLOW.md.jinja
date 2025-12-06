@@ -1,0 +1,317 @@
+# PenguiFlow Development Guide
+
+> Generated for **{{ agent_name }}** with PenguiFlow v2.6
+
+This guide covers everything you need to build your agent using the spec-based workflow.
+
+---
+
+## Quick Start
+
+```bash
+# 1. Edit your spec
+# Open {{ agent_name }}.yaml and customize tools, prompts, etc.
+
+# 2. Validate (dry run)
+penguiflow generate --spec {{ agent_name }}.yaml --dry-run
+
+# 3. Generate project
+penguiflow generate --spec {{ agent_name }}.yaml
+
+# 4. Setup and run
+cd {{ agent_name }}
+uv sync
+cp .env.example .env
+# Edit .env with your API keys
+uv run python -m {{ package_name }} "Your query here"
+```
+
+---
+
+## Spec Format Reference
+
+### Agent Configuration
+
+```yaml
+agent:
+  name: my-agent              # Becomes Python package name
+  description: "..."          # Agent purpose
+  template: react             # Template to use
+  flags:
+    memory: false             # Memory Iceberg integration
+    streaming: false          # Streaming responses
+    hitl: false               # Human-in-the-loop
+    a2a: false                # Agent-to-agent
+```
+
+**Templates:**
+| Template | Use Case |
+|----------|----------|
+| `minimal` | Bare bones, maximum control |
+| `react` | Standard ReAct agent with tool calling |
+| `parallel` | Batch processing with parallel execution |
+| `enterprise` | Full observability, resilience, multi-tenancy |
+
+### Tool Definition
+
+```yaml
+tools:
+  - name: tool_name           # snake_case required
+    description: "..."        # Shown to LLM
+    tags: ["cat1", "cat2"]    # For organization
+    side_effects: read        # pure|read|write|external|stateful
+    args:
+      param1: str
+      param2: Optional[int]
+      param3: list[str]
+    result:
+      output1: str
+      output2: dict[str, str]
+```
+
+**Supported Types:**
+- Primitives: `str`, `int`, `float`, `bool`
+- Containers: `list[T]`, `dict[K, V]`
+- Optional: `Optional[T]`
+
+### Flow Definition (Advanced)
+
+Flows define PenguiFlow DAGs for multi-step processing:
+
+```yaml
+flows:
+  - name: pipeline_name
+    description: "..."
+
+    dependencies:             # Injected services
+      - name: parser
+        type_hint: Parser
+
+    nodes:
+      - name: step_one
+        input_type: InputPayload     # Generates Pydantic model
+        output_type: OutputPayload
+        policy:
+          validate: both             # in|out|both|none
+          timeout_s: 60.0
+          max_retries: 2
+          backoff_base: 1.0
+        uses: [parser]               # Dependencies this node uses
+
+    steps: [step_one, step_two]      # Execution order
+```
+
+### Planner Configuration
+
+```yaml
+planner:
+  max_iters: 12                # Max planning iterations
+  hop_budget: 8                # Max tool calls per run
+  absolute_max_parallel: 5     # Max concurrent tools
+
+  system_prompt_extra: |
+    Define your agent's personality, capabilities, and guidelines here.
+
+  memory_prompt: |             # Required if memory: true
+    Instructions for using conversation history.
+
+  hints:                       # Optional execution hints
+    ordering: [tool_a, tool_b]
+    parallel_groups: [[fetch_a, fetch_b]]
+    sequential_only: [write_tool]
+```
+
+---
+
+## Generated Project Structure
+
+```
+{{ agent_name }}/
+├── src/{{ package_name }}/
+│   ├── __init__.py
+│   ├── __main__.py          # Entry point
+│   ├── config.py            # Environment configuration
+│   ├── orchestrator.py      # Main orchestrator
+│   ├── planner.py           # Tool catalog and prompts
+│   ├── models.py            # Pydantic models
+│   ├── tools/
+│   │   ├── __init__.py      # Tool registry
+│   │   └── *.py             # Generated tool stubs
+│   ├── flows/               # If flows defined
+│   │   └── *.py             # Flow implementations
+│   └── clients/
+│       └── memory.py        # Memory client (if enabled)
+├── tests/
+│   ├── conftest.py
+│   └── test_tools/
+├── .env.example
+└── pyproject.toml
+```
+
+---
+
+## Implementing Tools
+
+Generated tools are stubs that raise `NotImplementedError`. Implement the logic:
+
+```python
+# src/{{ package_name }}/tools/search_documents.py
+
+@tool(desc="Search documents", tags=["search"], side_effects="read")
+async def search_documents(
+    args: SearchDocumentsArgs,
+    ctx: ToolContext
+) -> SearchDocumentsResult:
+    # Access LLM context (memories, etc.)
+    memories = ctx.llm_context.get("retrieved_memories", [])
+
+    # Access tool context (passed from orchestrator)
+    db = ctx.tool_context.get("database")
+
+    # Your implementation
+    results = await db.search(args.query, limit=args.top_k or 10)
+
+    return SearchDocumentsResult(
+        documents=[r.text for r in results],
+        scores=[r.score for r in results],
+    )
+```
+
+### Context Types
+
+| Context | Purpose | Set By |
+|---------|---------|--------|
+| `ctx.llm_context` | Read-only LLM data (memories, retrieved docs) | Orchestrator |
+| `ctx.tool_context` | Mutable runtime data (DB connections, caches) | You |
+
+---
+
+## Running Your Agent
+
+### Development
+
+```bash
+# Interactive mode
+uv run python -m {{ package_name }} "Your query"
+
+# With environment variables
+LLM_MODEL=gpt-4o uv run python -m {{ package_name }} "Query"
+```
+
+### Testing
+
+```bash
+# Run all tests
+uv run pytest
+
+# Run specific tool test
+uv run pytest tests/test_tools/test_search_documents.py -v
+```
+
+### Environment Variables
+
+Key variables in `.env`:
+
+```bash
+# LLM
+LLM_PROVIDER=openrouter
+LLM_MODEL=anthropic/claude-sonnet-4
+OPENROUTER_API_KEY=sk-or-...
+
+# Memory (if enabled)
+MEMORY_ENABLED=false
+MEMORY_BASE_URL=http://localhost:8000
+```
+
+---
+
+## Architecture Patterns
+
+### ReactPlanner Flow
+
+```
+User Query
+    ↓
+┌─────────────────────────────────────┐
+│           ReactPlanner              │
+│  ┌─────────────────────────────┐    │
+│  │ 1. Think about the query    │    │
+│  │ 2. Decide which tool to use │    │
+│  │ 3. Execute tool             │←───│──── Tools
+│  │ 4. Observe result           │    │
+│  │ 5. Repeat or finish         │    │
+│  └─────────────────────────────┘    │
+└─────────────────────────────────────┘
+    ↓
+Final Answer
+```
+
+### Memory Integration
+
+When `memory: true`:
+
+1. **Session Start**: Load conscious memories
+2. **Before Planning**: Retrieve relevant memories for query
+3. **During Planning**: Memories available in `llm_context`
+4. **After Response**: Ingest interaction to memory
+
+---
+
+## Common Patterns
+
+### Parallel Tool Execution
+
+```yaml
+planner:
+  hints:
+    parallel_groups:
+      - [fetch_user_data, fetch_preferences, fetch_history]
+```
+
+### Tool Ordering
+
+```yaml
+planner:
+  hints:
+    ordering: [search, filter, summarize]
+```
+
+### Error Handling in Tools
+
+```python
+@tool(desc="...", side_effects="external")
+async def external_api_call(args: Args, ctx: ToolContext) -> Result:
+    try:
+        response = await client.call(args.query)
+        return Result(data=response)
+    except ExternalAPIError as e:
+        # Return error result instead of raising
+        return Result(data=None, error=str(e))
+```
+
+---
+
+## Troubleshooting
+
+### "Tool name must be snake_case"
+Tool names must be lowercase with underscores: `search_documents` not `searchDocuments`.
+
+### "planner.memory_prompt is required when memory is enabled"
+Add `memory_prompt` to your planner config, or set `memory: false`.
+
+### "LiteLLM is not installed"
+Install the planner extras: `pip install penguiflow[planner]`
+
+### Tool not being called
+Check that:
+1. Tool is in the `tools` list in spec
+2. Tool description clearly explains when to use it
+3. `system_prompt_extra` mentions the tool
+
+---
+
+## Resources
+
+- [PenguiFlow GitHub](https://github.com/...)
+- [ReactPlanner Integration Guide](docs/REACT_PLANNER_INTEGRATION_GUIDE.md)
+- [Full Templating Guide](docs/TEMPLATING_QUICKGUIDE.md)

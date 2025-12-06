@@ -113,7 +113,7 @@ async def build_planner() -> ReactPlanner:
             "next_node": "respond",
             "args": {"answer": "Metrics sent to Slack with highlights."},
         },
-        {"thought": "finish", "next_node": None, "args": {"answer": "done"}},
+        {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
     ]
 
     planner = ReactPlanner(

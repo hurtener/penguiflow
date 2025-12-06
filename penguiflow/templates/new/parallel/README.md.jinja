@@ -1,23 +1,92 @@
 # {{ project_name }}
 
-Parallel ReactPlanner scaffold demonstrating fan-out + explicit join injection.
+Parallel ReactPlanner scaffold demonstrating fan-out and explicit join injection for concurrent tool execution.
 
-## Quickstart
+## Quick Start
 
 ```bash
+# Install dependencies
 uv sync
+
+# Set up environment variables
+cp .env.example .env
+# Edit .env with your API keys
+
+# Run the agent
 uv run python -m {{ package_name }}
 ```
 
-## Customize
+## Project Structure
 
-- Update tools under `src/{{ package_name }}/tools/` to reflect your workloads.
-- Swap the scripted LLM in `planner.py` with your provider.
-- Telemetry and memory stubs are ready for production integrations.
+```
+{{ package_name }}/
+├── orchestrator.py     # Main entry point with parallel execution
+├── planner.py          # ReactPlanner with parallel_join_nodes
+├── config.py           # Environment-driven settings
+├── models.py           # Pydantic data models
+├── tools/              # Agent tools
+│   ├── fetch_a.py      # Parallel fetch tool A
+│   ├── fetch_b.py      # Parallel fetch tool B
+│   └── merge.py        # Join/merge tool
+└── __main__.py         # CLI entry point
+```
 
-## Use a real LLM and adjust prompts
+## Parallel Execution
 
-- Set `LLM_MODEL` and your provider key (e.g., `OPENAI_API_KEY`) in the environment.
-- In `planner.py`, replace `ScriptedLLM` by passing `llm=config.llm_model` to `ReactPlanner` (LiteLLM path), or use `DSPyLLMClient(llm=config.llm_model)` as `llm_client`.
-- Custom clients just need `.complete(messages=[...], response_format=...)`.
-- To nudge prompts, pass `system_prompt_extra` and/or `planning_hints` to `ReactPlanner` instead of editing `penguiflow.planner.prompts` directly.
+This template demonstrates:
+
+1. **Fan-out**: Multiple tools execute concurrently
+2. **Join injection**: Results merge at a designated join node
+3. **Budget management**: `absolute_max_parallel` limits concurrent tasks
+
+Configure parallel behavior:
+
+```python
+planner = ReactPlanner(
+    llm=config.llm_model,
+    nodes=nodes,
+    registry=registry,
+    parallel_join_nodes={merge_results},  # Join point
+    absolute_max_parallel=config.absolute_max_parallel,
+)
+```
+
+## Configuration
+
+Key settings (via environment or `config.py`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLM_MODEL` | `stub-llm` | LLM model identifier |
+| `PLANNER_MAX_ITERS` | `10` | Maximum planning iterations |
+| `PLANNER_HOP_BUDGET` | `6` | Maximum tool hops |
+| `ABSOLUTE_MAX_PARALLEL` | `4` | Maximum concurrent tool calls |
+
+## Use a Real LLM
+
+1. Set your API key in `.env`:
+   ```bash
+   OPENAI_API_KEY=sk-...
+   LLM_MODEL=gpt-4o
+   ```
+
+2. In `planner.py`, replace `ScriptedLLM` with:
+   ```python
+   planner = ReactPlanner(
+       llm=config.llm_model,
+       nodes=nodes,
+       registry=registry,
+       parallel_join_nodes={merge_results},
+   )
+   ```
+
+## Testing
+
+```bash
+uv run pytest
+```
+
+## Learn More
+
+- [PenguiFlow Documentation](https://github.com/yourorg/penguiflow)
+- See `REACT_PLANNER_INTEGRATION_GUIDE.md` for parallel execution details

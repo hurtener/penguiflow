@@ -41,8 +41,10 @@ class ReflectionStubClient:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, object] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> tuple[str, float]:
-        del response_format
+        del response_format, stream, on_stream_chunk
         self.calls.append(list(messages))
         if not self._responses:
             raise AssertionError("No stub responses left")
@@ -63,13 +65,13 @@ async def test_reflection_improves_incomplete_answer() -> None:
             {
                 "thought": "Found info about parallel",
                 "next_node": None,
-                "args": {"answer": "PenguiFlow uses asyncio.gather"},
+                "args": {"raw_answer": "PenguiFlow uses asyncio.gather"},
             },
             {
                 "thought": "Adding error recovery details",
                 "next_node": None,
                 "args": {
-                    "answer": (
+                    "raw_answer": (
                         "PenguiFlow uses asyncio.gather for parallel execution "
                         "with exponential backoff for error recovery"
                     ),
@@ -133,7 +135,7 @@ async def test_reflection_improves_incomplete_answer() -> None:
     assert reflection_meta["score"] >= 0.8
     assert reflection_meta["revisions"] == 1
     assert reflection_meta["passed"] is True
-    assert "error recovery" in result.payload["answer"].lower()
+    assert "error recovery" in result.payload["raw_answer"].lower()
 
 
 @pytest.mark.asyncio()
@@ -150,17 +152,17 @@ async def test_reflection_stops_after_max_revisions() -> None:
             {
                 "thought": "Answer",
                 "next_node": None,
-                "args": {"answer": "Bad answer"},
+                "args": {"raw_answer": "Bad answer"},
             },
             {
                 "thought": "Revised",
                 "next_node": None,
-                "args": {"answer": "Still bad"},
+                "args": {"raw_answer": "Still bad"},
             },
             {
                 "thought": "Revised again",
                 "next_node": None,
-                "args": {"answer": "Still not good"},
+                "args": {"raw_answer": "Still not good"},
             },
             # Clarification response after max revisions exceeded
             {
@@ -240,7 +242,7 @@ async def test_reflection_disabled_by_default() -> None:
             {
                 "thought": "Done",
                 "next_node": None,
-                "args": {"answer": "Result"},
+                "args": {"raw_answer": "Result"},
             },
         ]
     )
@@ -273,12 +275,12 @@ async def test_reflection_respects_hop_budget() -> None:
             {
                 "thought": "Done",
                 "next_node": None,
-                "args": {"answer": "First"},
+                "args": {"raw_answer": "First"},
             },
             {
                 "thought": "Revised",
                 "next_node": None,
-                "args": {"answer": "Second"},
+                "args": {"raw_answer": "Second"},
             },
         ]
     )
@@ -337,7 +339,7 @@ async def test_reflection_event_emission() -> None:
             {
                 "thought": "Done",
                 "next_node": None,
-                "args": {"answer": "Answer"},
+                "args": {"raw_answer": "Answer"},
             },
         ]
     )
@@ -415,8 +417,10 @@ async def test_critique_uses_main_llm_when_shared_client() -> None:
             *,
             messages: list[Mapping[str, str]],
             response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
         ) -> str:
-            del response_format
+            del response_format, stream, on_stream_chunk
             self.calls.append(list(messages))
             if self._responses:
                 return self._responses.pop(0)
@@ -424,7 +428,7 @@ async def test_critique_uses_main_llm_when_shared_client() -> None:
 
     client = CaptureClient(
         [
-            {"thought": "Done", "next_node": None, "args": {"answer": "Result"}},
+            {"thought": "Done", "next_node": None, "args": {"raw_answer": "Result"}},
         ]
     )
 

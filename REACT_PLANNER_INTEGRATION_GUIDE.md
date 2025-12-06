@@ -1,5 +1,7 @@
 # PenguiFlow: React Planner Integration Guide (v2.4+)
 
+> **v2.7 Update**: Planner now returns structured `FinalPayload` with `raw_answer` field. All examples updated to show the new format. See [Handling Different Result Types](#handling-different-result-types) for payload extraction patterns.
+
 This guide is the **source of truth** for wiring `ReactPlanner` into a production agent. It captures patterns from `planner_enterprise_agent_v2`, `react_typed_tools`, `react_parallel_join`, and `react_pause_resume`.
 
 ---
@@ -92,9 +94,21 @@ async def main():
     )
 
     result = await planner.run("What is 2+2?")
-    print(result.payload)
+
+    # Extract structured payload (v2.7+)
+    payload = result.payload
+    print(f"Answer: {payload['raw_answer']}")
+    print(f"Confidence: {payload.get('confidence')}")
+    print(f"Artifacts: {payload.get('artifacts', {})}")
 
 asyncio.run(main())
+```
+
+**Expected Output:**
+```
+Answer: The sum of 2+2 is 4.
+Confidence: 0.95
+Artifacts: {}
 ```
 
 ---
@@ -277,7 +291,13 @@ class AgentOrchestrator:
                 },
             )
 
-        return FinalAnswer.model_validate(result.payload)
+        # Payload is a FinalPayload dict with raw_answer field
+        payload = result.payload
+        return FinalAnswer(
+            text=payload["raw_answer"],
+            artifacts=payload.get("artifacts", {}),
+            confidence=payload.get("confidence"),
+        )
 ```
 
 ### Handling Different Result Types
@@ -290,8 +310,14 @@ if isinstance(result, PlannerPause):
     return handle_pause(result)
 
 elif result.reason == "answer_complete":
-    # Success - extract payload
-    return FinalAnswer.model_validate(result.payload)
+    # Success - extract payload (always has raw_answer)
+    payload = result.payload  # FinalPayload dict
+    return FinalAnswer(
+        text=payload["raw_answer"],
+        artifacts=payload.get("artifacts", {}),
+        confidence=payload.get("confidence"),
+        sources=payload.get("sources", []),
+    )
 
 elif result.reason == "no_path":
     # LLM couldn't find a solution
@@ -739,7 +765,7 @@ class ScriptedLLM:
 # Test
 scripted = [
     {"thought": "triage", "next_node": "triage", "args": {"text": "test"}},
-    {"thought": "finish", "next_node": None, "args": None},
+    {"thought": "finish", "next_node": None, "args": {"raw_answer": "Complete response"}},
 ]
 
 planner = ReactPlanner(
@@ -749,6 +775,7 @@ planner = ReactPlanner(
 
 result = await planner.run("Test query")
 assert result.reason == "answer_complete"
+assert result.payload["raw_answer"] == "Complete response"
 ```
 
 ### Testing Pause/Resume
@@ -756,7 +783,7 @@ assert result.reason == "answer_complete"
 ```python
 scripted = [
     {"thought": "approve", "next_node": "approval", "args": {"intent": "test"}},
-    {"thought": "finish", "next_node": None, "args": None},
+    {"thought": "finish", "next_node": None, "args": {"raw_answer": "Approved and completed"}},
 ]
 
 planner = ReactPlanner(llm_client=ScriptedLLM(scripted), catalog=catalog)
@@ -767,6 +794,7 @@ assert result.reason == "approval_required"
 
 final = await planner.resume(result.resume_token, user_input="approved")
 assert final.reason == "answer_complete"
+assert final.payload["raw_answer"] == "Approved and completed"
 ```
 
 ### Testing Parallel Execution
@@ -784,11 +812,12 @@ scripted = [
             "inject": {"results": "$results", "count": "$expect"},
         },
     },
-    {"thought": "finish", "next_node": None},
+    {"thought": "finish", "next_node": None, "args": {"raw_answer": "Search complete with 2 sources"}},
 ]
 
 result = await planner.run("Search both")
 # Verify merge received both results
+assert result.payload["raw_answer"] == "Search complete with 2 sources"
 ```
 
 ---
@@ -895,7 +924,13 @@ async def execute(query: str) -> Answer:
     if isinstance(result, PlannerPause):
         raise PauseRequired(result.resume_token)
 
-    return Answer.model_validate(result.payload)
+    # Extract raw_answer from FinalPayload
+    payload = result.payload
+    return Answer(
+        text=payload["raw_answer"],
+        confidence=payload.get("confidence"),
+        artifacts=payload.get("artifacts", {}),
+    )
 ```
 
 ### Tool Template

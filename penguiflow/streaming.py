@@ -71,11 +71,7 @@ async def stream_flow(
 
     while True:
         fetch_coro = flow.fetch()
-        result = (
-            await asyncio.wait_for(fetch_coro, timeout)
-            if timeout is not None
-            else await fetch_coro
-        )
+        result = await asyncio.wait_for(fetch_coro, timeout) if timeout is not None else await fetch_coro
 
         payload = result.payload if hasattr(result, "payload") else result
 

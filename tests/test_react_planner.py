@@ -9,11 +9,11 @@ from collections.abc import Mapping
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
-from penguiflow.planner import PlannerPause, ReactPlanner
+from penguiflow.planner import PlannerEvent, PlannerPause, ReactPlanner
 from penguiflow.planner.react import (
     PlannerAction,
     ReflectionConfig,
@@ -201,7 +201,10 @@ class StubClient:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, object] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> tuple[str, float]:
+        del stream, on_stream_chunk
         self.calls.append(list(messages))
         if not self._responses:
             raise AssertionError("No stub responses left")
@@ -217,7 +220,10 @@ class SummarizerStub:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, object] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> tuple[str, float]:
+        del stream, on_stream_chunk
         self.calls.append(list(messages))
         return (
             json.dumps(
@@ -248,8 +254,10 @@ class CostStubClient:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, object] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> tuple[str, float]:
-        del response_format
+        del response_format, stream, on_stream_chunk
         self.calls.append(list(messages))
         if not self._responses:
             raise AssertionError("No stub responses left")
@@ -290,7 +298,7 @@ async def test_react_planner_runs_end_to_end() -> None:
             {
                 "thought": "final",
                 "next_node": None,
-                "args": {"answer": "PenguiFlow is lightweight."},
+                "args": {"raw_answer": "PenguiFlow is lightweight."},
             },
         ]
     )
@@ -299,8 +307,85 @@ async def test_react_planner_runs_end_to_end() -> None:
     result = await planner.run("Tell me about PenguiFlow")
 
     assert result.reason == "answer_complete"
-    assert result.payload == {"answer": "PenguiFlow is lightweight."}
+    # FinalPayload wraps the answer with standard fields
+    assert result.payload["raw_answer"] == "PenguiFlow is lightweight."
+    assert "artifacts" in result.payload
     assert result.metadata["step_count"] == 2
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_collects_sources_into_payload() -> None:
+    class SourceArgs(BaseModel):
+        query: str
+
+    class SourceDoc(BaseModel):
+        model_config = ConfigDict(json_schema_extra={"produces_sources": True})
+
+        title: str
+        url: str | None = None
+        snippet: str
+        score: float = Field(
+            default=0.0,
+            json_schema_extra={"source_field": "relevance_score"},
+        )
+
+    class SourceResult(BaseModel):
+        results: list[SourceDoc]
+
+    @tool(desc="Return documents with source markers")
+    async def retrieve_sources(args: SourceArgs, ctx: Any) -> SourceResult:
+        del ctx
+        return SourceResult(
+            results=[
+                SourceDoc(
+                    title="Doc A",
+                    url="https://example.com/a",
+                    snippet="alpha",
+                    score=0.9,
+                ),
+                SourceDoc(
+                    title="Doc B",
+                    url="https://example.com/b",
+                    snippet="beta",
+                    score=0.7,
+                ),
+            ]
+        )
+
+    registry = ModelRegistry()
+    registry.register("retrieve_sources", SourceArgs, SourceResult)
+
+    client = StubClient(
+        [
+            {
+                "thought": "collect",
+                "next_node": "retrieve_sources",
+                "args": {"query": "docs"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "done"},
+            },
+        ]
+    )
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog(
+            [Node(retrieve_sources, name="retrieve_sources")],
+            registry,
+        ),
+    )
+
+    result = await planner.run("Fetch docs")
+
+    assert result.reason == "answer_complete"
+    sources = result.payload["sources"]
+    assert len(sources) == 2
+    assert sources[0]["title"] == "Doc A"
+    assert sources[0]["relevance_score"] == pytest.approx(0.9)
+    assert result.metadata["sources"] == sources
 
 
 @pytest.mark.asyncio()
@@ -313,7 +398,7 @@ async def test_tool_context_separation_and_meta_warning() -> None:
                 "next_node": "capture",
                 "args": {"answer": "ok"},
             },
-            {"thought": "finish", "next_node": None, "args": {"answer": "ok"}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "ok"}},
         ]
     )
     registry = ModelRegistry()
@@ -362,7 +447,7 @@ async def test_react_planner_recovers_from_invalid_node() -> None:
         [
             {"thought": "invalid", "next_node": "missing", "args": {}},
             {"thought": "triage", "next_node": "triage", "args": {"question": "What?"}},
-            {"thought": "finish", "next_node": None, "args": {"answer": "done"}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
         ]
     )
     planner = make_planner(client)
@@ -374,29 +459,25 @@ async def test_react_planner_recovers_from_invalid_node() -> None:
 
 
 @pytest.mark.asyncio()
-async def test_react_planner_reports_validation_error() -> None:
+async def test_react_planner_autofills_missing_args() -> None:
+    """Test that missing required args are autofilled with defaults."""
     client = StubClient(
         [
-            {"thought": "bad", "next_node": "retrieve", "args": {}},
-            {
-                "thought": "triage",
-                "next_node": "triage",
-                "args": {"question": "Q"},
-            },
-            {
-                "thought": "retrieve",
-                "next_node": "retrieve",
-                "args": {"intent": "docs"},
-            },
-            {"thought": "finish", "next_node": None, "args": {"answer": "ok"}},
+            # Args empty - will be autofilled with defaults
+            {"thought": "retrieve", "next_node": "retrieve", "args": {}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "ok"}},
         ]
     )
     planner = make_planner(client)
 
-    result = await planner.run("Test validation path")
+    result = await planner.run("Test autofill path")
 
-    errors = [step["error"] for step in result.metadata["steps"] if step["error"]]
-    assert any("did not validate" in err for err in errors)
+    # Should complete without validation errors because autofill kicks in
+    assert result.reason == "answer_complete"
+    # First step should have observation (tool was called successfully with autofilled args)
+    steps = result.metadata["steps"]
+    assert len(steps) >= 1
+    assert steps[0]["observation"] is not None
 
 
 @pytest.mark.asyncio()
@@ -408,7 +489,7 @@ async def test_react_planner_reports_output_validation_error() -> None:
                 "next_node": "broken",
                 "args": {"intent": "docs"},
             },
-            {"thought": "finish", "next_node": None, "args": {"answer": "fallback"}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "fallback"}},
         ]
     )
     registry = ModelRegistry()
@@ -449,7 +530,7 @@ async def test_react_planner_replans_after_tool_failure() -> None:
             {
                 "thought": "final",
                 "next_node": None,
-                "args": {"answer": "Using cached docs"},
+                "args": {"raw_answer": "Using cached docs"},
             },
         ]
     )
@@ -593,9 +674,10 @@ async def test_react_planner_litellm_guard_raises_runtime_error() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_step_repairs_invalid_action() -> None:
+    # Use input that cannot be salvaged - not valid JSON at all
     client = StubClient(
         [
-            "{}",
+            "not valid json {{{",
             {
                 "thought": "recover",
                 "next_node": "triage",
@@ -614,6 +696,24 @@ async def test_react_planner_step_repairs_invalid_action() -> None:
 
 
 @pytest.mark.asyncio()
+async def test_react_planner_step_salvages_empty_json() -> None:
+    """Test that empty JSON {} is salvaged into a valid finish action."""
+    client = StubClient(
+        [
+            "{}",
+        ]
+    )
+    planner = make_planner(client)
+    trajectory = Trajectory(query="salvage test")
+
+    action = await planner.step(trajectory)
+    # Empty JSON should be salvaged to a finish action (next_node=None)
+    assert action.next_node is None
+    assert action.thought == "planning next step"
+    assert len(client.calls) == 1  # No repair needed
+
+
+@pytest.mark.asyncio()
 async def test_react_planner_compacts_history_when_budget_exceeded() -> None:
     long_answer = "PenguiFlow " * 30
     client = StubClient(
@@ -628,7 +728,7 @@ async def test_react_planner_compacts_history_when_budget_exceeded() -> None:
                 "next_node": "respond",
                 "args": {"answer": long_answer},
             },
-            {"thought": "finish", "next_node": None, "args": {"answer": "done"}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
         ]
     )
     planner = make_planner(client, token_budget=180)
@@ -656,7 +756,7 @@ async def test_react_planner_invokes_summarizer_client() -> None:
                 "next_node": "respond",
                 "args": {"answer": "value"},
             },
-            {"thought": "finish", "next_node": None, "args": {"answer": "ok"}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "ok"}},
         ]
     )
     planner = make_planner(client, token_budget=60)
@@ -704,7 +804,7 @@ async def test_react_planner_pause_and_resume_flow() -> None:
             {
                 "thought": "finish",
                 "next_node": None,
-                "args": {"answer": "Report sent"},
+                "args": {"raw_answer": "Report sent"},
             },
         ]
     )
@@ -753,7 +853,7 @@ async def test_resume_accepts_tool_context_override() -> None:
                 "next_node": "contextual_respond",
                 "args": {"answer": "done"},
             },
-            {"thought": "finish", "next_node": None, "args": {"answer": "done"}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
         ]
     )
     planner = ReactPlanner(llm_client=client, catalog=catalog, pause_enabled=True)
@@ -801,7 +901,7 @@ async def test_react_planner_resume_preserves_hop_budget() -> None:
             {
                 "thought": "finish",
                 "next_node": None,
-                "args": {"answer": "Report"},
+                "args": {"raw_answer": "Report"},
             },
         ]
     )
@@ -851,7 +951,7 @@ async def test_react_planner_disallows_nodes_from_hints() -> None:
             {
                 "thought": "finish",
                 "next_node": None,
-                "args": {"answer": "done"},
+                "args": {"raw_answer": "done"},
             },
         ]
     )
@@ -888,7 +988,7 @@ async def test_react_planner_emits_ordering_hint_once() -> None:
             {
                 "thought": "finish",
                 "next_node": None,
-                "args": {"answer": "done"},
+                "args": {"raw_answer": "done"},
             },
         ]
     )
@@ -927,7 +1027,7 @@ async def test_react_planner_parallel_plan_executes_concurrently() -> None:
             {
                 "thought": "finish",
                 "next_node": None,
-                "args": {"answer": "done"},
+                "args": {"raw_answer": "done"},
             },
         ]
     )
@@ -991,7 +1091,7 @@ async def test_react_planner_parallel_join_explicit_inject_mapping() -> None:
             {
                 "thought": "finish",
                 "next_node": None,
-                "args": {"answer": "done"},
+                "args": {"raw_answer": "done"},
             },
         ]
     )
@@ -1044,7 +1144,7 @@ async def test_react_planner_parallel_join_magic_injection_warns(
             {
                 "thought": "finish",
                 "next_node": None,
-                "args": {"answer": "done"},
+                "args": {"raw_answer": "done"},
             },
         ]
     )
@@ -1091,7 +1191,7 @@ async def test_react_planner_parallel_plan_handles_branch_failure() -> None:
             {
                 "thought": "finish",
                 "next_node": None,
-                "args": {"answer": "done"},
+                "args": {"raw_answer": "done"},
             },
         ]
     )
@@ -1139,7 +1239,7 @@ async def test_react_planner_parallel_plan_rejects_invalid_node() -> None:
             {
                 "thought": "finish",
                 "next_node": None,
-                "args": {"answer": "done"},
+                "args": {"raw_answer": "done"},
             },
         ]
     )
@@ -1227,7 +1327,7 @@ async def test_react_planner_absolute_max_parallel_enforced() -> None:
             {
                 "thought": "finish",
                 "next_node": None,
-                "args": {"answer": "done"},
+                "args": {"raw_answer": "done"},
             },
         ]
     )
@@ -1256,7 +1356,6 @@ async def test_react_planner_absolute_max_parallel_enforced() -> None:
 @pytest.mark.asyncio()
 async def test_react_planner_event_callback_receives_events() -> None:
     """Event callback should receive all planner events."""
-    from penguiflow.planner import PlannerEvent
 
     events: list[PlannerEvent] = []
 
@@ -1270,7 +1369,7 @@ async def test_react_planner_event_callback_receives_events() -> None:
                 "next_node": "triage",
                 "args": {"question": "Test"},
             },
-            {"thought": "finish", "next_node": None, "args": {"answer": "done"}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
         ]
     )
 
@@ -1298,7 +1397,6 @@ async def test_react_planner_event_callback_receives_events() -> None:
 @pytest.mark.asyncio()
 async def test_react_planner_captures_stream_chunks() -> None:
     """Streaming chunks should be emitted as events and persisted."""
-    from penguiflow.planner import PlannerEvent
 
     chunk_events: list[dict[str, Any]] = []
 
@@ -1325,7 +1423,7 @@ async def test_react_planner_captures_stream_chunks() -> None:
             {
                 "thought": "finish",
                 "next_node": None,
-                "args": {"answer": "Complete"},
+                "args": {"raw_answer": "Complete"},
             },
         ]
     )
@@ -1353,6 +1451,60 @@ async def test_react_planner_captures_stream_chunks() -> None:
         assert chunk["seq"] == index
         assert chunk["text"] == f"token_{index} "
         assert chunk["done"] == (index == 4)
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_streams_artifacts() -> None:
+    """Artifact chunks should be emitted separately from text chunks."""
+    artifact_events: list[dict[str, Any]] = []
+
+    def event_callback(event: PlannerEvent) -> None:
+        if event.event_type == "artifact_chunk":
+            artifact_events.append(dict(event.extra))
+
+    @tool(desc="Stream artifact data")
+    async def artifact_tool(args: Query, ctx: Any) -> Answer:
+        await ctx.emit_artifact("chart", {"step": 0})
+        await ctx.emit_artifact(
+            "chart",
+            {"step": 1},
+            done=True,
+            artifact_type="chart_config",
+        )
+        return Answer(answer=f"complete:{args.question}")
+
+    registry = ModelRegistry()
+    registry.register("artifact_tool", Query, Answer)
+
+    client = StubClient(
+        [
+            {
+                "thought": "artifacts",
+                "next_node": "artifact_tool",
+                "args": {"question": "test"},
+            },
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
+        ]
+    )
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog([Node(artifact_tool, name="artifact_tool")], registry),
+        event_callback=event_callback,
+    )
+
+    result = await planner.run("Test artifact streaming")
+
+    assert len(artifact_events) == 2
+    assert artifact_events[0]["stream_id"] == "chart"
+    assert artifact_events[0]["seq"] == 0
+    assert artifact_events[0]["chunk"]["step"] == 0
+    assert artifact_events[1]["done"] is True
+    assert artifact_events[1]["artifact_type"] == "chart_config"
+
+    step_streams = result.metadata["steps"][0]["streams"]["chart"]
+    assert step_streams[0]["chunk"]["step"] == 0
+    assert step_streams[1]["done"] is True
 
 
 def test_trajectory_serialisation_preserves_stream_chunks() -> None:
@@ -1394,7 +1546,7 @@ async def test_react_planner_improved_token_estimation() -> None:
     """Token estimation should account for message structure overhead."""
     client = StubClient(
         [
-            {"thought": "finish", "next_node": None, "args": {"answer": "done"}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
         ]
     )
 
@@ -1465,7 +1617,7 @@ async def test_planner_tracks_llm_costs() -> None:
                 0.0015,
             ),
             (
-                {"thought": "Done", "next_node": None, "args": {"answer": "Result"}},
+                {"thought": "Done", "next_node": None, "args": {"raw_answer": "Result"}},
                 0.0020,
             ),
         ]
@@ -1507,7 +1659,7 @@ async def test_cost_tracking_with_reflection_and_summarizer() -> None:
                 {
                     "thought": "Answer",
                     "next_node": None,
-                    "args": {"answer": "First"},
+                    "args": {"raw_answer": "First"},
                 },
                 0.002,
             ),
@@ -1515,7 +1667,7 @@ async def test_cost_tracking_with_reflection_and_summarizer() -> None:
                 {
                     "thought": "Revised",
                     "next_node": None,
-                    "args": {"answer": "Better"},
+                    "args": {"raw_answer": "Better"},
                 },
                 0.002,
             ),
@@ -1599,10 +1751,12 @@ async def test_cost_tracking_graceful_when_unavailable() -> None:
             *,
             messages: list[Mapping[str, str]],
             response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
         ) -> str:
-            del messages, response_format
+            del messages, response_format, stream, on_stream_chunk
             return json.dumps(
-                {"thought": "Done", "next_node": None, "args": {"answer": "OK"}}
+                {"thought": "Done", "next_node": None, "args": {"raw_answer": "OK"}}
             )
 
     planner = ReactPlanner(

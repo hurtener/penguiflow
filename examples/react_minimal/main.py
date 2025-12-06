@@ -90,7 +90,7 @@ async def main() -> None:
                 "thought": "wrap up",
                 "next_node": None,
                 "args": {
-                    "answer": "PenguiFlow uses async orchestration and minimal deps."
+                    "raw_answer": "PenguiFlow uses async orchestration and minimal deps."
                 },
             },
         ]

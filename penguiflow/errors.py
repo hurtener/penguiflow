@@ -51,9 +51,7 @@ class FlowError(Exception):
         self.message = message
         self.original_exc = original_exc
         self.metadata = dict(metadata or {})
-        self.exception_type = (
-            type(original_exc).__name__ if original_exc is not None else None
-        )
+        self.exception_type = type(original_exc).__name__ if original_exc is not None else None
 
     def __str__(self) -> str:  # pragma: no cover - debug helper
         trace = f" trace={self.trace_id}" if self.trace_id else ""

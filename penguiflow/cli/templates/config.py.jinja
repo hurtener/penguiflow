@@ -1,0 +1,90 @@
+"""Configuration for {{ agent_name }}."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Parse boolean from environment variable."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    """Parse integer from environment variable."""
+    raw = os.getenv(name)
+    return int(raw) if raw is not None else default
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse float from environment variable."""
+    raw = os.getenv(name)
+    return float(raw) if raw is not None else default
+
+
+@dataclass
+class Config:
+    """Environment-driven configuration.
+
+    All settings can be overridden via environment variables.
+    Use Config.from_env() to load from environment.
+    """
+
+    # LLM Configuration
+    llm_model: str = "{{ primary_model }}"
+    summarizer_model: str | None = None
+    reflection_model: str | None = None
+
+    # Feature Flags
+    memory_enabled: bool = {{ memory_enabled }}
+    summarizer_enabled: bool = {{ summarizer_enabled }}
+    reflection_enabled: bool = {{ reflection_enabled }}
+
+    # Reflection Settings
+    reflection_quality_threshold: float = {{ reflection_quality_threshold }}
+    reflection_max_revisions: int = {{ reflection_max_revisions }}
+
+    # Service URLs
+    memory_base_url: str | None = {{ memory_base_url }}
+    lighthouse_base_url: str | None = {{ lighthouse_base_url }}
+    wayfinder_base_url: str | None = {{ wayfinder_base_url }}
+
+    # Planner Settings
+    planner_max_iters: int = {{ planner_max_iters }}
+    planner_hop_budget: int = {{ planner_hop_budget }}
+    planner_absolute_max_parallel: int = {{ planner_absolute_max_parallel }}
+    planner_stream_final_response: bool = {{ planner_stream_final_response }}
+
+    @classmethod
+    def from_env(cls) -> Config:
+        """Load configuration from environment variables."""
+        return cls(
+            # LLM Configuration
+            llm_model=os.getenv("LLM_MODEL", "{{ primary_model }}"),
+            summarizer_model=os.getenv("SUMMARIZER_MODEL"),
+            reflection_model=os.getenv("REFLECTION_MODEL"),
+
+            # Feature Flags
+            memory_enabled=_env_flag("MEMORY_ENABLED", {{ memory_enabled }}),
+            summarizer_enabled=_env_flag("SUMMARIZER_ENABLED", {{ summarizer_enabled }}),
+            reflection_enabled=_env_flag("REFLECTION_ENABLED", {{ reflection_enabled }}),
+
+            # Reflection Settings
+            reflection_quality_threshold=_env_float("REFLECTION_QUALITY_THRESHOLD", {{ reflection_quality_threshold }}),
+            reflection_max_revisions=_env_int("REFLECTION_MAX_REVISIONS", {{ reflection_max_revisions }}),
+
+            # Service URLs (None if not set)
+            memory_base_url=os.getenv("MEMORY_BASE_URL"),
+            lighthouse_base_url=os.getenv("LIGHTHOUSE_BASE_URL"),
+            wayfinder_base_url=os.getenv("WAYFINDER_BASE_URL"),
+
+            # Planner Settings
+            planner_max_iters=_env_int("PLANNER_MAX_ITERS", {{ planner_max_iters }}),
+            planner_hop_budget=_env_int("PLANNER_HOP_BUDGET", {{ planner_hop_budget }}),
+            planner_absolute_max_parallel=_env_int("PLANNER_ABSOLUTE_MAX_PARALLEL", {{ planner_absolute_max_parallel }}),
+            planner_stream_final_response=_env_flag("PLANNER_STREAM_FINAL_RESPONSE", {{ planner_stream_final_response }}),
+        )

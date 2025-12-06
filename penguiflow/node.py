@@ -53,10 +53,7 @@ class Node:
         signature = inspect.signature(self.func)
         params = list(signature.parameters.values())
         if len(params) != 2:
-            raise ValueError(
-                f"Node '{self.name}' must accept exactly two parameters "
-                f"(message, ctx); got {len(params)}"
-            )
+            raise ValueError(f"Node '{self.name}' must accept exactly two parameters (message, ctx); got {len(params)}")
 
         ctx_param = params[1]
         if ctx_param.kind not in (

@@ -9,9 +9,10 @@ import time
 import warnings
 from collections import ChainMap, defaultdict
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, Literal, get_args, get_origin
 from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
@@ -27,7 +28,9 @@ from .llm import (
     _coerce_llm_response,
     _estimate_size,
     _LiteLLMJSONClient,
+    _redact_artifacts,
     _sanitize_json_schema,
+    _unwrap_model,
     build_messages,
     critique_answer,
     generate_clarification,
@@ -36,6 +39,7 @@ from .llm import (
 )
 from .models import (
     ClarificationResponse,
+    FinalPayload,
     JoinInjection,
     JSONLLMClient,
     ParallelCall,
@@ -48,6 +52,7 @@ from .models import (
     ReflectionConfig,
     ReflectionCriteria,
     ReflectionCritique,
+    Source,
     ToolPolicy,
 )
 from .parallel import execute_parallel_plan
@@ -70,9 +75,7 @@ def _validate_llm_context(
     try:
         json.dumps(llm_context, ensure_ascii=False)
     except (TypeError, ValueError) as exc:
-        raise TypeError(
-            f"llm_context must be JSON-serializable: {exc}"
-        ) from exc
+        raise TypeError(f"llm_context must be JSON-serializable: {exc}") from exc
     return dict(llm_context)
 
 
@@ -88,6 +91,137 @@ def _coerce_tool_context(
     return dict(tool_context)
 
 
+def _salvage_action_payload(raw: str) -> PlannerAction | None:
+    """Attempt to coerce loosely-structured JSON into a PlannerAction."""
+
+    def _lenient_parse(payload: str) -> Mapping[str, Any] | None:
+        try:
+            return json.loads(payload)
+        except Exception:
+            try:
+                import ast
+
+                maybe = ast.literal_eval(payload)
+                if isinstance(maybe, Mapping):
+                    return maybe
+            except Exception:
+                return None
+        return None
+
+    data = _lenient_parse(raw)
+    if not isinstance(data, Mapping):
+        return None
+
+    patched = dict(data)
+    patched.setdefault("thought", "planning next step")
+    patched.setdefault("next_node", None)
+    patched.setdefault("args", None)
+    patched.setdefault("plan", None)
+    patched.setdefault("join", None)
+    if "action" in patched and isinstance(patched["action"], Mapping):
+        nested = patched["action"]
+        patched.update(
+            {
+                "thought": nested.get("thought", patched["thought"]),
+                "next_node": nested.get("next_node", patched["next_node"]),
+                "args": nested.get("args", patched["args"]),
+                "plan": nested.get("plan", patched["plan"]),
+                "join": nested.get("join", patched["join"]),
+            }
+        )
+
+    # Fill args when next_node is present but args missing
+    if patched.get("next_node") and patched.get("args") is None:
+        patched["args"] = {}
+
+    # Normalize plan entries
+    if isinstance(patched.get("plan"), Sequence) and not isinstance(patched.get("plan"), (str, bytes, bytearray)):
+        normalised_plan: list[dict[str, Any]] = []
+        for item in patched["plan"]:
+            if not isinstance(item, Mapping):
+                continue
+            entry = dict(item)
+            if "node" not in entry:
+                continue
+            entry.setdefault("args", {})
+            normalised_plan.append(entry)
+        patched["plan"] = normalised_plan if normalised_plan else None
+
+    # Normalize join shape
+    if isinstance(patched.get("join"), Mapping):
+        join = dict(patched["join"])
+        join.setdefault("inject", None)
+        join.setdefault("args", {})
+        patched["join"] = join
+
+    try:
+        return PlannerAction.model_validate(patched)
+    except ValidationError:
+        return None
+
+
+def _default_for_annotation(annotation: Any) -> Any:
+    """Generate a lightweight placeholder for a required field."""
+
+    origin = get_origin(annotation)
+    if origin is Literal:
+        values = get_args(annotation)
+        if values:
+            return values[0]
+
+    if origin is None:
+        if annotation is str:
+            return "unknown"
+        if annotation is bool:
+            return False
+        if annotation is int:
+            return 0
+        if annotation is float:
+            return 0.0
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            return {}
+    else:
+        if origin in (list, set, tuple, Sequence):
+            return []
+        if origin in (dict, Mapping):
+            return {}
+        if origin is type(None):
+            return None
+
+        for arg in get_args(annotation):
+            if arg is type(None):
+                continue
+            candidate = _default_for_annotation(arg)
+            if candidate is not None:
+                return candidate
+
+    return "<auto>"
+
+
+def _autofill_missing_args(
+    spec: NodeSpec,
+    args: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], tuple[str, ...]] | None:
+    """Fill required args with safe defaults to avoid repeated validation loops."""
+
+    provided: dict[str, Any] = dict(args or {})
+    filled: dict[str, Any] = {}
+
+    for field_name, field_info in spec.args_model.model_fields.items():
+        if field_name in provided and provided[field_name] is not None:
+            continue
+        if not field_info.is_required():
+            continue
+
+        placeholder = _default_for_annotation(field_info.annotation)
+        provided[field_name] = placeholder
+        filled[field_name] = placeholder
+
+    if not filled:
+        return None
+
+    return provided, tuple(filled.keys())
+
 
 @dataclass(slots=True)
 class _StreamChunk:
@@ -101,6 +235,393 @@ class _StreamChunk:
     ts: float
 
 
+@dataclass(slots=True)
+class _ArtifactChunk:
+    """Streaming artifact chunk captured during planning."""
+
+    stream_id: str
+    seq: int
+    chunk: Any
+    done: bool
+    artifact_type: str | None
+    meta: Mapping[str, Any]
+    ts: float
+
+
+class _StreamingArgsExtractor:
+    """Extracts 'args' field content from streaming JSON chunks for real-time display.
+
+    This class buffers incoming JSON chunks and detects when the LLM is generating
+    a "finish" action (next_node is null). Once detected, it extracts the args field
+    content character-by-character for streaming to the UI.
+
+    The args field is typically a dict like {"answer": "..."} or {"raw_answer": "..."},
+    so we need to look for the string value inside the object.
+    """
+
+    __slots__ = ("_buffer", "_is_finish_action", "_in_args_string", "_escape_next", "_emitted_count")
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._is_finish_action = False
+        self._in_args_string = False  # Inside the actual string value we want to stream
+        self._escape_next = False
+        self._emitted_count = 0
+
+    @property
+    def is_finish_action(self) -> bool:
+        return self._is_finish_action
+
+    @property
+    def emitted_count(self) -> int:
+        return self._emitted_count
+
+    def feed(self, chunk: str) -> list[str]:
+        """Feed a chunk of streaming JSON, return list of args content to emit.
+
+        Returns individual characters or small strings from the args field
+        that should be streamed to the UI.
+        """
+        self._buffer += chunk
+        emits: list[str] = []
+
+        # Detect finish action by looking for "next_node": null
+        if not self._is_finish_action:
+            normalized = self._buffer.replace(" ", "").replace("\n", "")
+            if '"next_node":null' in normalized:
+                self._is_finish_action = True
+
+        # Once we know it's a finish, look for args content
+        # The args is a dict like {"answer": "..."} or {"raw_answer": "..."}
+        # We need to find the string value inside
+        if self._is_finish_action and not self._in_args_string:
+            import re
+            # Look for "args": { ... "answer"/"raw_answer": " pattern
+            # Match: "args" : { "answer" : "  or "args":{"raw_answer":"
+            args_value_match = re.search(
+                r'"args"\s*:\s*\{\s*"(?:answer|raw_answer)"\s*:\s*"',
+                self._buffer
+            )
+            if args_value_match:
+                self._in_args_string = True
+                # Keep only content after the opening quote of the value
+                self._buffer = self._buffer[args_value_match.end():]
+
+        # Extract string content character by character
+        if self._in_args_string:
+            extracted = self._extract_string_content()
+            if extracted:
+                emits.extend(extracted)
+                self._emitted_count += len(extracted)
+
+        return emits
+
+    def _extract_string_content(self) -> list[str]:
+        """Extract characters from a JSON string, handling escapes."""
+        result: list[str] = []
+        i = 0
+
+        while i < len(self._buffer):
+            char = self._buffer[i]
+
+            if self._escape_next:
+                # Handle escape sequence
+                self._escape_next = False
+                if char == 'n':
+                    result.append('\n')
+                elif char == 't':
+                    result.append('\t')
+                elif char == 'r':
+                    result.append('\r')
+                elif char == '"':
+                    result.append('"')
+                elif char == '\\':
+                    result.append('\\')
+                elif char == 'u' and i + 4 < len(self._buffer):
+                    # Unicode escape \uXXXX
+                    try:
+                        hex_val = self._buffer[i + 1:i + 5]
+                        result.append(chr(int(hex_val, 16)))
+                        i += 4
+                    except (ValueError, IndexError):
+                        result.append(char)
+                else:
+                    result.append(char)
+                i += 1
+                continue
+
+            if char == '\\':
+                self._escape_next = True
+                i += 1
+                continue
+
+            if char == '"':
+                # End of string - stop processing
+                self._in_args_string = False
+                self._buffer = self._buffer[i + 1:]
+                break
+
+            result.append(char)
+            i += 1
+
+        # Keep unprocessed buffer
+        if self._in_args_string:
+            self._buffer = self._buffer[i:]
+
+        return result
+
+
+class _ArtifactCollector:
+    """Collect artifact-marked fields during planner execution."""
+
+    def __init__(self, existing: Mapping[str, Any] | None = None) -> None:
+        self._artifacts: dict[str, Any] = dict(existing or {})
+
+    def collect(
+        self,
+        node_name: str,
+        out_model: type[BaseModel],
+        observation: Mapping[str, Any],
+    ) -> None:
+        if not isinstance(observation, Mapping):
+            return
+
+        collected: dict[str, Any] = {}
+        for field_name, field_info in out_model.model_fields.items():
+            extra = field_info.json_schema_extra
+            if not isinstance(extra, Mapping):
+                extra = {}
+            if extra.get("artifact") and field_name in observation:
+                collected[field_name] = observation[field_name]
+
+        if not collected:
+            return
+
+        existing = self._artifacts.get(node_name, {})
+        merged = dict(existing)
+        merged.update(collected)
+        self._artifacts[node_name] = merged
+
+    def snapshot(self) -> dict[str, Any]:
+        return deepcopy(self._artifacts)
+
+
+def _model_json_schema_extra(model: type[BaseModel]) -> Mapping[str, Any]:
+    """Return json_schema_extra from model config (ConfigDict or legacy Config)."""
+
+    config_extra: Mapping[str, Any] | None = None
+    config = getattr(model, "model_config", None)
+    if isinstance(config, Mapping):
+        raw_extra = config.get("json_schema_extra")
+        if isinstance(raw_extra, Mapping):
+            config_extra = raw_extra
+
+    legacy_config = getattr(model, "Config", None)
+    if legacy_config is not None:
+        legacy_extra = getattr(legacy_config, "json_schema_extra", None)
+        if isinstance(legacy_extra, Mapping):
+            config_extra = {**(config_extra or {}), **legacy_extra}
+
+    return config_extra or {}
+
+
+def _produces_sources(model: type[BaseModel]) -> bool:
+    """Check whether the model declares that it produces sources."""
+
+    extra = _model_json_schema_extra(model)
+    return bool(extra.get("produces_sources"))
+
+
+def _source_field_map(model: type[BaseModel]) -> dict[str, str]:
+    """Build mapping of model field names to Source fields."""
+
+    mapping: dict[str, str] = {}
+    for field_name, field_info in model.model_fields.items():
+        extra = field_info.json_schema_extra
+        if not isinstance(extra, Mapping):
+            extra = {}
+        target = extra.get("source_field")
+        if target is None and field_name in Source.model_fields:
+            target = field_name
+        if target:
+            mapping[field_name] = str(target)
+    return mapping
+
+
+def _extract_source_payloads(
+    out_model: type[BaseModel],
+    observation: Any,
+) -> list[Mapping[str, Any]]:
+    """Extract potential Source payloads from an observation."""
+
+    if observation is None:
+        return []
+    if isinstance(observation, BaseModel):
+        observation = observation.model_dump(mode="json")
+    if not isinstance(observation, Mapping):
+        return []
+
+    payloads: list[Mapping[str, Any]] = []
+
+    if _produces_sources(out_model):
+        mapping = _source_field_map(out_model)
+        if mapping:
+            payload = {
+                target: observation.get(field_name)
+                for field_name, target in mapping.items()
+                if field_name in observation
+            }
+            if payload:
+                payloads.append(payload)
+
+    for field_name, field_info in out_model.model_fields.items():
+        nested_model = _unwrap_model(field_info.annotation)
+        if nested_model is None:
+            continue
+        nested_value = observation.get(field_name)
+        if nested_value is None:
+            continue
+
+        if isinstance(nested_value, Sequence) and not isinstance(nested_value, (str, bytes, bytearray, Mapping)):
+            for item in nested_value:
+                payloads.extend(_extract_source_payloads(nested_model, item))
+        elif isinstance(nested_value, Mapping) or isinstance(nested_value, BaseModel):
+            payloads.extend(_extract_source_payloads(nested_model, nested_value))
+
+    return payloads
+
+
+class _SourceCollector:
+    """Collect Source objects emitted by tools during execution."""
+
+    def __init__(self, existing: Sequence[Mapping[str, Any]] | None = None) -> None:
+        self._sources: list[Source] = []
+        self._seen: set[tuple[str, str | None, str | None]] = set()
+        for src in existing or []:
+            self._add(src)
+
+    def _add(self, payload: Mapping[str, Any] | Source) -> None:
+        try:
+            model = payload if isinstance(payload, Source) else Source.model_validate(payload)
+        except ValidationError as exc:
+            logger.debug("source_validation_failed", extra={"error": str(exc)})
+            return
+
+        key = (model.title, model.url, model.snippet)
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        self._sources.append(model)
+
+    def collect(self, out_model: type[BaseModel], observation: Mapping[str, Any]) -> None:
+        if not isinstance(observation, Mapping):
+            return
+        for payload in _extract_source_payloads(out_model, observation):
+            self._add(payload)
+
+    def snapshot(self) -> list[Mapping[str, Any]]:
+        return [src.model_dump(mode="json") for src in self._sources]
+
+
+def _normalise_artifact_value(value: Any) -> Any:
+    """Best-effort conversion of artifact chunks to JSON-serialisable payloads."""
+
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
+    try:
+        json.dumps(value, ensure_ascii=False)
+        return value
+    except Exception:
+        try:
+            return json.loads(json.dumps(value, default=str, ensure_ascii=False))
+        except Exception:
+            return repr(value)
+
+
+def _fallback_answer(last_observation: Any) -> str:
+    """Provide a safe fallback answer when planner args are missing.
+
+    This function extracts a human-readable answer string from various payload formats.
+    Per RFC_STRUCTURED_PLANNER_OUTPUT, the result must be a plain string (not JSON).
+    """
+
+    if isinstance(last_observation, Mapping):
+        # First pass: check for answer-like keys (prioritized order)
+        for key in (
+            "raw_answer",
+            "answer",
+            "text",
+            "result",
+            "output",
+            "response",
+            "message",
+            "content",
+            "greeting",
+            "joke",
+            "reply",
+            "summary",
+            "explanation",
+            "description",
+            "body",
+        ):
+            if key in last_observation:
+                value = last_observation[key]
+                if isinstance(value, str):
+                    return value
+                if isinstance(value, Mapping):
+                    # Recursively extract from nested dict
+                    return _fallback_answer(value)
+                if value is not None:
+                    return str(value)
+
+        # Second pass: check if there's a nested 'args' dict with answer-like keys
+        if "args" in last_observation and isinstance(last_observation["args"], Mapping):
+            nested = _fallback_answer(last_observation["args"])
+            if nested != "No answer produced.":
+                return nested
+
+        # Third pass: if observation has exactly one string value > 10 chars, use it
+        # (excluding 'thought' and 'next_node' which are planner metadata)
+        excluded_keys = {"thought", "next_node", "plan", "join"}
+        string_values = [
+            v for k, v in last_observation.items() if k not in excluded_keys and isinstance(v, str) and len(v) > 10
+        ]
+        if len(string_values) == 1:
+            return string_values[0]
+
+        # Fourth pass: use 'thought' as last resort if it looks like an answer
+        # (i.e., it doesn't start with typical thinking phrases)
+        thought = last_observation.get("thought", "")
+        if isinstance(thought, str) and len(thought) > 20:
+            thinking_phrases = (
+                "i need to",
+                "i should",
+                "i will",
+                "let me",
+                "i'll",
+                "first,",
+                "now i",
+                "the user",
+                "based on",
+                "looking at",
+                "i can see",
+                "i notice",
+                "according to",
+            )
+            thought_lower = thought.lower().strip()
+            if not any(thought_lower.startswith(p) for p in thinking_phrases):
+                return thought
+
+    if isinstance(last_observation, str):
+        return last_observation
+    if last_observation is not None:
+        try:
+            return json.dumps(last_observation, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(last_observation)
+    return "No answer produced."
+
+
 class _PlannerContext(ToolContext):
     __slots__ = (
         "_llm_context",
@@ -108,6 +629,8 @@ class _PlannerContext(ToolContext):
         "_planner",
         "_trajectory",
         "_chunks",
+        "_artifact_chunks",
+        "_artifact_seq",
         "_meta_warned",
     )
 
@@ -117,6 +640,8 @@ class _PlannerContext(ToolContext):
         self._planner = planner
         self._trajectory = trajectory
         self._chunks: list[_StreamChunk] = []
+        self._artifact_chunks: list[_ArtifactChunk] = []
+        self._artifact_seq: defaultdict[str, int] = defaultdict(int)
         self._meta_warned = False
 
     @property
@@ -174,10 +699,51 @@ class _PlannerContext(ToolContext):
             )
         )
 
+    async def emit_artifact(
+        self,
+        stream_id: str,
+        chunk: Any,
+        *,
+        done: bool = False,
+        artifact_type: str | None = None,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Emit a streaming artifact chunk during tool execution."""
+
+        serialised_chunk = _normalise_artifact_value(chunk)
+        seq = self._artifact_seq[stream_id]
+        self._artifact_seq[stream_id] += 1
+        record = _ArtifactChunk(
+            stream_id=stream_id,
+            seq=seq,
+            chunk=serialised_chunk,
+            done=done,
+            artifact_type=artifact_type or type(chunk).__name__,
+            meta=dict(meta or {}),
+            ts=self._planner._time_source(),
+        )
+        self._artifact_chunks.append(record)
+
+        self._planner._emit_event(
+            PlannerEvent(
+                event_type="artifact_chunk",
+                ts=record.ts,
+                trajectory_step=len(self._trajectory.steps),
+                extra={
+                    "stream_id": stream_id,
+                    "seq": seq,
+                    "chunk": serialised_chunk,
+                    "done": done,
+                    "artifact_type": record.artifact_type,
+                    "meta": dict(meta or {}),
+                },
+            )
+        )
+
     def _collect_chunks(self) -> dict[str, list[dict[str, Any]]]:
         """Collect streaming chunks grouped by stream identifier."""
 
-        if not self._chunks:
+        if not self._chunks and not self._artifact_chunks:
             return {}
 
         streams: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -191,10 +757,24 @@ class _PlannerContext(ToolContext):
                     "ts": chunk.ts,
                 }
             )
+        for artifact in self._artifact_chunks:
+            streams[artifact.stream_id].append(
+                {
+                    "seq": artifact.seq,
+                    "chunk": artifact.chunk,
+                    "artifact_type": artifact.artifact_type,
+                    "done": artifact.done,
+                    "meta": dict(artifact.meta),
+                    "ts": artifact.ts,
+                }
+            )
 
         for stream_chunks in streams.values():
             stream_chunks.sort(key=lambda payload: payload["seq"])
 
+        self._chunks.clear()
+        self._artifact_chunks.clear()
+        self._artifact_seq.clear()
         return dict(streams)
 
     async def pause(
@@ -343,14 +923,14 @@ class ReactPlanner:
         reflection_config: ReflectionConfig | None = None,
         reflection_llm: str | Mapping[str, Any] | None = None,
         tool_policy: ToolPolicy | None = None,
+        stream_final_response: bool = False,
     ) -> None:
         if catalog is None:
             if nodes is None or registry is None:
-                raise ValueError(
-                    "Either catalog or (nodes and registry) must be provided"
-                )
+                raise ValueError("Either catalog or (nodes and registry) must be provided")
             catalog = build_catalog(nodes, registry)
 
+        self._stream_final_response = stream_final_response
         self._tool_policy = tool_policy
         specs = list(catalog)
         if tool_policy is not None:
@@ -382,11 +962,7 @@ class ReactPlanner:
         self._spec_by_name = {spec.name: spec for spec in self._specs}
         self._catalog_records = [spec.to_tool_record() for spec in self._specs]
         self._planning_hints = _PlanningHints.from_mapping(planning_hints)
-        hints_payload = (
-            self._planning_hints.to_prompt_payload()
-            if not self._planning_hints.empty()
-            else None
-        )
+        hints_payload = self._planning_hints.to_prompt_payload() if not self._planning_hints.empty() else None
         self._system_prompt = prompts.build_system_prompt(
             self._catalog_records,
             extra=system_prompt_extra,
@@ -429,6 +1005,7 @@ class ReactPlanner:
             # instances for reflection (ReflectionCritique), summarization (TrajectorySummary),
             # and clarification (ClarificationResponse)
             from .dspy_client import DSPyLLMClient
+
             is_dspy = isinstance(llm_client, DSPyLLMClient)
 
             # Create DSPy reflection client if reflection enabled
@@ -438,18 +1015,14 @@ class ReactPlanner:
                     "dspy_reflection_client_creation",
                     extra={"schema": "ReflectionCritique"},
                 )
-                self._reflection_client = DSPyLLMClient.from_base_client(
-                    llm_client, ReflectionCritique
-                )
+                self._reflection_client = DSPyLLMClient.from_base_client(llm_client, ReflectionCritique)
 
                 # Create DSPy clarification client (used when reflection fails)
                 logger.info(
                     "dspy_clarification_client_creation",
                     extra={"schema": "ClarificationResponse"},
                 )
-                self._clarification_client = DSPyLLMClient.from_base_client(
-                    llm_client, ClarificationResponse
-                )
+                self._clarification_client = DSPyLLMClient.from_base_client(llm_client, ClarificationResponse)
 
             # Create DSPy summarizer client if summarization enabled
             if is_dspy and token_budget is not None and token_budget > 0:
@@ -458,9 +1031,7 @@ class ReactPlanner:
                     "dspy_summarizer_client_creation",
                     extra={"schema": "TrajectorySummary"},
                 )
-                self._summarizer_client = DSPyLLMClient.from_base_client(
-                    llm_client, TrajectorySummary
-                )
+                self._summarizer_client = DSPyLLMClient.from_base_client(llm_client, TrajectorySummary)
         else:
             if llm is None:
                 raise ValueError("llm or llm_client must be provided")
@@ -470,6 +1041,7 @@ class ReactPlanner:
                 json_schema_mode=json_schema_mode,
                 max_retries=llm_max_retries,
                 timeout_s=llm_timeout_s,
+                streaming_enabled=stream_final_response,
             )
 
         # LiteLLM-based separate clients (override DSPy if explicitly provided)
@@ -486,9 +1058,7 @@ class ReactPlanner:
         if self._reflection_client is None:
             if reflection_config and reflection_config.use_separate_llm:
                 if reflection_llm is None:
-                    raise ValueError(
-                        "reflection_llm required when use_separate_llm=True"
-                    )
+                    raise ValueError("reflection_llm required when use_separate_llm=True")
                 self._reflection_client = _LiteLLMJSONClient(
                     reflection_llm,
                     temperature=temperature,
@@ -584,9 +1154,7 @@ class ReactPlanner:
             If resume token is invalid or expired.
         """
         logger.info("planner_resume", extra={"token": token[:8] + "..."})
-        provided_tool_context = (
-            _coerce_tool_context(tool_context) if tool_context is not None else None
-        )
+        provided_tool_context = _coerce_tool_context(tool_context) if tool_context is not None else None
         record = await self._load_pause_record(token)
         trajectory = record.trajectory
         trajectory.llm_context = _validate_llm_context(trajectory.llm_context) or {}
@@ -624,6 +1192,8 @@ class ReactPlanner:
         tracker: _ConstraintTracker | None,
     ) -> PlannerFinish | PlannerPause:
         last_observation: Any | None = None
+        artifact_collector = _ArtifactCollector(trajectory.artifacts)
+        source_collector = _SourceCollector(trajectory.sources)
         self._active_trajectory = trajectory
         if tracker is None:
             tracker = _ConstraintTracker(
@@ -640,6 +1210,8 @@ class ReactPlanner:
                         "deadline_exhausted",
                         extra={"step": len(trajectory.steps)},
                     )
+                    trajectory.artifacts = artifact_collector.snapshot()
+                    trajectory.sources = source_collector.snapshot()
                     return self._finish(
                         trajectory,
                         reason="budget_exhausted",
@@ -672,24 +1244,26 @@ class ReactPlanner:
                 )
 
                 # Check constraints BEFORE executing parallel plan or any action
-                constraint_error = self._check_action_constraints(
-                    action, trajectory, tracker
-                )
+                constraint_error = self._check_action_constraints(action, trajectory, tracker)
                 if constraint_error is not None:
-                    trajectory.steps.append(
-                        TrajectoryStep(action=action, error=constraint_error)
-                    )
+                    trajectory.steps.append(TrajectoryStep(action=action, error=constraint_error))
                     trajectory.summary = None
                     continue
 
                 if action.plan:
                     parallel_observation, pause = await self._execute_parallel_plan(
-                        action, trajectory, tracker
+                        action,
+                        trajectory,
+                        tracker,
+                        artifact_collector,
+                        source_collector,
                     )
                     if pause is not None:
                         return pause
                     trajectory.summary = None
                     last_observation = parallel_observation
+                    trajectory.artifacts = artifact_collector.snapshot()
+                    trajectory.sources = source_collector.snapshot()
                     trajectory.resume_user_input = None
                     continue
 
@@ -697,19 +1271,11 @@ class ReactPlanner:
                     candidate_answer = action.args or last_observation
                     metadata_reflection: dict[str, Any] | None = None
 
-                    if (
-                        candidate_answer is not None
-                        and self._reflection_config
-                        and self._reflection_config.enabled
-                    ):
+                    if candidate_answer is not None and self._reflection_config and self._reflection_config.enabled:
                         critique: ReflectionCritique | None = None
                         metadata_reflection = {}
-                        for revision_idx in range(
-                            self._reflection_config.max_revisions + 1
-                        ):
-                            critique = await self._critique_answer(
-                                trajectory, candidate_answer
-                            )
+                        for revision_idx in range(self._reflection_config.max_revisions + 1):
+                            critique = await self._critique_answer(trajectory, candidate_answer)
 
                             self._emit_event(
                                 PlannerEvent(
@@ -726,11 +1292,7 @@ class ReactPlanner:
                                 )
                             )
 
-                            if (
-                                critique.passed
-                                or critique.score
-                                >= self._reflection_config.quality_threshold
-                            ):
+                            if critique.passed or critique.score >= self._reflection_config.quality_threshold:
                                 logger.info(
                                     "reflection_passed",
                                     extra={
@@ -741,9 +1303,7 @@ class ReactPlanner:
                                 break
 
                             if revision_idx >= self._reflection_config.max_revisions:
-                                threshold = (
-                                    self._reflection_config.quality_threshold
-                                )
+                                threshold = self._reflection_config.quality_threshold
 
                                 # Check if quality is still below threshold
                                 if critique.score < threshold:
@@ -769,6 +1329,7 @@ class ReactPlanner:
                                     # Ensure proper structure for downstream consumers (like FinalAnswer model)
                                     if isinstance(candidate_answer, dict):
                                         # Update existing dict with clarification
+                                        candidate_answer["raw_answer"] = clarification_text
                                         candidate_answer["text"] = clarification_text
 
                                         # Ensure required fields are present
@@ -804,6 +1365,7 @@ class ReactPlanner:
                                                 route = getattr(obs, "route", "unknown")
 
                                         candidate_answer = {
+                                            "raw_answer": clarification_text,
                                             "text": clarification_text,
                                             "route": route,
                                             "artifacts": {},
@@ -863,9 +1425,7 @@ class ReactPlanner:
                                 trajectory,
                                 critique,
                             )
-                            candidate_answer = (
-                                revision_action.args or revision_action.model_dump()
-                            )
+                            candidate_answer = revision_action.args or revision_action.model_dump()
                             trajectory.steps.append(
                                 TrajectoryStep(
                                     action=revision_action,
@@ -886,15 +1446,25 @@ class ReactPlanner:
                             if critique.feedback:
                                 metadata_reflection["feedback"] = critique.feedback
 
-                    payload = candidate_answer
                     metadata_extra: dict[str, Any] | None = None
                     if metadata_reflection is not None:
                         metadata_extra = {"reflection": metadata_reflection}
 
+                    trajectory.artifacts = artifact_collector.snapshot()
+                    trajectory.sources = source_collector.snapshot()
+                    final_payload = self._build_final_payload(
+                        candidate_answer,
+                        last_observation,
+                        trajectory.artifacts,
+                        trajectory.sources,
+                    )
+                    # Note: Real-time streaming of args content happens during LLM call
+                    # via _StreamingArgsExtractor in step(). No post-hoc chunking needed.
+
                     return self._finish(
                         trajectory,
                         reason="answer_complete",
-                        payload=payload,
+                        payload=final_payload.model_dump(mode="json"),
                         thought=action.thought,
                         constraints=tracker,
                         metadata_extra=metadata_extra,
@@ -913,13 +1483,35 @@ class ReactPlanner:
                 try:
                     parsed_args = spec.args_model.model_validate(action.args or {})
                 except ValidationError as exc:
-                    error = prompts.render_validation_error(
-                        spec.name,
-                        json.dumps(exc.errors(), ensure_ascii=False),
-                    )
-                    trajectory.steps.append(TrajectoryStep(action=action, error=error))
-                    trajectory.summary = None
-                    continue
+                    autofilled = _autofill_missing_args(spec, action.args)
+                    if autofilled is not None:
+                        autofilled_args, filled_fields = autofilled
+                        try:
+                            parsed_args = spec.args_model.model_validate(autofilled_args)
+                            action.args = autofilled_args
+                            logger.info(
+                                "planner_autofill_args",
+                                extra={
+                                    "tool": spec.name,
+                                    "filled": list(filled_fields),
+                                },
+                            )
+                        except ValidationError as autofill_exc:
+                            error = prompts.render_validation_error(
+                                spec.name,
+                                json.dumps(autofill_exc.errors(), ensure_ascii=False),
+                            )
+                            trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                            trajectory.summary = None
+                            continue
+                    else:
+                        error = prompts.render_validation_error(
+                            spec.name,
+                            json.dumps(exc.errors(), ensure_ascii=False),
+                        )
+                        trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                        trajectory.summary = None
+                        continue
 
                 ctx = _PlannerContext(self, trajectory)
                 try:
@@ -941,12 +1533,8 @@ class ReactPlanner:
                     await self._record_pause(signal.pause, trajectory, tracker)
                     return signal.pause
                 except Exception as exc:
-                    failure_payload = self._build_failure_payload(
-                        spec, parsed_args, exc
-                    )
-                    error = (
-                        f"tool '{spec.name}' raised {exc.__class__.__name__}: {exc}"
-                    )
+                    failure_payload = self._build_failure_payload(spec, parsed_args, exc)
+                    error = f"tool '{spec.name}' raised {exc.__class__.__name__}: {exc}"
                     failure_chunks = ctx._collect_chunks()
                     trajectory.steps.append(
                         TrajectoryStep(
@@ -982,16 +1570,24 @@ class ReactPlanner:
                     last_observation = None
                     continue
 
+                observation_json = observation.model_dump(mode="json")
+
+                artifact_collector.collect(spec.name, spec.out_model, observation_json)
+                source_collector.collect(spec.out_model, observation_json)
+
                 trajectory.steps.append(
                     TrajectoryStep(
                         action=action,
-                        observation=observation,
+                        observation=observation_json,
+                        llm_observation=_redact_artifacts(spec.out_model, observation_json),
                         streams=step_chunks or None,
                     )
                 )
                 tracker.record_hop()
                 trajectory.summary = None
-                last_observation = observation.model_dump(mode="json")
+                last_observation = observation_json
+                trajectory.artifacts = artifact_collector.snapshot()
+                trajectory.sources = source_collector.snapshot()
                 self._record_hint_progress(spec.name, trajectory)
                 trajectory.resume_user_input = None
 
@@ -1014,6 +1610,8 @@ class ReactPlanner:
                     if tracker.deadline_triggered
                     else prompts.render_hop_budget_violation(self._hop_budget or 0)
                 )
+                trajectory.artifacts = artifact_collector.snapshot()
+                trajectory.sources = source_collector.snapshot()
                 return self._finish(
                     trajectory,
                     reason="budget_exhausted",
@@ -1021,6 +1619,8 @@ class ReactPlanner:
                     thought=thought,
                     constraints=tracker,
                 )
+            trajectory.artifacts = artifact_collector.snapshot()
+            trajectory.sources = source_collector.snapshot()
             return self._finish(
                 trajectory,
                 reason="no_path",
@@ -1036,6 +1636,7 @@ class ReactPlanner:
         base_messages = await self._build_messages(trajectory)
         messages: list[dict[str, str]] = list(base_messages)
         last_error: str | None = None
+        last_raw: str | None = None
 
         for _ in range(self._repair_attempts):
             if last_error is not None:
@@ -1047,23 +1648,112 @@ class ReactPlanner:
                 ]
 
             response_format: Mapping[str, Any] | None = self._response_format
-            if response_format is None and getattr(
-                self._client, "expects_json_schema", False
-            ):
+            if response_format is None and getattr(self._client, "expects_json_schema", False):
                 response_format = self._action_schema
+
+            stream_allowed = (
+                self._stream_final_response
+                and isinstance(self._client, _LiteLLMJSONClient)
+                and (
+                    response_format is None
+                    or (
+                        isinstance(response_format, Mapping)
+                        and response_format.get("type") in ("json_object", "json_schema")
+                    )
+                )
+            )
+
+            # Create extractor to detect finish actions and stream args content
+            args_extractor = _StreamingArgsExtractor()
+
+            def _emit_llm_chunk(
+                text: str,
+                done: bool,
+                *,
+                _extractor: _StreamingArgsExtractor = args_extractor,
+            ) -> None:
+                if self._event_callback is None:
+                    return
+
+                # DEBUG: Log incoming chunks
+                logger.debug(
+                    "llm_chunk_received",
+                    extra={"text": text[:100] if text else "", "done": done, "buffer_len": len(_extractor._buffer)},
+                )
+
+                # Feed chunk to extractor to detect args content
+                args_chars = _extractor.feed(text)
+
+                # DEBUG: Log extractor state
+                logger.debug(
+                    "extractor_state",
+                    extra={
+                        "is_finish": _extractor.is_finish_action,
+                        "in_args_string": _extractor._in_args_string,
+                        "chars_extracted": len(args_chars),
+                    },
+                )
+
+                # Emit args content as "answer" phase for real-time display
+                if args_chars:
+                    # Batch small chars into reasonable chunks for efficiency
+                    args_text = "".join(args_chars)
+                    self._emit_event(
+                        PlannerEvent(
+                            event_type="llm_stream_chunk",
+                            ts=self._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={"text": args_text, "done": False, "phase": "answer"},
+                        )
+                    )
+
+                # Emit done signal when LLM finishes and it was a finish action
+                if done and _extractor.is_finish_action:
+                    self._emit_event(
+                        PlannerEvent(
+                            event_type="llm_stream_chunk",
+                            ts=self._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={"text": "", "done": True, "phase": "answer"},
+                        )
+                    )
 
             llm_result = await self._client.complete(
                 messages=messages,
                 response_format=response_format,
+                stream=stream_allowed,
+                on_stream_chunk=_emit_llm_chunk if stream_allowed else None,
             )
             raw, cost = _coerce_llm_response(llm_result)
+            last_raw = raw
             self._cost_tracker.record_main_call(cost)
 
             try:
                 return PlannerAction.model_validate_json(raw)
             except ValidationError as exc:
+                salvaged = _salvage_action_payload(raw)
+                if salvaged is not None:
+                    logger.info(
+                        "planner_action_salvaged",
+                        extra={"errors": json.dumps(exc.errors(), ensure_ascii=False)},
+                    )
+                    return salvaged
                 last_error = json.dumps(exc.errors(), ensure_ascii=False)
                 continue
+
+        if last_raw is not None:
+            fallback = PlannerAction(
+                thought="fallback finish after repair failures",
+                next_node=None,
+                args={"raw_answer": last_raw.strip()[:2000]},
+                plan=None,
+                join=None,
+            )
+            logger.warning(
+                "planner_fallback_finish",
+                extra={"reason": "repair_exhausted"},
+            )
+            return fallback
 
         raise RuntimeError("Planner failed to produce valid JSON after repair attempts")
 
@@ -1072,8 +1762,17 @@ class ReactPlanner:
         action: PlannerAction,
         trajectory: Trajectory,
         tracker: _ConstraintTracker,
+        artifact_collector: _ArtifactCollector,
+        source_collector: _SourceCollector,
     ) -> tuple[Any | None, PlannerPause | None]:
-        return await execute_parallel_plan(self, action, trajectory, tracker)
+        return await execute_parallel_plan(
+            self,
+            action,
+            trajectory,
+            tracker,
+            artifact_collector,
+            source_collector,
+        )
 
     def _make_context(self, trajectory: Trajectory) -> _PlannerContext:
         return _PlannerContext(self, trajectory)
@@ -1084,9 +1783,7 @@ class ReactPlanner:
     def _estimate_size(self, messages: Sequence[Mapping[str, str]]) -> int:
         return _estimate_size(messages)
 
-    async def _summarise_trajectory(
-        self, trajectory: Trajectory
-    ) -> TrajectorySummary:
+    async def _summarise_trajectory(self, trajectory: Trajectory) -> TrajectorySummary:
         return await summarise_trajectory(self, trajectory)
 
     async def _critique_answer(
@@ -1110,9 +1807,7 @@ class ReactPlanner:
         critique: ReflectionCritique,
         revision_attempts: int,
     ) -> str:
-        return await generate_clarification(
-            self, trajectory, failed_answer, critique, revision_attempts
-        )
+        return await generate_clarification(self, trajectory, failed_answer, critique, revision_attempts)
 
     def _check_action_constraints(
         self,
@@ -1158,10 +1853,7 @@ class ReactPlanner:
             if expected_index < len(hints.ordering_hints):
                 expected_node = hints.ordering_hints[expected_index]
                 if node_name != expected_node:
-                    if (
-                        node_name in hints.ordering_hints
-                        and not state.get("warned", False)
-                    ):
+                    if node_name in hints.ordering_hints and not state.get("warned", False):
                         state["warned"] = True
                         return prompts.render_ordering_hint_violation(
                             hints.ordering_hints,
@@ -1179,16 +1871,11 @@ class ReactPlanner:
         )
         completed = state.setdefault("completed", [])
         expected_index = len(completed)
-        if (
-            expected_index < len(hints.ordering_hints)
-            and node_name == hints.ordering_hints[expected_index]
-        ):
+        if expected_index < len(hints.ordering_hints) and node_name == hints.ordering_hints[expected_index]:
             completed.append(node_name)
             state["warned"] = False
 
-    def _build_failure_payload(
-        self, spec: NodeSpec, args: BaseModel, exc: Exception
-    ) -> dict[str, Any]:
+    def _build_failure_payload(self, spec: NodeSpec, args: BaseModel, exc: Exception) -> dict[str, Any]:
         suggestion = getattr(exc, "suggestion", None)
         if suggestion is None:
             suggestion = getattr(exc, "remedy", None)
@@ -1202,9 +1889,94 @@ class ReactPlanner:
             payload["suggestion"] = str(suggestion)
         return payload
 
-    async def pause(
-        self, reason: PlannerPauseReason, payload: Mapping[str, Any] | None = None
-    ) -> PlannerPause:
+    def _build_final_payload(
+        self,
+        args: Mapping[str, Any] | Any | None,
+        last_observation: Any,
+        artifacts: Mapping[str, Any],
+        sources: Sequence[Mapping[str, Any]] | None,
+    ) -> FinalPayload:
+        logger.debug(
+            "build_final_payload_start",
+            extra={
+                "args_type": type(args).__name__,
+                "args_value": str(args)[:500] if args else None,
+                "last_observation_type": type(last_observation).__name__ if last_observation else None,
+                "last_observation_value": str(last_observation)[:500] if last_observation else None,
+            },
+        )
+
+        payload_data: dict[str, Any] = {}
+        if isinstance(args, BaseModel):
+            payload_data.update(args.model_dump(mode="json"))
+        elif isinstance(args, Mapping):
+            payload_data.update(args)
+        elif args is not None:
+            payload_data["raw_answer"] = _fallback_answer(args)
+
+        if not payload_data.get("raw_answer"):
+            # Try args first (the LLM's answer), then last_observation
+            for source in (args, last_observation):
+                if source is not None:
+                    extracted = _fallback_answer(source)
+                    logger.debug(
+                        "fallback_answer_extraction",
+                        extra={
+                            "source_type": type(source).__name__,
+                            "extracted": extracted[:200] if extracted else None,
+                        },
+                    )
+                    if extracted and extracted != "No answer produced.":
+                        payload_data["raw_answer"] = extracted
+                        break
+            else:
+                logger.warning(
+                    "no_answer_extracted",
+                    extra={
+                        "args": str(args)[:200] if args else None,
+                        "last_observation": str(last_observation)[:200] if last_observation else None,
+                    },
+                )
+                payload_data["raw_answer"] = "No answer produced."
+
+        payload_data["artifacts"] = dict(artifacts)
+        if sources is not None:
+            payload_data["sources"] = list(sources)
+
+        known_fields = set(FinalPayload.model_fields)
+        extra_payload: dict[str, Any] = {}
+        existing_extra = payload_data.get("extra")
+        if isinstance(existing_extra, Mapping):
+            extra_payload.update(existing_extra)
+
+        for key in list(payload_data.keys()):
+            if key not in known_fields:
+                extra_payload[key] = payload_data.pop(key)
+
+        if extra_payload:
+            payload_data["extra"] = extra_payload
+
+        try:
+            return FinalPayload.model_validate(payload_data)
+        except ValidationError as exc:
+            logger.warning(
+                "final_payload_validation_failed",
+                extra={"error": str(exc)},
+            )
+            # Try args first, then last_observation (consistent with above)
+            raw_answer = "No answer produced."
+            for source in (args, last_observation):
+                if source is not None:
+                    extracted = _fallback_answer(source)
+                    if extracted and extracted != "No answer produced.":
+                        raw_answer = extracted
+                        break
+            return FinalPayload(
+                raw_answer=raw_answer,
+                artifacts=dict(artifacts),
+            )
+
+    async def pause(self, reason: PlannerPauseReason, payload: Mapping[str, Any] | None = None) -> PlannerPause:
         if self._active_trajectory is None:
             raise RuntimeError("pause() requires an active planner run")
         try:
@@ -1300,11 +2072,7 @@ class ReactPlanner:
                     reason = result.get("reason", "await_input")
                     constraints = result.get("constraints")
                     tool_context_payload = result.get("tool_context")
-                    tool_context = (
-                        dict(tool_context_payload)
-                        if isinstance(tool_context_payload, Mapping)
-                        else None
-                    )
+                    tool_context = dict(tool_context_payload) if isinstance(tool_context_payload, Mapping) else None
                     logger.debug("pause_record_loaded", extra={"source": "state_store"})
                     return _PauseRecord(
                         trajectory=trajectory,
@@ -1333,25 +2101,24 @@ class ReactPlanner:
         tool_context: dict[str, Any] | None = None
         if record.tool_context is not None:
             try:
-                tool_context = json.loads(
-                    json.dumps(record.tool_context, ensure_ascii=False)
-                )
+                tool_context = json.loads(json.dumps(record.tool_context, ensure_ascii=False))
             except (TypeError, ValueError):
                 tool_context = None
         return {
             "trajectory": record.trajectory.serialise(),
             "reason": record.reason,
             "payload": dict(record.payload),
-            "constraints": dict(record.constraints)
-            if record.constraints is not None
-            else None,
+            "constraints": dict(record.constraints) if record.constraints is not None else None,
             "tool_context": tool_context,
         }
 
     def _emit_event(self, event: PlannerEvent) -> None:
         """Emit a planner event for observability."""
-        # Log the event
-        logger.info(event.event_type, extra=event.to_payload())
+        # Log the event (strip reserved logging keys to avoid collisions)
+        payload = event.to_payload()
+        for reserved in ("args", "msg", "levelname", "levelno", "exc_info"):
+            payload.pop(reserved, None)
+        logger.info(event.event_type, extra=payload)
 
         # Invoke callback if provided
         if self._event_callback is not None:
@@ -1382,6 +2149,8 @@ class ReactPlanner:
             "thought": thought,
             "steps": trajectory.to_history(),
             "step_count": len(trajectory.steps),
+            "artifacts": dict(trajectory.artifacts),
+            "sources": list(trajectory.sources),
         }
         metadata["cost"] = self._cost_tracker.snapshot()
         if constraints is not None:
@@ -1429,6 +2198,7 @@ __all__ = [
     "ReflectionConfig",
     "ReflectionCriteria",
     "ReflectionCritique",
+    "FinalPayload",
     "ReactPlanner",
     "_sanitize_json_schema",
     "Trajectory",

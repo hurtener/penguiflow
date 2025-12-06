@@ -1,0 +1,283 @@
+"""Orchestrator for {{ flow.name }} flow.
+
+This orchestrator provides a production-ready wrapper around the flow, managing:
+- Dependency injection
+- Flow lifecycle (start/stop)
+- Telemetry and observability
+- Execution interface with proper error handling
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+from uuid import uuid4
+
+from penguiflow.errors import FlowError
+from penguiflow.metrics import FlowEvent
+from penguiflow.types import Headers, Message
+
+from .flows.{{ flow.name }} import {{ flow.bundle_class }}, build_{{ flow.name }}_flow
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class {{ flow.error_class }}(RuntimeError):
+    """Raised when {{ flow.name }} flow execution fails."""
+
+    def __init__(self, flow_error: FlowError | str) -> None:
+        message = flow_error.message if isinstance(flow_error, FlowError) else str(flow_error)
+        super().__init__(message)
+        self.flow_error = flow_error
+
+
+class FlowTelemetry:
+    """Simple telemetry wrapper for flow events.
+
+    This is a lightweight stub that can be replaced with a full observability
+    implementation (e.g., OpenTelemetry, DataDog, Prometheus) in production.
+    """
+
+    def __init__(
+        self,
+        *,
+        flow_name: str,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self.flow_name = flow_name
+        self.logger = logger or _LOGGER
+
+    def record_flow_event(self, event: FlowEvent) -> None:
+        """Record a flow event for observability.
+
+        Args:
+            event: The flow event to record
+        """
+        event_type = event.event_type
+        payload = event.to_payload()
+
+        if event_type in ("node_failed", "node_timeout"):
+            self.logger.error(
+                f"Flow event: {event_type}",
+                extra={"flow": self.flow_name, **payload},
+            )
+        elif event_type in ("node_start", "node_end"):
+            self.logger.debug(
+                f"Flow event: {event_type}",
+                extra={"flow": self.flow_name, **payload},
+            )
+        else:
+            self.logger.info(
+                f"Flow event: {event_type}",
+                extra={"flow": self.flow_name, **payload},
+            )
+
+
+class {{ flow.orchestrator_class }}:
+    """Orchestrator for {{ flow.name }} flow.
+
+    This orchestrator manages the complete lifecycle of the flow, including:
+    - Dependency injection from a registry
+    - Flow initialization and configuration
+    - Telemetry middleware integration
+    - Lifecycle management (start/stop)
+    - Execution interface with proper error handling
+
+    Example:
+        ```python
+        orchestrator = {{ flow.orchestrator_class }}(
+{% for dep in flow.dependencies %}
+            {{ dep.name }}={{ dep.name }},
+{% endfor %}
+        )
+
+        await orchestrator.start()
+        try:
+            result = await orchestrator.execute(
+                payload={"query": "example"},
+                tenant_id="tenant-123",
+            )
+        finally:
+            await orchestrator.stop()
+        ```
+    """
+
+    def __init__(
+        self,
+        *,
+{% for dep in flow.dependencies %}
+        {{ dep.name }}: {{ dep.type_hint }},
+{% endfor %}
+        telemetry: FlowTelemetry | None = None,
+        use_run_one: bool = False,
+    ) -> None:
+        """Initialize the orchestrator with required dependencies.
+
+        Args:
+{% for dep in flow.dependencies %}
+            {{ dep.name }}: {{ dep.description }}
+{% endfor %}
+            telemetry: Optional telemetry instance for observability
+            use_run_one: If True, use testkit.run_one for synchronous execution
+        """
+{% for dep in flow.dependencies %}
+        self._{{ dep.name }} = {{ dep.name }}
+{% endfor %}
+
+        # Build the flow bundle with injected dependencies
+        bundle: {{ flow.bundle_class }} = build_{{ flow.name }}_flow(
+{% for dep in flow.dependencies %}
+            {{ dep.name }}={{ dep.name }},
+{% endfor %}
+        )
+        self._flow = bundle.flow
+        self._registry = bundle.registry
+
+        # Configure telemetry
+        self._telemetry = telemetry or FlowTelemetry(
+            flow_name="{{ flow.name }}",
+            logger=_LOGGER,
+        )
+
+        # Wire telemetry middleware
+        add_middleware = getattr(self._flow, "add_middleware", None)
+        if callable(add_middleware):
+            add_middleware(self._telemetry.record_flow_event)
+
+        self._started = False
+        self._use_run_one = use_run_one
+
+    async def start(self) -> None:
+        """Start the flow processing loop.
+
+        This method must be called before executing the flow. It initializes
+        the flow runtime and prepares it to process messages.
+
+        Raises:
+            RuntimeError: If the flow is already started
+        """
+        if self._started:
+            raise RuntimeError("{{ flow.orchestrator_class }} is already started")
+
+        if not self._use_run_one:
+            self._flow.run(registry=self._registry)
+
+        self._started = True
+        _LOGGER.info("{{ flow.name }} orchestrator started")
+
+    async def stop(self) -> None:
+        """Stop the flow gracefully.
+
+        This method should be called when shutting down to ensure proper
+        cleanup of resources and graceful termination of in-flight work.
+        """
+        if self._started:
+            if not self._use_run_one:
+                await self._flow.stop()
+
+            self._started = False
+            _LOGGER.info("{{ flow.name }} orchestrator stopped")
+
+    async def execute(
+        self,
+        *,
+        payload: dict[str, Any],
+        tenant_id: str,
+        trace_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute the flow with the given payload.
+
+        This is the primary execution interface for the flow. It handles:
+        - Message envelope creation
+        - Trace ID generation
+        - Flow execution (via run_one or emit/fetch)
+        - Error handling and propagation
+
+        Args:
+            payload: The input payload for the flow
+            tenant_id: The tenant identifier for multi-tenancy
+            trace_id: Optional trace ID for tracking (generated if not provided)
+
+        Returns:
+            The result payload from the flow
+
+        Raises:
+            {{ flow.error_class }}: If the flow execution fails
+            RuntimeError: If the orchestrator is not started
+        """
+        if not self._started:
+            raise RuntimeError(
+                "{{ flow.orchestrator_class }} is not started; call start() first"
+            )
+
+        # Generate trace ID if not provided
+        resolved_trace_id = trace_id or str(uuid4())
+
+        # Create message envelope
+        message = Message(
+            payload=payload,
+            headers=Headers(tenant=tenant_id, trace_id=resolved_trace_id),
+        )
+
+        _LOGGER.info(
+            "Executing {{ flow.name }} flow",
+            extra={
+                "trace_id": resolved_trace_id,
+                "tenant_id": tenant_id,
+            },
+        )
+
+        try:
+            if self._use_run_one:
+                # Use testkit.run_one for synchronous execution
+                from penguiflow.testkit import run_one
+
+                result = await run_one(
+                    self._flow,
+                    message,
+                    registry=self._registry,
+                )
+            else:
+                # Standard flow execution
+                await self._flow.emit(message)
+                result = await self._flow.fetch()
+
+            # Check for flow errors
+            if isinstance(result, FlowError):
+                raise {{ flow.error_class }}(result)
+
+            # Extract payload from result
+            if isinstance(result, Message):
+                return result.payload
+
+            return result
+
+        except {{ flow.error_class }}:
+            # Re-raise our own errors
+            raise
+        except Exception as exc:
+            # Wrap unexpected exceptions
+            _LOGGER.exception(
+                "{{ flow.name }} flow execution failed",
+                extra={
+                    "trace_id": resolved_trace_id,
+                    "tenant_id": tenant_id,
+                },
+            )
+            raise {{ flow.error_class }}(f"Flow execution failed: {exc}") from exc
+
+    async def __aenter__(self) -> {{ flow.orchestrator_class }}:
+        """Async context manager entry."""
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Async context manager exit."""
+        await self.stop()
+
+
+__all__ = [
+    "{{ flow.orchestrator_class }}",
+    "{{ flow.error_class }}",
+    "FlowTelemetry",
+]

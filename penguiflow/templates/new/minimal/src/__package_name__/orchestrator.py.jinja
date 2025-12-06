@@ -5,16 +5,18 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from penguiflow.errors import FlowError
 from penguiflow.planner import PlannerFinish, PlannerPause, ReactPlanner
-{% if memory_enabled %}
-from .clients.memory import MemoryClient
-{% endif %}
+
 {% if with_a2a %}
 from .a2a import A2AServer
+{% endif %}
+{% if memory_enabled %}
+from .clients.memory import MemoryClient
 {% endif %}
 from .config import Config
 from .telemetry import AgentTelemetry
@@ -56,6 +58,26 @@ def _collect_streams(metadata: Mapping[str, Any]) -> dict[str, list[dict[str, An
     return streams
 
 
+def _extract_answer(payload: Any) -> str | None:
+    """Normalise planner payloads to a displayable answer."""
+
+    if payload is None:
+        return None
+    if isinstance(payload, Mapping):
+        for key in ("raw_answer", "answer", "text", "content", "message", "greeting", "response", "result"):
+            if key in payload:
+                value = payload.get(key)
+                return None if value is None else str(value)
+        return str(payload)
+
+    for attr in ("raw_answer", "answer", "text", "content", "message", "greeting", "response", "result"):
+        if hasattr(payload, attr):
+            value = getattr(payload, attr)
+            return None if value is None else str(value)
+
+    return str(payload)
+
+
 class ScriptedLLM:
     """Deterministic JSON responses for planner tests."""
 
@@ -67,8 +89,10 @@ class ScriptedLLM:
         *,
         messages: list[dict[str, str]],
         response_format: dict[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> str:
-        del response_format
+        del response_format, stream, on_stream_chunk
         if self._responses is None:
             user_prompt = messages[-1].get("content", "")
             scripted = [
@@ -198,7 +222,7 @@ class {{ class_name }}Orchestrator:
             raise {{ class_name }}FlowError("Planner did not finish successfully")
 
         payload: Any = result.payload
-        answer_text = payload.answer if isinstance(payload, Answer) else str(payload)
+        answer_text = _extract_answer(payload)
 
 {% if memory_enabled %}
         await self._memory.ingest_interaction(
@@ -260,7 +284,7 @@ class {{ class_name }}Orchestrator:
             raise {{ class_name }}FlowError("Planner did not finish successfully")
 
         payload: Any = result.payload
-        answer_text = payload.answer if isinstance(payload, Answer) else str(payload)
+        answer_text = _extract_answer(payload)
 
 {% if memory_enabled %}
         await self._memory.ingest_interaction(

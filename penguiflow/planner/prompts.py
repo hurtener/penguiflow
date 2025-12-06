@@ -41,31 +41,20 @@ def render_planning_hints(hints: Mapping[str, Any]) -> str:
 
 
 def render_disallowed_node(node_name: str) -> str:
-    return (
-        f"tool '{node_name}' is not permitted by constraints. "
-        "Choose an allowed tool or revise the plan."
-    )
+    return f"tool '{node_name}' is not permitted by constraints. Choose an allowed tool or revise the plan."
 
 
 def render_ordering_hint_violation(expected: Sequence[str], proposed: str) -> str:
     order = ", ".join(expected)
-    return (
-        "Ordering hint reminder: follow the preferred sequence "
-        f"[{order}]. Proposed: {proposed}. Revise the plan."
-    )
+    return f"Ordering hint reminder: follow the preferred sequence [{order}]. Proposed: {proposed}. Revise the plan."
 
 
 def render_parallel_limit(max_parallel: int) -> str:
-    return (
-        f"Parallel action exceeds max_parallel={max_parallel}. Reduce parallel fan-out."
-    )
+    return f"Parallel action exceeds max_parallel={max_parallel}. Reduce parallel fan-out."
 
 
 def render_sequential_only(node_name: str) -> str:
-    return (
-        f"tool '{node_name}' must run sequentially. "
-        "Do not include it in a parallel plan."
-    )
+    return f"tool '{node_name}' must run sequentially. Do not include it in a parallel plan."
 
 
 def render_parallel_setup_error(errors: Sequence[str]) -> str:
@@ -78,17 +67,11 @@ def render_empty_parallel_plan() -> str:
 
 
 def render_parallel_with_next_node(next_node: str) -> str:
-    return (
-        f"Parallel plan cannot set next_node='{next_node}'. "
-        "Use 'join' to continue or finish the run explicitly."
-    )
+    return f"Parallel plan cannot set next_node='{next_node}'. Use 'join' to continue or finish the run explicitly."
 
 
 def render_parallel_unknown_failure(node_name: str) -> str:
-    return (
-        f"tool '{node_name}' failed during parallel execution. "
-        "Investigate the tool and adjust the plan."
-    )
+    return f"tool '{node_name}' failed during parallel execution. Investigate the tool and adjust the plan."
 
 
 def build_summarizer_messages(
@@ -153,8 +136,9 @@ def build_system_prompt(
     *,
     extra: str | None = None,
     planning_hints: Mapping[str, Any] | None = None,
+    current_date: str | None = None,
 ) -> str:
-    """Build system prompt for the planner.
+    """Build comprehensive system prompt for the planner.
 
     The library provides baseline behavior: context (including memories) is injected
     via the user prompt. Use `extra` to specify format-specific interpretation rules
@@ -177,34 +161,250 @@ def build_system_prompt(
         planning_hints: Optional planning constraints and preferences (ordering,
                        disallowed nodes, parallel limits, etc.)
 
+        current_date: Optional date string (YYYY-MM-DD). If not provided, defaults
+                     to today's date. Date-only (no time) for better LLM cache hits.
+
     Returns:
         Complete system prompt string combining baseline rules + tools + extra + hints
     """
     rendered_tools = "\n".join(render_tool(item) for item in catalog)
-    prompt = [
-        "You are PenguiFlow ReactPlanner, a JSON-only planner.",
-        "Follow these rules strictly:",
-        "1. Respond with valid JSON matching the PlannerAction schema.",
-        "2. Use the provided tools when necessary; never invent new tool names.",
-        "3. Keep 'thought' concise and factual.",
-        "4. When the task is complete, set 'next_node' to null "
-        "and include the final payload in 'args'.",
-        "5. For parallel plans, set 'join.inject' to map join args to "
-        "parallel outputs. Implicit injection is deprecated.",
-        "   Sources: $results, $expect, $branches, $failures, "
-        "$success_count, $failure_count.",
-        "6. Do not emit plain text outside JSON.",
-        "",
-        "Available tools:",
-        rendered_tools or "(none)",
-    ]
+
+    # Default to current date if not provided (date-only for better cache hits)
+    if current_date is None:
+        from datetime import date
+
+        current_date = date.today().isoformat()  # "YYYY-MM-DD"
+
+    prompt_sections: list[str] = []
+
+    # ─────────────────────────────────────────────────────────────
+    # IDENTITY & ROLE
+    # ─────────────────────────────────────────────────────────────
+    prompt_sections.append(f"""<identity>
+You are an autonomous reasoning agent that solves tasks by selecting and orchestrating tools.
+Your name and voice on how to answer will come at the end of the prompt in additional_guidance.
+
+Your role is to:
+- Understand the user's intent and break complex queries into actionable steps
+- Select appropriate tools from your catalog to gather information or perform actions
+- Synthesize observations into clear, accurate answers
+- Know when you have enough information to answer and when you need more
+
+Current date: {current_date}
+</identity>""")
+
+    # ─────────────────────────────────────────────────────────────
+    # OUTPUT FORMAT (NON-NEGOTIABLE)
+    # ─────────────────────────────────────────────────────────────
+    prompt_sections.append("""<output_format>
+Think briefly in plain text, then respond with a single JSON object that matches the PlannerAction schema.
+
+Write your JSON inside one markdown code block (```json ... ```).
+Do not emit multiple JSON objects or extra commentary after the code block.
+</output_format>""")
+
+    # ─────────────────────────────────────────────────────────────
+    # ACTION SCHEMA
+    # ─────────────────────────────────────────────────────────────
+    prompt_sections.append("""<action_schema>
+Every response follows this structure:
+
+{
+  "thought": "Your reasoning about what to do next (required, keep concise)",
+  "next_node": "tool_name" | null,
+  "args": { ... } | null,
+  "plan": [...] | null,
+  "join": { ... } | null
+}
+
+Field meanings:
+- thought: Brief explanation of your reasoning (1-2 sentences, factual)
+- next_node: Name of the tool to call, or null when finished
+- args: Arguments for the tool (when next_node is set) or final answer structure (when finished)
+- plan: For parallel execution - list of {node, args} to run concurrently
+- join: For parallel execution - how to combine results. If there is no join/aggregator tool in \
+the catalog, combine the parallel outputs yourself in the final answer instead of calling a missing tool.
+</action_schema>""")
+
+    # ─────────────────────────────────────────────────────────────
+    # FINISHING (CRITICAL)
+    # ─────────────────────────────────────────────────────────────
+    prompt_sections.append("""<finishing>
+When you have gathered enough information to answer the query:
+
+1. Set "next_node" to null
+2. Provide "args" with this structure:
+
+{
+  "raw_answer": "Your complete, human-readable answer to the user's query"
+}
+
+The raw_answer field is REQUIRED. Write a full, helpful response - not a summary or fragment.
+Focus on solving the user query, going to the point of answering what they asked.
+
+Optional fields you may include in args:
+- "confidence": 0.0 to 1.0 (your confidence in the answer's correctness)
+- "route": category string like "knowledge_base", "calculation", "generation", "clarification"
+- "requires_followup": true if you need clarification from the user
+- "warnings": ["string", ...] for any caveats, limitations, or data quality concerns
+
+Do NOT include heavy data (charts, files, large JSON) in args - artifacts from tool outputs are collected automatically.
+
+Example finish:
+{
+  "thought": "I have analyzed the sales data and generated the chart. Ready to answer.",
+  "next_node": null,
+  "args": {
+    "raw_answer": "Q4 2024 revenue increased 15% YoY to $1.2M. December was strongest.",
+    "confidence": 0.92,
+    "route": "analytics"
+  }
+}
+</finishing>""")
+
+    # ─────────────────────────────────────────────────────────────
+    # TOOL USAGE
+    # ─────────────────────────────────────────────────────────────
+    prompt_sections.append("""<tool_usage>
+Rules for using tools:
+
+1. Only use tools listed in the catalog below - never invent tool names
+2. Match your args to the tool's args_schema exactly
+3. Consider side_effects before calling:
+   - "pure": Safe to call multiple times, no external changes
+   - "read": Reads external data but doesn't modify anything
+   - "write": Modifies external state - use carefully
+   - "external": Calls external services - may have rate limits or costs
+4. Use the tool's description to understand when it's appropriate
+5. If a tool fails, consider alternative approaches before giving up
+</tool_usage>""")
+
+    # ─────────────────────────────────────────────────────────────
+    # PARALLEL EXECUTION
+    # ─────────────────────────────────────────────────────────────
+    prompt_sections.append("""<parallel_execution>
+For tasks that benefit from concurrent execution, use parallel plans:
+
+{
+  "thought": "I need data from multiple independent sources",
+  "next_node": null,
+  "plan": [
+    {"node": "tool_a", "args": {...}},
+    {"node": "tool_b", "args": {...}}
+  ],
+  "join": {
+    "node": "aggregator_tool",
+    "args": {},
+    "inject": {"results": "$results", "count": "$success_count"}
+  }
+}
+
+Available injection sources for join.inject:
+- $results: List of successful outputs
+- $branches: Full branch details with node names
+- $failures: List of failed branches with errors
+- $success_count: Number of successful branches
+- $failure_count: Number of failed branches
+- $expect: Expected number of branches
+
+Use parallel execution when:
+- Multiple independent data sources need to be queried
+- Multiple independent queries can be made to the same source in parallel
+- Tasks can be decomposed into non-dependent subtasks
+- Speed matters and tools don't have ordering dependencies
+</parallel_execution>""")
+
+    # ─────────────────────────────────────────────────────────────
+    # REASONING GUIDANCE
+    # ─────────────────────────────────────────────────────────────
+    prompt_sections.append("""<reasoning>
+Approach problems systematically:
+
+1. Understand first: Parse the query to identify what's actually being asked
+2. Plan before acting: Consider which tools will help and in what order.
+3. Gather evidence: Use tools to collect relevant information
+4. Synthesize: Combine observations into a coherent answer
+5. Verify: Check if your answer actually addresses the query
+
+When uncertain:
+- If you lack information to answer confidently, say so honestly
+- If multiple interpretations exist, address the most likely one and note alternatives
+- If a tool fails, explain what happened and try alternatives
+- If you cannot complete the task, explain why and what would help
+
+Avoid:
+- Making up information not supported by tool observations
+- Calling the same tool repeatedly with identical arguments
+- Ignoring errors or unexpected results
+- Providing partial answers without acknowledging gaps
+</reasoning>""")
+
+    # ─────────────────────────────────────────────────────────────
+    # TONE & STYLE
+    # ─────────────────────────────────────────────────────────────
+    prompt_sections.append("""<tone>
+In your raw_answer:
+- Be direct and informative - get to the point
+- Use clear, professional language
+- Acknowledge limitations honestly rather than hedging excessively
+- Match the formality level to the query (technical queries get technical answers)
+- Avoid unnecessary caveats, but do note important limitations
+- Don't apologize unless you've actually made an error
+- These are safe defaults. Your tone or voice can be changed in the additional_guidance section.
+- you can use markdown formatting if suggested in additional_guidance.
+
+In your thought field:
+- Be concise and factual
+- Focus on reasoning, not commentary
+- 1-2 sentences maximum
+</tone>""")
+
+    # ─────────────────────────────────────────────────────────────
+    # ERROR HANDLING
+    # ─────────────────────────────────────────────────────────────
+    prompt_sections.append("""<error_handling>
+When things go wrong:
+
+Tool validation error: Fix your args to match the schema and retry
+Tool execution error: Note the error, try alternative tools or approaches
+No suitable tools: Explain what you cannot do and why
+Ambiguous query: Make reasonable assumptions and note them, or ask for clarification
+Conflicting information: Acknowledge the conflict and explain your reasoning
+
+If you cannot complete the task after reasonable attempts:
+- Set requires_followup: true in your finish args
+- Explain what you tried and why it didn't work
+- Suggest what additional information or tools would help
+</error_handling>""")
+
+    # ─────────────────────────────────────────────────────────────
+    # AVAILABLE TOOLS
+    # ─────────────────────────────────────────────────────────────
+    no_tools_msg = "(No tools available - provide direct answers based on your knowledge)"
+    tools_section = f"""<available_tools>
+{rendered_tools if rendered_tools else no_tools_msg}
+</available_tools>"""
+    prompt_sections.append(tools_section)
+
+    # ─────────────────────────────────────────────────────────────
+    # ADDITIONAL GUIDANCE (USER-PROVIDED)
+    # ─────────────────────────────────────────────────────────────
     if extra:
-        prompt.extend(["", "Additional guidance:", extra])
+        prompt_sections.append(f"""<additional_guidance>
+{extra}
+</additional_guidance>""")
+
+    # ─────────────────────────────────────────────────────────────
+    # PLANNING HINTS
+    # ─────────────────────────────────────────────────────────────
     if planning_hints:
         rendered_hints = render_planning_hints(planning_hints)
         if rendered_hints:
-            prompt.extend(["", rendered_hints])
-    return "\n".join(prompt)
+            prompt_sections.append(f"""<planning_constraints>
+{rendered_hints}
+</planning_constraints>""")
+
+    return "\n\n".join(prompt_sections)
 
 
 def build_user_prompt(query: str, llm_context: Mapping[str, Any] | None = None) -> str:
@@ -263,16 +463,11 @@ def render_hop_budget_violation(limit: int) -> str:
 
 
 def render_deadline_exhausted() -> str:
-    return (
-        "Deadline reached. Provide the best available conclusion or return no_path."
-    )
+    return "Deadline reached. Provide the best available conclusion or return no_path."
 
 
 def render_validation_error(node_name: str, error: str) -> str:
-    return (
-        f"args for tool '{node_name}' did not validate: {error}. "
-        "Return corrected JSON."
-    )
+    return f"args for tool '{node_name}' did not validate: {error}. Return corrected JSON."
 
 
 def render_output_validation_error(node_name: str, error: str) -> str:
@@ -284,37 +479,24 @@ def render_output_validation_error(node_name: str, error: str) -> str:
 
 def render_invalid_node(node_name: str, available: Sequence[str]) -> str:
     options = ", ".join(sorted(available))
-    return (
-        f"tool '{node_name}' is not in the catalog. Choose one of: {options}."
-    )
+    return f"tool '{node_name}' is not in the catalog. Choose one of: {options}."
 
 
-def render_invalid_join_injection_source(
-    source: str, available: Sequence[str]
-) -> str:
+def render_invalid_join_injection_source(source: str, available: Sequence[str]) -> str:
     options = ", ".join(available)
-    return (
-        f"join.inject uses unknown source '{source}'. "
-        f"Choose one of: {options}."
-    )
+    return f"join.inject uses unknown source '{source}'. Choose one of: {options}."
 
 
-def render_join_validation_error(
-    node_name: str, error: str, *, suggest_inject: bool
-) -> str:
-    message = (
-        f"args for join tool '{node_name}' did not validate: {error}. "
-        "Return corrected JSON."
-    )
+def render_join_validation_error(node_name: str, error: str, *, suggest_inject: bool) -> str:
+    message = f"args for join tool '{node_name}' did not validate: {error}. Return corrected JSON."
     if suggest_inject:
-        message += (
-            " Provide 'join.inject' to map parallel outputs to this join tool."
-        )
+        message += " Provide 'join.inject' to map parallel outputs to this join tool."
     return message
 
 
 def render_repair_message(error: str) -> str:
     return (
         "Previous response was invalid JSON or schema mismatch: "
-        f"{error}. Reply with corrected JSON only."
+        f"{error}. Reply with corrected JSON only. "
+        "When finishing, set next_node to null and include raw_answer in args."
     )

@@ -67,9 +67,7 @@ class _ConstraintTracker:
         }
 
     @classmethod
-    def from_snapshot(
-        cls, snapshot: dict[str, Any], *, time_source: Callable[[], float]
-    ) -> _ConstraintTracker:
+    def from_snapshot(cls, snapshot: dict[str, Any], *, time_source: Callable[[], float]) -> _ConstraintTracker:
         deadline_remaining = snapshot.get("deadline_remaining_s")
         hop_budget = snapshot.get("hop_budget")
         tracker = cls(

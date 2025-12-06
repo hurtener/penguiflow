@@ -6,6 +6,9 @@ import sys
 
 import click
 
+from penguiflow.cli.dev import CLIError as DevCLIError
+from penguiflow.cli.dev import run_dev
+
 
 @click.group()
 @click.version_option()
@@ -68,6 +71,63 @@ def init(
         if not result.success:
             sys.exit(1)
     except CLIError as e:
+        click.echo(f"✗ {e.message}", err=True)
+        if e.hint:
+            click.echo(f"  Hint: {e.hint}", err=True)
+        sys.exit(1)
+
+
+@app.command()
+@click.option(
+    "--project-root",
+    "-p",
+    type=click.Path(path_type=str),
+    default=".",
+    help="Project directory containing the agent. Defaults to current directory.",
+)
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    show_default=True,
+    help="Host to bind the playground server.",
+)
+@click.option(
+    "--port",
+    default=8001,
+    show_default=True,
+    help="Port to bind the playground server.",
+)
+@click.option(
+    "--no-browser",
+    is_flag=True,
+    help="Do not open the browser automatically.",
+)
+def dev(project_root: str, host: str, port: int, no_browser: bool) -> None:
+    """Launch the playground backend + UI for a project.
+
+    IMPORTANT: The playground runs in penguiflow's Python environment, not the
+    agent project's venv. To use LLM features, ensure the agent project has
+    penguiflow[planner] installed, or install dependencies in penguiflow's venv:
+
+    \b
+    # Option 1: Install agent in editable mode (recommended)
+    cd <project_root> && uv sync
+    cd <penguiflow_dir> && uv pip install -e <project_root>
+
+    \b
+    # Option 2: Install litellm directly
+    uv pip install litellm
+    """
+    from pathlib import Path
+
+    try:
+        run_dev(
+            project_root=Path(project_root),
+            host=host,
+            port=port,
+            open_browser=not no_browser,
+        )
+    except DevCLIError as e:
         click.echo(f"✗ {e.message}", err=True)
         if e.hint:
             click.echo(f"  Hint: {e.hint}", err=True)
@@ -162,6 +222,128 @@ def new(
         )
         if not result.success:
             sys.exit(1)
+    except CLIError as e:
+        click.echo(f"✗ {e.message}", err=True)
+        if e.hint:
+            click.echo(f"  Hint: {e.hint}", err=True)
+        sys.exit(1)
+
+
+@app.command()
+@click.option(
+    "--init",
+    "init_name",
+    type=str,
+    default=None,
+    help="Initialize a spec workspace with sample spec and docs (e.g., --init my-agent).",
+)
+@click.option(
+    "--spec",
+    "-s",
+    "spec_path",
+    type=click.Path(exists=True, path_type=str),
+    default=None,
+    help="Path to the agent spec YAML file.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=str),
+    default=None,
+    help="Directory where the project should be created (defaults to cwd).",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite existing files if they already exist.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show which files would be created without writing them.",
+)
+@click.option(
+    "--quiet",
+    "-q",
+    is_flag=True,
+    help="Suppress output messages.",
+)
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    help="Show detailed generation progress.",
+)
+def generate(
+    init_name: str | None,
+    spec_path: str | None,
+    output_dir: str | None,
+    force: bool,
+    dry_run: bool,
+    quiet: bool,
+    verbose: bool,
+) -> None:
+    """Generate tools and planner code from an agent spec.
+
+    Use --init to create a new spec workspace:
+
+        penguiflow generate --init my-agent
+
+    Use --spec to generate from an existing spec:
+
+        penguiflow generate --spec my-agent.yaml
+    """
+    from pathlib import Path
+
+    from .generate import run_generate, run_init_spec
+    from .init import CLIError
+    from .spec_errors import SpecValidationError
+
+    # Handle --init mode
+    if init_name is not None:
+        if spec_path is not None:
+            click.echo("✗ Cannot use --init and --spec together", err=True)
+            sys.exit(1)
+        if dry_run:
+            click.echo("✗ --dry-run is not supported with --init", err=True)
+            sys.exit(1)
+
+        try:
+            init_result = run_init_spec(
+                agent_name=init_name,
+                output_dir=Path(output_dir) if output_dir else None,
+                force=force,
+                quiet=quiet,
+            )
+            if not init_result.success:
+                sys.exit(1)
+        except CLIError as e:
+            click.echo(f"✗ {e.message}", err=True)
+            if e.hint:
+                click.echo(f"  Hint: {e.hint}", err=True)
+            sys.exit(1)
+        return
+
+    # Handle --spec mode (original behavior)
+    if spec_path is None:
+        click.echo("✗ Either --init or --spec is required", err=True)
+        click.echo("  Use --init to create a new spec workspace", err=True)
+        click.echo("  Use --spec to generate from an existing spec", err=True)
+        sys.exit(1)
+
+    try:
+        result = run_generate(
+            spec_path=Path(spec_path),
+            output_dir=Path(output_dir) if output_dir else None,
+            dry_run=dry_run,
+            force=force,
+            quiet=quiet,
+            verbose=verbose,
+        )
+        if not result.success:
+            sys.exit(1)
+    except SpecValidationError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
     except CLIError as e:
         click.echo(f"✗ {e.message}", err=True)
         if e.hint:

@@ -1,0 +1,176 @@
+# Environment Setup for {{ agent_name }}
+
+This document explains how to configure environment variables for your agent.
+
+## Quick Start
+
+1. Copy `.env.example` to `.env`:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Set your LLM provider API key (see Your Configuration below)
+
+3. Run your agent:
+   ```bash
+   uv run {{ package_name }}
+   # or use the playground:
+   penguiflow dev .
+   ```
+
+## Your Agent Configuration
+
+Your agent is configured to use:
+- **Model**: `{{ primary_model }}`
+{% if primary_provider %}- **Provider**: `{{ primary_provider }}`{% endif %}
+
+{% if primary_provider == "openrouter" %}
+### OpenRouter Setup (Your Configured Provider)
+
+```bash
+OPENROUTER_API_KEY=sk-or-v1-...
+LLM_MODEL={{ primary_model }}
+```
+
+Get your API key at: https://openrouter.ai/keys
+
+{% elif primary_provider == "anthropic" %}
+### Anthropic Setup (Your Configured Provider)
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-api03-...
+LLM_MODEL={{ primary_model }}
+```
+
+Get your API key at: https://console.anthropic.com/settings/keys
+
+{% elif primary_provider == "azure" %}
+### Azure OpenAI Setup (Your Configured Provider)
+
+```bash
+AZURE_API_KEY=...
+AZURE_API_BASE=https://your-resource.openai.azure.com/
+AZURE_API_VERSION=2024-02-15-preview
+LLM_MODEL={{ primary_model }}
+```
+
+{% elif primary_provider == "google" or primary_provider == "gemini" %}
+### Google Gemini Setup (Your Configured Provider)
+
+```bash
+GEMINI_API_KEY=...
+LLM_MODEL={{ primary_model }}
+```
+
+Get your API key at: https://aistudio.google.com/app/apikey
+
+{% elif primary_provider == "bedrock" %}
+### AWS Bedrock Setup (Your Configured Provider)
+
+```bash
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION_NAME=us-east-1
+LLM_MODEL={{ primary_model }}
+```
+
+{% else %}
+### OpenAI Setup (Your Configured Provider)
+
+```bash
+OPENAI_API_KEY=sk-proj-...
+LLM_MODEL={{ primary_model }}
+```
+
+Get your API key at: https://platform.openai.com/api-keys
+
+{% endif %}
+
+---
+
+## Other Providers (Reference)
+
+PenguiFlow uses [LiteLLM](https://docs.litellm.ai/) for LLM integration. You can switch providers by changing your `.env`:
+
+<details>
+<summary>OpenAI</summary>
+
+```bash
+OPENAI_API_KEY=sk-proj-...
+LLM_MODEL=gpt-4o
+```
+</details>
+
+<details>
+<summary>Anthropic (Claude)</summary>
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-api03-...
+LLM_MODEL=anthropic/claude-sonnet-4-20250514
+```
+</details>
+
+<details>
+<summary>OpenRouter</summary>
+
+```bash
+OPENROUTER_API_KEY=sk-or-v1-...
+LLM_MODEL=openrouter/anthropic/claude-sonnet-4-20250514
+```
+</details>
+
+<details>
+<summary>Azure OpenAI</summary>
+
+```bash
+AZURE_API_KEY=...
+AZURE_API_BASE=https://your-resource.openai.azure.com/
+AZURE_API_VERSION=2024-02-15-preview
+LLM_MODEL=azure/your-deployment-name
+```
+</details>
+
+<details>
+<summary>Google (Gemini)</summary>
+
+```bash
+GEMINI_API_KEY=...
+LLM_MODEL=gemini/gemini-1.5-pro
+```
+</details>
+
+<details>
+<summary>AWS Bedrock</summary>
+
+```bash
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION_NAME=us-east-1
+LLM_MODEL=bedrock/anthropic.claude-3-sonnet-20240229-v1:0
+```
+</details>
+
+## Environment Variables Reference
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LLM_MODEL` | Primary LLM model identifier | `{{ primary_model }}` |
+| `SUMMARIZER_MODEL` | Model for trajectory summarization (optional) | Same as LLM_MODEL |
+| `REFLECTION_MODEL` | Model for reflection/critique (optional) | Same as LLM_MODEL |
+| `MEMORY_ENABLED` | Enable memory service integration | `{{ memory_enabled }}` |
+| `SUMMARIZER_ENABLED` | Enable trajectory summarization | `{{ summarizer_enabled }}` |
+| `REFLECTION_ENABLED` | Enable reflection loop | `{{ reflection_enabled }}` |
+| `MEMORY_BASE_URL` | Memory service endpoint | `http://localhost:8000` |
+| `LIGHTHOUSE_BASE_URL` | Lighthouse service endpoint | `http://localhost:8081` |
+| `WAYFINDER_BASE_URL` | Wayfinder service endpoint | `http://localhost:8082` |
+| `PLANNER_MAX_ITERS` | Maximum planner iterations | `{{ planner_max_iters }}` |
+| `PLANNER_HOP_BUDGET` | Maximum tool hops per run | `{{ planner_hop_budget }}` |
+| `PLANNER_ABSOLUTE_MAX_PARALLEL` | Maximum parallel tool calls | `{{ planner_absolute_max_parallel }}` |
+| `PLANNER_STREAM_FINAL_RESPONSE` | Stream final LLM answer tokens (true/false) | `{{ planner_stream_final_response }}` |
+
+## Security Notes
+
+- **Never commit `.env` to version control** - it's already in `.gitignore`
+- Use `.env.example` as a template (safe to commit)
+- For production, use secret management (AWS Secrets Manager, Vault, etc.)
+- Rotate API keys regularly

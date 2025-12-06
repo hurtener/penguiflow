@@ -1,0 +1,128 @@
+"""Flow: {{ flow.description }}."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+{% if flow.has_typed_payloads %}
+
+from pydantic import BaseModel
+{% endif %}
+
+from penguiflow.core import PenguiFlow, create
+from penguiflow.node import Node, NodePolicy
+from penguiflow.registry import ModelRegistry
+from penguiflow.types import Message
+
+{% if flow.has_typed_payloads %}
+
+# Typed payload models
+{% set seen_types = [] %}
+{% for node in flow.nodes %}
+{% if node.input_type and node.input_type not in seen_types %}
+{% set _ = seen_types.append(node.input_type) %}
+class {{ node.input_type }}(BaseModel):
+    """Payload model for {{ node.input_type }}."""
+    # TODO: Define fields
+    pass
+
+{% endif %}
+{% if node.output_type and node.output_type not in seen_types %}
+{% set _ = seen_types.append(node.output_type) %}
+class {{ node.output_type }}(BaseModel):
+    """Payload model for {{ node.output_type }}."""
+    # TODO: Define fields
+    pass
+
+{% endif %}
+{% endfor %}
+{% endif %}
+
+@dataclass(slots=True)
+class {{ flow.bundle_class }}:
+    """Flow bundle for {{ flow.name }}."""
+
+    flow: PenguiFlow
+    registry: ModelRegistry
+{% for node in flow.nodes %}
+    {{ node.var_name }}: Node
+{% endfor %}
+
+
+{% for node in flow.nodes %}
+def _make_{{ node.var_name }}(
+{% for dep_name in node.uses %}
+    {{ dep_name }}: Any,
+{% endfor %}
+) -> Node:
+    """Create node '{{ node.name }}'."""
+
+    async def _{{ node.var_name }}(message: Message, _ctx: Any) -> Message:
+        base_message = (
+            message if isinstance(message, Message) else Message.model_validate(message)
+        )
+        payload = base_message.payload
+{% if node.uses %}
+
+        # Dependencies available: {{ node.uses | join(", ") }}
+{% endif %}
+
+        # TODO: Implement {{ node.name }} logic
+        result = payload
+
+        return base_message.model_copy(update={"payload": result})
+
+    return Node(
+        _{{ node.var_name }},
+        name="{{ node.name }}",
+        policy=NodePolicy({{ node.policy_kwargs }}),
+    )
+
+
+{% endfor %}
+def build_{{ flow.name }}_flow(
+{% for dep in flow.dependencies %}
+    {{ dep.name }}: Any,  # {{ dep.type_hint }}
+{% endfor %}
+) -> {{ flow.bundle_class }}:
+    """Create PenguiFlow DAG for {{ flow.description }}."""
+{% for node in flow.nodes %}
+{% if node.uses %}
+    {{ node.var_name }} = _make_{{ node.var_name }}(
+{% for dep_name in node.uses %}
+        {{ dep_name }}={{ dep_name }},
+{% endfor %}
+    )
+{% else %}
+    {{ node.var_name }} = _make_{{ node.var_name }}()
+{% endif %}
+{% endfor %}
+
+    # Build flow using fluent API
+    flow = create(
+{% for edge in flow.edges %}
+{% if edge.target %}
+        {{ edge.start }}.to({{ edge.target }}),
+{% endif %}
+{% endfor %}
+    )
+
+    registry = ModelRegistry()
+{% for node in flow.nodes %}
+{% if node.input_type and node.output_type %}
+    registry.register("{{ node.name }}", {{ node.input_type }}, {{ node.output_type }})
+{% else %}
+    registry.register("{{ node.name }}", Message, Message)
+{% endif %}
+{% endfor %}
+
+    return {{ flow.bundle_class }}(
+        flow=flow,
+        registry=registry,
+{% for node in flow.nodes %}
+        {{ node.var_name }}={{ node.var_name }},
+{% endfor %}
+    )
+
+
+__all__ = ["{{ flow.bundle_class }}", "build_{{ flow.name }}_flow"]

@@ -1,0 +1,59 @@
+"""Tool: {{ tool.description }}"""
+
+from __future__ import annotations
+{% if not tool.result %}
+
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+{% else %}
+
+from pydantic import BaseModel
+
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+{% endif %}
+
+
+class {{ tool.class_name }}Args(BaseModel):
+    """{{ tool.description }} input."""
+{% if tool.args %}
+{% for field in tool.args %}
+    {{ field.name }}: {{ field.type_hint }}
+{% endfor %}
+{%- else %}
+    pass
+{% endif %}
+
+
+class {{ tool.class_name }}Result(BaseModel):
+    """{{ tool.description }} output."""
+{% if tool.result %}
+{% for field in tool.result %}
+    {{ field.name }}: {{ field.type_hint }}
+{% endfor %}
+{% else %}
+    summary: str = Field(description="Short description of the outcome")
+    details: dict[str, Any] | None = Field(
+        default=None,
+        description="Heavy data for downstream consumers (redacted from LLM context).",
+        json_schema_extra={"artifact": True},
+    )
+{% endif %}
+
+
+@tool(
+    desc="{{ tool.description }}",
+    tags={{ tool.tags_literal }},
+    side_effects="{{ tool.side_effects }}",
+)
+async def {{ tool.name }}(args: {{ tool.class_name }}Args, ctx: ToolContext) -> {{ tool.class_name }}Result:
+    """{{ tool.description }}
+
+    TODO: Implement the actual logic.
+    """
+    del ctx  # Remove when implementing - ctx provides emit_chunk(), pause(), etc.
+    raise NotImplementedError("Implement {{ tool.name }}")

@@ -1,0 +1,13 @@
+"""Generated flows for {{ agent_name }}."""
+
+from __future__ import annotations
+{% for flow in flows %}
+from .{{ flow.name }} import {{ flow.bundle_class }}, build_{{ flow.name }}_flow
+{% endfor %}
+
+__all__ = [
+{% for flow in flows %}
+    "{{ flow.bundle_class }}",
+    "build_{{ flow.name }}_flow",
+{% endfor %}
+]

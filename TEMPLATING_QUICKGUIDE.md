@@ -1,8 +1,14 @@
 # PenguiFlow Templating Quickguide
 
-> **Version**: 2.5 | **Last Updated**: December 2025
+> **Version**: 2.6 | **Last Updated**: December 2025
+>
+> **v2.7 Update**: Planner now returns structured `FinalPayload` with `raw_answer` field. See [Extracting Answers from Payload](#4-extracting-answers-from-payload) for the recommended pattern.
 
-The `penguiflow new` command scaffolds production-ready agent projects with best practices baked in. This guide covers every template, flag, and pattern you need to ship agents fast.
+The PenguiFlow CLI scaffolds production-ready agent projects with best practices baked in. This guide covers every template, flag, and pattern you need to ship agents fast.
+
+**Two ways to create agents:**
+- `penguiflow new` — Interactive scaffolding with templates
+- `penguiflow generate` — Declarative YAML spec → generated project (v2.6+)
 
 ---
 
@@ -28,12 +34,18 @@ The `penguiflow new` command scaffolds production-ready agent projects with best
    - [--with-hitl](#--with-hitl)
    - [--with-a2a](#--with-a2a)
    - [--no-memory](#--no-memory)
-9. [Project Structure](#project-structure)
-10. [Configuration](#configuration)
-11. [Running Your Agent](#running-your-agent)
-12. [Testing](#testing)
-13. [Best Practices](#best-practices)
-14. [Troubleshooting](#troubleshooting)
+9. [Agent Spec & Generator (v2.6+)](#agent-spec--generator-v26)
+   - [Spec Format](#spec-format)
+   - [Generator Command](#generator-command)
+   - [Example Spec](#example-spec)
+   - [Tested Template Examples](#tested-template-examples)
+   - [Memory Configuration](#memory-configuration)
+10. [Project Structure](#project-structure)
+11. [Configuration](#configuration)
+12. [Running Your Agent](#running-your-agent)
+13. [Testing](#testing)
+14. [Best Practices](#best-practices)
+15. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -1021,6 +1033,636 @@ async def execute(self, query: str, ...) -> AgentResponse:
 
 ---
 
+## Agent Spec & Generator (v2.6+)
+
+**New in v2.6**: Define your agent declaratively in YAML and generate production-ready code.
+
+Instead of manually creating tools and wiring the planner, describe what you want in a spec file and let the generator create everything for you.
+
+### When to Use Generate vs New
+
+| Approach | Best For |
+|----------|----------|
+| `penguiflow new` | Quick start, exploring templates, learning patterns |
+| `penguiflow generate` | Defined requirements, spec-driven development, reproducible scaffolding |
+
+### Generator Command
+
+```bash
+penguiflow generate --spec=agent.yaml [--output-dir=.] [--dry-run] [--force] [--verbose]
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--spec`, `-s` | Path to the agent spec YAML file (required) |
+| `--output-dir` | Directory for the project (default: current directory) |
+| `--dry-run` | Preview files without creating them |
+| `--force` | Overwrite existing files |
+| `--verbose`, `-v` | Show detailed generation progress |
+| `--quiet`, `-q` | Suppress output messages |
+
+### Spec Format
+
+The spec YAML has these sections:
+
+```yaml
+# ─────────────────────────────────────────────────────────────
+# AGENT DEFINITION
+# ─────────────────────────────────────────────────────────────
+agent:
+  name: my-agent                    # Project name (required)
+  description: My awesome agent     # Agent purpose
+  template: react                   # Base template to use
+  flags:
+    streaming: true                 # --with-streaming
+    hitl: false                     # --with-hitl
+    a2a: false                      # --with-a2a
+    memory: true                    # default true, false = --no-memory
+
+# ─────────────────────────────────────────────────────────────
+# TOOLS (ReactPlanner catalog)
+# ─────────────────────────────────────────────────────────────
+tools:
+  - name: search_documents          # Function name (snake_case)
+    description: Search indexed documents by query
+    side_effects: read              # pure|read|write|external|stateful
+    tags: ["search", "rag"]         # For ToolPolicy filtering
+    args:
+      query: str
+      limit: Optional[int]
+    result:
+      documents: list[str]
+      total_count: int
+
+# ─────────────────────────────────────────────────────────────
+# FLOWS (Linear DAGs only in v2.6)
+# ─────────────────────────────────────────────────────────────
+flows:
+  - name: process_pipeline
+    description: Document processing pipeline
+    nodes:
+      - name: fetch
+        policy:
+          timeout_s: 30
+      - name: transform
+      - name: store
+    steps: [fetch, transform, store]  # Linear: fetch→transform→store
+
+# ─────────────────────────────────────────────────────────────
+# SERVICES (External integrations)
+# ─────────────────────────────────────────────────────────────
+services:
+  memory_iceberg:
+    enabled: true
+    base_url: http://localhost:8000
+  lighthouse:
+    enabled: false
+  wayfinder:
+    enabled: false
+
+# ─────────────────────────────────────────────────────────────
+# LLM CONFIGURATION
+# ─────────────────────────────────────────────────────────────
+llm:
+  primary:
+    model: gpt-4o                   # Required
+    provider: openai                # Optional hint
+  summarizer:
+    enabled: true
+    model: gpt-4o-mini              # Defaults to primary.model if omitted
+  reflection:
+    enabled: true
+    quality_threshold: 0.8
+    max_revisions: 2
+    criteria:                       # Custom reflection criteria
+      completeness: "Fully answers the query"
+      accuracy: "Uses verified information"
+      clarity: "Response is actionable"
+
+# ─────────────────────────────────────────────────────────────
+# PLANNER CONFIGURATION
+# ─────────────────────────────────────────────────────────────
+planner:
+  max_iters: 12
+  hop_budget: 8
+  absolute_max_parallel: 5
+
+  # Required: Agent identity & purpose
+  system_prompt_extra: |
+    You are a document search assistant.
+
+    Your mission is to help users find relevant information
+    in their document collection quickly and accurately.
+
+    Always cite sources and indicate confidence levels.
+
+  # Required if memory enabled
+  memory_prompt: |
+    You have access to the user's memory context:
+    - conscious_memories: Recent session context
+    - retrieved_memories: Relevant historical information
+
+    Use memories to personalize responses and avoid
+    asking for information already provided.
+
+  hints:
+    ordering: [search_documents, analyze_results]
+    parallel_groups: [[fetch_a, fetch_b]]
+```
+
+### Supported Types
+
+The generator supports these type annotations:
+
+| Type | Example | Generated Code |
+|------|---------|----------------|
+| `str` | `query: str` | `query: str` |
+| `int` | `count: int` | `count: int` |
+| `float` | `score: float` | `score: float` |
+| `bool` | `enabled: bool` | `enabled: bool` |
+| `list[T]` | `items: list[str]` | `items: list[str]` |
+| `Optional[T]` | `limit: Optional[int]` | `limit: int \| None` |
+| `dict[K,V]` | `meta: dict[str,str]` | `meta: dict[str, str]` |
+
+### Example Spec
+
+Here's a complete example for a RAG agent:
+
+```yaml
+agent:
+  name: rag-assistant
+  description: RAG-powered document assistant
+  template: react
+  flags:
+    streaming: true
+    memory: true
+
+tools:
+  - name: search_documents
+    description: Search documents using semantic similarity
+    side_effects: read
+    tags: ["search", "rag"]
+    args:
+      query: str
+      top_k: Optional[int]
+    result:
+      documents: list[str]
+      scores: list[float]
+
+  - name: summarize_results
+    description: Summarize search results into a coherent answer
+    side_effects: pure
+    tags: ["synthesis"]
+    args:
+      documents: list[str]
+      query: str
+    result:
+      summary: str
+      citations: list[str]
+
+services:
+  memory_iceberg:
+    enabled: true
+    base_url: http://localhost:8000
+  lighthouse:
+    enabled: true
+    base_url: http://localhost:8081
+
+llm:
+  primary:
+    model: gpt-4o
+  reflection:
+    enabled: true
+    quality_threshold: 0.85
+
+planner:
+  max_iters: 10
+  hop_budget: 6
+  system_prompt_extra: |
+    You are a helpful RAG assistant that searches documents
+    and provides accurate, well-cited answers.
+
+    Always search before answering factual questions.
+    Cite your sources with document references.
+  memory_prompt: |
+    Use the user's memory context to:
+    - Remember their preferences and past queries
+    - Avoid repeating information already discussed
+    - Build on previous conversations
+```
+
+### Generated Output
+
+Running `penguiflow generate --spec=agent.yaml` creates:
+
+```
+rag-assistant/
+├── src/rag_assistant/
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── config.py              # With LLM inheritance
+│   ├── orchestrator.py
+│   ├── planner.py             # Tool catalog + prompts
+│   ├── models.py
+│   ├── telemetry.py
+│   ├── tools/
+│   │   ├── __init__.py
+│   │   ├── search_documents.py   # Generated tool stub
+│   │   └── summarize_results.py  # Generated tool stub
+│   └── clients/
+│       └── memory.py
+├── tests/
+│   ├── conftest.py
+│   ├── test_orchestrator.py
+│   └── test_tools/
+│       ├── test_search_documents.py
+│       └── test_summarize_results.py
+├── pyproject.toml
+├── .env.example               # All env vars pre-filled
+└── .vscode/
+```
+
+### Generated Tool Example
+
+Each tool in the spec generates a file like this:
+
+```python
+# src/rag_assistant/tools/search_documents.py
+"""Tool: Search documents using semantic similarity"""
+
+from pydantic import BaseModel
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
+
+
+class SearchDocumentsArgs(BaseModel):
+    """Search documents using semantic similarity input."""
+    query: str
+    top_k: int | None
+
+
+class SearchDocumentsResult(BaseModel):
+    """Search documents using semantic similarity output."""
+    documents: list[str]
+    scores: list[float]
+
+
+@tool(desc="Search documents using semantic similarity", tags=["search", "rag"], side_effects="read")
+async def search_documents(args: SearchDocumentsArgs, ctx: ToolContext) -> SearchDocumentsResult:
+    """TODO: Implement search_documents logic."""
+    del ctx  # avoid unused-variable lint warnings until implemented
+    raise NotImplementedError("Implement search_documents")
+```
+
+### Error Messages
+
+The generator provides actionable errors with file:line references:
+
+```bash
+$ penguiflow generate --spec=agent.yaml
+
+agent.yaml:15 tools[0].name - Invalid tool name 'SearchDocs': must be snake_case
+  Suggestion: Use 'search_docs' instead
+
+agent.yaml:23 tools[1].args.query - Unsupported type 'Query': use str, int, float, bool, list[T], Optional[T], or dict[K,V]
+  Suggestion: Did you mean 'str'?
+
+agent.yaml:45 planner.system_prompt_extra - Required field is empty
+  Suggestion: Define who your agent is and what it does
+```
+
+---
+
+### Tested Template Examples
+
+The following specs have been tested and verified to generate valid, runnable projects.
+
+#### React Template (Recommended Start)
+
+A simple conversational agent with a greeting tool:
+
+```yaml
+# hello_world.yaml
+name: hello-agent
+description: Hello world demo agent
+template: react
+
+# Shorthand format (equivalent to agent.flags.memory: false)
+memory: false
+
+llm:
+  provider: openrouter
+  model: anthropic/claude-sonnet-4
+
+tools:
+  - name: greet
+    description: Greet a user by name
+    args:
+      - name: name
+        type: str
+    result:
+      - name: greeting
+        type: str
+
+planner:
+  system_prompt_extra: |
+    You are a friendly assistant that greets users.
+    Use the greet tool to generate personalized greetings.
+```
+
+Generate and run:
+
+```bash
+penguiflow generate --spec=hello_world.yaml
+cd hello-agent
+uv sync && cp .env.example .env
+# Edit .env to add your API key
+uv run python -m hello_agent
+```
+
+---
+
+#### Parallel Template (Multi-Source)
+
+Batch processing agent that fetches from multiple sources:
+
+```yaml
+# parallel_agent.yaml
+name: parallel-agent
+description: Parallel data fetching agent
+template: parallel
+
+memory: true  # Enable memory integration
+
+llm:
+  provider: openrouter
+  model: anthropic/claude-sonnet-4
+
+tools:
+  - name: fetch_data
+    description: Fetch data from a specified source
+    tags: ["fetch", "parallel"]
+    side_effects: read
+    args:
+      - name: source_id
+        type: str
+    result:
+      - name: data
+        type: dict
+
+  - name: process_data
+    description: Process and transform fetched data
+    tags: ["process"]
+    side_effects: pure
+    args:
+      - name: data
+        type: dict
+    result:
+      - name: processed
+        type: dict
+
+services:
+  memory_iceberg:
+    enabled: true
+    base_url: http://localhost:8000
+
+planner:
+  absolute_max_parallel: 4
+  system_prompt_extra: |
+    You are a data aggregation assistant.
+    Fetch from multiple sources in parallel and combine results.
+  memory_prompt: |
+    Use retrieved memories to understand user preferences
+    for data sources and processing options.
+```
+
+---
+
+#### Enterprise Template (Production-Ready)
+
+Full-featured enterprise agent with observability and resilience:
+
+```yaml
+# enterprise_agent.yaml
+name: enterprise-agent
+description: Production-grade enterprise support agent
+template: enterprise
+
+memory: true
+
+llm:
+  provider: openrouter
+  model: anthropic/claude-sonnet-4
+  reflection:
+    enabled: true
+    quality_threshold: 0.85
+    max_revisions: 2
+
+tools:
+  - name: audit_log
+    description: Log audit events for compliance tracking
+    tags: ["audit", "compliance"]
+    side_effects: write
+    args:
+      - name: event_type
+        type: str
+      - name: details
+        type: dict
+    result:
+      - name: log_id
+        type: str
+
+  - name: validate_permissions
+    description: Validate user permissions for a resource
+    tags: ["security", "permissions"]
+    side_effects: read
+    args:
+      - name: user_id
+        type: str
+      - name: resource
+        type: str
+    result:
+      - name: allowed
+        type: bool
+
+services:
+  memory_iceberg:
+    enabled: true
+    base_url: http://localhost:8000
+
+planner:
+  max_iters: 15
+  hop_budget: 10
+  system_prompt_extra: |
+    You are an enterprise support agent with full audit capabilities.
+    Always validate permissions before accessing sensitive resources.
+    Log all significant actions for compliance.
+  memory_prompt: |
+    Consider the user's role, recent interactions, and permission history
+    when determining access levels and providing assistance.
+```
+
+---
+
+#### Flow Template (DAG Pipelines)
+
+Agent with PenguiFlow DAG for data processing pipelines:
+
+```yaml
+# flow_agent.yaml
+name: flow-agent
+description: ETL pipeline agent with DAG orchestration
+template: react  # Use react as base, flows add DAG capability
+
+memory: true
+
+llm:
+  provider: openrouter
+  model: anthropic/claude-sonnet-4
+
+tools:
+  - name: input
+    description: Receive and validate input data
+    args:
+      - name: source
+        type: str
+    result:
+      - name: data
+        type: dict
+
+  - name: process
+    description: Transform and enrich data
+    args:
+      - name: data
+        type: dict
+    result:
+      - name: processed
+        type: dict
+
+  - name: output
+    description: Store processed results
+    args:
+      - name: processed
+        type: dict
+    result:
+      - name: status
+        type: str
+
+# Define PenguiFlow DAG
+flows:
+  - name: data_pipeline
+    description: Simple data processing pipeline
+    nodes:
+      - name: input
+        next: [process]
+      - name: process
+        next: [output]
+      - name: output
+        next: []
+
+services:
+  memory_iceberg:
+    enabled: true
+    base_url: http://localhost:8000
+
+planner:
+  system_prompt_extra: |
+    You are a data pipeline orchestrator.
+    Use the flow tools to process data through the pipeline.
+  memory_prompt: |
+    Reference past pipeline executions to optimize processing.
+```
+
+This generates both tools and a `flows/` directory with PenguiFlow DAG definitions:
+
+```
+flow-agent/
+├── src/flow_agent/
+│   ├── tools/
+│   │   ├── input.py
+│   │   ├── process.py
+│   │   └── output.py
+│   └── flows/
+│       ├── __init__.py
+│       └── data_pipeline.py   # PenguiFlow DAG
+└── ...
+```
+
+The generated flow can be used as a subflow within the planner or run independently.
+
+---
+
+#### Memory Configuration
+
+Memory can be configured at two levels:
+
+**1. Shorthand (top-level):**
+```yaml
+memory: false  # Disable memory
+```
+
+**2. Full flags:**
+```yaml
+agent:
+  name: my-agent
+  flags:
+    memory: true
+    streaming: true
+    hitl: false
+    a2a: false
+```
+
+When memory is enabled, the generator:
+- Adds `memory_enabled: bool = True` to `config.py`
+- Creates `clients/memory.py` with `MemoryClient` stub
+- Wires memory integration in `orchestrator.py`
+- Adds `MEMORY_PROMPT` handling in `planner.py`
+
+When memory is disabled:
+- `memory_enabled: bool = False` in `config.py`
+- No memory client initialization
+- `llm_context` passed as empty dict
+
+---
+
+### Workflow
+
+1. **Start with the reference spec:**
+   ```bash
+   # Copy the reference spec
+   cp $(python -c "import penguiflow; print(penguiflow.__path__[0])")/templates/spec.template.yaml agent.yaml
+   ```
+
+2. **Edit the spec** with your agent's requirements
+
+3. **Preview the generation:**
+   ```bash
+   penguiflow generate --spec=agent.yaml --dry-run
+   ```
+
+4. **Generate the project:**
+   ```bash
+   penguiflow generate --spec=agent.yaml
+   ```
+
+5. **Implement the tools:**
+   ```bash
+   cd my-agent
+   # Edit src/my_agent/tools/*.py to add your logic
+   ```
+
+6. **Run and test:**
+   ```bash
+   uv sync
+   cp .env.example .env
+   uv run pytest
+   uv run python -m my_agent
+   ```
+
+---
+
 ## Project Structure
 
 All templates follow a consistent structure:
@@ -1352,7 +1994,49 @@ async def record_planner_event(self, event: FlowEvent) -> FlowEvent:
     return event
 ```
 
-### 4. Memory Integration
+### 4. Extracting Answers from Payload
+
+**v2.7+ uses structured `FinalPayload` with `raw_answer` field:**
+
+```python
+# DO: Extract raw_answer from FinalPayload
+def _extract_answer(payload: dict) -> str:
+    """Extract answer text from planner payload.
+
+    Tries keys in priority order for backward compatibility:
+    1. raw_answer (v2.7+)
+    2. answer (legacy)
+    3. text (legacy)
+    4. result (legacy)
+    """
+    for key in ("raw_answer", "answer", "text", "result"):
+        if key in payload:
+            return str(payload.get(key))
+
+    # Fallback: serialize entire payload
+    return str(payload)
+
+# Usage in orchestrator
+async def execute(self, query: str, ...) -> AgentResponse:
+    result = await self._planner.run(...)
+
+    payload = result.payload
+    answer_text = _extract_answer(payload)
+
+    return AgentResponse(
+        answer=answer_text,
+        artifacts=payload.get("artifacts", {}),
+        confidence=payload.get("confidence"),
+        sources=payload.get("sources", []),
+    )
+```
+
+**Why this pattern?**
+- Handles both v2.7+ (`raw_answer`) and legacy formats
+- Gracefully degrades if planner doesn't use structured output
+- Centralizes extraction logic for maintainability
+
+### 5. Memory Integration
 
 ```python
 # DO: Follow the lifecycle
@@ -1372,15 +2056,19 @@ async def execute(self, query: str, ...) -> AgentResponse:
         ...
     )
 
-    # 4. Ingest interaction
+    # 4. Extract answer (v2.7+ uses raw_answer)
+    payload = result.payload
+    answer_text = _extract_answer(payload)
+
+    # 5. Ingest interaction
     await self._memory.ingest_interaction(
         user_prompt=query,
-        agent_response=result.answer,
+        agent_response=answer_text,
         ...
     )
 ```
 
-### 5. Production Checklist
+### 6. Production Checklist
 
 - [ ] Configure proper `LLM_MODEL` for production
 - [ ] Set `LOG_LEVEL=INFO` (not DEBUG)

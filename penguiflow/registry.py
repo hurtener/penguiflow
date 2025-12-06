@@ -49,9 +49,7 @@ class ModelRegistry:
             raise KeyError(f"Node '{node_name}' not registered") from exc
         return entry.in_adapter, entry.out_adapter
 
-    def models(
-        self, node_name: str
-    ) -> tuple[type[BaseModel], type[BaseModel]]:
+    def models(self, node_name: str) -> tuple[type[BaseModel], type[BaseModel]]:
         """Return the registered models for ``node_name``.
 
         Raises

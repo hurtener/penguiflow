@@ -1,0 +1,65 @@
+"""Pytest configuration for {{ agent_name }}."""
+
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+# Add src to path for imports
+root = Path(__file__).resolve().parents[1]
+src = root / "src"
+if str(src) not in sys.path:
+    sys.path.insert(0, str(src))
+
+from {{ package_name }}.config import Config
+
+
+@dataclass
+class DummyToolContext:
+    """Mock ToolContext for testing tools without a full planner.
+
+    Captures emit_chunk() calls and provides basic context fields.
+    """
+
+    llm_context: dict[str, Any] = field(default_factory=dict)
+    tool_context: dict[str, Any] = field(default_factory=lambda: {"tenant_id": "test-tenant"})
+    meta: dict[str, Any] = field(default_factory=dict)
+    chunks: list[tuple[str, int, str, bool]] = field(default_factory=list)
+    updates: list[object] = field(default_factory=list)
+
+    async def pause(self, *args: Any, **kwargs: Any) -> None:
+        """Not implemented in tests - raises if called unexpectedly."""
+        del args, kwargs
+        raise RuntimeError("Unexpected pause() call in test")
+
+    async def emit_chunk(
+        self,
+        stream_id: str,
+        seq: int,
+        text: str,
+        done: bool = False,
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        """Record emitted chunks for assertions."""
+        del meta  # Not tracked in basic tests
+        self.chunks.append((stream_id, seq, text, done))
+
+    def record_status(self, update: object) -> None:
+        """Record status updates for assertions."""
+        self.updates.append(update)
+
+
+@pytest.fixture
+def dummy_ctx() -> DummyToolContext:
+    """Provide a fresh DummyToolContext for each test."""
+    return DummyToolContext()
+
+
+@pytest.fixture
+def config() -> Config:
+    """Provide default Config for testing."""
+    return Config()

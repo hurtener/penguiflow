@@ -1,0 +1,89 @@
+"""Planner configuration for {{ agent_name }}."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from penguiflow.catalog import build_catalog
+from penguiflow.planner import ReactPlanner{% if reflection_enabled %}, ReflectionConfig{% if reflection_criteria %}, ReflectionCriteria{% endif %}{% endif %}
+
+from .config import Config
+from .tools import build_catalog_bundle
+
+
+SYSTEM_PROMPT_EXTRA = """{{ system_prompt_extra }}"""
+{% if include_memory_prompt %}
+MEMORY_PROMPT = """{{ memory_prompt }}"""
+{% endif %}
+
+
+@dataclass
+class PlannerBundle:
+    """Container for planner and registry."""
+
+    planner: ReactPlanner
+    registry: Any
+
+
+def _build_system_prompt(config: Config) -> str:
+    """Build the system prompt, optionally including memory context."""
+    prompt = SYSTEM_PROMPT_EXTRA
+{% if include_memory_prompt %}
+    if config.memory_enabled:
+        prompt = prompt + "\n\n" + MEMORY_PROMPT
+{% endif %}
+    return prompt
+
+
+def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
+    """Build ReactPlanner with generated tool catalog."""
+
+    nodes, registry = build_catalog_bundle()
+    catalog = build_catalog(nodes, registry)
+
+{% if reflection_enabled %}
+    reflection_cfg = ReflectionConfig(
+        enabled=True,
+        quality_threshold=config.reflection_quality_threshold,
+        max_revisions=config.reflection_max_revisions,
+{% if reflection_criteria %}
+        criteria=ReflectionCriteria(
+            completeness="{{ reflection_criteria.completeness }}",
+            accuracy="{{ reflection_criteria.accuracy }}",
+            clarity="{{ reflection_criteria.clarity }}",
+        ),
+{% endif %}
+    )
+{% else %}
+    reflection_cfg = None
+{% endif %}
+
+{% if summarizer_enabled %}
+    summarizer_llm = config.summarizer_model or config.llm_model
+{% else %}
+    summarizer_llm = None
+{% endif %}
+
+{% if reflection_enabled %}
+    reflection_llm = config.reflection_model or config.llm_model
+{% else %}
+    reflection_llm = None
+{% endif %}
+
+    planner = ReactPlanner(
+        llm=config.llm_model,
+        catalog=catalog,
+        system_prompt_extra=_build_system_prompt(config),
+        max_iters=config.planner_max_iters,
+        hop_budget=config.planner_hop_budget,
+        absolute_max_parallel=config.planner_absolute_max_parallel,
+        summarizer_llm=summarizer_llm,
+        reflection_config=reflection_cfg,
+        reflection_llm=reflection_llm,
+        planning_hints={{ planning_hints_literal }},
+        event_callback=event_callback,
+        stream_final_response=config.planner_stream_final_response,
+    )
+
+    return PlannerBundle(planner=planner, registry=registry)

@@ -10,7 +10,9 @@ __pycache__/
 .Python
 build/
 develop-eggs/
+test_generation/
 dist/
+!penguiflow/cli/playground_ui/dist/
 downloads/
 eggs/
 .eggs/

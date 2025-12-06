@@ -1,4 +1,4 @@
-PenguiFlow AI Assistant Reference (v2.5)
+PenguiFlow AI Assistant Reference (v2.6)
 ==========================================
 
 This file helps AI code assistants understand and use PenguiFlow effectively.

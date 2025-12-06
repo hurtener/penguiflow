@@ -81,9 +81,7 @@ def _iter_template_files(base: Traversable, prefix: Path | None = None):
 def _render_path(path: Path, ctx: TemplateContext) -> Path:
     """Render a destination path by replacing placeholders and suffixes."""
     rendered = Path(
-        str(path)
-        .replace("__package_name__", ctx.package_name)
-        .replace("__project_name__", ctx.project_name)
+        str(path).replace("__package_name__", ctx.package_name).replace("__project_name__", ctx.project_name)
     )
     if rendered.suffix == ".jinja":
         rendered = rendered.with_suffix("")
@@ -122,11 +120,7 @@ def _load_template_root(template: str) -> Traversable:
     base = resources.files("penguiflow.templates.new")
     target = base.joinpath(template)
     if not target.is_dir():
-        available = sorted(
-            entry.name
-            for entry in base.iterdir()
-            if entry.is_dir() and not entry.name.startswith("__")
-        )
+        available = sorted(entry.name for entry in base.iterdir() if entry.is_dir() and not entry.name.startswith("__"))
         hint = f"Available templates: {', '.join(available)}" if available else None
         raise TemplateNotFoundError(f"Unknown template: {template}", hint=hint)
     return target
@@ -158,9 +152,11 @@ def run_new(
     Returns:
         NewResult with success flag and created/skipped/error paths.
     """
-    package_name = _normalise_package_name(name)
+    # Use only the final component for display name (handles paths like "foo/bar")
+    display_name = Path(name).name
+    package_name = _normalise_package_name(display_name)
     ctx = TemplateContext(
-        project_name=name,
+        project_name=display_name,
         package_name=package_name,
         class_name=_class_name(package_name),
         template=template,

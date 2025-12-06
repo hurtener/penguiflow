@@ -76,7 +76,7 @@ async def main() -> None:
             {
                 "thought": "finish",
                 "next_node": None,
-                "args": {"answer": "PenguiFlow is a lightweight agent orchestrator."},
+                "args": {"raw_answer": "PenguiFlow is a lightweight agent orchestrator."},
             },
         ]
     )

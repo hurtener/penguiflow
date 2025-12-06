@@ -5,7 +5,15 @@ on:
   pull_request:
 
 jobs:
+  validate-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate frontend build
+        run: ./scripts/validate_frontend.sh
+
   test:
+    needs: validate-frontend
     runs-on: ubuntu-latest
     strategy:
       matrix:

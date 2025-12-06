@@ -35,6 +35,7 @@ class TrajectorySummary(BaseModel):
 class TrajectoryStep:
     action: PlannerAction
     observation: Any | None = None
+    llm_observation: Any | None = None
     error: str | None = None
     failure: Mapping[str, Any] | None = None
     streams: Mapping[str, Sequence[Mapping[str, Any]]] | None = None
@@ -46,10 +47,11 @@ class TrajectoryStep:
             "error": self.error,
             "failure": dict(self.failure) if self.failure else None,
         }
+        if self.llm_observation is not None:
+            payload["llm_observation"] = self.llm_observation
         if self.streams:
             payload["streams"] = {
-                stream_id: [dict(chunk) for chunk in chunks]
-                for stream_id, chunks in self.streams.items()
+                stream_id: [dict(chunk) for chunk in chunks] for stream_id, chunks in self.streams.items()
             }
         return payload
 
@@ -58,12 +60,19 @@ class TrajectoryStep:
             return self.observation.model_dump(mode="json")
         return self.observation
 
+    def serialise_for_llm(self) -> Any:
+        if self.llm_observation is not None:
+            return self.llm_observation
+        return self._serialise_observation()
+
 
 @dataclass(slots=True)
 class Trajectory:
     query: str
     llm_context: Mapping[str, Any] | None = None
     tool_context: dict[str, Any] | None = None
+    artifacts: dict[str, Any] = field(default_factory=dict)
+    sources: list[Mapping[str, Any]] = field(default_factory=list)
     steps: list[TrajectoryStep] = field(default_factory=list)
     summary: TrajectorySummary | None = None
     hint_state: dict[str, Any] = field(default_factory=dict)
@@ -76,19 +85,17 @@ class Trajectory:
         tool_context: dict[str, Any] | None = None
         if self.tool_context is not None:
             try:
-                tool_context = json.loads(
-                    json.dumps(self.tool_context, ensure_ascii=False)
-                )
+                tool_context = json.loads(json.dumps(self.tool_context, ensure_ascii=False))
             except (TypeError, ValueError):
                 tool_context = None
         return {
             "query": self.query,
             "llm_context": dict(self.llm_context or {}),
             "tool_context": tool_context,
+            "artifacts": dict(self.artifacts),
+            "sources": [dict(src) for src in self.sources],
             "steps": self.to_history(),
-            "summary": self.summary.model_dump(mode="json")
-            if self.summary
-            else None,
+            "summary": self.summary.model_dump(mode="json") if self.summary else None,
             "hint_state": dict(self.hint_state),
             "resume_user_input": self.resume_user_input,
         }
@@ -122,6 +129,7 @@ class Trajectory:
             step = TrajectoryStep(
                 action=action,
                 observation=step_data.get("observation"),
+                llm_observation=step_data.get("llm_observation"),
                 error=step_data.get("error"),
                 failure=step_data.get("failure"),
                 streams=normalised_streams,
@@ -132,6 +140,10 @@ class Trajectory:
             trajectory.summary = TrajectorySummary.model_validate(summary_data)
         trajectory.hint_state.update(payload.get("hint_state", {}))
         trajectory.resume_user_input = payload.get("resume_user_input")
+        trajectory.artifacts.update(payload.get("artifacts") or {})
+        for src in payload.get("sources") or []:
+            if isinstance(src, Mapping):
+                trajectory.sources.append(dict(src))
         return trajectory
 
     def compress(self) -> TrajectorySummary:
@@ -141,7 +153,7 @@ class Trajectory:
         if self.steps:
             last_step = self.steps[-1]
             if last_step.observation is not None:
-                last_observation = last_step._serialise_observation()
+                last_observation = last_step.serialise_for_llm()
                 facts["last_observation"] = last_observation
             if last_step.error:
                 facts["last_error"] = last_step.error

@@ -17,15 +17,18 @@ class JSONLLMClient(Protocol):
         *,
         messages: Sequence[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
-    ) -> str | tuple[str, float]:
-        ...
+        stream: bool = False,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
+    ) -> str | tuple[str, float]: ...
 
 
 @dataclass(frozen=True, slots=True)
 class PlannerEvent:
     """Structured event emitted during planner execution for observability."""
 
-    event_type: str  # step_start, step_complete, llm_call, pause, resume, finish
+    # Types: step_start, step_complete, llm_call, pause, resume, finish,
+    # stream_chunk, artifact_chunk, llm_stream_chunk
+    event_type: str
     ts: float
     trajectory_step: int
     thought: str | None = None
@@ -85,6 +88,67 @@ class ParallelJoin(BaseModel):
     node: str
     args: dict[str, Any] = Field(default_factory=dict)
     inject: JoinInjection | None = None
+
+
+class Source(BaseModel):
+    """Citation or reference used in a response."""
+
+    title: str
+    url: str | None = None
+    snippet: str | None = None
+    relevance_score: float | None = None
+
+
+class SuggestedAction(BaseModel):
+    """Recommended follow-up action for downstream consumers."""
+
+    action_id: str
+    label: str
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class FinalPayload(BaseModel):
+    """Standard structure for planner final answers."""
+
+    raw_answer: str = Field(description="Human-readable answer text.")
+    artifacts: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Heavy tool outputs collected during execution.",
+    )
+    confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Optional confidence score from planner/reflection.",
+    )
+    sources: list[Source] = Field(
+        default_factory=list,
+        description="Citations gathered from retrieval tools.",
+    )
+    route: str | None = Field(
+        default=None,
+        description="Categorization of the answer type.",
+    )
+    suggested_actions: list[SuggestedAction] = Field(
+        default_factory=list,
+        description="Suggested next steps for the user or UI.",
+    )
+    requires_followup: bool = Field(
+        default=False,
+        description="True if user input/clarification is needed.",
+    )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Non-fatal issues encountered during execution.",
+    )
+    language: str | None = Field(
+        default=None,
+        description="ISO 639-1 language code for the answer.",
+    )
+    extra: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Domain-specific fields not covered by the standard schema.",
+    )
 
 
 class PlannerAction(BaseModel):
@@ -164,12 +228,8 @@ class ReflectionConfig(BaseModel):
 class ClarificationResponse(BaseModel):
     """Response when planner cannot satisfy query after reflection failures."""
 
-    text: str = Field(
-        description="Honest explanation of what was tried and why it didn't work"
-    )
-    confidence: Literal["satisfied", "unsatisfied"] = Field(
-        description="Whether the query was satisfactorily answered"
-    )
+    text: str = Field(description="Honest explanation of what was tried and why it didn't work")
+    confidence: Literal["satisfied", "unsatisfied"] = Field(description="Whether the query was satisfactorily answered")
     attempted_approaches: list[str] = Field(
         default_factory=list,
         description="List of approaches/tools tried to answer the query",
@@ -206,5 +266,8 @@ __all__ = [
     "ReflectionConfig",
     "ReflectionCritique",
     "ReflectionCriteria",
+    "FinalPayload",
+    "Source",
+    "SuggestedAction",
     "ToolPolicy",
 ]

@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import logging
 import secrets
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from penguiflow.errors import FlowError
 from penguiflow.planner import PlannerFinish, PlannerPause
-{% if memory_enabled %}
-from .clients.memory import MemoryClient
-{% endif %}
+
 {% if with_a2a %}
 from .a2a import A2AServer
+{% endif %}
+{% if memory_enabled %}
+from .clients.memory import MemoryClient
 {% endif %}
 from .config import Config
 from .models import FinalDocuments
@@ -58,6 +60,13 @@ def _collect_streams(metadata: Mapping[str, Any]) -> dict[str, list[dict[str, An
 
 def _extract_documents(payload: Any) -> list[str]:
     """Normalize documents list from planner payloads."""
+    # Check for RFC-compliant raw_answer first
+    if isinstance(payload, Mapping):
+        for key in ("raw_answer", "answer", "text", "content", "message", "greeting", "response", "result"):
+            if key in payload:
+                value = payload.get(key)
+                if value is not None:
+                    return [str(value)]
     if isinstance(payload, FinalDocuments):
         return list(payload.documents)
     if isinstance(payload, dict):

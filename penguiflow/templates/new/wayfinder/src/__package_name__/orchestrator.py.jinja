@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import logging
 import secrets
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from penguiflow.errors import FlowError
 from penguiflow.planner import PlannerFinish, PlannerPause
+
+{% if with_a2a %}
+from .a2a import A2AServer
+{% endif %}
 {% if memory_enabled %}
 from .clients.memory import MemoryClient
 {% endif %}
 from .clients.wayfinder import WayfinderClient
-{% if with_a2a %}
-from .a2a import A2AServer
-{% endif %}
 from .config import Config
 from .models import QueryExecution
 from .planner import PlannerBundle, build_planner
@@ -59,10 +61,21 @@ def _collect_streams(metadata: Mapping[str, Any]) -> dict[str, list[dict[str, An
 
 def _extract_answer(payload: Any) -> str:
     """Normalize answer text from planner payloads."""
+    if isinstance(payload, Mapping):
+        # Check domain-specific keys first, then generic fallbacks
+        for key in ("raw_answer", "summary", "answer", "text", "content", "message", "greeting", "response", "result"):
+            if key in payload:
+                value = payload.get(key)
+                if value is not None:
+                    return str(value)
+        return str(payload)
     if isinstance(payload, QueryExecution):
         return payload.summary or "Query executed"
-    if isinstance(payload, dict) and "summary" in payload:
-        return str(payload.get("summary", "Query executed"))
+    for attr in ("raw_answer", "summary", "answer", "text", "content", "message", "greeting", "response", "result"):
+        if hasattr(payload, attr):
+            value = getattr(payload, attr)
+            if value is not None:
+                return str(value)
     return str(payload)
 
 

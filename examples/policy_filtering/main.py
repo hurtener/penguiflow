@@ -131,7 +131,7 @@ async def main() -> None:
             {
                 "thought": "Respond",
                 "next_node": None,
-                "args": {"answer": "Share public summary"},
+                "args": {"raw_answer": "Share public summary"},
             },
         ],
     )
@@ -160,7 +160,7 @@ async def main() -> None:
             {
                 "thought": "Wrap up",
                 "next_node": None,
-                "args": {"answer": "Email sent to stakeholders"},
+                "args": {"raw_answer": "Email sent to stakeholders"},
             },
         ],
     )
@@ -184,7 +184,7 @@ async def main() -> None:
             {
                 "thought": "Wrap up",
                 "next_node": None,
-                "args": {"answer": "Risky operation executed"},
+                "args": {"raw_answer": "Risky operation executed"},
             },
         ],
     )
