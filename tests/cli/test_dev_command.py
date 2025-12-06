@@ -23,10 +23,8 @@ def test_run_dev_invokes_uvicorn_and_browser(monkeypatch, tmp_path: Path) -> Non
     browser = mock.Mock()
     monkeypatch.setattr("webbrowser.open_new", browser)
 
-    # ensure dist exists so guard passes
-    dist_dir = Path(__file__).parents[2] / "penguiflow" / "cli" / "playground_ui" / "dist"
-    dist_dir.mkdir(parents=True, exist_ok=True)
-    (dist_dir / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    # Mock the UI assets check to avoid depending on real dist directory
+    monkeypatch.setattr("penguiflow.cli.dev._ensure_ui_assets", lambda _: None)
 
     pkg_dir = tmp_path / "src" / "demo_agent"
     pkg_dir.mkdir(parents=True)
