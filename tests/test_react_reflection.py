@@ -41,8 +41,10 @@ class ReflectionStubClient:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, object] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> tuple[str, float]:
-        del response_format
+        del response_format, stream, on_stream_chunk
         self.calls.append(list(messages))
         if not self._responses:
             raise AssertionError("No stub responses left")
@@ -415,8 +417,10 @@ async def test_critique_uses_main_llm_when_shared_client() -> None:
             *,
             messages: list[Mapping[str, str]],
             response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
         ) -> str:
-            del response_format
+            del response_format, stream, on_stream_chunk
             self.calls.append(list(messages))
             if self._responses:
                 return self._responses.pop(0)

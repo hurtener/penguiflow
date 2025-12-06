@@ -6,9 +6,9 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
-from typing import Any, Callable, get_args, get_origin
+from typing import Any, get_args, get_origin
 
 from pydantic import BaseModel
 

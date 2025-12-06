@@ -89,8 +89,10 @@ class ScriptedLLM:
         *,
         messages: list[dict[str, str]],
         response_format: dict[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> str:
-        del response_format
+        del response_format, stream, on_stream_chunk
         if self._responses is None:
             user_prompt = messages[-1].get("content", "")
             scripted = [

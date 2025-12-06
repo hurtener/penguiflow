@@ -201,7 +201,10 @@ class StubClient:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, object] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> tuple[str, float]:
+        del stream, on_stream_chunk
         self.calls.append(list(messages))
         if not self._responses:
             raise AssertionError("No stub responses left")
@@ -217,7 +220,10 @@ class SummarizerStub:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, object] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> tuple[str, float]:
+        del stream, on_stream_chunk
         self.calls.append(list(messages))
         return (
             json.dumps(
@@ -248,8 +254,10 @@ class CostStubClient:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, object] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> tuple[str, float]:
-        del response_format
+        del response_format, stream, on_stream_chunk
         self.calls.append(list(messages))
         if not self._responses:
             raise AssertionError("No stub responses left")
@@ -1743,8 +1751,10 @@ async def test_cost_tracking_graceful_when_unavailable() -> None:
             *,
             messages: list[Mapping[str, str]],
             response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
         ) -> str:
-            del messages, response_format
+            del messages, response_format, stream, on_stream_chunk
             return json.dumps(
                 {"thought": "Done", "next_node": None, "args": {"raw_answer": "OK"}}
             )

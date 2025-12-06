@@ -34,8 +34,10 @@ class StubClient:
         *,
         messages: list[Mapping[str, str]],
         response_format: Mapping[str, object] | None = None,
+        stream: bool = False,
+        on_stream_chunk: object = None,
     ) -> tuple[str, float]:
-        del response_format
+        del response_format, stream, on_stream_chunk
         self.calls.append(list(messages))
         if not self._responses:
             raise AssertionError("No stub responses remaining")

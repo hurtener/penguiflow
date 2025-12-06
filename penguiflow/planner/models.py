@@ -17,6 +17,8 @@ class JSONLLMClient(Protocol):
         *,
         messages: Sequence[Mapping[str, str]],
         response_format: Mapping[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> str | tuple[str, float]: ...
 
 
@@ -24,7 +26,9 @@ class JSONLLMClient(Protocol):
 class PlannerEvent:
     """Structured event emitted during planner execution for observability."""
 
-    event_type: str  # step_start, step_complete, llm_call, pause, resume, finish, stream_chunk, artifact_chunk, llm_stream_chunk
+    # Types: step_start, step_complete, llm_call, pause, resume, finish,
+    # stream_chunk, artifact_chunk, llm_stream_chunk
+    event_type: str
     ts: float
     trajectory_step: int
     thought: str | None = None
