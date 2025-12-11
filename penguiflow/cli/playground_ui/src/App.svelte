@@ -17,6 +17,11 @@
     ts: number;
     traceId?: string;
     latencyMs?: number;
+    pause?: {
+      reason?: string;
+      payload?: Record<string, unknown>;
+      resume_token?: string;
+    };
   };
 
   type TimelineStep = {
@@ -290,6 +295,32 @@
           if (plannerEvents.length > 120) plannerEvents.length = 120;
         }
       } else if (eventName === "done") {
+        const pause = (data.pause as Record<string, unknown> | undefined) ?? undefined;
+        if (pause) {
+          msg.pause = pause;
+          msg.traceId = (data.trace_id as string) ?? msg.traceId;
+          activeTraceId = (data.trace_id as string) ?? activeTraceId;
+          const payload = (pause.payload as Record<string, unknown>) ?? {};
+          const authUrl = (payload.auth_url as string) || (payload.url as string) || "";
+          const provider = (payload.provider as string) || "";
+          const reason = (pause.reason as string) || "pause";
+          let body = `⏸️ Planner paused (${reason})`;
+          if (provider) body += ` for ${provider}`;
+          if (authUrl) {
+            body += `\n[Open auth link](${authUrl})`;
+          }
+          if (pause.resume_token) {
+            body += `\nResume token: \`${pause.resume_token}\``;
+          }
+          msg.text = body;
+          msg.isStreaming = false;
+          msg.isThinking = false;
+          fetchTrajectory(activeTraceId as string, sessionId);
+          startEventFollow();
+          isSending = false;
+          resetChatStream();
+          return;
+        }
         if (!msg.text || msg.text.trim() === "") {
           msg.text = (data.answer as string) ?? msg.text;
         }
@@ -574,6 +605,30 @@
             <div class={`message-row ${msg.role === "agent" ? "agent" : "user"}`}>
               <div class={`bubble ${msg.role}`}>
                 <div class="markdown-content">{@html renderMarkdown(msg.text)}</div>
+                {#if msg.pause}
+                  <div class="pause-card">
+                    <div class="pause-title">Action required</div>
+                    {#if msg.pause.payload?.auth_url || msg.pause.payload?.url}
+                      <a
+                        class="pause-link"
+                        href={(msg.pause.payload.auth_url as string) || (msg.pause.payload.url as string)}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open authorization link
+                      </a>
+                    {/if}
+                    {#if msg.pause.resume_token}
+                      <div class="pause-token">Resume token: {msg.pause.resume_token}</div>
+                    {/if}
+                    <div class="pause-meta">
+                      {msg.pause.reason ? `reason: ${msg.pause.reason}` : "paused"}
+                      {#if msg.pause.payload?.provider}
+                        · provider: {msg.pause.payload.provider}
+                      {/if}
+                    </div>
+                  </div>
+                {/if}
                 {#if msg.isStreaming || msg.isThinking}
                   <div class="typing">
                     <span></span><span></span><span></span>

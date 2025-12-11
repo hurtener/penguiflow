@@ -5,11 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import asyncio
+
 from penguiflow.catalog import build_catalog
 from penguiflow.planner import ReactPlanner{% if reflection_enabled %}, ReflectionConfig{% if reflection_criteria %}, ReflectionCriteria{% endif %}{% endif %}
 
 from .config import Config
 from .tools import build_catalog_bundle
+{% if has_external_tools %}
+from .external_tools import get_external_tool_specs, setup_external_tools
+{% endif %}
 
 
 SYSTEM_PROMPT_EXTRA = """{{ system_prompt_extra }}"""
@@ -41,6 +46,15 @@ def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
 
     nodes, registry = build_catalog_bundle()
     catalog = build_catalog(nodes, registry)
+{% if has_external_tools %}
+    # Connect external tool sources and merge their specs using the current event loop
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        raise RuntimeError("build_planner must be called before the event loop starts when external tools are configured")
+    else:
+        external_nodes = loop.run_until_complete(setup_external_tools(registry))
+    catalog.extend(get_external_tool_specs(external_nodes))
+{% endif %}
 
 {% if reflection_enabled %}
     reflection_cfg = ReflectionConfig(

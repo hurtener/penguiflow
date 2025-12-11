@@ -1,0 +1,64 @@
+"""External tool integrations for {{ agent_name }}."""
+
+from __future__ import annotations
+
+from penguiflow.registry import ModelRegistry
+from penguiflow.tools import (
+    AuthType,
+    ExternalToolConfig,
+    ToolNode,
+    TransportType,
+    get_preset,
+)
+
+{% for preset in presets %}
+# {{ preset.preset_key }} MCP server preset
+def _build_{{ preset.slug }}_config() -> ExternalToolConfig:
+    config = get_preset("{{ preset.preset_key }}")
+    updates = {}
+    {% if preset.auth_override %}updates["auth_type"] = AuthType.{{ preset.auth_override }}{% endif %}
+    {% if preset.auth_config_literal %}updates["auth_config"] = {{ preset.auth_config_literal }}{% endif %}
+    {% if preset.env_literal %}updates["env"] = {{ preset.env_literal }}{% endif %}
+    return config if not updates else config.model_copy(update=updates)
+
+{% endfor -%}
+{% for custom in custom_tools %}
+# Custom: {{ custom.name }}
+def _build_{{ custom.name }}_config() -> ExternalToolConfig:
+    return ExternalToolConfig(
+        name="{{ custom.name }}",
+        transport=TransportType.{{ custom.transport }},
+        connection={{ custom.connection_literal }},
+        auth_type=AuthType.{{ custom.auth_type }},
+        {% if custom.auth_config_literal %}auth_config={{ custom.auth_config_literal }},{% endif %}
+        {% if custom.env_literal %}env={{ custom.env_literal }},{% endif %}
+        description={{ custom.description_literal }},
+    )
+
+{% endfor %}
+
+async def setup_external_tools(registry: ModelRegistry) -> list[ToolNode]:
+    """Connect all external tool sources and return ToolNode instances."""
+    nodes: list[ToolNode] = []
+
+    {% for preset in presets %}
+    {{ preset.slug }}_node = ToolNode(config=_build_{{ preset.slug }}_config(), registry=registry)
+    await {{ preset.slug }}_node.connect()
+    nodes.append({{ preset.slug }}_node)
+    {% endfor %}
+
+    {% for custom in custom_tools %}
+    {{ custom.name }}_node = ToolNode(config=_build_{{ custom.name }}_config(), registry=registry)
+    await {{ custom.name }}_node.connect()
+    nodes.append({{ custom.name }}_node)
+    {% endfor %}
+
+    return nodes
+
+
+def get_external_tool_specs(nodes: list[ToolNode]) -> list:
+    """Collect all tool specs from connected ToolNodes."""
+    specs = []
+    for node in nodes:
+        specs.extend(node.get_tools())
+    return specs

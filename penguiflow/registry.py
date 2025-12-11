@@ -42,6 +42,10 @@ class ModelRegistry:
             out_model,
         )
 
+    def has(self, node_name: str) -> bool:
+        """Check if a node is already registered."""
+        return node_name in self._entries
+
     def adapters(self, node_name: str) -> tuple[TypeAdapter[Any], TypeAdapter[Any]]:
         try:
             entry = self._entries[node_name]

@@ -64,6 +64,16 @@ uv run python -m {{ package_name }}
 uv run pytest
 ```
 
+## External Tools (MCP/UTCP)
+
+Discover or preview ToolNode presets from the CLI:
+
+```bash
+penguiflow tools list                # show available presets
+penguiflow tools connect github      # dry-run config preview
+penguiflow tools connect github --discover --show-tools  # fetch tool names (needs penguiflow[planner])
+```
+
 ## Learn More
 
 - [PenguiFlow Documentation](https://github.com/yourorg/penguiflow)

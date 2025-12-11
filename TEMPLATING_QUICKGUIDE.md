@@ -34,18 +34,26 @@ The PenguiFlow CLI scaffolds production-ready agent projects with best practices
    - [--with-hitl](#--with-hitl)
    - [--with-a2a](#--with-a2a)
    - [--no-memory](#--no-memory)
-9. [Agent Spec & Generator (v2.6+)](#agent-spec--generator-v26)
+9. [External Tool Integration (ToolNode v2)](#external-tool-integration-toolnode-v2)
+   - [Overview](#overview)
+   - [Quick Start with Presets](#quick-start-with-presets)
+   - [Available Presets](#available-presets)
+   - [Custom Configuration](#custom-configuration)
+   - [Production Considerations](#production-considerations)
+   - [OAuth Integration](#oauth-integration)
+   - [Documentation Links](#documentation-links)
+10. [Agent Spec & Generator (v2.6+)](#agent-spec--generator-v26)
    - [Spec Format](#spec-format)
    - [Generator Command](#generator-command)
    - [Example Spec](#example-spec)
    - [Tested Template Examples](#tested-template-examples)
    - [Memory Configuration](#memory-configuration)
-10. [Project Structure](#project-structure)
-11. [Configuration](#configuration)
-12. [Running Your Agent](#running-your-agent)
-13. [Testing](#testing)
-14. [Best Practices](#best-practices)
-15. [Troubleshooting](#troubleshooting)
+11. [Project Structure](#project-structure)
+12. [Configuration](#configuration)
+13. [Running Your Agent](#running-your-agent)
+14. [Testing](#testing)
+15. [Best Practices](#best-practices)
+16. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -1030,6 +1038,355 @@ async def execute(self, query: str, ...) -> AgentResponse:
 - Testing without memory dependency
 - Simple single-turn interactions
 - External memory management
+
+---
+
+## External Tool Integration (ToolNode v2)
+
+**New in v2.6+**: Seamlessly integrate external tools into your agents without writing wrapper code.
+
+ToolNode v2 enables zero-wrapper integration with external tools and APIs through two transport types:
+- **MCP (Model Context Protocol)**: Integration with FastMCP servers (via stdio or SSE/HTTP)
+- **UTCP (Universal Tool Communication Protocol)**: Direct HTTP API integration
+
+This allows you to add capabilities like GitHub operations, filesystem access, database queries, and cloud APIs to your agents with minimal configuration.
+
+---
+
+### Overview
+
+ToolNode v2 provides a unified interface for external tools:
+
+- **Zero-wrapper integration**: No need to write Python wrappers for external tools
+- **Popular presets**: Pre-configured MCP servers for GitHub, Slack, PostgreSQL, etc.
+- **Custom configuration**: Define your own MCP or HTTP-based tool integrations
+- **Automatic discovery**: Tools are automatically discovered and added to the planner catalog
+- **Type safety**: Full Pydantic validation for tool inputs and outputs
+- **Auth support**: Built-in support for API keys, Bearer tokens, and OAuth2
+
+Two transport types:
+
+| Transport | Use Case | Example |
+|-----------|----------|---------|
+| **MCP** | FastMCP servers, stdio commands | GitHub CLI via `@modelcontextprotocol/server-github` |
+| **UTCP** | Direct HTTP APIs | REST APIs, custom endpoints |
+
+---
+
+### Quick Start with Presets
+
+The fastest way to add external tools is using popular MCP server presets:
+
+```python
+from penguiflow.tools import ToolNode, get_preset, POPULAR_MCP_SERVERS
+from penguiflow.registry import ModelRegistry
+
+# Initialize registry
+registry = ModelRegistry()
+
+# Get GitHub MCP server preset
+github = ToolNode(config=get_preset("github"), registry=registry)
+await github.connect()
+
+# Get all available tools
+github_tools = github.get_tools()
+
+# Add to your planner catalog
+from penguiflow.planner import build_planner
+
+catalog = [
+    *native_tools,      # Your Python tools
+    *github_tools,      # External GitHub tools
+]
+
+planner = build_planner(registry=registry, catalog=catalog, ...)
+```
+
+**That's it!** Your agent now has access to GitHub operations (create issues, PRs, search code, etc.) without writing any wrapper code.
+
+---
+
+### Available Presets
+
+| Preset Name | MCP Server Package | Auth Type | Capabilities |
+|-------------|-------------------|-----------|-------------|
+| `github` | `@modelcontextprotocol/server-github` | API_KEY | Create issues/PRs, search code, manage repos |
+| `filesystem` | `@modelcontextprotocol/server-filesystem` | NONE | Read/write files, list directories |
+| `postgres` | `@modelcontextprotocol/server-postgres` | API_KEY | Query databases, execute SQL |
+| `slack` | `@modelcontextprotocol/server-slack` | BEARER | Send messages, read channels |
+| `google-drive` | `@modelcontextprotocol/server-google-drive` | OAUTH2_USER | Read/write documents, manage files |
+
+**View all presets:**
+
+```python
+from penguiflow.tools import POPULAR_MCP_SERVERS
+
+for name, config in POPULAR_MCP_SERVERS.items():
+    print(f"{name}: {config.description}")
+```
+
+**Environment setup for presets:**
+
+```bash
+# GitHub preset requires GITHUB_PERSONAL_ACCESS_TOKEN
+export GITHUB_PERSONAL_ACCESS_TOKEN=ghp_xxx...
+
+# PostgreSQL preset requires DATABASE_URL
+export DATABASE_URL=postgresql://user:pass@localhost:5432/db
+
+# Slack preset requires SLACK_BOT_TOKEN
+export SLACK_BOT_TOKEN=xoxb-xxx...
+```
+
+---
+
+### Custom Configuration
+
+For custom MCP servers or direct HTTP APIs, define an `ExternalToolConfig`:
+
+#### MCP Transport (stdio command)
+
+```python
+from penguiflow.tools import ToolNode, ExternalToolConfig, AuthType
+from penguiflow.registry import ModelRegistry
+
+registry = ModelRegistry()
+
+# Custom MCP server via stdio
+custom_mcp = ToolNode(
+    config=ExternalToolConfig(
+        name="my-custom-mcp",
+        description="Custom MCP integration",
+        transport_type="mcp",
+        command="npx -y @my-org/custom-mcp-server",
+        auth_type=AuthType.API_KEY,
+        env_vars={
+            "CUSTOM_API_KEY": "your-key-here",
+        },
+    ),
+    registry=registry,
+)
+
+await custom_mcp.connect()
+tools = custom_mcp.get_tools()
+```
+
+#### UTCP Transport (HTTP API with manual URL)
+
+```python
+from penguiflow.tools import ToolNode, ExternalToolConfig, AuthType
+
+# Direct HTTP API integration
+weather_api = ToolNode(
+    config=ExternalToolConfig(
+        name="weather-api",
+        description="Weather data API",
+        transport_type="utcp",
+        base_url="https://api.weather.com/v1",
+        auth_type=AuthType.API_KEY,
+        auth_config={
+            "header_name": "X-API-Key",
+            "env_var": "WEATHER_API_KEY",
+        },
+        endpoints=[
+            {
+                "name": "get_current_weather",
+                "method": "GET",
+                "path": "/weather/current",
+                "description": "Get current weather for a location",
+                "params": {
+                    "location": "str",
+                    "units": "Optional[str]",
+                },
+            },
+        ],
+    ),
+    registry=registry,
+)
+
+await weather_api.connect()
+tools = weather_api.get_tools()
+```
+
+**Supported auth types:**
+
+```python
+from penguiflow.tools import AuthType
+
+AuthType.NONE           # No authentication
+AuthType.API_KEY        # API key in header or query param
+AuthType.BEARER         # Bearer token in Authorization header
+AuthType.OAUTH2_USER    # User-level OAuth2 (requires HITL)
+```
+
+---
+
+### Production Considerations
+
+**Important notes for production deployments:**
+
+1. **Presets use `npx -y` which requires Node.js runtime**
+   - Default presets run MCP servers via `npx -y <package>`
+   - This requires Node.js to be installed in your container
+
+2. **For production containers, consider these alternatives:**
+
+   **Option 1: Run MCP servers as sidecars with SSE/HTTP**
+   ```yaml
+   # docker-compose.yml
+   services:
+     agent:
+       image: my-agent
+       environment:
+         GITHUB_MCP_URL: http://mcp-github:3000
+
+     mcp-github:
+       image: modelcontextprotocol/server-github
+       ports:
+         - "3000:3000"
+       environment:
+         GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_TOKEN}
+   ```
+
+   ```python
+   # Connect to sidecar MCP server via HTTP
+   github = ToolNode(
+       config=ExternalToolConfig(
+           name="github",
+           transport_type="mcp",
+           url="http://mcp-github:3000",  # SSE/HTTP transport
+           auth_type=AuthType.API_KEY,
+       ),
+       registry=registry,
+   )
+   ```
+
+   **Option 2: Use UTCP for direct API access**
+   ```python
+   # Skip MCP layer, call GitHub API directly
+   github = ToolNode(
+       config=ExternalToolConfig(
+           name="github-api",
+           transport_type="utcp",
+           base_url="https://api.github.com",
+           auth_type=AuthType.BEARER,
+           auth_config={
+               "env_var": "GITHUB_TOKEN",
+           },
+       ),
+       registry=registry,
+   )
+   ```
+
+   **Option 3: Include Node.js in your container**
+   ```dockerfile
+   FROM python:3.12-slim
+
+   # Install Node.js for MCP presets
+   RUN apt-get update && apt-get install -y nodejs npm
+
+   # ... rest of Dockerfile
+   ```
+
+3. **Performance considerations:**
+   - MCP stdio servers have process startup overhead (~100-500ms)
+   - For high-throughput scenarios, use HTTP-based MCP or UTCP
+   - Consider connection pooling for UTCP integrations
+
+4. **Security best practices:**
+   - Never hardcode API keys in `ExternalToolConfig`
+   - Use environment variables via `env_vars` or `auth_config.env_var`
+   - For OAuth2, use user-level auth with HITL (see below)
+   - Review MCP server packages before deploying to production
+
+---
+
+### OAuth Integration
+
+For tools requiring user-level OAuth (e.g., Google Drive, Microsoft Graph):
+
+```python
+from penguiflow.tools import ToolNode, OAuthManager, OAuthProviderConfig, AuthType
+from penguiflow.planner import PlannerPause
+
+# Configure OAuth providers
+oauth_manager = OAuthManager(
+    providers={
+        "google": OAuthProviderConfig(
+            client_id="your-client-id",
+            client_secret="your-client-secret",
+            authorization_url="https://accounts.google.com/o/oauth2/auth",
+            token_url="https://oauth2.googleapis.com/token",
+            scopes=["https://www.googleapis.com/auth/drive.readonly"],
+        ),
+    }
+)
+
+# Create ToolNode with OAuth
+google_drive = ToolNode(
+    config=ExternalToolConfig(
+        name="google-drive",
+        transport_type="mcp",
+        command="npx -y @modelcontextprotocol/server-google-drive",
+        auth_type=AuthType.OAUTH2_USER,
+    ),
+    registry=registry,
+    auth_manager=oauth_manager,
+)
+
+await google_drive.connect()
+```
+
+**HITL flow for OAuth:**
+
+```python
+# In your orchestrator
+async def execute(self, query: str, user_id: str, ...) -> AgentResponse | PauseRequest:
+    result = await self._planner.run(...)
+
+    # Check if OAuth is needed
+    if isinstance(result, PlannerPause) and result.reason == "oauth_required":
+        # Return auth URL to user
+        return PauseRequest(
+            pause_token=result.token,
+            reason="oauth_required",
+            auth_url=result.metadata.get("auth_url"),
+            provider=result.metadata.get("provider"),
+        )
+
+    return AgentResponse(...)
+
+async def resume(self, pause_token: str, auth_code: str) -> AgentResponse:
+    """Resume after user completes OAuth."""
+    # Exchange auth code for tokens
+    await self._oauth_manager.exchange_code(auth_code)
+
+    # Resume planner
+    result = await self._planner.resume(token=pause_token)
+    return AgentResponse(...)
+```
+
+---
+
+### Documentation Links
+
+For detailed implementation guides:
+
+- **StateStore Guide**: [docs/tools/statestore-guide.md](/Users/santiagobenvenuto/Repos/Penguiflow/penguiflow/docs/tools/statestore-guide.md)
+  - State management for stateful tools
+  - Transaction patterns and isolation
+
+- **Concurrency Guide**: [docs/tools/concurrency-guide.md](/Users/santiagobenvenuto/Repos/Penguiflow/penguiflow/docs/tools/concurrency-guide.md)
+  - Parallel tool execution patterns
+  - Deadlock prevention strategies
+
+- **Configuration Guide**: [docs/tools/configuration-guide.md](/Users/santiagobenvenuto/Repos/Penguiflow/penguiflow/docs/tools/configuration-guide.md)
+  - Advanced configuration options
+  - Transport-specific settings
+
+- **ToolNode v2 Plan**: [docs/proposals/TOOLNODE_V2_PLAN.md](/Users/santiagobenvenuto/Repos/Penguiflow/penguiflow/docs/proposals/TOOLNODE_V2_PLAN.md)
+  - Full technical specification
+  - Architecture diagrams
 
 ---
 

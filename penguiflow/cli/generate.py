@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from importlib import resources
@@ -157,6 +158,10 @@ def _sample_value(expr: TypeExpression) -> str:
     if expr.kind == "dict":
         return "{}"
     return "None"
+
+
+def _slugify_name(value: str) -> str:
+    return value.replace("-", "_")
 
 
 def _planning_hints(spec: Spec) -> dict[str, Any] | None:
@@ -362,6 +367,93 @@ def _generate_tools(
     return created, skipped
 
 
+def _collect_external_env_vars(spec: Spec) -> list[str]:
+    """Collect environment variable names referenced by external tools."""
+    vars_needed: set[str] = set()
+    preset_env_vars = {
+        "github": {"GITHUB_TOKEN"},
+        "postgres": {"DATABASE_URL"},
+    }
+    for preset in spec.external_tools.presets:
+        vars_needed.update(preset_env_vars.get(preset.preset, set()))
+        for value in preset.env.values():
+            vars_needed.update(re.findall(r"\$\{([^}]+)\}", value))
+    for custom in spec.external_tools.custom:
+        for value in custom.env.values():
+            vars_needed.update(re.findall(r"\$\{([^}]+)\}", value))
+        for value in custom.auth_config.values():
+            if isinstance(value, str):
+                vars_needed.update(re.findall(r"\$\{([^}]+)\}", value))
+    return sorted(vars_needed)
+
+
+def _generate_external_tools(
+    project_dir: Path,
+    package_name: str,
+    spec: Spec,
+    *,
+    dry_run: bool,
+    force: bool,
+) -> tuple[list[str], list[str]]:
+    created: list[str] = []
+    skipped: list[str] = []
+
+    if not spec.external_tools.presets and not spec.external_tools.custom:
+        return created, skipped
+
+    external_path = project_dir / "src" / package_name / "external_tools.py"
+
+    def _literal(data: dict[str, str]) -> str | None:
+        return json.dumps(data) if data else None
+
+    presets = []
+    for preset in spec.external_tools.presets:
+        env_literal = _literal(preset.env)
+        presets.append(
+            {
+                "preset_key": preset.preset,
+                "slug": _slugify_name(preset.preset),
+                "auth_override": preset.auth_override.upper() if preset.auth_override else None,
+                "auth_config_literal": env_literal,
+                "env_literal": env_literal,
+            }
+        )
+
+    custom_tools = []
+    for custom in spec.external_tools.custom:
+        custom_tools.append(
+            {
+                "name": custom.name,
+                "transport": custom.transport.upper(),
+                "connection_literal": json.dumps(custom.connection),
+                "auth_type": custom.auth_type.upper(),
+                "auth_config_literal": _literal(custom.auth_config),
+                "env_literal": _literal(custom.env),
+                "description_literal": json.dumps(custom.description),
+            }
+        )
+
+    context = {
+        "agent_name": spec.agent.name,
+        "presets": presets,
+        "custom_tools": custom_tools,
+    }
+
+    content = _render_template("external_tools.py.jinja", context)
+
+    if dry_run:
+        created.append(external_path.as_posix())
+        return created, skipped
+
+    wrote, path = _write_file(external_path, content, force=force)
+    if wrote and path:
+        created.append(path)
+    elif not wrote:
+        skipped.append(external_path.as_posix())
+
+    return created, skipped
+
+
 def _generate_planner(
     project_dir: Path,
     package_name: str,
@@ -394,6 +486,7 @@ def _generate_planner(
             "hop_budget": spec.planner.hop_budget,
             "absolute_max_parallel": spec.planner.absolute_max_parallel,
             "planning_hints_literal": planning_hints_literal if planning_hints_literal != "None" else "None",
+            "has_external_tools": bool(spec.external_tools.presets or spec.external_tools.custom),
         },
     )
 
@@ -714,6 +807,8 @@ def _generate_env_example(
     skipped: list[str] = []
     env_path = project_dir / ".env.example"
 
+    external_env_vars = _collect_external_env_vars(spec)
+
     content = _render_template(
         "env.example.jinja",
         {
@@ -729,6 +824,7 @@ def _generate_env_example(
             "planner_hop_budget": spec.planner.hop_budget,
             "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,
             "planner_stream_final_response": spec.planner.stream_final_response,
+            "external_env_vars": external_env_vars,
         },
     )
 
@@ -838,6 +934,7 @@ def run_generate(
         click.echo(f"  Agent: {spec.agent.name}")
         click.echo(f"  Template: {spec.agent.template}")
         click.echo(f"  Tools: {len(spec.tools)}")
+        click.echo(f"  External tools: {len(spec.external_tools.presets) + len(spec.external_tools.custom)}")
         click.echo(f"  Flows: {len(spec.flows)}")
         click.echo(f"  LLM: {spec.llm.primary.model}")
 
@@ -872,6 +969,16 @@ def run_generate(
         skipped.extend(tool_skipped)
         if verbose:
             click.echo(f"  {len(tool_created)} tools generated")
+
+        if verbose:
+            click.echo("Generating external tools...")
+        ext_created, ext_skipped = _generate_external_tools(
+            project_dir, package_name, spec, dry_run=dry_run, force=force
+        )
+        created.extend(ext_created)
+        skipped.extend(ext_skipped)
+        if verbose and ext_created:
+            click.echo(f"  {len(ext_created)} external tool files generated")
 
         if verbose:
             click.echo("Generating planner...")

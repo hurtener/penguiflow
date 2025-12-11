@@ -27,6 +27,7 @@ class ChatResult:
     trace_id: str
     session_id: str
     metadata: dict[str, Any] | None = None
+    pause: dict[str, Any] | None = None
 
 
 class AgentWrapper(Protocol):
@@ -231,7 +232,18 @@ class PlannerAgentWrapper:
         await self._event_recorder.persist(trace_id)
 
         if isinstance(result, PlannerPause):
-            raise RuntimeError("Planner paused; HITL flow is not supported in playground backend")
+            pause_payload = {
+                "reason": result.reason,
+                "payload": result.payload,
+                "resume_token": result.resume_token,
+            }
+            return ChatResult(
+                answer=None,
+                trace_id=trace_id,
+                session_id=session_id,
+                metadata={"pause": pause_payload},
+                pause=pause_payload,
+            )
         if not isinstance(result, PlannerFinish):
             raise RuntimeError("Planner did not finish execution")
 

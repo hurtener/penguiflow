@@ -72,6 +72,7 @@ class ChatResponse(BaseModel):
     session_id: str
     answer: str | None = None
     metadata: dict[str, Any] | None = None
+    pause: dict[str, Any] | None = None
 
 
 class SpecPayload(BaseModel):
@@ -269,6 +270,7 @@ def _done_frame(result: ChatResult, session_id: str) -> bytes:
             "session_id": session_id,
             "answer": result.answer,
             "metadata": result.metadata,
+            "pause": result.pause,
         },
     )
 
@@ -627,6 +629,7 @@ def create_playground_app(
             session_id=result.session_id,
             answer=result.answer,
             metadata=result.metadata,
+            pause=result.pause,
         )
 
     @app.get("/chat/stream")

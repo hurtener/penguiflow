@@ -508,6 +508,47 @@ html, body {
   40% { transform: scale(1); opacity: 1; }
 }
 
+.pause-card {
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  background: #f7fbfa;
+  border: 1px dashed #b8dcd7;
+  color: #0f5f5a;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pause-title {
+  font-weight: 700;
+  font-size: 12px;
+  color: #0d4f4a;
+}
+
+.pause-link {
+  color: #0f7a73;
+  text-decoration: underline;
+  font-weight: 600;
+}
+
+.pause-link:hover {
+  color: #0c5c57;
+}
+
+.pause-token {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 11px;
+  color: #0d4f4a;
+  word-break: break-all;
+}
+
+.pause-meta {
+  font-size: 11px;
+  color: #3b7873;
+}
+
 .meta-row {
   font-size: 10px;
   color: #8b857c;
