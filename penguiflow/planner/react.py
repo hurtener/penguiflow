@@ -1421,9 +1421,56 @@ class ReactPlanner:
                                 },
                             )
 
+                            # Build streaming callback for revision (reuse extractor pattern)
+                            revision_extractor = _StreamingArgsExtractor()
+
+                            def _emit_revision_chunk(
+                                text: str,
+                                done: bool,
+                                *,
+                                _extractor: _StreamingArgsExtractor = revision_extractor,
+                                _revision_idx: int = revision_idx,
+                            ) -> None:
+                                if self._event_callback is None:
+                                    return
+
+                                args_chars = _extractor.feed(text)
+
+                                if args_chars:
+                                    args_text = "".join(args_chars)
+                                    self._emit_event(
+                                        PlannerEvent(
+                                            event_type="llm_stream_chunk",
+                                            ts=self._time_source(),
+                                            trajectory_step=len(trajectory.steps),
+                                            extra={
+                                                "text": args_text,
+                                                "done": False,
+                                                "phase": "revision",
+                                                "revision_idx": _revision_idx + 1,
+                                            },
+                                        )
+                                    )
+
+                                if done and _extractor.is_finish_action:
+                                    self._emit_event(
+                                        PlannerEvent(
+                                            event_type="llm_stream_chunk",
+                                            ts=self._time_source(),
+                                            trajectory_step=len(trajectory.steps),
+                                            extra={
+                                                "text": "",
+                                                "done": True,
+                                                "phase": "revision",
+                                                "revision_idx": _revision_idx + 1,
+                                            },
+                                        )
+                                    )
+
                             revision_action = await self._request_revision(
                                 trajectory,
                                 critique,
+                                on_stream_chunk=_emit_revision_chunk if self._stream_final_response else None,
                             )
                             candidate_answer = revision_action.args or revision_action.model_dump()
                             trajectory.steps.append(
@@ -1797,8 +1844,10 @@ class ReactPlanner:
         self,
         trajectory: Trajectory,
         critique: ReflectionCritique,
+        *,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
     ) -> PlannerAction:
-        return await request_revision(self, trajectory, critique)
+        return await request_revision(self, trajectory, critique, on_stream_chunk=on_stream_chunk)
 
     async def _generate_clarification(
         self,
@@ -1933,7 +1982,7 @@ class ReactPlanner:
                 logger.warning(
                     "no_answer_extracted",
                     extra={
-                        "args": str(args)[:200] if args else None,
+                        "input_args": str(args)[:200] if args else None,
                         "last_observation": str(last_observation)[:200] if last_observation else None,
                     },
                 )

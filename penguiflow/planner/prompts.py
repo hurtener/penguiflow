@@ -310,6 +310,8 @@ Available injection sources for join.inject:
 Use parallel execution when:
 - Multiple independent data sources need to be queried
 - Multiple independent queries can be made to the same source in parallel
+- Breakdown of multiples independent queries is more efficient than sequential calls
+- A single query seems too difficult to answer directly and several simpler queries can help
 - Tasks can be decomposed into non-dependent subtasks
 - Speed matters and tools don't have ordering dependencies
 </parallel_execution>""")

@@ -67,6 +67,30 @@ POPULAR_MCP_SERVERS = {
         auth_type=AuthType.OAUTH2_USER,
         description="Google Drive files and folders",
     ),
+    "duckduckgo": ExternalToolConfig(
+        name="duckduckgo",
+        transport=TransportType.MCP,
+        connection="npx -y @nickclyde/duckduckgo-mcp-server",
+        auth_type=AuthType.NONE,
+        description="Web search and content retrieval via DuckDuckGo",
+    ),
+    "brave-search": ExternalToolConfig(
+        name="brave-search",
+        transport=TransportType.MCP,
+        connection="npx -y @anthropic/mcp-server-brave-search",
+        env={"BRAVE_API_KEY": "${BRAVE_API_KEY}"},
+        auth_type=AuthType.NONE,  # Key passed via env, not auth_config
+        description="Web search via Brave Search API (requires BRAVE_API_KEY env var)",
+    ),
+    # NOTE: Redis MCP server is Python-based (uvx), not Node.js (npx)
+    "redis": ExternalToolConfig(
+        name="redis",
+        transport=TransportType.MCP,
+        connection="uvx --from redis-mcp-server@latest redis-mcp-server",
+        env={"REDIS_HOST": "${REDIS_HOST}", "REDIS_PORT": "${REDIS_PORT}"},
+        auth_type=AuthType.NONE,
+        description="Redis database operations (requires uvx/Python)",
+    ),
 }
 
 

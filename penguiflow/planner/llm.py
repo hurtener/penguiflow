@@ -811,6 +811,8 @@ async def request_revision(
     planner: Any,
     trajectory: Trajectory,
     critique: ReflectionCritique,
+    *,
+    on_stream_chunk: Callable[[str, bool], None] | None = None,
 ) -> PlannerAction:
     from . import reflection_prompts
 
@@ -823,9 +825,18 @@ async def request_revision(
     messages = list(base_messages)
     messages.append({"role": "user", "content": revision_prompt})
 
+    # Enable streaming for revision if callback provided and client supports it
+    stream_allowed = (
+        on_stream_chunk is not None
+        and planner._stream_final_response
+        and isinstance(planner._client, _LiteLLMJSONClient)
+    )
+
     llm_result = await planner._client.complete(
         messages=messages,
         response_format=planner._response_format,
+        stream=stream_allowed,
+        on_stream_chunk=on_stream_chunk if stream_allowed else None,
     )
     raw, cost = _coerce_llm_response(llm_result)
     planner._cost_tracker.record_main_call(cost)
