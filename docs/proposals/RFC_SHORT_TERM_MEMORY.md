@@ -242,6 +242,46 @@ class ShortTermMemoryConfig:
     Custom token estimator. If None, uses default heuristic:
     len(text) // 4 + 1 (conservative for English text)
     """
+
+    # ─────────────────────────────────────────────────────────────
+    # CALLBACKS (Layer 2: Observation hooks for external systems)
+    # ─────────────────────────────────────────────────────────────
+
+    on_turn_added: Callable[[ConversationTurn], Awaitable[None]] | None = None
+    """
+    Called after a turn is successfully added to memory.
+    Use for: syncing to external databases, analytics, audit logs.
+
+    Example:
+        async def log_turn(turn: ConversationTurn) -> None:
+            await my_analytics.track("conversation_turn", {
+                "user_message": turn.user_message[:100],
+                "tools_used": turn.trajectory_digest.tools_invoked if turn.trajectory_digest else [],
+            })
+    """
+
+    on_summary_updated: Callable[[str, str], Awaitable[None]] | None = None
+    """
+    Called when the rolling summary is regenerated.
+    Receives (old_summary, new_summary).
+    Use for: debugging, quality monitoring, external sync.
+
+    Example:
+        async def track_summary(old: str, new: str) -> None:
+            logger.debug(f"Summary updated: {len(old)} -> {len(new)} chars")
+    """
+
+    on_health_changed: Callable[[MemoryHealth, MemoryHealth], Awaitable[None]] | None = None
+    """
+    Called when memory health state transitions.
+    Receives (old_health, new_health).
+    Use for: alerting, metrics, circuit breaker patterns.
+
+    Example:
+        async def alert_degradation(old: MemoryHealth, new: MemoryHealth) -> None:
+            if new == MemoryHealth.DEGRADED:
+                await pagerduty.alert("Memory summarization degraded")
+    """
 ```
 
 ---
@@ -344,6 +384,53 @@ class ShortTermMemory(Protocol):
 
         Returns:
             The artifact value, or None if not found
+        """
+        ...
+
+    # ─────────────────────────────────────────────────────────────
+    # SERIALIZATION (Layer 3: Export/import for custom persistence)
+    # ─────────────────────────────────────────────────────────────
+
+    def to_dict(self) -> dict:
+        """Serialize full memory state for external storage.
+
+        Returns a dict containing:
+        - turns: List of serialized ConversationTurn objects
+        - summary: Current summary string (or None)
+        - health: Current health state
+        - pending: List of turns awaiting summarization
+        - artifacts: Hidden artifacts registry
+        - config_snapshot: Relevant config for validation on restore
+
+        Use this for custom persistence backends (Redis, DynamoDB, etc.)
+        without implementing the full ShortTermMemory protocol.
+
+        Example:
+            state = memory.to_dict()
+            await redis.set(f"memory:{session_id}", json.dumps(state))
+        """
+        ...
+
+    def from_dict(self, state: dict) -> None:
+        """Restore memory state from serialized dict.
+
+        Validates state structure and restores:
+        - All conversation turns
+        - Summary zone content
+        - Health state
+        - Pending summarization buffer
+        - Artifacts registry
+
+        Args:
+            state: Previously serialized state from to_dict()
+
+        Raises:
+            ValueError: If state structure is invalid or incompatible
+
+        Example:
+            state = json.loads(await redis.get(f"memory:{session_id}"))
+            if state:
+                memory.from_dict(state)
         """
         ...
 ```
@@ -881,6 +968,80 @@ def _extract_memory_key(
 
 ---
 
+### 12. Memory Access Layers
+
+To support diverse downstream team needs, memory provides multiple access layers:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Memory Access Layers                            │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Layer 1: StateStore (Primary - established pattern)                │
+│  ├─ Use existing StateStore with optional memory methods            │
+│  ├─ Zero new concepts for teams already using StateStore            │
+│  └─ Automatic persistence/hydration in ReactPlanner.run()           │
+│                                                                     │
+│  Layer 2: Callbacks (Observation)                                   │
+│  ├─ on_turn_added: React when turns are added                       │
+│  ├─ on_summary_updated: React when summary changes                  │
+│  ├─ on_health_changed: React to degradation/recovery                │
+│  └─ Use for: analytics, external sync, alerting                     │
+│                                                                     │
+│  Layer 3: Serialization (Export/Import)                             │
+│  ├─ to_dict(): Export full state to JSON-serializable dict          │
+│  ├─ from_dict(): Import state from dict                             │
+│  └─ Use for: Redis, DynamoDB, custom databases                      │
+│                                                                     │
+│  Layer 4: Full Custom Implementation (Escape hatch)                 │
+│  ├─ Implement ShortTermMemory protocol entirely                     │
+│  └─ Use for: distributed memory, custom eviction, special backends  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Layer Selection Guide:**
+
+| Need | Recommended Layer |
+|------|-------------------|
+| "Just make it work with my existing StateStore" | Layer 1 |
+| "I need to sync turns to my analytics DB" | Layer 2 (on_turn_added) |
+| "I want to alert when summarization fails" | Layer 2 (on_health_changed) |
+| "I use Redis for session storage" | Layer 3 (to_dict/from_dict) |
+| "I need distributed memory across pods" | Layer 4 (custom impl) |
+| "I want memory backed by vector DB" | Layer 4 (custom impl) |
+
+**Example: Layer 2 + Layer 3 Combined**
+
+```python
+# Use callbacks for real-time sync, serialization for persistence
+config = ShortTermMemoryConfig(
+    strategy="rolling_summary",
+
+    # Layer 2: Real-time analytics
+    on_turn_added=lambda turn: analytics.track_turn(turn),
+    on_health_changed=lambda old, new: alert_if_degraded(old, new),
+)
+
+planner = ReactPlanner(
+    llm="claude-sonnet-4-20250514",
+    nodes=[...],
+    short_term_memory=config,
+)
+
+# After each conversation session ends:
+async def save_session(memory: ShortTermMemory, session_id: str):
+    # Layer 3: Custom persistence
+    state = memory.to_dict()
+    await my_redis.setex(
+        f"memory:{session_id}",
+        ttl=86400,  # 24 hours
+        value=json.dumps(state)
+    )
+```
+
+---
+
 ## Usage Examples
 
 ### Basic Opt-In (Rolling Summary)
@@ -953,7 +1114,73 @@ planner = ReactPlanner(
 # Memory survives across planner instances (session resumption)
 ```
 
-### Custom Memory Implementation
+### With Callbacks (Layer 2)
+
+```python
+async def on_turn(turn: ConversationTurn) -> None:
+    """Sync turns to analytics database."""
+    await analytics_db.insert({
+        "timestamp": turn.ts,
+        "user_message": turn.user_message,
+        "assistant_response": turn.assistant_response[:500],
+        "tools_used": turn.trajectory_digest.tools_invoked if turn.trajectory_digest else [],
+    })
+
+async def on_health(old: MemoryHealth, new: MemoryHealth) -> None:
+    """Alert on degradation."""
+    if new == MemoryHealth.DEGRADED:
+        await slack.post("#alerts", "⚠️ Memory summarization degraded!")
+    elif old == MemoryHealth.DEGRADED and new == MemoryHealth.HEALTHY:
+        await slack.post("#alerts", "✅ Memory summarization recovered")
+
+planner = ReactPlanner(
+    llm="claude-sonnet-4-20250514",
+    nodes=[...],
+    short_term_memory=ShortTermMemoryConfig(
+        strategy="rolling_summary",
+        on_turn_added=on_turn,
+        on_health_changed=on_health,
+    ),
+)
+```
+
+### With Custom Persistence (Layer 3)
+
+```python
+import json
+from redis.asyncio import Redis
+
+redis = Redis.from_url("redis://localhost:6379")
+
+async def handle_conversation(session_id: str, user_message: str):
+    planner = ReactPlanner(
+        llm="claude-sonnet-4-20250514",
+        nodes=[...],
+        short_term_memory=ShortTermMemoryConfig(strategy="rolling_summary"),
+    )
+
+    # Restore memory from Redis (Layer 3)
+    saved_state = await redis.get(f"memory:{session_id}")
+    if saved_state:
+        planner._memory.from_dict(json.loads(saved_state))
+
+    # Run conversation turn
+    result = await planner.run(
+        llm_context={"query": user_message},
+    )
+
+    # Persist memory to Redis (Layer 3)
+    state = planner._memory.to_dict()
+    await redis.setex(
+        f"memory:{session_id}",
+        3600,  # 1 hour TTL
+        json.dumps(state),
+    )
+
+    return result
+```
+
+### Custom Memory Implementation (Layer 4)
 
 ```python
 class RedisShortTermMemory:
@@ -1025,11 +1252,44 @@ planner = ReactPlanner(
 - [ ] Integration tests with ReactPlanner
 - [ ] Integration tests with StateStore persistence
 
-### Phase 6: Documentation
-- [ ] Update `REACT_PLANNER_INTEGRATION_GUIDE.md`
-- [ ] Add short-term memory section to manual
-- [ ] Add examples in `examples/` directory
-- [ ] Update generated orchestrator templates
+### Phase 6: Documentation (Comprehensive)
+
+**Goal:** Create a clear, complete path for downstream developers to adopt penguiflow memory.
+
+#### 6.1 Core Documentation
+- [ ] Create `docs/MEMORY_GUIDE.md` - Comprehensive memory usage guide
+  - Quick start (5-minute setup)
+  - Strategy selection guide (when to use each)
+  - Configuration reference (all options explained)
+  - Troubleshooting section
+- [ ] Update `REACT_PLANNER_INTEGRATION_GUIDE.md` with memory section
+- [ ] Add short-term memory section to `manual.md`
+- [ ] Update `README.md` with memory feature highlight
+
+#### 6.2 Examples
+- [ ] `examples/memory_basic/` - Minimal rolling summary setup
+- [ ] `examples/memory_truncation/` - Cost-effective truncation approach
+- [ ] `examples/memory_persistence/` - StateStore integration
+- [ ] `examples/memory_redis/` - Custom Redis persistence with Layer 3
+- [ ] `examples/memory_callbacks/` - Analytics and alerting with Layer 2
+- [ ] `examples/memory_custom/` - Full custom implementation (Layer 4)
+
+#### 6.3 Templates
+- [ ] Update `penguiflow/templates/new/*/` with memory-enabled orchestrator option
+- [ ] Add memory configuration to CLI `penguiflow new` wizard
+- [ ] Generate memory client stubs in new projects (optional)
+
+#### 6.4 Migration & Adoption
+- [ ] Create `docs/migration/MEMORY_ADOPTION.md`
+  - Step-by-step migration from stateless to memory-enabled
+  - Migration from iceberg memory templates to built-in memory
+  - Common pitfalls and solutions
+  - Performance tuning guide
+
+#### 6.5 API Reference
+- [ ] Docstrings for all public classes and methods
+- [ ] Type hints complete and verified with mypy
+- [ ] Auto-generated API docs (if using sphinx/mkdocs)
 
 ---
 
