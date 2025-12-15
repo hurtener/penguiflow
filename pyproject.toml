@@ -122,6 +122,8 @@ show_error_codes = true
 [tool.pytest.ini_options]
 addopts = "-q"
 asyncio_mode = "auto"
+testpaths = ["tests"]
+norecursedirs = ["test_generation"]
 
 [tool.coverage.run]
 source = ["penguiflow"]

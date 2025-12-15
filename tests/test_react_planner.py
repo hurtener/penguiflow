@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
 from penguiflow.planner import PlannerEvent, PlannerPause, ReactPlanner
+from penguiflow.planner.memory import MemoryBudget, MemoryKey, ShortTermMemoryConfig
 from penguiflow.planner.react import (
     PlannerAction,
     ReflectionConfig,
@@ -133,9 +134,7 @@ async def merge_results(args: MergeArgs, ctx: Any) -> Documents:
 
 
 @tool(desc="Merge shard payloads with explicit inject mapping")
-async def merge_results_explicit(
-    args: FlexibleMergeArgs, ctx: Any
-) -> Documents:
+async def merge_results_explicit(args: FlexibleMergeArgs, ctx: Any) -> Documents:
     assert args.success_total == args.expected == len(args.payloads)
     assert len(args.branches) == args.expected
     return Documents(documents=[item.text for item in args.payloads])
@@ -243,10 +242,7 @@ class CostStubClient:
     """Stub client that also tracks synthetic cost values."""
 
     def __init__(self, responses: list[tuple[Mapping[str, object], float]]) -> None:
-        self._responses = [
-            (json.dumps(payload, ensure_ascii=False), float(cost))
-            for payload, cost in responses
-        ]
+        self._responses = [(json.dumps(payload, ensure_ascii=False), float(cost)) for payload, cost in responses]
         self.calls: list[list[Mapping[str, str]]] = []
 
     async def complete(
@@ -411,9 +407,7 @@ async def test_tool_context_separation_and_meta_warning() -> None:
     llm_ctx = {"visible": "memories"}
     tool_ctx = {"hidden": "secret", "sentinel": sentinel}
 
-    result = await planner.run(
-        "Check context separation", llm_context=llm_ctx, tool_context=tool_ctx
-    )
+    result = await planner.run("Check context separation", llm_context=llm_ctx, tool_context=tool_ctx)
 
     assert result.reason == "answer_complete"
     assert CONTEXT_CAPTURE["llm_context"] == llm_ctx
@@ -421,17 +415,222 @@ async def test_tool_context_separation_and_meta_warning() -> None:
     assert CONTEXT_CAPTURE["tool_context"]["sentinel"] is sentinel
     assert CONTEXT_CAPTURE["meta"]["visible"] == "memories"
     assert CONTEXT_CAPTURE["meta"]["hidden"] == "secret"
-    assert any(
-        issubclass(warning.category, DeprecationWarning)
-        for warning in CONTEXT_CAPTURE["meta_warnings"]
-    )
-    first_user_messages = [
-        msg["content"]
-        for msg in client.calls[0]
-        if msg.get("role") == "user"
-    ]
+    assert any(issubclass(warning.category, DeprecationWarning) for warning in CONTEXT_CAPTURE["meta_warnings"])
+    first_user_messages = [msg["content"] for msg in client.calls[0] if msg.get("role") == "user"]
     assert any("memories" in content for content in first_user_messages)
     assert all("secret" not in content for content in first_user_messages)
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_injects_short_term_memory_across_runs() -> None:
+    client = StubClient(
+        [
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a1"}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a2"}},
+        ]
+    )
+    planner = make_planner(
+        client,
+        short_term_memory=ShortTermMemoryConfig(
+            strategy="truncation",
+            budget=MemoryBudget(full_zone_turns=5),
+        ),
+    )
+    key = MemoryKey(tenant_id="t", user_id="u", session_id="s")
+
+    await planner.run("q1", memory_key=key)
+    await planner.run("q2", memory_key=key)
+
+    first_user = next(msg["content"] for msg in client.calls[0] if msg["role"] == "user")
+    payload1 = json.loads(first_user)
+    assert payload1["context"]["conversation_memory"]["recent_turns"] == []
+
+    second_user = next(msg["content"] for msg in client.calls[1] if msg["role"] == "user")
+    payload2 = json.loads(second_user)
+    recent = payload2["context"]["conversation_memory"]["recent_turns"]
+    assert recent[0]["user"] == "q1"
+    assert recent[0]["assistant"] == "a1"
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_rolling_summary_uses_llm_summarizer() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self._actions = [
+                {"thought": "finish", "next_node": None, "args": {"raw_answer": "a1"}},
+                {"thought": "finish", "next_node": None, "args": {"raw_answer": "a2"}},
+            ]
+            self.summary_calls = 0
+            self.calls: list[tuple[str | None, list[Mapping[str, str]]]] = []
+
+        async def complete(
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del stream, on_stream_chunk
+            schema_name = None
+            if isinstance(response_format, Mapping):
+                json_schema = response_format.get("json_schema")
+                if isinstance(json_schema, Mapping):
+                    schema_name = json_schema.get("name")
+            self.calls.append((schema_name if isinstance(schema_name, str) else None, list(messages)))
+
+            if schema_name == "short_term_memory_summary":
+                self.summary_calls += 1
+                return json.dumps({"summary": "<session_summary>ok</session_summary>"}), 0.0
+
+            if not self._actions:
+                raise AssertionError("No stub responses left")
+            return json.dumps(self._actions.pop(0), ensure_ascii=False), 0.0
+
+    client = Client()
+    planner = make_planner(
+        client,
+        short_term_memory=ShortTermMemoryConfig(
+            strategy="rolling_summary",
+            budget=MemoryBudget(full_zone_turns=0),
+            retry_attempts=0,
+            retry_backoff_base_s=0.0,
+        ),
+    )
+    key = MemoryKey(tenant_id="t", user_id="u", session_id="s")
+
+    await planner.run("q1", memory_key=key)
+    memory = planner._memory_by_key[key.composite()]
+    await memory.flush()
+    await planner.run("q2", memory_key=key)
+
+    assert client.summary_calls == 1
+    assert any(name == "short_term_memory_summary" for name, _ in client.calls)
+
+    second_user = next(msg["content"] for msg in client.calls[-1][1] if msg["role"] == "user")
+    payload2 = json.loads(second_user)
+    assert payload2["context"]["conversation_memory"]["summary"] == "<session_summary>ok</session_summary>"
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_extracts_memory_key_from_tool_context() -> None:
+    client = StubClient(
+        [
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a1"}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a2"}},
+        ]
+    )
+    planner = make_planner(
+        client,
+        short_term_memory=ShortTermMemoryConfig(
+            strategy="truncation",
+            budget=MemoryBudget(full_zone_turns=5),
+        ),
+    )
+    tool_ctx = {"tenant_id": "t", "user_id": "u", "session_id": "s"}
+
+    await planner.run("q1", tool_context=tool_ctx)
+    await planner.run("q2", tool_context=tool_ctx)
+
+    second_user = next(msg["content"] for msg in client.calls[1] if msg["role"] == "user")
+    payload2 = json.loads(second_user)
+    recent = payload2["context"]["conversation_memory"]["recent_turns"]
+    assert recent[0]["user"] == "q1"
+    assert recent[0]["assistant"] == "a1"
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_persists_and_hydrates_short_term_memory() -> None:
+    class Store:
+        def __init__(self) -> None:
+            self.data: dict[str, dict[str, Any]] = {}
+
+        async def save_memory_state(self, key: str, state: dict[str, Any]) -> None:
+            self.data[key] = state
+
+        async def load_memory_state(self, key: str) -> dict[str, Any] | None:
+            return self.data.get(key)
+
+    store = Store()
+    key = MemoryKey(tenant_id="t", user_id="u", session_id="s")
+
+    client1 = StubClient([{"thought": "finish", "next_node": None, "args": {"raw_answer": "a1"}}])
+    planner1 = make_planner(
+        client1,
+        state_store=store,
+        short_term_memory=ShortTermMemoryConfig(
+            strategy="truncation",
+            budget=MemoryBudget(full_zone_turns=5),
+        ),
+    )
+    await planner1.run("q1", memory_key=key)
+
+    client2 = StubClient([{"thought": "finish", "next_node": None, "args": {"raw_answer": "a2"}}])
+    planner2 = make_planner(
+        client2,
+        state_store=store,
+        short_term_memory=ShortTermMemoryConfig(
+            strategy="truncation",
+            budget=MemoryBudget(full_zone_turns=5),
+        ),
+    )
+    await planner2.run("q2", memory_key=key)
+
+    second_user = next(msg["content"] for msg in client2.calls[0] if msg["role"] == "user")
+    payload2 = json.loads(second_user)
+    recent = payload2["context"]["conversation_memory"]["recent_turns"]
+    assert recent[0]["user"] == "q1"
+    assert recent[0]["assistant"] == "a1"
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_memory_fail_closed_without_key() -> None:
+    client = StubClient(
+        [
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a1"}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a2"}},
+        ]
+    )
+    planner = make_planner(
+        client,
+        short_term_memory=ShortTermMemoryConfig(
+            strategy="truncation",
+            budget=MemoryBudget(full_zone_turns=5),
+        ),
+    )
+
+    await planner.run("q1")
+    await planner.run("q2")
+
+    second_user = next(msg["content"] for msg in client.calls[1] if msg["role"] == "user")
+    payload = json.loads(second_user)
+    assert "conversation_memory" not in payload.get("context", {})
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_session_isolation_by_memory_key() -> None:
+    client = StubClient(
+        [
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a1"}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "a2"}},
+        ]
+    )
+    planner = make_planner(
+        client,
+        short_term_memory=ShortTermMemoryConfig(
+            strategy="truncation",
+            budget=MemoryBudget(full_zone_turns=5),
+        ),
+    )
+    k1 = MemoryKey(tenant_id="t", user_id="u", session_id="s1")
+    k2 = MemoryKey(tenant_id="t", user_id="u", session_id="s2")
+
+    await planner.run("q1", memory_key=k1)
+    await planner.run("q2", memory_key=k2)
+
+    second_user = next(msg["content"] for msg in client.calls[1] if msg["role"] == "user")
+    payload = json.loads(second_user)
+    assert payload.get("context", {}).get("conversation_memory", {}).get("recent_turns") == []
 
 
 @pytest.mark.asyncio()
@@ -666,10 +865,7 @@ async def test_react_planner_litellm_guard_raises_runtime_error() -> None:
     with pytest.raises((RuntimeError, litellm.exceptions.BadRequestError)) as exc:
         await planner.step(trajectory)
     # Accept either error message
-    assert (
-        "LiteLLM is not installed" in str(exc.value)
-        or "LLM Provider NOT provided" in str(exc.value)
-    )
+    assert "LiteLLM is not installed" in str(exc.value) or "LLM Provider NOT provided" in str(exc.value)
 
 
 @pytest.mark.asyncio()
@@ -736,10 +932,7 @@ async def test_react_planner_compacts_history_when_budget_exceeded() -> None:
     result = await planner.run("Explain budget handling")
 
     assert result.reason == "answer_complete"
-    assert any(
-        msg["role"] == "system" and "Trajectory summary" in msg["content"]
-        for msg in client.calls[1]
-    )
+    assert any(msg["role"] == "system" and "Trajectory summary" in msg["content"] for msg in client.calls[1])
 
 
 @pytest.mark.asyncio()
@@ -821,11 +1014,7 @@ async def test_react_planner_pause_and_resume_flow() -> None:
     assert resume_result.reason == "answer_complete"
 
     post_pause_calls = client.calls[2:]
-    assert any(
-        "Resume input" in msg["content"]
-        for call in post_pause_calls
-        for msg in call
-    )
+    assert any("Resume input" in msg["content"] for call in post_pause_calls for msg in call)
 
 
 @pytest.mark.asyncio()
@@ -858,9 +1047,7 @@ async def test_resume_accepts_tool_context_override() -> None:
     )
     planner = ReactPlanner(llm_client=client, catalog=catalog, pause_enabled=True)
 
-    pause_result = await planner.run(
-        "Need approval", llm_context={"user": "demo"}, tool_context={"initial": "one"}
-    )
+    pause_result = await planner.run("Need approval", llm_context={"user": "demo"}, tool_context={"initial": "one"})
     assert isinstance(pause_result, PlannerPause)
     assert RESUME_CAPTURE["calls"][0]["tool_context"]["initial"] == "one"
 
@@ -924,10 +1111,9 @@ async def test_react_planner_resume_preserves_hop_budget() -> None:
     assert resume_result.reason == "answer_complete"
 
     steps = resume_result.metadata["steps"]
-    assert any(
-        step.get("error") and "Hop budget" in step["error"]
-        for step in steps
-    ), "expected hop budget violation after resume"
+    assert any(step.get("error") and "Hop budget" in step["error"] for step in steps), (
+        "expected hop budget violation after resume"
+    )
 
     constraints = resume_result.metadata["constraints"]
     assert constraints["hops_used"] == 1
@@ -960,10 +1146,7 @@ async def test_react_planner_disallows_nodes_from_hints() -> None:
     result = await planner.run("test hints")
 
     assert result.reason == "answer_complete"
-    assert any(
-        msg["role"] == "user" and "not permitted" in msg["content"]
-        for msg in client.calls[1]
-    )
+    assert any(msg["role"] == "user" and "not permitted" in msg["content"] for msg in client.calls[1])
 
 
 @pytest.mark.asyncio()
@@ -1000,10 +1183,7 @@ async def test_react_planner_emits_ordering_hint_once() -> None:
     result = await planner.run("ordering")
 
     assert result.reason == "answer_complete"
-    assert any(
-        msg["role"] == "user" and "Ordering hint" in msg["content"]
-        for msg in client.calls[1]
-    )
+    assert any(msg["role"] == "user" and "Ordering hint" in msg["content"] for msg in client.calls[1])
 
 
 @pytest.mark.asyncio()
@@ -1169,10 +1349,7 @@ async def test_react_planner_parallel_join_magic_injection_warns(
         result = await planner.run("parallel implicit inject")
 
     assert result.reason == "answer_complete"
-    assert any(
-        "Implicit join injection is deprecated" in record.message
-        for record in caplog.records
-    )
+    assert any("Implicit join injection is deprecated" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio()
@@ -1755,9 +1932,7 @@ async def test_cost_tracking_graceful_when_unavailable() -> None:
             on_stream_chunk: object = None,
         ) -> str:
             del messages, response_format, stream, on_stream_chunk
-            return json.dumps(
-                {"thought": "Done", "next_node": None, "args": {"raw_answer": "OK"}}
-            )
+            return json.dumps({"thought": "Done", "next_node": None, "args": {"raw_answer": "OK"}})
 
     planner = ReactPlanner(
         llm_client=NoCostClient(),

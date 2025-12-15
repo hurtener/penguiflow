@@ -70,7 +70,7 @@ POPULAR_MCP_SERVERS = {
     "duckduckgo": ExternalToolConfig(
         name="duckduckgo",
         transport=TransportType.MCP,
-        connection="npx -y @nickclyde/duckduckgo-mcp-server",
+        connection="npx -y duckduckgo-mcp-server",
         auth_type=AuthType.NONE,
         description="Web search and content retrieval via DuckDuckGo",
     ),

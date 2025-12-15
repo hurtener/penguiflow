@@ -59,6 +59,76 @@ def test_parse_spec_success(tmp_path: Path) -> None:
     assert spec.planner.system_prompt_extra.startswith("You are helpful.")
 
 
+def test_parse_spec_supports_short_term_memory(tmp_path: Path) -> None:
+    content = dedent(
+        """\
+        agent:
+          name: memory-agent
+          description: Demo agent
+          template: react
+          flags:
+            memory: false
+        tools:
+          - name: search
+            description: Search the web
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: |
+            You are helpful.
+          short_term_memory:
+            enabled: true
+            strategy: rolling_summary
+            budget:
+              full_zone_turns: 3
+              summary_max_tokens: 200
+              total_max_tokens: 800
+              overflow_policy: truncate_oldest
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    spec = load_spec(path)
+    assert spec.planner.short_term_memory is not None
+    assert spec.planner.short_term_memory.strategy == "rolling_summary"
+    assert spec.planner.short_term_memory.budget.total_max_tokens == 800
+
+
+def test_short_term_memory_enabled_requires_strategy(tmp_path: Path) -> None:
+    content = dedent(
+        """\
+        agent:
+          name: bad-stm
+          description: Demo agent
+          template: react
+          flags:
+            memory: false
+        tools:
+          - name: search
+            description: Search the web
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: "Hello"
+          short_term_memory:
+            enabled: true
+            strategy: none
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    with pytest.raises(SpecValidationError) as excinfo:
+        load_spec(path)
+
+    assert "short_term_memory" in str(excinfo.value)
+    assert "enabled=true is not compatible" in str(excinfo.value)
+
 def test_invalid_tool_name_reports_line(tmp_path: Path) -> None:
     content = dedent(
         """\

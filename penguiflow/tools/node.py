@@ -585,11 +585,6 @@ class ToolNode:
 
         return variables
 
-    async def _force_reconnect(self) -> None:
-        """Close existing connection and reconnect on current event loop."""
-        await self.close()
-        await self.connect()
-
     # ─── Helpers ────────────────────────────────────────────────────────────────
 
     def _matches_filter(self, tool_name: str) -> bool:

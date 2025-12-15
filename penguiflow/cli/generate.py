@@ -467,6 +467,8 @@ def _generate_planner(
     planner_path = project_dir / "src" / package_name / "planner.py"
 
     planning_hints_literal = repr(_planning_hints(spec)).replace("'", '"')
+    stm = spec.planner.short_term_memory
+    stm_enabled = bool(stm and stm.enabled)
 
     content = _render_template(
         "planner.py.jinja",
@@ -476,6 +478,7 @@ def _generate_planner(
             "memory_prompt": (spec.planner.memory_prompt or "").strip(),
             "include_memory_prompt": spec.planner.memory_prompt is not None and spec.agent.flags.memory,
             "memory_enabled": spec.agent.flags.memory,
+            "short_term_memory_enabled": stm_enabled,
             "reflection_enabled": bool(spec.llm.reflection and spec.llm.reflection.enabled),
             "reflection_quality_threshold": spec.llm.reflection.quality_threshold if spec.llm.reflection else 0.8,
             "reflection_max_revisions": spec.llm.reflection.max_revisions if spec.llm.reflection else 2,
@@ -762,6 +765,9 @@ def _generate_config(
     memory_base = repr(spec.services.memory_iceberg.base_url) if spec.services.memory_iceberg.base_url else "None"
     lighthouse_base = repr(spec.services.lighthouse.base_url) if spec.services.lighthouse.base_url else "None"
     wayfinder_base = repr(spec.services.wayfinder.base_url) if spec.services.wayfinder.base_url else "None"
+    stm = spec.planner.short_term_memory
+    stm_budget = stm.budget if stm else None
+    stm_isolation = stm.isolation if stm else None
 
     content = _render_template(
         "config.py.jinja",
@@ -780,6 +786,26 @@ def _generate_config(
             "planner_hop_budget": spec.planner.hop_budget,
             "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,
             "planner_stream_final_response": spec.planner.stream_final_response,
+            "short_term_memory_enabled": bool(stm and stm.enabled),
+            "short_term_memory_strategy": repr(stm.strategy if stm else "none"),
+            "short_term_memory_full_zone_turns": stm_budget.full_zone_turns if stm_budget else 5,
+            "short_term_memory_summary_max_tokens": stm_budget.summary_max_tokens if stm_budget else 1000,
+            "short_term_memory_total_max_tokens": stm_budget.total_max_tokens if stm_budget else 10000,
+            "short_term_memory_overflow_policy": repr(stm_budget.overflow_policy if stm_budget else "truncate_oldest"),
+            "short_term_memory_tenant_key": repr(stm_isolation.tenant_key if stm_isolation else "tenant_id"),
+            "short_term_memory_user_key": repr(stm_isolation.user_key if stm_isolation else "user_id"),
+            "short_term_memory_session_key": repr(stm_isolation.session_key if stm_isolation else "session_id"),
+            "short_term_memory_require_explicit_key": bool(
+                stm_isolation.require_explicit_key if stm_isolation else True
+            ),
+            "short_term_memory_include_trajectory_digest": bool(stm.include_trajectory_digest if stm else True),
+            "short_term_memory_summarizer_model": (
+                repr(stm.summarizer_model) if stm and stm.summarizer_model is not None else "None"
+            ),
+            "short_term_memory_recovery_backlog_limit": stm.recovery_backlog_limit if stm else 20,
+            "short_term_memory_retry_attempts": stm.retry_attempts if stm else 3,
+            "short_term_memory_retry_backoff_base_s": stm.retry_backoff_base_s if stm else 2.0,
+            "short_term_memory_degraded_retry_interval_s": stm.degraded_retry_interval_s if stm else 30.0,
         },
     )
 
@@ -808,6 +834,8 @@ def _generate_env_example(
     env_path = project_dir / ".env.example"
 
     external_env_vars = _collect_external_env_vars(spec)
+    stm = spec.planner.short_term_memory
+    stm_budget = stm.budget if stm else None
 
     content = _render_template(
         "env.example.jinja",
@@ -824,6 +852,19 @@ def _generate_env_example(
             "planner_hop_budget": spec.planner.hop_budget,
             "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,
             "planner_stream_final_response": spec.planner.stream_final_response,
+            "short_term_memory_enabled": str(bool(stm and stm.enabled)).lower(),
+            "short_term_memory_strategy": stm.strategy if stm else "none",
+            "short_term_memory_full_zone_turns": stm_budget.full_zone_turns if stm_budget else 5,
+            "short_term_memory_summary_max_tokens": stm_budget.summary_max_tokens if stm_budget else 1000,
+            "short_term_memory_total_max_tokens": stm_budget.total_max_tokens if stm_budget else 10000,
+            "short_term_memory_overflow_policy": stm_budget.overflow_policy if stm_budget else "truncate_oldest",
+            "short_term_memory_include_trajectory_digest": str(
+                bool(stm.include_trajectory_digest if stm else True)
+            ).lower(),
+            "short_term_memory_recovery_backlog_limit": stm.recovery_backlog_limit if stm else 20,
+            "short_term_memory_retry_attempts": stm.retry_attempts if stm else 3,
+            "short_term_memory_retry_backoff_base_s": stm.retry_backoff_base_s if stm else 2.0,
+            "short_term_memory_degraded_retry_interval_s": stm.degraded_retry_interval_s if stm else 30.0,
             "external_env_vars": external_env_vars,
         },
     )
@@ -853,6 +894,7 @@ def _generate_env_setup_docs(
     skipped: list[str] = []
     docs_path = project_dir / "ENV_SETUP.md"
     package_name = _normalise_package_name(spec.agent.name)
+    stm = spec.planner.short_term_memory
 
     content = _render_template(
         "ENV_SETUP.md.jinja",
@@ -864,6 +906,7 @@ def _generate_env_setup_docs(
             "memory_enabled": str(spec.agent.flags.memory).lower(),
             "summarizer_enabled": str(bool(spec.llm.summarizer and spec.llm.summarizer.enabled)).lower(),
             "reflection_enabled": str(bool(spec.llm.reflection and spec.llm.reflection.enabled)).lower(),
+            "short_term_memory_enabled": str(bool(stm and stm.enabled)).lower(),
             "planner_max_iters": spec.planner.max_iters,
             "planner_hop_budget": spec.planner.hop_budget,
             "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,

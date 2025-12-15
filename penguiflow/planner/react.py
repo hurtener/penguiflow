@@ -8,7 +8,7 @@ import logging
 import time
 import warnings
 from collections import ChainMap, defaultdict
-from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -37,6 +37,14 @@ from .llm import (
     request_revision,
     summarise_trajectory,
 )
+from .memory import (
+    ConversationTurn,
+    DefaultShortTermMemory,
+    MemoryKey,
+    ShortTermMemory,
+    ShortTermMemoryConfig,
+    TrajectoryDigest,
+)
 from .models import (
     ClarificationResponse,
     FinalPayload,
@@ -61,6 +69,12 @@ from .trajectory import Trajectory, TrajectoryStep, TrajectorySummary
 
 # Planner-specific logger
 logger = logging.getLogger("penguiflow.planner")
+
+_STM_SUMMARY_SCHEMA_NAME = "short_term_memory_summary"
+
+
+class _ShortTermMemorySummary(BaseModel):
+    summary: str
 
 
 def _validate_llm_context(
@@ -296,16 +310,14 @@ class _StreamingArgsExtractor:
         # We need to find the string value inside
         if self._is_finish_action and not self._in_args_string:
             import re
+
             # Look for "args": { ... "answer"/"raw_answer": " pattern
             # Match: "args" : { "answer" : "  or "args":{"raw_answer":"
-            args_value_match = re.search(
-                r'"args"\s*:\s*\{\s*"(?:answer|raw_answer)"\s*:\s*"',
-                self._buffer
-            )
+            args_value_match = re.search(r'"args"\s*:\s*\{\s*"(?:answer|raw_answer)"\s*:\s*"', self._buffer)
             if args_value_match:
                 self._in_args_string = True
                 # Keep only content after the opening quote of the value
-                self._buffer = self._buffer[args_value_match.end():]
+                self._buffer = self._buffer[args_value_match.end() :]
 
         # Extract string content character by character
         if self._in_args_string:
@@ -327,20 +339,20 @@ class _StreamingArgsExtractor:
             if self._escape_next:
                 # Handle escape sequence
                 self._escape_next = False
-                if char == 'n':
-                    result.append('\n')
-                elif char == 't':
-                    result.append('\t')
-                elif char == 'r':
-                    result.append('\r')
+                if char == "n":
+                    result.append("\n")
+                elif char == "t":
+                    result.append("\t")
+                elif char == "r":
+                    result.append("\r")
                 elif char == '"':
                     result.append('"')
-                elif char == '\\':
-                    result.append('\\')
-                elif char == 'u' and i + 4 < len(self._buffer):
+                elif char == "\\":
+                    result.append("\\")
+                elif char == "u" and i + 4 < len(self._buffer):
                     # Unicode escape \uXXXX
                     try:
-                        hex_val = self._buffer[i + 1:i + 5]
+                        hex_val = self._buffer[i + 1 : i + 5]
                         result.append(chr(int(hex_val, 16)))
                         i += 4
                     except (ValueError, IndexError):
@@ -350,7 +362,7 @@ class _StreamingArgsExtractor:
                 i += 1
                 continue
 
-            if char == '\\':
+            if char == "\\":
                 self._escape_next = True
                 i += 1
                 continue
@@ -358,7 +370,7 @@ class _StreamingArgsExtractor:
             if char == '"':
                 # End of string - stop processing
                 self._in_args_string = False
-                self._buffer = self._buffer[i + 1:]
+                self._buffer = self._buffer[i + 1 :]
                 break
 
             result.append(char)
@@ -924,6 +936,7 @@ class ReactPlanner:
         reflection_llm: str | Mapping[str, Any] | None = None,
         tool_policy: ToolPolicy | None = None,
         stream_final_response: bool = False,
+        short_term_memory: ShortTermMemory | ShortTermMemoryConfig | None = None,
     ) -> None:
         if catalog is None:
             if nodes is None or registry is None:
@@ -997,6 +1010,21 @@ class ReactPlanner:
         self._clarification_client: JSONLLMClient | None = None
         self._reflection_config = reflection_config
 
+        self._memory_config = ShortTermMemoryConfig()
+        self._memory_singleton: ShortTermMemory | None = None
+        self._memory_by_key: dict[str, ShortTermMemory] = {}
+        self._memory_ephemeral_key: MemoryKey | None = None
+        self._memory_summarizer_client: JSONLLMClient | None = None
+        self._memory_summarizer: Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]] | None = None
+        if isinstance(short_term_memory, ShortTermMemoryConfig):
+            self._memory_config = short_term_memory
+            if short_term_memory.strategy != "none":
+                # Default memory is scoped per session key to prevent leakage across users/sessions.
+                self._memory_by_key = {}
+        elif short_term_memory is not None:
+            # Custom memory instances are assumed to manage their own isolation semantics.
+            self._memory_singleton = short_term_memory
+
         if llm_client is not None:
             self._client = llm_client
 
@@ -1032,6 +1060,26 @@ class ReactPlanner:
                     extra={"schema": "TrajectorySummary"},
                 )
                 self._summarizer_client = DSPyLLMClient.from_base_client(llm_client, TrajectorySummary)
+
+            if is_dspy and self._memory_singleton is None and self._memory_config.strategy == "rolling_summary":
+                assert isinstance(llm_client, DSPyLLMClient)  # for mypy
+                logger.info(
+                    "dspy_memory_summarizer_client_creation",
+                    extra={"schema": "ShortTermMemorySummary"},
+                )
+                if self._memory_config.summarizer_model:
+                    self._memory_summarizer_client = DSPyLLMClient(
+                        llm=self._memory_config.summarizer_model,
+                        output_schema=_ShortTermMemorySummary,
+                        temperature=temperature,
+                        max_retries=llm_max_retries,
+                        timeout_s=llm_timeout_s,
+                    )
+                else:
+                    self._memory_summarizer_client = DSPyLLMClient.from_base_client(
+                        llm_client,
+                        _ShortTermMemorySummary,
+                    )
         else:
             if llm is None:
                 raise ValueError("llm or llm_client must be provided")
@@ -1042,6 +1090,20 @@ class ReactPlanner:
                 max_retries=llm_max_retries,
                 timeout_s=llm_timeout_s,
                 streaming_enabled=stream_final_response,
+            )
+
+        if (
+            self._memory_summarizer_client is None
+            and self._memory_singleton is None
+            and self._memory_config.strategy == "rolling_summary"
+            and self._memory_config.summarizer_model is not None
+        ):
+            self._memory_summarizer_client = _LiteLLMJSONClient(
+                self._memory_config.summarizer_model,
+                temperature=temperature,
+                json_schema_mode=True,
+                max_retries=llm_max_retries,
+                timeout_s=llm_timeout_s,
             )
 
         # LiteLLM-based separate clients (override DSPy if explicitly provided)
@@ -1074,6 +1136,7 @@ class ReactPlanner:
         llm_context: Mapping[str, Any] | None = None,
         context_meta: Mapping[str, Any] | None = None,  # Deprecated
         tool_context: Mapping[str, Any] | None = None,
+        memory_key: MemoryKey | None = None,
     ) -> PlannerFinish | PlannerPause:
         """Execute planner on a query until completion or pause.
 
@@ -1090,6 +1153,11 @@ class ReactPlanner:
         tool_context : Mapping[str, Any] | None
             Tool-only context (callbacks, loggers, telemetry objects). Not
             visible to the LLM. May contain non-serialisable objects.
+        memory_key : MemoryKey | None
+            Optional explicit short-term memory key. If omitted, the planner may
+            derive a key from `tool_context` using the configured memory isolation
+            paths. If no key is available and memory is configured to require an
+            explicit key, memory behaves as disabled for this call.
 
         Returns
         -------
@@ -1113,15 +1181,19 @@ class ReactPlanner:
                 llm_context = context_meta
 
         logger.info("planner_run_start", extra={"query": query})
-        normalised_llm_context = _validate_llm_context(llm_context)
         normalised_tool_context = _coerce_tool_context(tool_context)
+        normalised_llm_context = _validate_llm_context(llm_context)
+        resolved_key = self._resolve_memory_key(memory_key, normalised_tool_context)
+        normalised_llm_context = await self._apply_memory_context(normalised_llm_context, resolved_key)
         self._cost_tracker = _CostTracker()
         trajectory = Trajectory(
             query=query,
             llm_context=normalised_llm_context,
             tool_context=normalised_tool_context,
         )
-        return await self._run_loop(trajectory, tracker=None)
+        result = await self._run_loop(trajectory, tracker=None)
+        await self._maybe_record_memory_turn(query, result, trajectory, resolved_key)
+        return result
 
     async def resume(
         self,
@@ -1129,6 +1201,7 @@ class ReactPlanner:
         user_input: str | None = None,
         *,
         tool_context: Mapping[str, Any] | None = None,
+        memory_key: MemoryKey | None = None,
     ) -> PlannerFinish | PlannerPause:
         """Resume a paused planning session.
 
@@ -1142,6 +1215,12 @@ class ReactPlanner:
             Tool-only context (callbacks, loggers, telemetry objects). Not
             visible to the LLM. May contain non-serialisable objects. Overrides
             any tool_context captured in the pause record.
+        memory_key : MemoryKey | None
+            Optional explicit short-term memory key for the resumed session. If
+            omitted, the planner may derive a key from `tool_context` using the
+            configured memory isolation paths. If no key is available and memory
+            is configured to require an explicit key, memory behaves as disabled
+            for this call.
 
         Returns
         -------
@@ -1166,6 +1245,13 @@ class ReactPlanner:
             trajectory.tool_context = trajectory.tool_context or {}
         if user_input is not None:
             trajectory.resume_user_input = user_input
+
+        resolved_key = self._resolve_memory_key(memory_key, trajectory.tool_context or {})
+        merged_llm_context = await self._apply_memory_context(
+            dict(trajectory.llm_context or {}),
+            resolved_key,
+        )
+        trajectory.llm_context = merged_llm_context
         tracker: _ConstraintTracker | None = None
         if record.constraints is not None:
             tracker = _ConstraintTracker.from_snapshot(
@@ -1183,7 +1269,264 @@ class ReactPlanner:
             )
         )
 
-        return await self._run_loop(trajectory, tracker=tracker)
+        result = await self._run_loop(trajectory, tracker=tracker)
+        await self._maybe_record_memory_turn(trajectory.query, result, trajectory, resolved_key)
+        return result
+
+    def _resolve_memory_key(
+        self,
+        explicit: MemoryKey | None,
+        tool_context: Mapping[str, Any] | None,
+    ) -> MemoryKey | None:
+        if self._memory_singleton is None and self._memory_config.strategy == "none":
+            return None
+        if explicit is not None:
+            return explicit
+        extracted = self._extract_memory_key_from_tool_context(tool_context or {})
+        if extracted is not None:
+            return extracted
+        if self._memory_config.isolation.require_explicit_key:
+            return None
+        if self._memory_ephemeral_key is None:
+            self._memory_ephemeral_key = MemoryKey(
+                tenant_id="default",
+                user_id="anonymous",
+                session_id=uuid4().hex,
+            )
+        return self._memory_ephemeral_key
+
+    def _get_memory_for_key(self, key: MemoryKey) -> ShortTermMemory | None:
+        if self._memory_singleton is not None:
+            return self._memory_singleton
+        if self._memory_config.strategy == "none":
+            return None
+        composite = key.composite()
+        memory = self._memory_by_key.get(composite)
+        if memory is None:
+            summarizer = None
+            if self._memory_config.strategy == "rolling_summary":
+                summarizer = self._get_short_term_memory_summarizer()
+            memory = DefaultShortTermMemory(config=self._memory_config, summarizer=summarizer)
+            self._memory_by_key[composite] = memory
+        return memory
+
+    @staticmethod
+    def _normalise_session_summary(summary: str) -> str:
+        summary = summary.strip()
+        if not summary:
+            return "<session_summary></session_summary>"
+        if "<session_summary>" not in summary:
+            return f"<session_summary>\n{summary}\n</session_summary>"
+        return summary
+
+    def _get_short_term_memory_summarizer(self) -> Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]]:
+        if self._memory_summarizer is not None:
+            return self._memory_summarizer
+
+        async def _summarize(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+            previous_summary = str(payload.get("previous_summary") or "")
+            turns = payload.get("turns") or []
+            if not isinstance(turns, Sequence):
+                raise TypeError("turns must be a sequence")
+
+            logger.debug(
+                "memory_summarizer_call_start",
+                extra={
+                    "turns_count": len(turns),
+                    "previous_summary_len": len(previous_summary),
+                    "has_dedicated_client": self._memory_summarizer_client is not None,
+                },
+            )
+
+            client = self._memory_summarizer_client or self._client
+            messages = prompts.build_short_term_memory_summary_messages(
+                previous_summary=previous_summary,
+                turns=[dict(item) for item in turns if isinstance(item, Mapping)],
+            )
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": _STM_SUMMARY_SCHEMA_NAME,
+                    "schema": _sanitize_json_schema(_ShortTermMemorySummary.model_json_schema()),
+                },
+            }
+            llm_result = await client.complete(messages=messages, response_format=response_format)
+            raw, _ = _coerce_llm_response(llm_result)
+            parsed = _ShortTermMemorySummary.model_validate_json(raw)
+            summary = self._normalise_session_summary(parsed.summary)
+
+            logger.debug(
+                "memory_summarizer_call_complete",
+                extra={
+                    "summary_len": len(summary),
+                    "turns_processed": len(turns),
+                },
+            )
+
+            return {"summary": summary}
+
+        self._memory_summarizer = _summarize
+        return self._memory_summarizer
+
+    @staticmethod
+    def _extract_path(mapping: Mapping[str, Any], path: str) -> Any | None:
+        current: Any = mapping
+        for part in path.split("."):
+            if not isinstance(current, Mapping):
+                return None
+            if part not in current:
+                return None
+            current = current[part]
+        return current
+
+    def _extract_memory_key_from_tool_context(self, tool_context: Mapping[str, Any]) -> MemoryKey | None:
+        isolation = self._memory_config.isolation
+        tenant_value = self._extract_path(tool_context, isolation.tenant_key)
+        user_value = self._extract_path(tool_context, isolation.user_key)
+        session_value = self._extract_path(tool_context, isolation.session_key)
+        if session_value is None or str(session_value).strip() == "":
+            return None
+        tenant_id = str(tenant_value).strip() if tenant_value is not None else "default"
+        user_id = str(user_value).strip() if user_value is not None else "anonymous"
+        return MemoryKey(tenant_id=tenant_id, user_id=user_id, session_id=str(session_value).strip())
+
+    async def _apply_memory_context(
+        self,
+        llm_context: dict[str, Any] | None,
+        key: MemoryKey | None,
+    ) -> dict[str, Any] | None:
+        if key is None:
+            return llm_context
+        memory = self._get_memory_for_key(key)
+        if memory is None:
+            return llm_context
+        await self._maybe_memory_hydrate(memory, key)
+        try:
+            patch = await memory.get_llm_context()
+        except Exception as exc:
+            logger.warning(
+                "memory_get_llm_context_failed",
+                extra={
+                    "error": str(exc),
+                    "error_type": exc.__class__.__name__,
+                },
+            )
+            return llm_context
+        if not patch:
+            return llm_context
+        merged: dict[str, Any] = dict(llm_context or {})
+        merged.update(dict(patch))
+        try:
+            json.dumps(merged, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "memory_context_not_json_serialisable",
+                extra={
+                    "error": str(exc),
+                    "error_type": exc.__class__.__name__,
+                },
+            )
+            return llm_context
+        return merged
+
+    async def _maybe_memory_hydrate(self, memory: ShortTermMemory, key: MemoryKey) -> None:
+        if self._state_store is None:
+            return
+        hydrate = getattr(memory, "hydrate", None)
+        if hydrate is None:
+            return
+        try:
+            await hydrate(self._state_store, key.composite())
+        except Exception as exc:
+            logger.warning(
+                "memory_hydrate_failed",
+                extra={"error": str(exc), "error_type": exc.__class__.__name__},
+            )
+
+    async def _maybe_memory_persist(self, memory: ShortTermMemory, key: MemoryKey) -> None:
+        if self._state_store is None:
+            return
+        persist = getattr(memory, "persist", None)
+        if persist is None:
+            return
+        try:
+            await persist(self._state_store, key.composite())
+        except Exception as exc:
+            logger.warning(
+                "memory_persist_failed",
+                extra={"error": str(exc), "error_type": exc.__class__.__name__},
+            )
+
+    def _build_memory_turn(self, query: str, result: PlannerFinish, trajectory: Trajectory) -> ConversationTurn:
+        payload = result.payload
+        if isinstance(payload, Mapping):
+            assistant = payload.get("raw_answer")
+            assistant_response = assistant if isinstance(assistant, str) else json.dumps(payload, ensure_ascii=False)
+        else:
+            assistant_response = str(payload) if payload is not None else ""
+
+        digest: TrajectoryDigest | None = None
+        if self._memory_config.include_trajectory_digest:
+            tools: list[str] = []
+            obs_lines: list[str] = []
+            for step in trajectory.steps:
+                tool_name = step.action.next_node
+                if tool_name is None:
+                    continue
+                if step.error is not None or step.observation is None:
+                    continue
+                tools.append(tool_name)
+                try:
+                    obs_payload = step.serialise_for_llm()
+                    obs_text = json.dumps(obs_payload, ensure_ascii=False)
+                except Exception:
+                    obs_text = str(step.serialise_for_llm())
+                if len(obs_text) > 400:
+                    obs_text = obs_text[:400] + "…"
+                obs_lines.append(f"- {tool_name}: {obs_text}")
+
+            if tools:
+                thought = result.metadata.get("thought")
+                digest = TrajectoryDigest(
+                    tools_invoked=tools,
+                    observations_summary="\n".join(obs_lines),
+                    reasoning_summary=thought if isinstance(thought, str) else None,
+                )
+
+        return ConversationTurn(
+            user_message=query,
+            assistant_response=assistant_response,
+            trajectory_digest=digest,
+            ts=time.time(),
+        )
+
+    async def _maybe_record_memory_turn(
+        self,
+        query: str,
+        result: PlannerFinish | PlannerPause,
+        trajectory: Trajectory,
+        key: MemoryKey | None,
+    ) -> None:
+        if key is None:
+            return
+        memory = self._get_memory_for_key(key)
+        if memory is None:
+            return
+        if not isinstance(result, PlannerFinish):
+            return
+        turn = self._build_memory_turn(query, result, trajectory)
+        try:
+            await memory.add_turn(turn)
+        except Exception as exc:
+            logger.warning(
+                "memory_add_turn_failed",
+                extra={
+                    "error": str(exc),
+                    "error_type": exc.__class__.__name__,
+                },
+            )
+            return
+        await self._maybe_memory_persist(memory, key)
 
     async def _run_loop(
         self,

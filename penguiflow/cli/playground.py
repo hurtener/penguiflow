@@ -62,7 +62,14 @@ class ChatRequest(BaseModel):
         default=None,
         description="Session identifier; generated automatically if omitted.",
     )
-    context: dict[str, Any] = Field(default_factory=dict, description="Optional LLM context.")
+    llm_context: dict[str, Any] = Field(default_factory=dict, description="Optional LLM-visible context.")
+    tool_context: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional runtime context (not LLM-visible).",
+    )
+
+    # Backward-compatible alias for older UI clients.
+    context: dict[str, Any] | None = Field(default=None, description="Deprecated alias for llm_context.")
 
 
 class ChatResponse(BaseModel):
@@ -97,6 +104,14 @@ def _parse_context_arg(raw: str | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _merge_contexts(primary: dict[str, Any], secondary: dict[str, Any] | None) -> dict[str, Any]:
+    if not secondary:
+        return primary
+    merged = dict(primary)
+    merged.update(secondary)
+    return merged
 
 
 def _discover_spec_path(project_root: Path) -> Path | None:
@@ -610,10 +625,12 @@ def create_playground_app(
                 broker.publish(tid, frame)
 
         try:
+            llm_context = _merge_contexts(dict(request.llm_context or {}), request.context)
             result: ChatResult = await agent_wrapper.chat(
                 query=request.query,
                 session_id=session_id,
-                context=request.context,
+                llm_context=llm_context,
+                tool_context=dict(request.tool_context or {}),
                 event_consumer=_event_consumer,
                 trace_id_hint=trace_holder["id"],
             )
@@ -636,10 +653,13 @@ def create_playground_app(
     async def chat_stream(
         query: str,
         session_id: str | None = None,
+        llm_context: str | None = None,
+        tool_context: str | None = None,
         context: str | None = None,
     ) -> StreamingResponse:
         session_value = session_id or secrets.token_hex(8)
-        context_payload = _parse_context_arg(context)
+        llm_payload = _merge_contexts(_parse_context_arg(llm_context), _parse_context_arg(context) or None)
+        tool_payload = _parse_context_arg(tool_context)
         queue: asyncio.Queue[bytes | object] = asyncio.Queue()
         trace_holder: dict[str, str | None] = {"id": secrets.token_hex(8)}
 
@@ -661,7 +681,8 @@ def create_playground_app(
                 result: ChatResult = await agent_wrapper.chat(
                     query=query,
                     session_id=session_value,
-                    context=context_payload,
+                    llm_context=llm_payload,
+                    tool_context=tool_payload,
                     event_consumer=_event_consumer,
                     trace_id_hint=trace_holder["id"],
                 )

@@ -66,6 +66,14 @@ def _write_spec(path: Path) -> None:
                 You are helpful.
               memory_prompt: |
                 Use memory responsibly.
+              short_term_memory:
+                enabled: true
+                strategy: rolling_summary
+                budget:
+                  full_zone_turns: 3
+                  summary_max_tokens: 200
+                  total_max_tokens: 800
+                  overflow_policy: truncate_oldest
               hints:
                 ordering: ["fetch_data", "write_data"]
                 disallow: []
@@ -128,6 +136,7 @@ def test_run_generate_creates_planner_and_tools(tmp_path: Path) -> None:
     assert "ReactPlanner" in planner_content
     assert "SYSTEM_PROMPT_EXTRA" in planner_content
     assert "memory_enabled" in planner_content
+    assert "_build_short_term_memory" in planner_content
     assert "ReflectionConfig" in planner_content
     assert "\"ordering\": ['fetch_data', 'write_data']" in planner_content or "ordering" in planner_content
     assert "absolute_max_parallel" in planner_content
@@ -146,10 +155,12 @@ def test_run_generate_creates_planner_and_tools(tmp_path: Path) -> None:
     config_content = config_file.read_text()
     assert "gpt-4o" in config_content
     assert "memory_enabled" in config_content
+    assert "short_term_memory_enabled" in config_content
 
     env_content = env_example.read_text()
     assert "LLM_MODEL" in env_content
     assert "PLANNER_MAX_ITERS" in env_content
+    assert "SHORT_TERM_MEMORY_ENABLED" in env_content
 
     # Test agent.yaml is persisted for playground discovery
     agent_yaml = project_dir / "agent.yaml"

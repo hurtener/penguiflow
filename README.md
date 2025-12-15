@@ -24,6 +24,7 @@ It provides:
 * **Streaming chunks** (LLM-style token emission with `Context.emit_chunk`)
 * **Dynamic loops** (controller nodes)
 * **LLM-driven orchestration** (`ReactPlanner` for autonomous multi-step workflows with tool selection, parallel execution, and pause/resume)
+* **Short-term memory (opt-in)** — per-session conversation continuity for `ReactPlanner` with truncation/rolling-summary strategies, fail-closed isolation by `MemoryKey`, and optional persistence via `state_store` (see `docs/MEMORY_GUIDE.md`).
 * **Runtime playbooks** (callable subflows with shared metadata)
 * **Per-trace cancellation** (`PenguiFlow.cancel` with `TraceCancelled` surfacing in nodes)
 * **Deadlines & budgets** (`Message.deadline_s`, `WM.budget_hops`, and `WM.budget_tokens` guardrails that you can leave unset/`None`)
@@ -70,7 +71,7 @@ It provides:
 
 ```bash
 # Project scaffolding
-uv run penguiflow new my-agent --template react        # ReactPlanner with memory
+uv run penguiflow new my-agent --template react        # ReactPlanner template (supports built-in short-term memory)
 uv run penguiflow new my-agent --template enterprise   # Multi-tenant enterprise setup
 uv run penguiflow new my-agent --template parallel --with-streaming  # Parallel + SSE
 

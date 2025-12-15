@@ -146,6 +146,22 @@ planner:
   #   - Avoid repeating information
   #   - Personalize responses
 
+  # Built-in short-term memory (ReactPlanner)
+  # short_term_memory:
+  #   enabled: true
+  #   strategy: rolling_summary   # rolling_summary|truncation|none
+  #   budget:
+  #     full_zone_turns: 5
+  #     summary_max_tokens: 1000
+  #     total_max_tokens: 10000
+  #     overflow_policy: truncate_oldest  # truncate_oldest|truncate_summary|error
+  #   isolation:
+  #     tenant_key: tenant_id
+  #     user_key: user_id
+  #     session_key: session_id
+  #     require_explicit_key: true
+  #   include_trajectory_digest: true
+
   # Optional: Hints for tool usage patterns
   # hints:
   #   ordering: [search_documents, analyze_results]  # Preferred tool order

@@ -112,8 +112,17 @@ planner:
   system_prompt_extra: |
     Define your agent's personality, capabilities, and guidelines here.
 
-  memory_prompt: |             # Required if memory: true
-    Instructions for using conversation history.
+  memory_prompt: |             # Required if agent.flags.memory: true (memory service integration)
+    Instructions for using retrieved memory snippets.
+
+  short_term_memory:           # Optional built-in short-term memory (ReactPlanner)
+    enabled: true
+    strategy: rolling_summary  # rolling_summary|truncation|none
+    budget:
+      full_zone_turns: 5
+      summary_max_tokens: 1000
+      total_max_tokens: 10000
+      overflow_policy: truncate_oldest
 
   hints:                       # Optional execution hints
     ordering: [tool_a, tool_b]

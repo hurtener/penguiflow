@@ -121,7 +121,32 @@
   let followEventSource: EventSource | null = null;
 
   // Reference to chat body for auto-scrolling
-  let chatBodyEl: HTMLDivElement | null = null;
+  let chatBodyEl = $state<HTMLDivElement | null>(null);
+
+  type CenterTab = "chat" | "setup";
+  let centerTab = $state<CenterTab>("chat");
+
+  let setupTenantId = $state("playground-tenant");
+  let setupUserId = $state("playground-user");
+  let setupToolContextRaw = $state("{}");
+  let setupLlmContextRaw = $state("{}");
+  let setupError = $state<string | null>(null);
+
+  const parseJsonObject = (raw: string, options: { label: string }): Record<string, unknown> => {
+    const label = options.label;
+    const trimmed = raw.trim();
+    if (!trimmed) return {};
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      throw new Error(`${label} must be valid JSON.`);
+    }
+    if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") {
+      throw new Error(`${label} must be a JSON object.`);
+    }
+    return parsed as Record<string, unknown>;
+  };
 
   // Auto-scroll to bottom when new messages arrive
   $effect(() => {
@@ -233,6 +258,22 @@
     if (!query || isSending) {
       return;
     }
+    setupError = null;
+    let toolContext: Record<string, unknown>;
+    let llmContext: Record<string, unknown>;
+    try {
+      const extraTool = parseJsonObject(setupToolContextRaw, { label: "Tool context" });
+      toolContext = {
+        tenant_id: setupTenantId,
+        user_id: setupUserId,
+        ...extraTool,
+      };
+      llmContext = parseJsonObject(setupLlmContextRaw, { label: "LLM context" });
+    } catch (err) {
+      setupError = err instanceof Error ? err.message : "Invalid setup configuration.";
+      centerTab = "setup";
+      return;
+    }
     isSending = true;
     artifactStreams = {};
     const userMessage: ChatMessage = {
@@ -256,6 +297,12 @@
     const url = new URL("/chat/stream", window.location.origin);
     url.searchParams.set("query", query);
     url.searchParams.set("session_id", sessionId);
+    if (Object.keys(toolContext).length) {
+      url.searchParams.set("tool_context", JSON.stringify(toolContext));
+    }
+    if (Object.keys(llmContext).length) {
+      url.searchParams.set("llm_context", JSON.stringify(llmContext));
+    }
 
     resetChatStream();
     chatEventSource = new EventSource(url.toString());
@@ -583,85 +630,152 @@
     </div>
   </aside>
 
-  <main class="column center">
-    <div class="card chat-card">
-      <div class="chat-header">
-        <div class="pill header-pill">
-          <span class="dot active"></span>
-          {agentMeta.name}
-        </div>
-        <div class="pill ghost">DEV PLAYGROUND</div>
-      </div>
-
-      <div class="chat-body" bind:this={chatBodyEl}>
-        {#if hasNoMessages}
-          <div class="empty">
-            <div class="empty-icon">✶</div>
-            <div class="empty-title">Ready to test agent behavior.</div>
-            <div class="empty-sub">Type a message below to start a run.</div>
-          </div>
-        {:else}
-          {#each chatMessages as msg (msg.id)}
-            <div class={`message-row ${msg.role === "agent" ? "agent" : "user"}`}>
-              <div class={`bubble ${msg.role}`}>
-                <div class="markdown-content">{@html renderMarkdown(msg.text)}</div>
-                {#if msg.pause}
-                  <div class="pause-card">
-                    <div class="pause-title">Action required</div>
-                    {#if msg.pause.payload?.auth_url || msg.pause.payload?.url}
-                      <a
-                        class="pause-link"
-                        href={(msg.pause.payload.auth_url as string) || (msg.pause.payload.url as string)}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Open authorization link
-                      </a>
-                    {/if}
-                    {#if msg.pause.resume_token}
-                      <div class="pause-token">Resume token: {msg.pause.resume_token}</div>
-                    {/if}
-                    <div class="pause-meta">
-                      {msg.pause.reason ? `reason: ${msg.pause.reason}` : "paused"}
-                      {#if msg.pause.payload?.provider}
-                        · provider: {msg.pause.payload.provider}
-                      {/if}
-                    </div>
-                  </div>
-                {/if}
-                {#if msg.isStreaming || msg.isThinking}
-                  <div class="typing">
-                    <span></span><span></span><span></span>
-                  </div>
-                {/if}
-              </div>
-              <div class="meta-row">
-                <span>{formatTime(msg.ts)}</span>
-                {#if msg.traceId}
-                  <span class="link">#{msg.traceId}</span>
-                {/if}
-              </div>
-            </div>
-          {/each}
-        {/if}
-      </div>
-
-      <div class="chat-input">
-        <textarea
-          placeholder="Ask your agent something..."
-          bind:value={chatInput}
-          onkeydown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              sendChat();
-            }
-          }}
-        ></textarea>
-        <button class="send-btn" onclick={sendChat} disabled={isSending || !chatInput.trim()}>
-          ➤
-        </button>
-      </div>
-    </div>
+	  <main class="column center">
+	    <div class="card chat-card">
+	      <div class="chat-header">
+	        <div class="pill header-pill">
+	          <span class="dot active"></span>
+	          {agentMeta.name}
+	        </div>
+	        <div class="pill ghost">DEV PLAYGROUND</div>
+	      </div>
+	
+	      <div class="tabs">
+	        <button type="button" class={`tab ${centerTab === "chat" ? "active" : ""}`} onclick={() => (centerTab = "chat")}>Chat</button>
+	        <button type="button" class={`tab ${centerTab === "setup" ? "active" : ""}`} onclick={() => (centerTab = "setup")}>Setup</button>
+	      </div>
+	
+	      {#if centerTab === "setup"}
+	        <div class="setup-body">
+	          <div class="setup-grid">
+	            <div class="setup-field">
+	              <div class="label">Session ID</div>
+	              <div class="row gap">
+	                <input class="setup-input" bind:value={sessionId} />
+	                <button
+	                  class="ghost-btn small"
+	                  onclick={() => {
+	                    sessionId = randomId();
+	                    activeTraceId = null;
+	                    timeline = [];
+	                    plannerEvents = [];
+	                    artifactStreams = {};
+	                  }}
+	                >
+	                  New
+	                </button>
+	              </div>
+	              <div class="muted tiny">Used to scope short-term memory and trajectory lookups.</div>
+	            </div>
+	
+	            <div class="setup-field">
+	              <div class="label">Tenant ID</div>
+	              <input class="setup-input" bind:value={setupTenantId} />
+	            </div>
+	
+	            <div class="setup-field">
+	              <div class="label">User ID</div>
+	              <input class="setup-input" bind:value={setupUserId} />
+	            </div>
+	
+		            <div class="setup-field full">
+		              <div class="label">Tool Context (JSON)</div>
+		              <textarea
+		                class="setup-textarea"
+		                bind:value={setupToolContextRaw}
+		                placeholder="&#123;&quot;any_runtime_key&quot;: &quot;value&quot;&#125;"
+		              ></textarea>
+		              <div class="muted tiny">Merged with tenant/user and injected as runtime tool_context.</div>
+		            </div>
+	
+		            <div class="setup-field full">
+		              <div class="label">LLM Context (JSON)</div>
+		              <textarea
+		                class="setup-textarea"
+		                bind:value={setupLlmContextRaw}
+		                placeholder="&#123;&#125;"
+		              ></textarea>
+		              <div class="muted tiny">Only used when the playground wraps a planner entry point.</div>
+		            </div>
+	          </div>
+	
+	          {#if setupError}
+	            <div class="errors">
+	              <div class="error-row">⚠️ {setupError}</div>
+	            </div>
+	          {/if}
+	        </div>
+	      {:else}
+	        <div class="chat-body" bind:this={chatBodyEl}>
+	          {#if hasNoMessages}
+	            <div class="empty">
+	              <div class="empty-icon">✶</div>
+	              <div class="empty-title">Ready to test agent behavior.</div>
+	              <div class="empty-sub">Type a message below to start a run.</div>
+	            </div>
+	          {:else}
+	            {#each chatMessages as msg (msg.id)}
+	              <div class={`message-row ${msg.role === "agent" ? "agent" : "user"}`}>
+	                <div class={`bubble ${msg.role}`}>
+	                  <div class="markdown-content">{@html renderMarkdown(msg.text)}</div>
+	                  {#if msg.pause}
+	                    <div class="pause-card">
+	                      <div class="pause-title">Action required</div>
+	                      {#if msg.pause.payload?.auth_url || msg.pause.payload?.url}
+	                        <a
+	                          class="pause-link"
+	                          href={(msg.pause.payload.auth_url as string) || (msg.pause.payload.url as string)}
+	                          target="_blank"
+	                          rel="noreferrer"
+	                        >
+	                          Open authorization link
+	                        </a>
+	                      {/if}
+	                      {#if msg.pause.resume_token}
+	                        <div class="pause-token">Resume token: {msg.pause.resume_token}</div>
+	                      {/if}
+	                      <div class="pause-meta">
+	                        {msg.pause.reason ? `reason: ${msg.pause.reason}` : "paused"}
+	                        {#if msg.pause.payload?.provider}
+	                          · provider: {msg.pause.payload.provider}
+	                        {/if}
+	                      </div>
+	                    </div>
+	                  {/if}
+	                  {#if msg.isStreaming || msg.isThinking}
+	                    <div class="typing">
+	                      <span></span><span></span><span></span>
+	                    </div>
+	                  {/if}
+	                </div>
+	                <div class="meta-row">
+	                  <span>{formatTime(msg.ts)}</span>
+	                  {#if msg.traceId}
+	                    <span class="link">#{msg.traceId}</span>
+	                  {/if}
+	                </div>
+	              </div>
+	            {/each}
+	          {/if}
+	        </div>
+	
+	        <div class="chat-input">
+	          <textarea
+	            placeholder="Ask your agent something..."
+	            bind:value={chatInput}
+	            onkeydown={(e) => {
+	              if (e.key === "Enter" && !e.shiftKey) {
+	                e.preventDefault();
+	                sendChat();
+	              }
+	            }}
+	          ></textarea>
+	          <button class="send-btn" onclick={sendChat} disabled={isSending || !chatInput.trim()}>
+	            ➤
+	          </button>
+	        </div>
+	      {/if}
+	    </div>
 
     <div class="card trajectory-card">
       <div class="trajectory-header">

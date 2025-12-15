@@ -159,6 +159,49 @@ html, body {
   outline: 2px solid #d7f0ec;
 }
 
+.setup-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 4px;
+}
+
+.setup-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.setup-field.full {
+  grid-column: 1 / -1;
+}
+
+.setup-input,
+.setup-textarea {
+  width: 100%;
+  border: 1px solid #efe9e0;
+  background: white;
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.setup-textarea {
+  resize: vertical;
+  min-height: 88px;
+}
+
+.setup-input:focus,
+.setup-textarea:focus {
+  outline: 2px solid #d7f0ec;
+}
+
+.ghost-btn.small {
+  padding: 8px 12px;
+  font-size: 11px;
+}
+
 .send-btn {
   background: linear-gradient(135deg, #31a6a0, #1a7c75);
   color: white;
@@ -305,6 +348,8 @@ html, body {
   font-size: 12px;
   color: #5a534a;
   cursor: pointer;
+  border: none;
+  appearance: none;
 }
 
 .tab.active {
@@ -801,6 +846,10 @@ details summary {
 
 .align-center {
   align-items: center;
+}
+
+.gap {
+  gap: 8px;
 }
 
 /* ========== MARKDOWN CONTENT ========== */
