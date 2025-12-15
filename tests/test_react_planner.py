@@ -24,6 +24,21 @@ from penguiflow.planner.react import (
 from penguiflow.registry import ModelRegistry
 
 
+def _extract_read_only_conversation_memory(messages: list[Mapping[str, str]]) -> dict[str, Any] | None:
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content") or ""
+        if "<read_only_conversation_memory_json>" not in content:
+            continue
+        if "</read_only_conversation_memory_json>" not in content:
+            continue
+        start = content.index("<read_only_conversation_memory_json>") + len("<read_only_conversation_memory_json>")
+        end = content.index("</read_only_conversation_memory_json>", start)
+        return json.loads(content[start:end])
+    return None
+
+
 class Query(BaseModel):
     question: str
 
@@ -441,13 +456,15 @@ async def test_react_planner_injects_short_term_memory_across_runs() -> None:
     await planner.run("q1", memory_key=key)
     await planner.run("q2", memory_key=key)
 
-    first_user = next(msg["content"] for msg in client.calls[0] if msg["role"] == "user")
-    payload1 = json.loads(first_user)
-    assert payload1["context"]["conversation_memory"]["recent_turns"] == []
+    first_call = client.calls[0]
+    memory1 = _extract_read_only_conversation_memory(first_call)
+    assert memory1 is not None
+    assert memory1["recent_turns"] == []
 
-    second_user = next(msg["content"] for msg in client.calls[1] if msg["role"] == "user")
-    payload2 = json.loads(second_user)
-    recent = payload2["context"]["conversation_memory"]["recent_turns"]
+    second_call = client.calls[1]
+    memory2 = _extract_read_only_conversation_memory(second_call)
+    assert memory2 is not None
+    recent = memory2["recent_turns"]
     assert recent[0]["user"] == "q1"
     assert recent[0]["assistant"] == "a1"
 
@@ -507,9 +524,10 @@ async def test_react_planner_rolling_summary_uses_llm_summarizer() -> None:
     assert client.summary_calls == 1
     assert any(name == "short_term_memory_summary" for name, _ in client.calls)
 
-    second_user = next(msg["content"] for msg in client.calls[-1][1] if msg["role"] == "user")
-    payload2 = json.loads(second_user)
-    assert payload2["context"]["conversation_memory"]["summary"] == "<session_summary>ok</session_summary>"
+    second_messages = client.calls[-1][1]
+    memory2 = _extract_read_only_conversation_memory(second_messages)
+    assert memory2 is not None
+    assert memory2["summary"] == "<session_summary>ok</session_summary>"
 
 
 @pytest.mark.asyncio()
@@ -532,9 +550,10 @@ async def test_react_planner_extracts_memory_key_from_tool_context() -> None:
     await planner.run("q1", tool_context=tool_ctx)
     await planner.run("q2", tool_context=tool_ctx)
 
-    second_user = next(msg["content"] for msg in client.calls[1] if msg["role"] == "user")
-    payload2 = json.loads(second_user)
-    recent = payload2["context"]["conversation_memory"]["recent_turns"]
+    second_messages = client.calls[1]
+    memory2 = _extract_read_only_conversation_memory(second_messages)
+    assert memory2 is not None
+    recent = memory2["recent_turns"]
     assert recent[0]["user"] == "q1"
     assert recent[0]["assistant"] == "a1"
 
@@ -576,9 +595,10 @@ async def test_react_planner_persists_and_hydrates_short_term_memory() -> None:
     )
     await planner2.run("q2", memory_key=key)
 
-    second_user = next(msg["content"] for msg in client2.calls[0] if msg["role"] == "user")
-    payload2 = json.loads(second_user)
-    recent = payload2["context"]["conversation_memory"]["recent_turns"]
+    second_messages = client2.calls[0]
+    memory2 = _extract_read_only_conversation_memory(second_messages)
+    assert memory2 is not None
+    recent = memory2["recent_turns"]
     assert recent[0]["user"] == "q1"
     assert recent[0]["assistant"] == "a1"
 
@@ -602,9 +622,8 @@ async def test_react_planner_memory_fail_closed_without_key() -> None:
     await planner.run("q1")
     await planner.run("q2")
 
-    second_user = next(msg["content"] for msg in client.calls[1] if msg["role"] == "user")
-    payload = json.loads(second_user)
-    assert "conversation_memory" not in payload.get("context", {})
+    second_messages = client.calls[1]
+    assert _extract_read_only_conversation_memory(second_messages) is None
 
 
 @pytest.mark.asyncio()
@@ -628,9 +647,10 @@ async def test_react_planner_session_isolation_by_memory_key() -> None:
     await planner.run("q1", memory_key=k1)
     await planner.run("q2", memory_key=k2)
 
-    second_user = next(msg["content"] for msg in client.calls[1] if msg["role"] == "user")
-    payload = json.loads(second_user)
-    assert payload.get("context", {}).get("conversation_memory", {}).get("recent_turns") == []
+    second_messages = client.calls[1]
+    memory2 = _extract_read_only_conversation_memory(second_messages)
+    assert memory2 is not None
+    assert memory2.get("recent_turns") == []
 
 
 @pytest.mark.asyncio()

@@ -644,7 +644,7 @@ However, **all summarization LLM calls remain JSON-only**: the summarizer return
 whose `summary` field contains the prose (optionally tagged). This preserves PenguiFlow's structured
 output/repair DNA while keeping the summary itself flexible and human-readable.
 
-Recommended `context.conversation_memory.summary` value:
+Recommended `conversation_memory.summary` value:
 
 ```xml
 <session_summary>
@@ -683,7 +683,7 @@ Recommended summarizer output shape (JSON-only):
 - **JSON-wrapped, prose content**: the summarizer only needs to produce `{ "summary": "..." }`, which is easier to validate/repair than fully structured summaries, while the prose stays model-friendly
 - **Optional tags**: tags are hints, not strict schema - summarizer can omit them
 - **Human-readable**: Facilitates debugging and log inspection
-- **Consistent with codebase**: memory is injected via `llm_context` (user prompt), and `system_prompt_extra` documents how to interpret `context.conversation_memory`
+- **Consistent with codebase**: memory is injected as a separate, read-only system message; `system_prompt_extra` may document how to interpret `<read_only_conversation_memory_json>`
 
 ---
 

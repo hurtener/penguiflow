@@ -614,16 +614,33 @@ def _estimate_size(messages: Sequence[Mapping[str, str]]) -> int:
 
 
 async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str, str]]:
+    llm_context = trajectory.llm_context
+    conversation_memory = None
+    if isinstance(llm_context, Mapping) and "conversation_memory" in llm_context:
+        conversation_memory = llm_context.get("conversation_memory")
+        llm_context = {k: v for k, v in llm_context.items() if k != "conversation_memory"}
+
     messages: list[dict[str, str]] = [
         {"role": "system", "content": planner._system_prompt},
+    ]
+    if conversation_memory is not None:
+        messages.append(
+            {
+                "role": "system",
+                "content": prompts.render_read_only_conversation_memory(conversation_memory),
+            }
+        )
+    messages.extend(
+        [
         {
             "role": "user",
             "content": prompts.build_user_prompt(
                 trajectory.query,
-                trajectory.llm_context,
+                llm_context,
             ),
         },
-    ]
+        ]
+    )
 
     history_messages: list[dict[str, str]] = []
     for step in trajectory.steps:

@@ -5,7 +5,7 @@ This example demonstrates the built-in short-term memory integration for `ReactP
 What it shows:
 - Enabling memory via `short_term_memory=ShortTermMemoryConfig(...)`
 - Passing an explicit `MemoryKey` to keep the session isolated
-- How `conversation_memory` is injected into the **user prompt** via `llm_context`
+- How `conversation_memory` is injected as a **read-only system message** (`<read_only_conversation_memory_json>...`)
 - A deterministic scripted LLM client so the example runs without network access
 
 Run it:

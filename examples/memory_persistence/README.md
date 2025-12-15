@@ -12,7 +12,7 @@ uv run python examples/memory_persistence/flow.py
 ```
 
 What to look for:
-- The second planner instance sees the previous turn injected as `context.conversation_memory` because it hydrates from the shared store.
+- The second planner instance sees the previous turn injected as a dedicated read-only memory system message (`<read_only_conversation_memory_json>...`), because it hydrates from the shared store.
 
 Notes:
 - This does not modify PenguiFlow’s core `StateStore` protocol; the memory methods are optional and checked via `hasattr`.

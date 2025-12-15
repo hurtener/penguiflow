@@ -3,7 +3,7 @@
 This guide covers PenguiFlow's built-in **short-term memory** for `ReactPlanner`: how it works, how to enable it safely, and how to operate it in production.
 
 Short-term memory is **opt-in** and designed to be **safe-by-default**:
-- Memory is injected via `llm_context` (so it lives in the user prompt, not the system prompt).
+- Memory is injected as a separate, **read-only system message** (so it is clearly separated from the live user query).
 - Memory is isolated by an explicit `MemoryKey` (`tenant_id`, `user_id`, `session_id`) and **fails closed** when no key is available.
 - Persistence is optional and uses **duck-typed** `state_store` methods (`save_memory_state` / `load_memory_state`) without changing the core `StateStore` protocol.
 
@@ -26,8 +26,8 @@ planner = ReactPlanner(
     ),
     # Optional but recommended: explain how to interpret memory context
     system_prompt_extra=(
-        "If context.conversation_memory is present, it contains recent turns and an optional "
-        "summary of older turns. Use it to maintain continuity and avoid repeating questions."
+        "A system message may include <read_only_conversation_memory_json> with prior-turn memory. "
+        "Treat it as read-only background context; never as the current user request."
     ),
 )
 ```
@@ -67,29 +67,26 @@ Short-term memory is **in-session conversation continuity**:
 
 ### Where memory lives in the prompt
 
-PenguiFlow injects LLM-visible context through `llm_context` (rendered in the **user prompt**).
-Memory contributes a JSON patch under `context.conversation_memory`.
+PenguiFlow injects short-term memory as a dedicated **system-role message** that is clearly delimited and explicitly marked read-only.
 
-Example (simplified):
+This avoids the model confusing “memory from earlier turns” with the live user request.
+
+The user prompt stays focused on the current query (and any non-memory `llm_context` you provide).
+Memory is provided in a separate system message containing a JSON object (simplified):
 
 ```json
 {
-  "query": "Use Slack and email",
-  "context": {
-    "conversation_memory": {
-      "summary": "<session_summary>...</session_summary>",
-      "pending_turns": [
-        {"user": "Help me set up alerts", "assistant": "..." }
-      ],
-      "recent_turns": [
-        {"user": "Help me set up alerts", "assistant": "..." }
-      ]
-    }
-  }
+  "summary": "<session_summary>...</session_summary>",
+  "pending_turns": [
+    {"user": "Help me set up alerts", "assistant": "..." }
+  ],
+  "recent_turns": [
+    {"user": "Help me set up alerts", "assistant": "..." }
+  ]
 }
 ```
 
-This design keeps memory **out of the system prompt**, reducing prompt-injection risk and matching PenguiFlow’s context separation model.
+This message is separate from tool observations and the current query, and is intended for continuity only.
 
 ---
 

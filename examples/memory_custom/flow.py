@@ -63,6 +63,21 @@ class ScriptedLLMClient:
         return json.dumps({"thought": "finish", "next_node": None, "args": {"raw_answer": answer}}), 0.0
 
 
+def _extract_memory_from_messages(messages: list[Mapping[str, str]]) -> dict[str, Any]:
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content") or ""
+        if "<read_only_conversation_memory_json>" not in content:
+            continue
+        if "</read_only_conversation_memory_json>" not in content:
+            continue
+        start = content.index("<read_only_conversation_memory_json>") + len("<read_only_conversation_memory_json>")
+        end = content.index("</read_only_conversation_memory_json>", start)
+        return json.loads(content[start:end])
+    return {}
+
+
 async def run_demo() -> dict[str, Any]:
     memory = WindowShortTermMemory(max_turns=2)
     client = ScriptedLLMClient(["a1", "a2"])
@@ -72,8 +87,7 @@ async def run_demo() -> dict[str, Any]:
     await planner.run("q1", memory_key=key)
     await planner.run("q2", memory_key=key)
 
-    second_user_payload = json.loads(next(msg["content"] for msg in client.calls[1] if msg["role"] == "user"))
-    return {"conversation_memory": second_user_payload.get("context", {}).get("conversation_memory", {})}
+    return {"conversation_memory": _extract_memory_from_messages(client.calls[1])}
 
 
 def main() -> None:

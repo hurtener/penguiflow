@@ -50,6 +50,21 @@ class ScriptedLLMClient:
         return json.dumps({"thought": "finish", "next_node": None, "args": {"raw_answer": answer}}), 0.0
 
 
+def _extract_memory_from_messages(messages: list[Mapping[str, str]]) -> dict[str, Any]:
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content") or ""
+        if "<read_only_conversation_memory_json>" not in content:
+            continue
+        if "</read_only_conversation_memory_json>" not in content:
+            continue
+        start = content.index("<read_only_conversation_memory_json>") + len("<read_only_conversation_memory_json>")
+        end = content.index("</read_only_conversation_memory_json>", start)
+        return json.loads(content[start:end])
+    return {}
+
+
 async def run_demo() -> dict[str, Any]:
     store = DictStateStore()
     key = MemoryKey(tenant_id="demo", user_id="user", session_id="session")
@@ -77,8 +92,7 @@ async def run_demo() -> dict[str, Any]:
     )
     await planner2.run("q2", memory_key=key)
 
-    injected = json.loads(next(msg["content"] for msg in client2.calls[0] if msg["role"] == "user")).get("context", {})
-    return {"conversation_memory": injected.get("conversation_memory", {})}
+    return {"conversation_memory": _extract_memory_from_messages(client2.calls[0])}
 
 
 def main() -> None:

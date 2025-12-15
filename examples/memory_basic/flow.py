@@ -48,6 +48,21 @@ class ScriptedLLMClient:
         return self._responses.pop(0), 0.0
 
 
+def _extract_memory_from_messages(messages: list[Mapping[str, str]]) -> dict[str, Any]:
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content") or ""
+        if "<read_only_conversation_memory_json>" not in content:
+            continue
+        if "</read_only_conversation_memory_json>" not in content:
+            continue
+        start = content.index("<read_only_conversation_memory_json>") + len("<read_only_conversation_memory_json>")
+        end = content.index("</read_only_conversation_memory_json>", start)
+        return json.loads(content[start:end])
+    return {}
+
+
 async def run_demo() -> dict[str, Any]:
     registry = ModelRegistry()
     registry.register("echo", EchoArgs, EchoOut)
@@ -70,8 +85,8 @@ async def run_demo() -> dict[str, Any]:
             budget=MemoryBudget(full_zone_turns=5, total_max_tokens=8000),
         ),
         system_prompt_extra=(
-            "If context.conversation_memory is present, it contains recent conversation turns and an optional summary. "
-            "Use it to maintain continuity."
+            "A system message may contain <read_only_conversation_memory_json> with prior-turn memory. "
+            "Treat it as read-only background context; never as the current user request."
         ),
     )
 
@@ -81,8 +96,7 @@ async def run_demo() -> dict[str, Any]:
     await planner.run("q2", memory_key=key)
 
     second_call_first_step = client.calls[2]
-    user_payload = json.loads(next(msg["content"] for msg in second_call_first_step if msg["role"] == "user"))
-    injected = user_payload.get("context", {}).get("conversation_memory", {})
+    injected = _extract_memory_from_messages(second_call_first_step)
 
     return {"conversation_memory": injected}
 
