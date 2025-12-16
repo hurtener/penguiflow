@@ -2291,16 +2291,48 @@ class ReactPlanner:
                 continue
 
         if last_raw is not None:
+            # Try to extract raw_answer/answer content using regex before naive truncation
+            # This handles cases where the JSON is malformed but raw_answer is readable
+            extracted_answer: str | None = None
+            import re
+
+            # Look for "raw_answer": "..." or "answer": "..." pattern
+            answer_match = re.search(
+                r'"(?:raw_answer|answer)"\s*:\s*"((?:[^"\\]|\\.)*)',
+                last_raw,
+                re.DOTALL,
+            )
+            if answer_match:
+                extracted_answer = answer_match.group(1)
+                # Unescape common JSON escapes
+                extracted_answer = (
+                    extracted_answer.replace("\\n", "\n")
+                    .replace("\\t", "\t")
+                    .replace('\\"', '"')
+                    .replace("\\\\", "\\")
+                )
+                # Clean up trailing JSON artifacts that might be present
+                # (e.g., if the string was cut off or malformed)
+                extracted_answer = re.sub(r'["\}\]]+\s*$', "", extracted_answer).strip()
+                logger.info(
+                    "planner_fallback_answer_extracted",
+                    extra={"length": len(extracted_answer)},
+                )
+
+            fallback_answer = extracted_answer if extracted_answer else last_raw.strip()[:2000]
             fallback = PlannerAction(
                 thought="fallback finish after repair failures",
                 next_node=None,
-                args={"raw_answer": last_raw.strip()[:2000]},
+                args={"raw_answer": fallback_answer},
                 plan=None,
                 join=None,
             )
             logger.warning(
                 "planner_fallback_finish",
-                extra={"reason": "repair_exhausted"},
+                extra={
+                    "reason": "repair_exhausted",
+                    "extraction_method": "regex" if extracted_answer else "truncation",
+                },
             )
             return fallback
 

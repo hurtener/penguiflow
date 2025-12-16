@@ -1,8 +1,8 @@
 # PenguiFlow Templating Quickguide
 
-> **Version**: 2.6 | **Last Updated**: December 2025
+> **Version**: 2.7 | **Last Updated**: December 2025
 >
-> **v2.7 Update**: Planner now returns structured `FinalPayload` with `raw_answer` field. See [Extracting Answers from Payload](#4-extracting-answers-from-payload) for the recommended pattern.
+> **v2.7 Features**: Interactive Playground (`penguiflow dev`), External Tool Integration (ToolNode for MCP/UTCP/HTTP), Short-Term Memory with multi-tenant isolation. Planner now returns structured `FinalPayload` with `raw_answer` field. See [Extracting Answers from Payload](#4-extracting-answers-from-payload) for the recommended pattern.
 
 The PenguiFlow CLI scaffolds production-ready agent projects with best practices baked in. This guide covers every template, flag, and pattern you need to ship agents fast.
 

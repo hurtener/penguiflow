@@ -283,6 +283,8 @@ def _response_format_policy(model_name: str) -> str:
         or "qwen" in lower
         or "deepseek" in lower
         or "cohere" in lower
+        or "nvidia" in lower
+        or "nim/" in lower
     )
 
     openai_like = (

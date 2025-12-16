@@ -3,8 +3,8 @@
 ## Snapshot
 - Built the entire core library in under 20 days; no downstream consumers right now, so risk is mostly examples/back-compat.
 - Baseline: v2.3 ReAct planner is in place on top of the v2.1 distributed/A2A core.
-- **In Progress**: v2.6.5+ ToolNode v2 Phase 4 — CLI Integration (optional).
-- **Just Completed**: ToolNode v2 Phases 1-3 (Foundation, Multi-Protocol + Auth, Documentation).
+- **Current**: v2.7 — Interactive Playground, External Tool Integration (ToolNode), Short-Term Memory.
+- **Just Completed**: ToolNode v2 Phases 1-4 (Foundation, Multi-Protocol + Auth, Documentation, CLI Integration).
 - Completed: v2.6 Streaming support, v2.5 CLI scaffolding, v2.4 API refinement.
 
 ## Completed
@@ -14,8 +14,9 @@
 - v2.4 API Refinement: Context split (llm_context vs tool_context), ToolContext protocol, explicit join.inject mapping, modularized planner, doc/example parity.
 - v2.5 CLI Scaffolding: Full `penguiflow new` command with 9 project templates, enhancement flags (--with-streaming, --with-hitl, --with-a2a, --no-memory), adaptive re-plan, token-aware trajectory compression, parallel fan-out + joins.
 - v2.6 Streaming Support: `JSONLLMClient` protocol with `stream` and `on_stream_chunk` parameters, all templates updated, spec generation for tool documentation, baseline Playground UI for quick verification of spec agents.
+- v2.7 Platform Features: Interactive Playground (`penguiflow dev`), External Tool Integration (ToolNode for MCP/UTCP/HTTP with auth and resilience), Short-Term Memory with multi-tenant isolation and rolling summary strategies.
 
-## v2.6.5+ ToolNode v2 (next target)
+## Future: Extended ToolNode & Distribution
 **Plan:** See `docs/proposals/TOOLNODE_V2_PLAN.md`
 
 **Core Value Proposition:**

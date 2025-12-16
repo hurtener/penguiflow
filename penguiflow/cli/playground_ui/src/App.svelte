@@ -82,6 +82,8 @@
     value: string | number | boolean | null;
   };
 
+  // Prevent answer rendering until the planner gates a specific action sequence.
+  const ANSWER_GATE_SENTINEL = -1;
   let agentMeta = $state({
     name: "loading_agent",
     description: "",
@@ -301,12 +303,10 @@
       isThinking: false,
       answerStreamDone: false,
       revisionStreamActive: false,
-      answerActionSeq: null,
+      answerActionSeq: ANSWER_GATE_SENTINEL,
       ts: Date.now(),
     };
     chatMessages.push(agentMsg);
-    // Reset any prior answer stream gating
-    agentMsg.answerActionSeq = null;
 
     const url = new URL("/chat/stream", window.location.origin);
     url.searchParams.set("query", query);
@@ -366,9 +366,19 @@
         }
 
         if (channel === "answer") {
+          const gate = (msg.answerActionSeq ?? ANSWER_GATE_SENTINEL) as number;
           const seq = (data.action_seq as number | undefined) ?? undefined;
-          const gate = msg.answerActionSeq;
-          if (gate !== null && gate !== undefined && seq !== undefined && seq !== gate) {
+
+          if (gate === ANSWER_GATE_SENTINEL) {
+            if (done) {
+              msg.answerStreamDone = true;
+              msg.isStreaming = false;
+            }
+            msg.isThinking = false;
+            return;
+          }
+
+          if (seq !== undefined && seq !== gate) {
             // Ignore answer text from non-final action sequences
             msg.isThinking = false;
             return;
@@ -403,7 +413,7 @@
         if (eventType === "step_start") {
           // Use action_seq to gate answer streaming to the final finish
           const seq = (data.action_seq as number | undefined) ?? undefined;
-          msg.answerActionSeq = seq ?? null;
+          msg.answerActionSeq = typeof seq === "number" ? seq : ANSWER_GATE_SENTINEL;
         }
 
         // Only add if not already present (prevent duplicates from follow stream)
@@ -443,11 +453,9 @@
         }
         // Only accept the final answer if the action_seq matches the gated answer stream
         const doneActionSeq = (data.answer_action_seq as number | undefined) ?? undefined;
-        if (doneActionSeq === null || doneActionSeq === undefined || msg.answerActionSeq === null) {
-          if (data.answer && typeof data.answer === "string") {
-            msg.text = data.answer;
-          }
-        } else if (msg.answerActionSeq === doneActionSeq) {
+        const gate = (msg.answerActionSeq ?? ANSWER_GATE_SENTINEL) as number;
+        const gateReady = gate !== ANSWER_GATE_SENTINEL;
+        if (gateReady && (doneActionSeq === undefined || doneActionSeq === gate)) {
           if (data.answer && typeof data.answer === "string") {
             msg.text = data.answer;
           }

@@ -45,10 +45,15 @@ It provides:
   configured `StateStore` for debugging.
 * **Built-in CLI** — `penguiflow init` generates VS Code snippets/launch/tasks/settings for planner development (travels with the pip package).
 
-### v2.6 - Streaming Support (current)
+### v2.7 (current)
 
-**Streaming Enhancements:**
-- `JSONLLMClient` protocol now supports `stream` and `on_stream_chunk` parameters
+**New in v2.7:**
+- **Interactive Playground** — browser-based development environment with real-time chat, trajectory visualization, and event inspection (`penguiflow dev`)
+- **External Tool Integration (ToolNode)** — unified MCP/UTCP/HTTP tool connections with auth, retry, and streaming
+- **Short-Term Memory** — per-session conversation continuity with truncation/rolling-summary strategies and multi-tenant isolation
+
+**v2.6 Streaming (included):**
+- `JSONLLMClient` protocol supports `stream` and `on_stream_chunk` parameters
 - All templates updated to support streaming callbacks
 - Improved token-level streaming for real-time responses
 
@@ -79,7 +84,35 @@ uv run penguiflow new my-agent --template parallel --with-streaming  # Parallel 
 uv run penguiflow init             # create .vscode snippets/launch/tasks/settings
 uv run penguiflow init --dry-run   # preview without writing files
 uv run penguiflow init --force     # overwrite existing files
+
+# Launch the interactive playground
+uv run penguiflow dev              # opens browser at http://127.0.0.1:8001
 ```
+
+### Interactive Playground
+
+PenguiFlow includes a **browser-based development environment** for testing and debugging agents in real-time:
+
+```bash
+penguiflow dev --project-root .
+```
+
+The playground automatically discovers your agent (orchestrator class or `build_planner` function) and provides:
+
+* **Real-time chat** with streaming responses and LLM token display
+* **Trajectory visualization** showing step-by-step execution with thoughts, tool calls, arguments, and results
+* **Event inspector** for debugging planner decisions and timing
+* **Context editors** for configuring `llm_context` and `tool_context` at runtime
+* **Spec validation** for YAML agent definitions with inline error reporting
+* **Multi-session support** with isolated state per session
+
+The UI streams events via SSE, displaying:
+- `llm_stream_chunk` — real-time LLM token streaming (thinking, action, answer phases)
+- `step` — step boundaries with node name, latency, and thought summaries
+- `artifact_chunk` — structured artifacts as they're generated
+- `done` — final answer with metadata, pause state, and cost breakdown
+
+See `docs/PLAYGROUND_DEV.md` for backend contracts and customization options.
 
 Built on pure `asyncio` (no threads), PenguiFlow is small, predictable, and repo-agnostic.
 Product repos only define **their models + node functions** — the core stays dependency-light.
@@ -350,6 +383,61 @@ The new `penguiflow.testkit` module keeps unit tests tiny:
 The harness is covered by `tests/test_testkit.py` and demonstrated in
 `examples/testkit_demo/`.
 
+### External Tool Integration (ToolNode)
+
+Connect ReactPlanner to external services via **MCP** (Model Context Protocol), **UTCP**, or **HTTP** with unified authentication and resilience:
+
+```python
+from penguiflow.tools import ToolNode, ExternalToolConfig, TransportType, AuthType
+
+config = ExternalToolConfig(
+    name="github",
+    transport=TransportType.MCP,
+    connection="npx -y @modelcontextprotocol/server-github",
+    auth_type=AuthType.OAUTH2_USER,
+    timeout_s=30,
+    max_concurrency=10,
+)
+
+tool_node = ToolNode(config=config, registry=registry)
+await tool_node.connect()
+
+# Discovered tools are namespaced: github.create_issue, github.search_repos, etc.
+specs = tool_node.get_tool_specs()
+
+# Add external tools to planner catalog alongside local tools
+planner = ReactPlanner(llm="gpt-4o", catalog=specs + local_tools)
+```
+
+**Supported transports:**
+- **MCP** — FastMCP servers (stdio or HTTP)
+- **UTCP** — Universal Tool Calling Protocol endpoints
+- **HTTP** — REST APIs with JSON schema discovery
+
+**Authentication types:**
+- `NONE` — No authentication
+- `API_KEY` — Header injection (configurable header name)
+- `BEARER` — Authorization header with Bearer token
+- `OAUTH2_USER` — User-level OAuth with HITL pause/resume for consent
+
+**Built-in resilience:**
+- Exponential backoff retries with tenacity (configurable min/max)
+- Timeout protection via `asyncio.timeout()`
+- Semaphore-based concurrency limiting (default 10 concurrent calls)
+- Smart retry classification: 429/5xx = retry, 4xx = no retry
+- Event loop awareness for automatic reconnection
+
+**Error hierarchy:**
+- `ToolNodeError` (base) with `is_retryable` classification
+- `ToolAuthError` (401, 403), `ToolServerError` (5xx), `ToolRateLimitError` (429)
+- `ToolClientError` (4xx), `ToolConnectionError`, `ToolTimeoutError`
+
+CLI helpers for testing tool connections:
+```bash
+penguiflow tools list                      # List available presets
+penguiflow tools connect github --discover # Test connection and discover tools
+```
+
 ### React Planner - LLM-Driven Orchestration
 
 Build autonomous agents that select and execute tools dynamically using the ReAct (Reasoning + Acting) pattern:
@@ -494,6 +582,73 @@ planner = ReactPlanner(
     event_callback=track_costs,
 )
 ```
+
+### Short-Term Memory
+
+Enable conversation continuity across turns with opt-in session memory. Memory is isolated per session using composite `MemoryKey` (tenant + user + session):
+
+```python
+from penguiflow.planner import ReactPlanner, ShortTermMemoryConfig, MemoryBudget, MemoryKey
+
+planner = ReactPlanner(
+    llm="gpt-4o",
+    catalog=catalog,
+    short_term_memory=ShortTermMemoryConfig(
+        strategy="rolling_summary",  # or "truncation", "none"
+        budget=MemoryBudget(
+            full_zone_turns=5,        # Recent turns kept in full
+            summary_max_tokens=1000,  # Max summary size
+            total_max_tokens=8000,    # Overall cap
+            overflow_policy="truncate_oldest",  # or "truncate_summary", "error"
+        ),
+    ),
+)
+
+# Session-scoped memory with tenant isolation
+key = MemoryKey(tenant_id="acme", user_id="user123", session_id="sess-abc")
+result = await planner.run("What did we discuss earlier?", memory_key=key)
+```
+
+**Strategies:**
+- **`truncation`** — Keep last N turns only (deterministic, low-latency, cost-effective)
+- **`rolling_summary`** — Compress older turns into summaries via background summarization (maintains long context)
+- **`none`** — Stateless operation (default)
+
+**Safety features:**
+- **Fail-closed isolation** — `require_explicit_key=True` prevents accidental cross-session leakage
+- **Background summarization** — Non-blocking; doesn't delay responses
+- **Graceful degradation** — Summarizer failures fall back to truncation mode
+- **Health states** — `HEALTHY`, `RETRY`, `DEGRADED`, `RECOVERING` for observability
+
+**Memory context injection:**
+```python
+# Memory is injected as a separate system message with safety preamble
+{
+  "conversation_memory": {
+    "recent_turns": [...],      # Full turns in the "full zone"
+    "pending_turns": [...],     # Turns awaiting summarization
+    "summary": "..."            # Compressed history
+  }
+}
+```
+
+**Persistence:**
+```python
+# Persist across process restarts via duck-typed store
+await memory.persist(state_store, key.composite())
+await memory.hydrate(state_store, key.composite())
+```
+
+**Observability callbacks:**
+```python
+ShortTermMemoryConfig(
+    on_turn_added=lambda turn: log(turn),
+    on_summary_updated=lambda summary: log(summary),
+    on_health_changed=lambda old, new: alert(old, new),
+)
+```
+
+See `docs/MEMORY_GUIDE.md` for complete configuration and `examples/memory_basic/` through `examples/memory_custom/` for usage patterns.
 
 ### Streaming Planner Responses
 
@@ -800,7 +955,8 @@ playbook latency. Copy them into product repos to watch for regressions over tim
 
 ## 🔮 Roadmap
 
-* **v2.6 (current)**: Streaming support with `stream` and `on_stream_chunk` parameters in `JSONLLMClient` protocol.
+* **v2.7 (current)**: Interactive Playground, External Tool Integration (ToolNode), Short-Term Memory with multi-tenant isolation.
+* **v2.6**: Streaming support with `stream` and `on_stream_chunk` parameters in `JSONLLMClient` protocol.
 * **v2.5**: CLI scaffolding system with 9 templates and enhancement flags, extended ReactPlanner with ToolContext protocol and explicit context splits.
 * **v2.x**: per-trace cancellation, deadlines/budgets, metadata propagation, observability hooks, visualizer, routing policies, traceable errors, and FlowTestKit.
 * **Future**: optional distributed runners, richer third-party observability adapters, and extended template library.
@@ -848,6 +1004,12 @@ pytest -q
 * `examples/react_minimal/`: JSON-only ReactPlanner loop with a stubbed LLM.
 * `examples/react_pause_resume/`: Phase B planner features with pause/resume and developer hints.
 * `examples/policy_filtering/`: tenant-aware planner with runtime `ToolPolicy` filtering.
+* `examples/memory_basic/`: short-term memory with rolling summary strategy.
+* `examples/memory_truncation/`: truncation strategy for cost-effective memory.
+* `examples/memory_persistence/`: cross-process memory continuity via state store.
+* `examples/memory_redis/`: production-ready Redis-based memory persistence.
+* `examples/memory_callbacks/`: observability hooks for memory events.
+* `examples/memory_custom/`: custom `ShortTermMemory` implementation.
 
 
 ---
