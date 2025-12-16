@@ -1669,6 +1669,7 @@ cli = [
     { name = "uvicorn" },
 ]
 dev = [
+    { name = "aiohttp" },
     { name = "coverage", extra = ["toml"] },
     { name = "fastapi" },
     { name = "httpx" },
@@ -1680,6 +1681,7 @@ dev = [
     { name = "pytest-cov" },
     { name = "pyyaml" },
     { name = "ruff" },
+    { name = "tenacity" },
     { name = "uvicorn" },
 ]
 planner = [
@@ -1700,6 +1702,7 @@ tools-websocket = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "aiohttp" },
     { name = "coverage", extra = ["toml"] },
     { name = "fastapi" },
     { name = "httpx" },
@@ -1711,10 +1714,12 @@ dev = [
     { name = "pytest-cov" },
     { name = "pyyaml" },
     { name = "ruff" },
+    { name = "tenacity" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", marker = "extra == 'dev'", specifier = ">=3.9.0" },
     { name = "aiohttp", marker = "extra == 'planner'", specifier = ">=3.9.0" },
     { name = "click", specifier = ">=8.1" },
     { name = "coverage", extras = ["toml"], marker = "extra == 'dev'", specifier = ">=7.0" },
@@ -1737,6 +1742,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.2" },
+    { name = "tenacity", marker = "extra == 'dev'", specifier = ">=9.0.0" },
     { name = "tenacity", marker = "extra == 'planner'", specifier = ">=9.0.0" },
     { name = "utcp", marker = "extra == 'planner'", specifier = ">=1.1.0" },
     { name = "utcp-cli", marker = "extra == 'tools-cli'", specifier = ">=1.0.0" },
@@ -1750,6 +1756,7 @@ provides-extras = ["dev", "cli", "a2a-server", "planner", "tools-cli", "tools-we
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "aiohttp", specifier = ">=3.9.0" },
     { name = "coverage", extras = ["toml"], specifier = ">=7.0" },
     { name = "fastapi", specifier = ">=0.118" },
     { name = "httpx", specifier = ">=0.27" },
@@ -1761,6 +1768,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=4.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", specifier = ">=0.2" },
+    { name = "tenacity", specifier = ">=9.0.0" },
 ]
 
 [[package]]
