@@ -1,10 +1,8 @@
 """Tests for penguiflow/planner/reflection_prompts.py."""
 
-import pytest
 from pydantic import BaseModel
 
 from penguiflow.planner.reflection_prompts import _format_answer
-
 
 # ─── _format_answer tests ────────────────────────────────────────────────────
 

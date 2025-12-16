@@ -1,11 +1,9 @@
 """Miscellaneous tests for additional coverage."""
 
 import pytest
-from pydantic import BaseModel
 
 from penguiflow import Node, NodePolicy, create
 from penguiflow.viz import _display_label, _escape_label, _unique_id, flow_to_mermaid
-
 
 # ─── viz edge cases ──────────────────────────────────────────────────────────
 
@@ -79,7 +77,7 @@ async def test_visualizer_duplicate_node_names():
 
 def test_testkit_register_trace_empty_id():
     """_register_trace_history should ignore empty trace_id."""
-    from penguiflow.testkit import _register_trace_history, _TRACE_HISTORY
+    from penguiflow.testkit import _TRACE_HISTORY, _register_trace_history
 
     initial_size = len(_TRACE_HISTORY)
     _register_trace_history("", [])
@@ -88,7 +86,7 @@ def test_testkit_register_trace_empty_id():
 
 def test_testkit_register_trace_moves_to_end():
     """_register_trace_history should move existing trace to end."""
-    from penguiflow.testkit import _register_trace_history, _TRACE_HISTORY
+    from penguiflow.testkit import _TRACE_HISTORY, _register_trace_history
 
     # Register first trace
     _register_trace_history("trace_a", [])

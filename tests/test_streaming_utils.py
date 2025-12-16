@@ -12,7 +12,6 @@ from penguiflow.streaming import (
 )
 from penguiflow.types import StreamChunk
 
-
 # ─── format_sse_event tests ──────────────────────────────────────────────────
 
 

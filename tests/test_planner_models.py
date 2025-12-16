@@ -1,9 +1,7 @@
 """Tests for penguiflow/planner/models.py edge cases."""
 
-import pytest
 
 from penguiflow.planner.models import JoinInjection, PlannerEvent
-
 
 # ─── PlannerEvent tests ──────────────────────────────────────────────────────
 

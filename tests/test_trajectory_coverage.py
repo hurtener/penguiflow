@@ -1,11 +1,9 @@
 """Tests for penguiflow/planner/trajectory.py edge cases."""
 
-import pytest
 from pydantic import BaseModel
 
 from penguiflow.planner.models import PlannerAction
 from penguiflow.planner.trajectory import Trajectory, TrajectoryStep, TrajectorySummary
-
 
 # ─── TrajectorySummary tests ─────────────────────────────────────────────────
 

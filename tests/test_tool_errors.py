@@ -1,6 +1,5 @@
 """Tests for penguiflow/tools/errors.py."""
 
-import pytest
 
 from penguiflow.tools.errors import (
     ErrorCategory,
@@ -12,7 +11,6 @@ from penguiflow.tools.errors import (
     ToolServerError,
     ToolTimeoutError,
 )
-
 
 # ─── ErrorCategory tests ─────────────────────────────────────────────────────
 

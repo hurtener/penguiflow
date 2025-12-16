@@ -1,13 +1,13 @@
 """Tests for ToolNode connect methods and MCP/UTCP integration."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from penguiflow.registry import ModelRegistry
-from penguiflow.tools.config import AuthType, ExternalToolConfig, TransportType, UtcpMode
-from penguiflow.tools.errors import ToolConnectionError
+from penguiflow.tools.config import ExternalToolConfig, TransportType
+from penguiflow.tools.errors import ToolConnectionError, ToolNodeError
 from penguiflow.tools.node import ToolNode
 
 pytest.importorskip("tenacity")
@@ -113,7 +113,7 @@ def test_convert_utcp_tools_rejects_duplicates():
     tool = FakeUtcpTool(name="dup", description="")
     node._convert_utcp_tools([tool])
 
-    with pytest.raises(Exception):  # ToolNodeError
+    with pytest.raises(ToolNodeError):
         node._convert_utcp_tools([tool])
 
 
@@ -172,7 +172,7 @@ async def test_call_triggers_reconnect_on_new_loop():
         async def pause(self, reason, payload=None):
             pass
 
-    result = await node.call("test.ping", {}, DummyCtx())
+    await node.call("test.ping", {}, DummyCtx())
     assert reconnect_called
 
 

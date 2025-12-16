@@ -1,14 +1,12 @@
 """Extended tests for penguiflow/tools/node.py - coverage expansion."""
 
-import asyncio
-import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from penguiflow.registry import ModelRegistry
-from penguiflow.tools.config import AuthType, ExternalToolConfig, RetryPolicy, TransportType, UtcpMode
-from penguiflow.tools.errors import ToolAuthError, ToolConnectionError, ToolNodeError
+from penguiflow.tools.config import AuthType, ExternalToolConfig, TransportType, UtcpMode
+from penguiflow.tools.errors import ToolAuthError, ToolNodeError
 from penguiflow.tools.node import ToolNode
 
 pytest.importorskip("tenacity")

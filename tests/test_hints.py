@@ -1,6 +1,5 @@
 """Tests for penguiflow/planner/hints.py."""
 
-import pytest
 
 from penguiflow.planner.hints import _PlanningHints
 

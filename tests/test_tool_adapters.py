@@ -20,7 +20,6 @@ from penguiflow.tools.errors import (
     ToolTimeoutError,
 )
 
-
 # ─── adapt_mcp_error tests ───────────────────────────────────────────────────
 
 
@@ -192,7 +191,7 @@ def test_adapt_exception_cancelled_error():
 
 def test_adapt_exception_timeout_error():
     """TimeoutError should return ToolTimeoutError."""
-    exc = asyncio.TimeoutError()
+    exc = TimeoutError()
     result = adapt_exception(exc, "utcp")
     assert isinstance(result, ToolTimeoutError)
     assert "timed out" in str(result)

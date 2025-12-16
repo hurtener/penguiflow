@@ -1,8 +1,7 @@
 """Tests for helper functions in penguiflow/planner/react.py."""
 
-import json
-from typing import Literal, Sequence
-from unittest.mock import MagicMock
+from collections.abc import Sequence
+from typing import Literal
 
 import pytest
 from pydantic import BaseModel, Field
@@ -23,7 +22,6 @@ from penguiflow.planner.react import (
     _StreamingThoughtExtractor,
     _validate_llm_context,
 )
-
 
 # ─── _validate_llm_context tests ─────────────────────────────────────────────
 
@@ -222,9 +220,7 @@ def test_default_for_annotation_basemodel():
 
 def test_default_for_annotation_optional():
     """_default_for_annotation should handle Optional (Union with None)."""
-    from typing import Optional
-
-    result = _default_for_annotation(Optional[str])
+    result = _default_for_annotation(str | None)
     # Should return "unknown" for the str part
     assert result == "unknown"
 
@@ -296,8 +292,8 @@ def test_streaming_thought_extractor_basic():
 def test_streaming_thought_extractor_with_escapes():
     """_StreamingThoughtExtractor should handle escapes."""
     extractor = _StreamingThoughtExtractor()
-    chunks = extractor.feed('{"thought": "Step 1:\\nStep 2"')
-    # Should handle \n escape
+    extractor.feed('{"thought": "Step 1:\\nStep 2"')
+    # Should handle \n escape without error
 
 
 # ─── _ArtifactCollector tests ────────────────────────────────────────────────

@@ -1,6 +1,5 @@
 """Tests for penguiflow/planner/prompts.py edge cases."""
 
-import pytest
 
 from penguiflow.planner import prompts
 
