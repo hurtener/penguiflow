@@ -160,6 +160,7 @@ LLM_MODEL=bedrock/anthropic.claude-3-sonnet-20240229-v1:0
 | `MEMORY_ENABLED` | Enable memory service integration | `{{ memory_enabled }}` |
 | `SUMMARIZER_ENABLED` | Enable trajectory summarization | `{{ summarizer_enabled }}` |
 | `REFLECTION_ENABLED` | Enable reflection loop | `{{ reflection_enabled }}` |
+| `SHORT_TERM_MEMORY_ENABLED` | Enable built-in short-term memory | `{{ short_term_memory_enabled }}` |
 | `MEMORY_BASE_URL` | Memory service endpoint | `http://localhost:8000` |
 | `LIGHTHOUSE_BASE_URL` | Lighthouse service endpoint | `http://localhost:8081` |
 | `WAYFINDER_BASE_URL` | Wayfinder service endpoint | `http://localhost:8082` |
@@ -167,6 +168,8 @@ LLM_MODEL=bedrock/anthropic.claude-3-sonnet-20240229-v1:0
 | `PLANNER_HOP_BUDGET` | Maximum tool hops per run | `{{ planner_hop_budget }}` |
 | `PLANNER_ABSOLUTE_MAX_PARALLEL` | Maximum parallel tool calls | `{{ planner_absolute_max_parallel }}` |
 | `PLANNER_STREAM_FINAL_RESPONSE` | Stream final LLM answer tokens (true/false) | `{{ planner_stream_final_response }}` |
+
+Tuning options for built-in short-term memory are available as `SHORT_TERM_MEMORY_*` variables in `.env.example`.
 
 ## Security Notes
 

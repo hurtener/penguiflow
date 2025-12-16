@@ -27,6 +27,7 @@ class ChatResult:
     trace_id: str
     session_id: str
     metadata: dict[str, Any] | None = None
+    pause: dict[str, Any] | None = None
 
 
 class AgentWrapper(Protocol):
@@ -37,7 +38,8 @@ class AgentWrapper(Protocol):
         query: str,
         *,
         session_id: str,
-        context: Mapping[str, Any] | None = None,
+        llm_context: Mapping[str, Any] | None = None,
+        tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
     ) -> ChatResult: ...
@@ -153,6 +155,7 @@ def _build_trajectory(
     trace_id: str,
     metadata: Mapping[str, Any] | None,
     llm_context: Mapping[str, Any] | None,
+    tool_context: Mapping[str, Any] | None = None,
 ) -> Trajectory | None:
     if metadata is None:
         return None
@@ -162,7 +165,11 @@ def _build_trajectory(
     payload: dict[str, Any] = {
         "query": query,
         "llm_context": dict(llm_context or {}),
-        "tool_context": {"session_id": session_id, "trace_id": trace_id},
+        "tool_context": {
+            **(dict(tool_context or {})),
+            "session_id": session_id,
+            "trace_id": trace_id,
+        },
         "steps": steps,
         "hint_state": {},
     }
@@ -195,11 +202,12 @@ class PlannerAgentWrapper:
         query: str,
         *,
         session_id: str,
-        context: Mapping[str, Any] | None = None,
+        llm_context: Mapping[str, Any] | None = None,
+        tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
     ) -> ChatResult:
-        llm_context = dict(context or {})
+        llm_context = dict(llm_context or {})
         trace_id = trace_id_hint or secrets.token_hex(8)
 
         def _trace_id_supplier() -> str:
@@ -214,15 +222,16 @@ class PlannerAgentWrapper:
             self._planner._event_callback = _combine_callbacks(original_callback, callback)
 
         try:
-            tool_context = {
+            merged_tool_context = {
                 **self._tool_context_defaults,
+                **dict(tool_context or {}),
                 "session_id": session_id,
                 "trace_id": trace_id,
             }
             result = await self._planner.run(
                 query=query,
                 llm_context=llm_context,
-                tool_context=tool_context,
+                tool_context=merged_tool_context,
             )
         finally:
             if callback is not None:
@@ -231,12 +240,23 @@ class PlannerAgentWrapper:
         await self._event_recorder.persist(trace_id)
 
         if isinstance(result, PlannerPause):
-            raise RuntimeError("Planner paused; HITL flow is not supported in playground backend")
+            pause_payload = {
+                "reason": result.reason,
+                "payload": result.payload,
+                "resume_token": result.resume_token,
+            }
+            return ChatResult(
+                answer=None,
+                trace_id=trace_id,
+                session_id=session_id,
+                metadata={"pause": pause_payload},
+                pause=pause_payload,
+            )
         if not isinstance(result, PlannerFinish):
             raise RuntimeError("Planner did not finish execution")
 
         metadata = _normalise_metadata(getattr(result, "metadata", None))
-        trajectory = _build_trajectory(query, session_id, trace_id, metadata, llm_context)
+        trajectory = _build_trajectory(query, session_id, trace_id, metadata, llm_context, merged_tool_context)
         if trajectory is not None and self._state_store is not None:
             await self._state_store.save_trajectory(trace_id, session_id, trajectory)
 
@@ -278,11 +298,13 @@ class OrchestratorAgentWrapper:
         query: str,
         *,
         session_id: str,
-        context: Mapping[str, Any] | None = None,
+        llm_context: Mapping[str, Any] | None = None,
+        tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
     ) -> ChatResult:
-        ctx = dict(context or {})
+        ctx = dict(llm_context or {})
+        tool_ctx = dict(tool_context or {})
         planner = getattr(self._orchestrator, "_planner", None)
         trace_holder: dict[str, str | None] = {"id": trace_id_hint}
 
@@ -303,8 +325,8 @@ class OrchestratorAgentWrapper:
         try:
             response = await self._orchestrator.execute(
                 query=query,
-                tenant_id=ctx.get("tenant_id", self._tenant_id),
-                user_id=ctx.get("user_id", self._user_id),
+                tenant_id=tool_ctx.get("tenant_id", self._tenant_id),
+                user_id=tool_ctx.get("user_id", self._user_id),
                 session_id=session_id,
             )
         finally:
@@ -316,7 +338,7 @@ class OrchestratorAgentWrapper:
         await self._event_recorder.persist(trace_id)
 
         metadata = _normalise_metadata(_get_attr(response, "metadata"))
-        trajectory = _build_trajectory(query, session_id, trace_id, metadata, ctx)
+        trajectory = _build_trajectory(query, session_id, trace_id, metadata, ctx, tool_ctx)
         if trajectory is not None and self._state_store is not None:
             await self._state_store.save_trajectory(trace_id, session_id, trajectory)
 

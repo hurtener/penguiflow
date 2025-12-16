@@ -38,6 +38,9 @@ class PlannerEvent:
     error: str | None = None
     extra: Mapping[str, Any] = field(default_factory=dict)
 
+    # Keys reserved by Python's logging.LogRecord that must not appear in extra
+    _RESERVED_LOG_KEYS = frozenset({"args", "msg", "levelname", "levelno", "exc_info", "message", "name"})
+
     def to_payload(self) -> dict[str, Any]:
         """Render a dictionary payload suitable for structured logging."""
         payload: dict[str, Any] = {
@@ -56,7 +59,10 @@ class PlannerEvent:
         if self.error is not None:
             payload["error"] = self.error
         if self.extra:
-            payload.update(self.extra)
+            # Filter out reserved logging keys to prevent LogRecord conflicts
+            for key, value in self.extra.items():
+                if key not in self._RESERVED_LOG_KEYS:
+                    payload[key] = value
         return payload
 
 

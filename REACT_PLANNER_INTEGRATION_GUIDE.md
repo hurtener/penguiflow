@@ -11,6 +11,7 @@ This guide is the **source of truth** for wiring `ReactPlanner` into a productio
 1. [Overview](#1-overview)
 2. [Quick Start](#2-quick-start)
 3. [Understanding Context Types](#3-understanding-context-types)
+   - [Short-Term Memory (Optional)](#short-term-memory-optional)
 4. [Building an Orchestrator](#4-building-an-orchestrator)
 5. [Designing Tools with ToolContext](#5-designing-tools-with-toolcontext)
 6. [Pause/Resume Patterns](#6-pauseresume-patterns)
@@ -200,6 +201,65 @@ result = await planner.run(
     query="...",
     llm_context={"callback": lambda x: x},  # TypeError: not JSON-serializable
 )
+```
+
+### Short-Term Memory (Optional)
+
+PenguiFlow supports **opt-in short-term memory** for `ReactPlanner` to maintain conversation continuity across multiple `run()` calls within a single session.
+
+Key properties:
+- Memory is injected via `llm_context` (user prompt), not the system prompt.
+- Memory is isolated by `MemoryKey(tenant_id, user_id, session_id)` and fails closed by default when no key is available.
+- Persistence is optional via duck-typed `state_store.save_memory_state` / `state_store.load_memory_state`.
+
+For a full deep dive (strategies, budgets, persistence, troubleshooting), see `docs/MEMORY_GUIDE.md`.
+
+#### Enable memory
+
+```python
+from penguiflow.planner import ReactPlanner
+from penguiflow.planner.memory import MemoryBudget, ShortTermMemoryConfig
+
+planner = ReactPlanner(
+    llm="gpt-4o-mini",
+    catalog=catalog,
+    short_term_memory=ShortTermMemoryConfig(
+        strategy="rolling_summary",
+        budget=MemoryBudget(full_zone_turns=5, total_max_tokens=8000),
+    ),
+    system_prompt_extra=(
+        "If context.conversation_memory is present, it contains conversation history (recent turns and an optional "
+        "summary). Use it to maintain continuity and avoid repeating questions."
+    ),
+)
+```
+
+#### Provide a memory key (recommended)
+
+```python
+from penguiflow.planner.memory import MemoryKey
+
+key = MemoryKey(tenant_id="acme", user_id="u123", session_id="chat_001")
+result = await planner.run("First turn", memory_key=key)
+result = await planner.run("Second turn", memory_key=key)
+```
+
+#### Derive the key from tool_context (optional)
+
+`tool_context` is tools-only (not shown to the LLM), so it is the preferred place for internal routing metadata:
+
+```python
+tool_context = {"tenant_id": "acme", "user_id": "u123", "session_id": "chat_001"}
+result = await planner.run("Continue", tool_context=tool_context)
+```
+
+#### Pause/resume + memory
+
+If you rely on pause/resume, pass the same key on resume:
+
+```python
+pause = await planner.run("Do something sensitive", memory_key=key)
+final = await planner.resume(pause.resume_token, user_input="approved", memory_key=key)
 ```
 
 ---

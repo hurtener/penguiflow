@@ -104,6 +104,21 @@ planner = ReactPlanner(
 uv run pytest
 ```
 
+## External Tools (MCP/UTCP)
+
+Use ToolNode presets and discovery from the CLI:
+
+```bash
+# List built-in MCP presets (GitHub, Slack, etc.)
+penguiflow tools list
+
+# Preview a preset config (no network calls)
+penguiflow tools connect github
+
+# Discover tool names from a preset (requires penguiflow[planner] + network)
+penguiflow tools connect github --discover --show-tools
+```
+
 ## Learn More
 
 - [PenguiFlow Documentation](https://github.com/yourorg/penguiflow)

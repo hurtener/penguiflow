@@ -59,6 +59,76 @@ def test_parse_spec_success(tmp_path: Path) -> None:
     assert spec.planner.system_prompt_extra.startswith("You are helpful.")
 
 
+def test_parse_spec_supports_short_term_memory(tmp_path: Path) -> None:
+    content = dedent(
+        """\
+        agent:
+          name: memory-agent
+          description: Demo agent
+          template: react
+          flags:
+            memory: false
+        tools:
+          - name: search
+            description: Search the web
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: |
+            You are helpful.
+          short_term_memory:
+            enabled: true
+            strategy: rolling_summary
+            budget:
+              full_zone_turns: 3
+              summary_max_tokens: 200
+              total_max_tokens: 800
+              overflow_policy: truncate_oldest
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    spec = load_spec(path)
+    assert spec.planner.short_term_memory is not None
+    assert spec.planner.short_term_memory.strategy == "rolling_summary"
+    assert spec.planner.short_term_memory.budget.total_max_tokens == 800
+
+
+def test_short_term_memory_enabled_requires_strategy(tmp_path: Path) -> None:
+    content = dedent(
+        """\
+        agent:
+          name: bad-stm
+          description: Demo agent
+          template: react
+          flags:
+            memory: false
+        tools:
+          - name: search
+            description: Search the web
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: "Hello"
+          short_term_memory:
+            enabled: true
+            strategy: none
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    with pytest.raises(SpecValidationError) as excinfo:
+        load_spec(path)
+
+    assert "short_term_memory" in str(excinfo.value)
+    assert "enabled=true is not compatible" in str(excinfo.value)
+
 def test_invalid_tool_name_reports_line(tmp_path: Path) -> None:
     content = dedent(
         """\
@@ -388,6 +458,133 @@ def test_flow_validation_matrix(tmp_path: Path) -> None:
     assert "Flow node names must be snake_case" in message
     assert "Flow step names must be snake_case" in message
     assert "Flow step 'ghost' is not defined" in message
+
+
+def test_external_tool_preset_parses(tmp_path: Path) -> None:
+    content = dedent(
+        """\
+        agent:
+          name: ext-agent
+          description: Demo agent
+          template: react
+        tools:
+          - name: search
+            description: Search the web
+        external_tools:
+          presets:
+            - preset: github
+              auth_override: bearer
+              env:
+                token: "${GITHUB_TOKEN}"
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: "Hello"
+          memory_prompt: "Memory"
+        """
+    )
+    path = tmp_path / "ext.yaml"
+    path.write_text(content)
+    spec = load_spec(path)
+    assert spec.external_tools.presets[0].preset == "github"
+    assert spec.external_tools.presets[0].env["token"] == "${GITHUB_TOKEN}"
+
+
+def test_external_invalid_preset_name(tmp_path: Path) -> None:
+    content = dedent(
+        """\
+        agent:
+          name: bad-ext
+          description: Demo agent
+          template: react
+        tools:
+          - name: search
+            description: Search
+        external_tools:
+          presets:
+            - preset: unknown
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: "Hello"
+          memory_prompt: "Memory"
+        """
+    )
+    path = tmp_path / "ext-bad.yaml"
+    path.write_text(content)
+    with pytest.raises(SpecValidationError) as excinfo:
+        load_spec(path)
+    assert "Unknown preset" in str(excinfo.value)
+
+
+def test_external_custom_with_fields(tmp_path: Path) -> None:
+    content = dedent(
+        """\
+        agent:
+          name: ext-custom
+          description: Demo agent
+          template: react
+        tools:
+          - name: search
+            description: Search
+        external_tools:
+          custom:
+            - name: my_api
+              transport: utcp
+              connection: "https://api.example.com/.well-known/utcp"
+              auth_type: bearer
+              auth_config:
+                token: "${API_TOKEN}"
+              env:
+                region: "us-east-1"
+              description: "Custom API"
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: "Hello"
+          memory_prompt: "Memory"
+        """
+    )
+    path = tmp_path / "ext-custom.yaml"
+    path.write_text(content)
+    spec = load_spec(path)
+    assert spec.external_tools.custom[0].name == "my_api"
+    assert spec.external_tools.custom[0].transport == "utcp"
+    assert spec.external_tools.custom[0].auth_config["token"] == "${API_TOKEN}"
+
+
+def test_external_duplicate_custom_names_rejected(tmp_path: Path) -> None:
+    content = dedent(
+        """\
+        agent:
+          name: dup-ext
+          description: Demo agent
+          template: react
+        tools:
+          - name: search
+            description: Search
+        external_tools:
+          custom:
+            - name: data_api
+              connection: "npx -y server-a"
+            - name: data_api
+              connection: "npx -y server-b"
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: "Hello"
+          memory_prompt: "Memory"
+        """
+    )
+    path = tmp_path / "ext-dup.yaml"
+    path.write_text(content)
+    with pytest.raises(SpecValidationError) as excinfo:
+        load_spec(path)
+    assert "Duplicate external tool name" in str(excinfo.value)
 
 
 def test_service_requires_base_url_when_enabled(tmp_path: Path) -> None:

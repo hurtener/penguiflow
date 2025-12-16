@@ -1,5 +1,7 @@
 # PenguiFlow Playground (dev & release)
 
+For backend endpoints, SSE event shapes, and wrapper integration requirements, see `docs/PLAYGROUND_BACKEND_CONTRACTS.md`.
+
 ## Local development
 
 - Build the precompiled UI assets:

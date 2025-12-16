@@ -1378,6 +1378,28 @@ if isinstance(result, PlannerPause):
     # result = await planner.resume(result.resume_token, tool_context={...})
 ```
 
+### FastAPI callback example for OAuth completion
+
+```python
+from fastapi import FastAPI, Request, HTTPException
+from penguiflow.tools import OAuthManager
+
+app = FastAPI()
+oauth_manager = OAuthManager(...)
+
+@app.post("/oauth/callback")
+async def oauth_callback(request: Request):
+    body = await request.json()
+    code = body.get("code")
+    state = body.get("state")
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Missing code/state")
+
+    user_id, trace_id = await oauth_manager.handle_callback(code, state)
+    # Save trace_id to resume planner later
+    return {"ok": True, "user_id": user_id, "trace_id": trace_id}
+```
+
 ### UTCP with Manual URL (Recommended for HTTP APIs)
 
 ```python
@@ -1483,32 +1505,33 @@ penguiflow/
 ## Implementation Roadmap
 
 ### Phase 1: Foundation (Week 1)
-- [ ] Add planner-group deps: `fastmcp`, `utcp`, `utcp-http`, `tenacity`, `aiohttp`
-- [ ] Create `penguiflow/tools/` package
-- [ ] Implement `ExternalToolConfig` with `UtcpMode`
-- [ ] Implement `ToolNode` with MCP support (FastMCP)
-- [ ] Implement error classification + adapters + retry wiring for MCP
-- [ ] Basic tests with mock MCP server
+- [x] Add planner-group deps: `fastmcp`, `utcp`, `utcp-http`, `tenacity`, `aiohttp`
+- [x] Create `penguiflow/tools/` package
+- [x] Implement `ExternalToolConfig` with `UtcpMode`
+- [x] Implement `ToolNode` with MCP support (FastMCP)
+- [x] Implement error classification + adapters + retry wiring for MCP
+- [x] Basic tests with mock MCP server
 
 ### Phase 2: Multi-Protocol + Auth (Week 2)
-- [ ] Add UTCP support (manual_url and base_url modes)
-- [ ] Implement `OAuthManager` and `TokenStore`
-- [ ] Wire OAuth to HITL pause/resume
-- [ ] Add FastAPI callback handler example
-- [ ] Tests for OAuth flow and retry/cancellation
+- [x] Add UTCP support (manual_url and base_url modes)
+- [x] Implement `OAuthManager` and `TokenStore`
+- [x] Wire OAuth to HITL pause/resume
+- [x] Add FastAPI callback handler example
+- [x] Tests for OAuth flow and retry/cancellation
 
 ### Phase 3: Documentation + Polish (Week 3)
-- [ ] Add `presets.py` with popular MCP servers
-- [ ] Document StateStore implementation for production
-- [ ] Document concurrency configuration
-- [ ] Document env-var fail-fast behavior and namespacing/collision guarantees
-- [ ] Example: React frontend with OAuth
-- [ ] Example: Multi-tool agent
+- [x] Add `presets.py` with popular MCP servers
+- [x] Document StateStore implementation for production (`docs/tools/statestore-guide.md`)
+- [x] Document concurrency configuration (`docs/tools/concurrency-guide.md`)
+- [x] Document env-var fail-fast behavior and namespacing/collision guarantees (`docs/tools/configuration-guide.md`)
+- [x] Example: React frontend with OAuth
+- [x] Example: Multi-tool agent
 
-### Phase 4: CLI Integration (Optional, Week 4)
-- [ ] Add `penguiflow tools list` command
-- [ ] Add `penguiflow tools connect <preset>` command
-- [ ] Integration with `penguiflow new` templates
+### Phase 4: CLI Integration (Week 4)
+- [x] Add `penguiflow tools list` command
+- [x] Add `penguiflow tools connect <preset>` command
+- [x] Integration with `penguiflow new` templates
+- [x] Integration HITL approvals/auths (personal) with Playground UI (UI should catch and render those messages appropiatelly)
 
 ---
 

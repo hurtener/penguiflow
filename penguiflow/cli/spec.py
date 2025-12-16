@@ -23,6 +23,7 @@ from .spec_errors import (
 _TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 _RESERVED_TOOL_NAMES = set(keyword.kwlist) | {"__init__", "__call__"}
 _PASCAL_CASE_PATTERN = re.compile(r"^[A-Z][a-zA-Z0-9]*$")
+_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 
 def _suggest_snake_case(name: str) -> str | None:
@@ -272,6 +273,49 @@ class ToolSpec(BaseModel):
         return parsed
 
 
+class ExternalToolPresetSpec(BaseModel):
+    """Reference to a preset MCP server."""
+
+    preset: str
+    auth_override: Literal["bearer", "oauth", "none"] | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("preset")
+    @classmethod
+    def _validate_preset(cls, value: str) -> str:
+        from penguiflow.tools.presets import POPULAR_MCP_SERVERS
+
+        valid_presets = set(POPULAR_MCP_SERVERS.keys())
+        if value not in valid_presets:
+            raise ValueError(f"Unknown preset '{value}'. Valid: {valid_presets}")
+        return value
+
+
+class ExternalToolCustomSpec(BaseModel):
+    """Custom MCP/UTCP server connection."""
+
+    name: str
+    transport: Literal["mcp", "utcp"] = "mcp"
+    connection: str
+    auth_type: Literal["bearer", "oauth", "none"] = "none"
+    auth_config: dict[str, str] = Field(default_factory=dict)
+    env: dict[str, str] = Field(default_factory=dict)
+    description: str = ""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ExternalToolsSpec(BaseModel):
+    """External tools configuration (MCP servers, UTCP APIs)."""
+
+    presets: list[ExternalToolPresetSpec] = Field(default_factory=list)
+    custom: list[ExternalToolCustomSpec] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class FlowDependencySpec(BaseModel):
     """Flow-level dependency definition (e.g., parser, retriever)."""
 
@@ -450,12 +494,119 @@ class PlannerHintsSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PlannerShortTermMemoryBudgetSpec(BaseModel):
+    """Budget configuration for built-in short-term memory."""
+
+    full_zone_turns: int = 5
+    summary_max_tokens: int = 1000
+    total_max_tokens: int = 10000
+    overflow_policy: Literal["truncate_summary", "truncate_oldest", "error"] = "truncate_oldest"
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("full_zone_turns", "summary_max_tokens", "total_max_tokens")
+    @classmethod
+    def _non_negative_int(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("must be >= 0.")
+        return value
+
+    @field_validator("overflow_policy")
+    @classmethod
+    def _validate_overflow_policy(cls, value: str) -> str:
+        if value not in {"truncate_summary", "truncate_oldest", "error"}:
+            raise ValueError("must be one of: truncate_summary, truncate_oldest, error.")
+        return value
+
+    @field_validator("total_max_tokens")
+    @classmethod
+    def _summary_within_total(cls, value: int, info) -> int:
+        summary = getattr(info.data, "get", lambda *_: None)("summary_max_tokens")
+        if isinstance(summary, int) and value and summary > value:
+            raise ValueError("summary_max_tokens must be <= total_max_tokens.")
+        return value
+
+
+class PlannerShortTermMemoryIsolationSpec(BaseModel):
+    """Isolation configuration for built-in short-term memory."""
+
+    tenant_key: str = "tenant_id"
+    user_key: str = "user_id"
+    session_key: str = "session_id"
+    require_explicit_key: bool = True
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("tenant_key", "user_key", "session_key")
+    @classmethod
+    def _non_empty_key(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("must be a non-empty string.")
+        return value.strip()
+
+
+class PlannerShortTermMemorySpec(BaseModel):
+    """Built-in short-term memory configuration for ReactPlanner."""
+
+    enabled: bool = True
+    strategy: Literal["truncation", "rolling_summary", "none"] = "rolling_summary"
+
+    budget: PlannerShortTermMemoryBudgetSpec = Field(default_factory=PlannerShortTermMemoryBudgetSpec)
+    isolation: PlannerShortTermMemoryIsolationSpec = Field(default_factory=PlannerShortTermMemoryIsolationSpec)
+
+    include_trajectory_digest: bool = True
+    summarizer_model: str | None = None
+
+    recovery_backlog_limit: int = 20
+    retry_attempts: int = 3
+    retry_backoff_base_s: float = 2.0
+    degraded_retry_interval_s: float = 30.0
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("summarizer_model")
+    @classmethod
+    def _non_empty_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("cannot be empty when provided.")
+        return value.strip()
+
+    @field_validator("recovery_backlog_limit", "retry_attempts")
+    @classmethod
+    def _non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("must be >= 0.")
+        return value
+
+    @field_validator("retry_backoff_base_s", "degraded_retry_interval_s")
+    @classmethod
+    def _non_negative_float(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("must be >= 0.")
+        return value
+
+    @field_validator("strategy")
+    @classmethod
+    def _validate_strategy(cls, value: str, info) -> str:
+        if value not in {"truncation", "rolling_summary", "none"}:
+            raise ValueError("must be one of: truncation, rolling_summary, none.")
+        enabled = getattr(info.data, "get", lambda *_: True)("enabled")
+        if enabled and value == "none":
+            raise ValueError("enabled=true is not compatible with strategy=none.")
+        if enabled is False and value in {"truncation", "rolling_summary"}:
+            raise ValueError("enabled=false requires strategy=none.")
+        return value
+
+
 class PlannerSpec(BaseModel):
     max_iters: int = 12
     hop_budget: int = 8
     absolute_max_parallel: int = 5
     system_prompt_extra: str
     memory_prompt: str | None = None
+    short_term_memory: PlannerShortTermMemorySpec | None = None
     hints: PlannerHintsSpec | None = None
     stream_final_response: bool = False
 
@@ -481,6 +632,7 @@ class PlannerSpec(BaseModel):
 class Spec(BaseModel):
     agent: AgentSpec
     tools: list[ToolSpec]
+    external_tools: ExternalToolsSpec = Field(default_factory=ExternalToolsSpec)
     flows: list[FlowSpec] = Field(default_factory=list)
     services: ServiceSpec = Field(default_factory=ServiceSpec)
     llm: LLMSpec
@@ -638,6 +790,84 @@ def _validate_services(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail]:
     return errors
 
 
+def _validate_external_tools(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail]:
+    errors: list[SpecErrorDetail] = []
+    native_names = {tool.name for tool in spec.tools}
+
+    oauth_presets = {"github", "slack", "google-drive"}
+    seen_presets: set[str] = set()
+    for idx, preset in enumerate(spec.external_tools.presets):
+        preset_path = ("external_tools", "presets", idx, "preset")
+        if preset.preset in seen_presets:
+            errors.append(
+                SpecErrorDetail(
+                    message=f"Duplicate external preset '{preset.preset}'.",
+                    path=preset_path,
+                    line=lines.line_for(preset_path),
+                )
+            )
+        seen_presets.add(preset.preset)
+
+        uses_oauth = (preset.auth_override == "oauth") or (
+            preset.auth_override is None and preset.preset in oauth_presets
+        )
+        if uses_oauth and not spec.agent.flags.hitl:
+            auth_path = ("external_tools", "presets", idx, "auth_override")
+            errors.append(
+                SpecErrorDetail(
+                    message=f"Preset '{preset.preset}' uses OAuth; enable agent.flags.hitl for HITL flows.",
+                    path=auth_path,
+                    line=lines.line_for(auth_path) or lines.line_for(preset_path),
+                    suggestion="Set agent.flags.hitl: true or switch auth_override to bearer/none",
+                )
+            )
+
+    seen_custom: set[str] = set()
+    for idx, custom in enumerate(spec.external_tools.custom):
+        name_path = ("external_tools", "custom", idx, "name")
+        line = lines.line_for(name_path)
+        if not _TOOL_NAME_PATTERN.match(custom.name):
+            suggested = _suggest_snake_case(custom.name)
+            errors.append(
+                SpecErrorDetail(
+                    message="External tool names must be snake_case (lowercase, digits, underscores).",
+                    path=name_path,
+                    line=line,
+                    suggestion=f"Use '{suggested}' instead" if suggested else None,
+                )
+            )
+        if custom.name in _RESERVED_TOOL_NAMES:
+            errors.append(
+                SpecErrorDetail(
+                    message=f"External tool name '{custom.name}' is reserved; choose a different identifier.",
+                    path=name_path,
+                    line=line,
+                )
+            )
+        if custom.name in seen_custom or custom.name in native_names:
+            errors.append(
+                SpecErrorDetail(
+                    message=f"Duplicate external tool name '{custom.name}'.",
+                    path=name_path,
+                    line=line,
+                )
+            )
+        seen_custom.add(custom.name)
+
+        if custom.auth_type == "oauth" and not spec.agent.flags.hitl:
+            auth_path = ("external_tools", "custom", idx, "auth_type")
+            errors.append(
+                SpecErrorDetail(
+                    message=f"External tool '{custom.name}' uses OAuth; enable agent.flags.hitl for HITL flows.",
+                    path=auth_path,
+                    line=lines.line_for(auth_path),
+                    suggestion="Set agent.flags.hitl: true or switch auth_type to bearer/none",
+                )
+            )
+
+    return errors
+
+
 def _validate_cross_fields(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail]:
     errors: list[SpecErrorDetail] = []
     if spec.agent.flags.memory and not spec.planner.memory_prompt:
@@ -658,6 +888,7 @@ def _semantic_validations(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail]
     errors.extend(_validate_tool_names(spec, lines))
     errors.extend(_validate_flows(spec, lines))
     errors.extend(_validate_services(spec, lines))
+    errors.extend(_validate_external_tools(spec, lines))
     errors.extend(_validate_cross_fields(spec, lines))
     return errors
 
@@ -701,7 +932,13 @@ __all__ = [
     "LLMSpec",
     "LLMSummarizerSpec",
     "LineIndex",
+    "ExternalToolPresetSpec",
+    "ExternalToolCustomSpec",
+    "ExternalToolsSpec",
     "PlannerHintsSpec",
+    "PlannerShortTermMemoryBudgetSpec",
+    "PlannerShortTermMemoryIsolationSpec",
+    "PlannerShortTermMemorySpec",
     "PlannerSpec",
     "ServiceConfigSpec",
     "ServiceSpec",

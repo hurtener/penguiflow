@@ -283,6 +283,8 @@ def _response_format_policy(model_name: str) -> str:
         or "qwen" in lower
         or "deepseek" in lower
         or "cohere" in lower
+        or "nvidia" in lower
+        or "nim/" in lower
     )
 
     openai_like = (
@@ -614,16 +616,33 @@ def _estimate_size(messages: Sequence[Mapping[str, str]]) -> int:
 
 
 async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str, str]]:
+    llm_context = trajectory.llm_context
+    conversation_memory = None
+    if isinstance(llm_context, Mapping) and "conversation_memory" in llm_context:
+        conversation_memory = llm_context.get("conversation_memory")
+        llm_context = {k: v for k, v in llm_context.items() if k != "conversation_memory"}
+
     messages: list[dict[str, str]] = [
         {"role": "system", "content": planner._system_prompt},
+    ]
+    if conversation_memory is not None:
+        messages.append(
+            {
+                "role": "system",
+                "content": prompts.render_read_only_conversation_memory(conversation_memory),
+            }
+        )
+    messages.extend(
+        [
         {
             "role": "user",
             "content": prompts.build_user_prompt(
                 trajectory.query,
-                trajectory.llm_context,
+                llm_context,
             ),
         },
-    ]
+        ]
+    )
 
     history_messages: list[dict[str, str]] = []
     for step in trajectory.steps:
@@ -811,6 +830,8 @@ async def request_revision(
     planner: Any,
     trajectory: Trajectory,
     critique: ReflectionCritique,
+    *,
+    on_stream_chunk: Callable[[str, bool], None] | None = None,
 ) -> PlannerAction:
     from . import reflection_prompts
 
@@ -823,9 +844,18 @@ async def request_revision(
     messages = list(base_messages)
     messages.append({"role": "user", "content": revision_prompt})
 
+    # Enable streaming for revision if callback provided and client supports it
+    stream_allowed = (
+        on_stream_chunk is not None
+        and planner._stream_final_response
+        and isinstance(planner._client, _LiteLLMJSONClient)
+    )
+
     llm_result = await planner._client.complete(
         messages=messages,
         response_format=planner._response_format,
+        stream=stream_allowed,
+        on_stream_chunk=on_stream_chunk if stream_allowed else None,
     )
     raw, cost = _coerce_llm_response(llm_result)
     planner._cost_tracker.record_main_call(cost)

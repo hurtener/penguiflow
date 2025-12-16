@@ -62,7 +62,14 @@ class ChatRequest(BaseModel):
         default=None,
         description="Session identifier; generated automatically if omitted.",
     )
-    context: dict[str, Any] = Field(default_factory=dict, description="Optional LLM context.")
+    llm_context: dict[str, Any] = Field(default_factory=dict, description="Optional LLM-visible context.")
+    tool_context: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional runtime context (not LLM-visible).",
+    )
+
+    # Backward-compatible alias for older UI clients.
+    context: dict[str, Any] | None = Field(default=None, description="Deprecated alias for llm_context.")
 
 
 class ChatResponse(BaseModel):
@@ -72,6 +79,7 @@ class ChatResponse(BaseModel):
     session_id: str
     answer: str | None = None
     metadata: dict[str, Any] | None = None
+    pause: dict[str, Any] | None = None
 
 
 class SpecPayload(BaseModel):
@@ -96,6 +104,14 @@ def _parse_context_arg(raw: str | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _merge_contexts(primary: dict[str, Any], secondary: dict[str, Any] | None) -> dict[str, Any]:
+    if not secondary:
+        return primary
+    merged = dict(primary)
+    merged.update(secondary)
+    return merged
 
 
 def _discover_spec_path(project_root: Path) -> Path | None:
@@ -207,6 +223,20 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
     }
     extra = dict(event.extra or {})
     if event.event_type == "stream_chunk":
+        phase = "observation"
+        meta = extra.get("meta")
+        if isinstance(meta, Mapping):
+            meta_phase = meta.get("phase")
+            if isinstance(meta_phase, str) and meta_phase.strip():
+                phase = meta_phase.strip()
+        channel_raw: str | None = None
+        channel_val_chunk = extra.get("channel")
+        if isinstance(channel_val_chunk, str):
+            channel_raw = channel_val_chunk
+        elif isinstance(meta, Mapping):
+            meta_channel = meta.get("channel")
+            channel_raw = meta_channel if isinstance(meta_channel, str) else None
+        channel: str = channel_raw or "thinking"
         payload.update(
             {
                 "stream_id": extra.get("stream_id"),
@@ -214,6 +244,8 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
                 "text": extra.get("text"),
                 "done": extra.get("done", False),
                 "meta": extra.get("meta", {}),
+                "phase": phase,
+                "channel": channel,
             }
         )
         return format_sse("chunk", payload)
@@ -233,11 +265,23 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
         return format_sse("artifact_chunk", payload)
 
     if event.event_type == "llm_stream_chunk":
+        phase_val_llm = extra.get("phase")
+        phase_llm: str | None = phase_val_llm if isinstance(phase_val_llm, str) else None
+        channel_llm_val = extra.get("channel")
+        if isinstance(channel_llm_val, str):
+            channel_llm: str = channel_llm_val
+        elif phase_llm == "answer":
+            channel_llm = "answer"
+        elif phase_llm == "revision":
+            channel_llm = "revision"
+        else:
+            channel_llm = "thinking"
         payload.update(
             {
                 "text": extra.get("text", ""),
                 "done": extra.get("done", False),
-                "phase": extra.get("phase"),
+                "phase": phase_llm,
+                "channel": channel_llm,
             }
         )
         return format_sse("llm_stream_chunk", payload)
@@ -269,6 +313,10 @@ def _done_frame(result: ChatResult, session_id: str) -> bytes:
             "session_id": session_id,
             "answer": result.answer,
             "metadata": result.metadata,
+            "pause": result.pause,
+            "answer_action_seq": (
+                result.metadata.get("answer_action_seq") if isinstance(result.metadata, Mapping) else None
+            ),
         },
     )
 
@@ -608,10 +656,12 @@ def create_playground_app(
                 broker.publish(tid, frame)
 
         try:
+            llm_context = _merge_contexts(dict(request.llm_context or {}), request.context)
             result: ChatResult = await agent_wrapper.chat(
                 query=request.query,
                 session_id=session_id,
-                context=request.context,
+                llm_context=llm_context,
+                tool_context=dict(request.tool_context or {}),
                 event_consumer=_event_consumer,
                 trace_id_hint=trace_holder["id"],
             )
@@ -627,16 +677,20 @@ def create_playground_app(
             session_id=result.session_id,
             answer=result.answer,
             metadata=result.metadata,
+            pause=result.pause,
         )
 
     @app.get("/chat/stream")
     async def chat_stream(
         query: str,
         session_id: str | None = None,
+        llm_context: str | None = None,
+        tool_context: str | None = None,
         context: str | None = None,
     ) -> StreamingResponse:
         session_value = session_id or secrets.token_hex(8)
-        context_payload = _parse_context_arg(context)
+        llm_payload = _merge_contexts(_parse_context_arg(llm_context), _parse_context_arg(context) or None)
+        tool_payload = _parse_context_arg(tool_context)
         queue: asyncio.Queue[bytes | object] = asyncio.Queue()
         trace_holder: dict[str, str | None] = {"id": secrets.token_hex(8)}
 
@@ -658,7 +712,8 @@ def create_playground_app(
                 result: ChatResult = await agent_wrapper.chat(
                     query=query,
                     session_id=session_value,
-                    context=context_payload,
+                    llm_context=llm_payload,
+                    tool_context=tool_payload,
                     event_consumer=_event_consumer,
                     trace_id_hint=trace_holder["id"],
                 )

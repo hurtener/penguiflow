@@ -8653,6 +8653,43 @@ class PlannerPause(BaseModel):
     resume_token: str                           # Token for resuming
 ```
 
+#### Short-Term Memory (Optional)
+
+ReactPlanner can maintain **short-term memory** across multiple `run()` calls within a single session.
+
+Key properties:
+- **Opt-in**: memory is disabled by default.
+- **Safe-by-default isolation**: memory is scoped by `MemoryKey(tenant_id, user_id, session_id)` and fails closed when no key is available.
+- **Prompt placement**: memory is injected via `llm_context` (user prompt), not the system prompt.
+- **Optional persistence**: when `state_store` implements `save_memory_state` / `load_memory_state`, memory can survive across planner instances.
+
+Minimal example:
+
+```python
+from penguiflow.planner import ReactPlanner
+from penguiflow.planner.memory import MemoryBudget, MemoryKey, ShortTermMemoryConfig
+
+planner = ReactPlanner(
+    llm="gpt-4o-mini",
+    catalog=catalog,
+    short_term_memory=ShortTermMemoryConfig(
+        strategy="rolling_summary",
+        budget=MemoryBudget(full_zone_turns=5, total_max_tokens=8000),
+    ),
+    system_prompt_extra=(
+        "If context.conversation_memory is present, it contains recent conversation turns and an optional summary. "
+        "Use it to maintain continuity and avoid repeating questions."
+    ),
+)
+
+key = MemoryKey(tenant_id="acme", user_id="u123", session_id="chat_001")
+
+turn1 = await planner.run("Help me set up alerts", memory_key=key)
+turn2 = await planner.run("Use Slack and email", memory_key=key)
+```
+
+For a complete guide (strategies, budgets, persistence, troubleshooting), see `docs/MEMORY_GUIDE.md`.
+
 ---
 
 ### 19.3 Basic Usage
