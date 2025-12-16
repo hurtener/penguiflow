@@ -223,6 +223,20 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
     }
     extra = dict(event.extra or {})
     if event.event_type == "stream_chunk":
+        phase = "observation"
+        meta = extra.get("meta")
+        if isinstance(meta, Mapping):
+            meta_phase = meta.get("phase")
+            if isinstance(meta_phase, str) and meta_phase.strip():
+                phase = meta_phase.strip()
+        channel_raw: str | None = None
+        channel_val_chunk = extra.get("channel")
+        if isinstance(channel_val_chunk, str):
+            channel_raw = channel_val_chunk
+        elif isinstance(meta, Mapping):
+            meta_channel = meta.get("channel")
+            channel_raw = meta_channel if isinstance(meta_channel, str) else None
+        channel: str = channel_raw or "thinking"
         payload.update(
             {
                 "stream_id": extra.get("stream_id"),
@@ -230,6 +244,8 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
                 "text": extra.get("text"),
                 "done": extra.get("done", False),
                 "meta": extra.get("meta", {}),
+                "phase": phase,
+                "channel": channel,
             }
         )
         return format_sse("chunk", payload)
@@ -249,11 +265,23 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
         return format_sse("artifact_chunk", payload)
 
     if event.event_type == "llm_stream_chunk":
+        phase_val_llm = extra.get("phase")
+        phase_llm: str | None = phase_val_llm if isinstance(phase_val_llm, str) else None
+        channel_llm_val = extra.get("channel")
+        if isinstance(channel_llm_val, str):
+            channel_llm: str = channel_llm_val
+        elif phase_llm == "answer":
+            channel_llm = "answer"
+        elif phase_llm == "revision":
+            channel_llm = "revision"
+        else:
+            channel_llm = "thinking"
         payload.update(
             {
                 "text": extra.get("text", ""),
                 "done": extra.get("done", False),
-                "phase": extra.get("phase"),
+                "phase": phase_llm,
+                "channel": channel_llm,
             }
         )
         return format_sse("llm_stream_chunk", payload)
@@ -286,6 +314,9 @@ def _done_frame(result: ChatResult, session_id: str) -> bytes:
             "answer": result.answer,
             "metadata": result.metadata,
             "pause": result.pause,
+            "answer_action_seq": (
+                result.metadata.get("answer_action_seq") if isinstance(result.metadata, Mapping) else None
+            ),
         },
     )
 

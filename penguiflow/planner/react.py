@@ -383,6 +383,97 @@ class _StreamingArgsExtractor:
         return result
 
 
+class _StreamingThoughtExtractor:
+    """Extracts the 'thought' field content from streaming JSON chunks.
+
+    The thought field is intended to be short, factual execution status. The Playground
+    UI renders it in a collapsible "Thinking…" panel (not as a user-facing answer).
+    """
+
+    __slots__ = ("_buffer", "_in_thought_string", "_escape_next", "_emitted_count", "_started")
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._in_thought_string = False
+        self._escape_next = False
+        self._emitted_count = 0
+        self._started = False
+
+    @property
+    def emitted_count(self) -> int:
+        return self._emitted_count
+
+    def feed(self, chunk: str) -> list[str]:
+        self._buffer += chunk
+        emits: list[str] = []
+
+        if not self._started and not self._in_thought_string:
+            import re
+
+            match = re.search(r'"thought"\s*:\s*"', self._buffer)
+            if match:
+                self._started = True
+                self._in_thought_string = True
+                self._buffer = self._buffer[match.end() :]
+
+        if self._in_thought_string:
+            extracted = self._extract_string_content()
+            if extracted:
+                emits.extend(extracted)
+                self._emitted_count += len(extracted)
+
+        return emits
+
+    def _extract_string_content(self) -> list[str]:
+        result: list[str] = []
+        i = 0
+
+        while i < len(self._buffer):
+            char = self._buffer[i]
+
+            if self._escape_next:
+                self._escape_next = False
+                if char == "n":
+                    result.append("\n")
+                elif char == "t":
+                    result.append("\t")
+                elif char == "r":
+                    result.append("\r")
+                elif char == '"':
+                    result.append('"')
+                elif char == "\\":
+                    result.append("\\")
+                elif char == "u" and i + 4 < len(self._buffer):
+                    try:
+                        hex_val = self._buffer[i + 1 : i + 5]
+                        result.append(chr(int(hex_val, 16)))
+                        i += 4
+                    except (ValueError, IndexError):
+                        result.append(char)
+                else:
+                    result.append(char)
+                i += 1
+                continue
+
+            if char == "\\":
+                self._escape_next = True
+                i += 1
+                continue
+
+            if char == '"':
+                self._in_thought_string = False
+                self._buffer = self._buffer[i + 1 :]
+                break
+
+            result.append(char)
+            i += 1
+
+        if self._in_thought_string:
+            self._buffer = self._buffer[i:]
+
+        return result
+
+
 class _ArtifactCollector:
     """Collect artifact-marked fields during planner execution."""
 
@@ -686,12 +777,15 @@ class _PlannerContext(ToolContext):
     ) -> None:
         """Emit streaming chunk during tool execution."""
 
+        combined_meta = {"channel": "thinking"}
+        combined_meta.update(meta or {})
+
         chunk = _StreamChunk(
             stream_id=stream_id,
             seq=seq,
             text=text,
             done=done,
-            meta=dict(meta or {}),
+            meta=dict(combined_meta),
             ts=self._planner._time_source(),
         )
         self._chunks.append(chunk)
@@ -706,7 +800,7 @@ class _PlannerContext(ToolContext):
                     "seq": seq,
                     "text": text,
                     "done": done,
-                    "meta": dict(meta or {}),
+                    "meta": dict(combined_meta),
                 },
             )
         )
@@ -1009,6 +1103,8 @@ class ReactPlanner:
         self._reflection_client: JSONLLMClient | None = None
         self._clarification_client: JSONLLMClient | None = None
         self._reflection_config = reflection_config
+        self._action_seq = 0
+        self._ready_answer_seq: int | None = None
 
         self._memory_config = ShortTermMemoryConfig()
         self._memory_singleton: ShortTermMemory | None = None
@@ -1563,13 +1659,16 @@ class ReactPlanner:
                         constraints=tracker,
                     )
 
-                # Emit step start event
+                # Emit step start event and bump action sequence
                 step_start_ts = self._time_source()
+                self._action_seq += 1
+                current_action_seq = self._action_seq
                 self._emit_event(
                     PlannerEvent(
                         event_type="step_start",
                         ts=step_start_ts,
                         trajectory_step=len(trajectory.steps),
+                        extra={"action_seq": current_action_seq},
                     )
                 )
 
@@ -2055,12 +2154,17 @@ class ReactPlanner:
 
             # Create extractor to detect finish actions and stream args content
             args_extractor = _StreamingArgsExtractor()
+            thought_extractor = _StreamingThoughtExtractor()
+
+            current_action_seq = self._action_seq
 
             def _emit_llm_chunk(
                 text: str,
                 done: bool,
                 *,
                 _extractor: _StreamingArgsExtractor = args_extractor,
+                _thought_extractor: _StreamingThoughtExtractor = thought_extractor,
+                _action_seq: int = current_action_seq,
             ) -> None:
                 if self._event_callback is None:
                     return
@@ -2070,6 +2174,23 @@ class ReactPlanner:
                     "llm_chunk_received",
                     extra={"text": text[:100] if text else "", "done": done, "buffer_len": len(_extractor._buffer)},
                 )
+
+                thought_chars = _thought_extractor.feed(text)
+                if thought_chars:
+                    thought_text = "".join(thought_chars)
+                    self._emit_event(
+                        PlannerEvent(
+                            event_type="llm_stream_chunk",
+                            ts=self._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={
+                                "text": thought_text,
+                                "done": False,
+                                "phase": "observation",
+                                "channel": "thinking",
+                            },
+                        )
+                    )
 
                 # Feed chunk to extractor to detect args content
                 args_chars = _extractor.feed(text)
@@ -2093,7 +2214,13 @@ class ReactPlanner:
                             event_type="llm_stream_chunk",
                             ts=self._time_source(),
                             trajectory_step=len(trajectory.steps),
-                            extra={"text": args_text, "done": False, "phase": "answer"},
+                            extra={
+                                "text": args_text,
+                                "done": False,
+                                "phase": "answer",
+                                "channel": "answer",
+                                "action_seq": _action_seq,
+                            },
                         )
                     )
 
@@ -2104,16 +2231,48 @@ class ReactPlanner:
                             event_type="llm_stream_chunk",
                             ts=self._time_source(),
                             trajectory_step=len(trajectory.steps),
-                            extra={"text": "", "done": True, "phase": "answer"},
+                            extra={
+                                "text": "",
+                                "done": True,
+                                "phase": "answer",
+                                "channel": "answer",
+                                "action_seq": _action_seq,
+                            },
                         )
                     )
 
-            llm_result = await self._client.complete(
-                messages=messages,
-                response_format=response_format,
-                stream=stream_allowed,
-                on_stream_chunk=_emit_llm_chunk if stream_allowed else None,
-            )
+            if self._event_callback is not None:
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="llm_stream_chunk",
+                        ts=self._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        extra={
+                            "text": "",
+                            "done": False,
+                            "phase": "action",
+                            "channel": "thinking",
+                            "action_seq": current_action_seq,
+                        },
+                    )
+                )
+            try:
+                llm_result = await self._client.complete(
+                    messages=messages,
+                    response_format=response_format,
+                    stream=stream_allowed,
+                    on_stream_chunk=_emit_llm_chunk if stream_allowed else None,
+                )
+            finally:
+                if self._event_callback is not None:
+                    self._emit_event(
+                        PlannerEvent(
+                            event_type="llm_stream_chunk",
+                            ts=self._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={"text": "", "done": True, "phase": "action", "channel": "thinking"},
+                        )
+                    )
             raw, cost = _coerce_llm_response(llm_result)
             last_raw = raw
             self._cost_tracker.record_main_call(cost)
@@ -2524,6 +2683,7 @@ class ReactPlanner:
                         "step": event.trajectory_step,
                     },
                 )
+        self._last_event = event
 
     def _finish(
         self,
@@ -2553,7 +2713,11 @@ class ReactPlanner:
             metadata.update(metadata_extra)
 
         # Emit finish event
-        extra_data: dict[str, Any] = {"reason": reason, "cost": metadata["cost"]}
+        extra_data: dict[str, Any] = {
+            "reason": reason,
+            "cost": metadata["cost"],
+            "answer_action_seq": self._action_seq,
+        }
         if error:
             extra_data["error"] = error
         self._emit_event(

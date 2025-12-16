@@ -243,12 +243,20 @@ Common fields (most events):
 ### `event: chunk`
 
 Used for planner-level stream chunks:
-- `stream_id`, `seq`, `text`, `done`, `meta`
+- `stream_id`, `seq`, `text`, `done`, `meta`, `phase`
+
+Notes:
+- `phase` defaults to `"observation"` in the playground, so tool/progress streaming does not concatenate into the final answer bubble.
 
 ### `event: llm_stream_chunk`
 
 Used for LLM streaming:
 - `text`, `done`, `phase`
+
+Known phases:
+- `action`: LLM is selecting the next tool/action (UI renders typing dots).
+- `answer`: streaming final answer text (UI renders in the main bubble).
+- `revision`: streaming revised answer text (UI replaces the current answer).
 
 ### `event: artifact_chunk`
 
@@ -285,4 +293,3 @@ When adding backend fields:
 - Add them to the relevant response models in `penguiflow/cli/playground.py`
 - Update the UI parser in `penguiflow/cli/playground_ui/src/App.svelte`
 - Rebuild UI assets (`npm run build` in `penguiflow/cli/playground_ui/`) before packaging.
-

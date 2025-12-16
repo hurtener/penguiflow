@@ -12,8 +12,13 @@
     id: string;
     role: "user" | "agent";
     text: string;
+    observations?: string;
+    showObservations?: boolean;
     isStreaming?: boolean;
     isThinking?: boolean;
+    answerStreamDone?: boolean;
+    revisionStreamActive?: boolean;
+    answerActionSeq?: number | null;
     ts: number;
     traceId?: string;
     latencyMs?: number;
@@ -153,7 +158,8 @@
     // Track chatMessages length to trigger on new messages
     const _msgCount = chatMessages.length;
     // Also track if any message is streaming (text updates)
-    const _streamingText = chatMessages.find((m) => m.isStreaming)?.text;
+    const streamingMsg = chatMessages.find((m) => m.isStreaming);
+    const _streamingText = streamingMsg ? `${streamingMsg.text}${streamingMsg.observations ?? ""}` : "";
 
     if (chatBodyEl) {
       // Use requestAnimationFrame to ensure DOM has updated
@@ -289,10 +295,18 @@
       id: agentMsgId,
       role: "agent",
       text: "",
+      observations: "",
+      showObservations: false,
       isStreaming: true,
+      isThinking: false,
+      answerStreamDone: false,
+      revisionStreamActive: false,
+      answerActionSeq: null,
       ts: Date.now(),
     };
     chatMessages.push(agentMsg);
+    // Reset any prior answer stream gating
+    agentMsg.answerActionSeq = null;
 
     const url = new URL("/chat/stream", window.location.origin);
     url.searchParams.set("query", query);
@@ -317,22 +331,81 @@
       if (!msg) return;
 
       if (eventName === "chunk" || eventName === "llm_stream_chunk") {
-        const phase = data.phase as string | undefined;
-        if (phase === "action") {
-          msg.isThinking = !data.done;
-        } else {
-          msg.text = `${msg.text}${(data.text as string) ?? ""}`;
-          if (data.done) {
-            msg.isStreaming = false;
+        const channel = (data.channel as string | undefined) ?? "thinking";
+        const phase = (data.phase as string | undefined) ?? (eventName === "chunk" ? "observation" : undefined);
+        const text = (data.text as string) ?? "";
+        const done = Boolean(data.done);
+
+        if (channel === "thinking" && phase === "action") {
+          msg.isThinking = !done;
+          return;
+        }
+
+        if (channel === "thinking") {
+          if (text) {
+            msg.observations = `${msg.observations ?? ""}${text}`;
+            if (!msg.showObservations) {
+              msg.showObservations = true;
+            }
+          }
+          msg.isThinking = false;
+          return;
+        }
+
+        if (channel === "revision") {
+          if (!msg.revisionStreamActive) {
+            msg.revisionStreamActive = true;
+            msg.text = "";
+          }
+          if (text) {
+            msg.text = `${msg.text}${text}`;
+          }
+          msg.isThinking = false;
+          msg.isStreaming = true;
+          return;
+        }
+
+        if (channel === "answer") {
+          const seq = (data.action_seq as number | undefined) ?? undefined;
+          const gate = msg.answerActionSeq;
+          if (gate !== null && gate !== undefined && seq !== undefined && seq !== gate) {
+            // Ignore answer text from non-final action sequences
+            msg.isThinking = false;
+            return;
+          }
+          if (text) {
+            msg.text = `${msg.text}${text}`;
+          }
+          if (done) {
+            msg.answerStreamDone = true;
+          }
+          msg.isThinking = false;
+          msg.isStreaming = !done;
+          return;
+        }
+
+        if (text) {
+          msg.observations = `${msg.observations ?? ""}${text}`;
+          if (!msg.showObservations) {
+            msg.showObservations = true;
           }
         }
-      } else if (eventName === "artifact_chunk") {
+        msg.isThinking = false;
+    } else if (eventName === "artifact_chunk") {
         const streamId = (data.stream_id as string) ?? "artifact";
         const existing = artifactStreams[streamId] ?? [];
         artifactStreams[streamId] = [...existing, data.chunk];
         plannerEvents.unshift({ id: randomId(), ...data, event: "artifact_chunk" });
         if (plannerEvents.length > 120) plannerEvents.length = 120;
       } else if (eventName === "step" || eventName === "event") {
+        const eventType = data.event as string;
+
+        if (eventType === "step_start") {
+          // Use action_seq to gate answer streaming to the final finish
+          const seq = (data.action_seq as number | undefined) ?? undefined;
+          msg.answerActionSeq = seq ?? null;
+        }
+
         // Only add if not already present (prevent duplicates from follow stream)
         const isDuplicate = plannerEvents.some(
           (e) => e.node === data.node && e.thought === data.thought && e.latency_ms === data.latency_ms
@@ -368,10 +441,19 @@
           resetChatStream();
           return;
         }
-        if (!msg.text || msg.text.trim() === "") {
-          msg.text = (data.answer as string) ?? msg.text;
+        // Only accept the final answer if the action_seq matches the gated answer stream
+        const doneActionSeq = (data.answer_action_seq as number | undefined) ?? undefined;
+        if (doneActionSeq === null || doneActionSeq === undefined || msg.answerActionSeq === null) {
+          if (data.answer && typeof data.answer === "string") {
+            msg.text = data.answer;
+          }
+        } else if (msg.answerActionSeq === doneActionSeq) {
+          if (data.answer && typeof data.answer === "string") {
+            msg.text = data.answer;
+          }
         }
         msg.isStreaming = false;
+        msg.isThinking = false;
         activeTraceId = (data.trace_id as string) ?? activeTraceId;
         fetchTrajectory(data.trace_id as string, sessionId);
         startEventFollow();
@@ -380,6 +462,7 @@
       } else if (eventName === "error") {
         msg.text = (data.error as string) ?? "Unexpected error";
         msg.isStreaming = false;
+        msg.isThinking = false;
         isSending = false;
         resetChatStream();
       }
@@ -556,6 +639,7 @@
       return text;
     }
   };
+
 </script>
 
 <div class="page">
@@ -717,6 +801,21 @@
 	            {#each chatMessages as msg (msg.id)}
 	              <div class={`message-row ${msg.role === "agent" ? "agent" : "user"}`}>
 	                <div class={`bubble ${msg.role}`}>
+	                  {#if msg.role === "agent" && msg.observations && msg.observations.trim() !== ""}
+	                    <details
+	                      class="thinking-panel"
+	                      open={msg.showObservations}
+	                      ontoggle={(e) => {
+	                        const el = e.currentTarget as HTMLDetailsElement;
+	                        msg.showObservations = el.open;
+	                      }}
+	                    >
+	                      <summary class="thinking-summary">{msg.isStreaming ? "Thinking…" : "Thought"}</summary>
+	                      <div class="thinking-body">
+	                        <div class="markdown-content">{@html renderMarkdown(msg.observations)}</div>
+	                      </div>
+	                    </details>
+	                  {/if}
 	                  <div class="markdown-content">{@html renderMarkdown(msg.text)}</div>
 	                  {#if msg.pause}
 	                    <div class="pause-card">

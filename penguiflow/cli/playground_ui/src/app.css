@@ -531,6 +531,48 @@ html, body {
   border-bottom-left-radius: 4px;
 }
 
+.thinking-panel {
+  margin-bottom: 8px;
+  border-radius: 12px;
+  border: 1px solid #efe9e0;
+  background: #fbf9f6;
+  overflow: hidden;
+}
+
+.thinking-summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 8px 10px;
+  font-weight: 600;
+  font-size: 12px;
+  color: #5a534a;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.thinking-summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking-summary::before {
+  content: "▸";
+  font-size: 11px;
+  color: #8b857c;
+  transform: translateY(-1px);
+}
+
+.thinking-panel[open] .thinking-summary::before {
+  content: "▾";
+}
+
+.thinking-body {
+  padding: 10px;
+  border-top: 1px solid #efe9e0;
+  color: #6f6961;
+  font-size: 12px;
+}
+
 .typing {
   display: flex;
   gap: 3px;

@@ -315,6 +315,9 @@ Think briefly in plain text, then respond with a single JSON object that matches
 
 Write your JSON inside one markdown code block (```json ... ```).
 Do not emit multiple JSON objects or extra commentary after the code block.
+
+Important:
+- Emit keys in this order for stability: thought, next_node, args, plan, join.
 </output_format>""")
 
     # ─────────────────────────────────────────────────────────────
@@ -471,8 +474,10 @@ In your raw_answer:
 
 In your thought field:
 - Be concise and factual
-- Focus on reasoning, not commentary
-- 1-2 sentences maximum
+- Write an execution status update, not user-facing prose.
+- Do not address the user, ask questions, or propose follow-ups here.
+- Do not claim you performed actions unless supported by tool observations.
+- 1-2 sentences maximum.
 </tone>""")
 
     # ─────────────────────────────────────────────────────────────
