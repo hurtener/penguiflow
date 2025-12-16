@@ -211,6 +211,7 @@ async def test_oauth_manager_handle_callback_expired_state():
 @pytest.mark.asyncio
 async def test_oauth_manager_handle_callback_success():
     """OAuthManager should exchange code for token."""
+    pytest.importorskip("aiohttp")
     manager = OAuthManager(providers={"github": build_provider()})
 
     # Generate auth request to get valid state
@@ -248,6 +249,7 @@ async def test_oauth_manager_handle_callback_success():
 @pytest.mark.asyncio
 async def test_oauth_manager_handle_callback_oauth_error():
     """OAuthManager should handle OAuth error response."""
+    pytest.importorskip("aiohttp")
     manager = OAuthManager(providers={"github": build_provider()})
 
     request = manager.get_auth_request("github", "user1", "trace1")
@@ -276,6 +278,7 @@ async def test_oauth_manager_handle_callback_oauth_error():
 @pytest.mark.asyncio
 async def test_oauth_manager_handle_callback_error_without_description():
     """OAuthManager should handle OAuth error without description."""
+    pytest.importorskip("aiohttp")
     manager = OAuthManager(providers={"github": build_provider()})
 
     request = manager.get_auth_request("github", "user1", "trace1")
@@ -299,6 +302,7 @@ async def test_oauth_manager_handle_callback_error_without_description():
 @pytest.mark.asyncio
 async def test_oauth_manager_handle_callback_no_expires():
     """OAuthManager should handle token without expires_in."""
+    pytest.importorskip("aiohttp")
     manager = OAuthManager(providers={"github": build_provider()})
 
     request = manager.get_auth_request("github", "user1", "trace1")
