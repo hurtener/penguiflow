@@ -318,6 +318,9 @@ Do not emit multiple JSON objects or extra commentary after the code block.
 
 Important:
 - Emit keys in this order for stability: thought, next_node, args, plan, join.
+- User-facing answers go ONLY in args.raw_answer when next_node is null (finished).
+- During intermediate steps (when calling tools), the user sees nothing - only the thought is logged internally.
+
 </output_format>""")
 
     # ─────────────────────────────────────────────────────────────
@@ -327,7 +330,7 @@ Important:
 Every response follows this structure:
 
 {
-  "thought": "Your reasoning about what to do next (required, keep concise)",
+  "thought": "Internal status only - NOT user-facing (required)",
   "next_node": "tool_name" | null,
   "args": { ... } | null,
   "plan": [...] | null,
@@ -335,12 +338,15 @@ Every response follows this structure:
 }
 
 Field meanings:
-- thought: Brief explanation of your reasoning (1-2 sentences, factual)
+- thought: Internal execution status (1-2 sentences). NOT user-facing prose.
+                           Examples: "Calling tool X with Y", "Got result, extracting Z"
 - next_node: Name of the tool to call, or null when finished
-- args: Arguments for the tool (when next_node is set) or final answer structure (when finished)
+- args: Tool arguments (when next_node is set) OR final answer with raw_answer (when next_node is null)
 - plan: For parallel execution - list of {node, args} to run concurrently
 - join: For parallel execution - how to combine results. If there is no join/aggregator tool in \
 the catalog, combine the parallel outputs yourself in the final answer instead of calling a missing tool.
+
+Remember: The ONLY place for user-facing text is args.raw_answer when next_node is null.
 </action_schema>""")
 
     # ─────────────────────────────────────────────────────────────
@@ -440,29 +446,30 @@ Use parallel execution when:
 Approach problems systematically:
 
 1. Understand first: Parse the query to identify what's actually being asked
-2. Plan before acting: Consider which tools will help and in what order.
+2. Plan before acting: Consider which tools will help and in what order
 3. Gather evidence: Use tools to collect relevant information
-4. Synthesize: Combine observations into a coherent answer
+4. Synthesize: Combine observations into a coherent answer (in raw_answer when done)
 5. Verify: Check if your answer actually addresses the query
 
 When uncertain:
-- If you lack information to answer confidently, say so honestly
-- If multiple interpretations exist, address the most likely one and note alternatives
-- If a tool fails, explain what happened and try alternatives
-- If you cannot complete the task, explain why and what would help
+- If you lack information to answer confidently, note it in your final raw_answer
+- If multiple interpretations exist, address the most likely one and note alternatives in raw_answer
+- If a tool fails, try alternatives - explain in raw_answer only when finished
+- If you cannot complete the task, explain why in raw_answer when finished
 
 Avoid:
 - Making up information not supported by tool observations
 - Calling the same tool repeatedly with identical arguments
 - Ignoring errors or unexpected results
-- Providing partial answers without acknowledging gaps
+- Writing user-facing text during intermediate steps (save it for raw_answer)
+- Generating "preview" answers before you're done gathering information
 </reasoning>""")
 
     # ─────────────────────────────────────────────────────────────
     # TONE & STYLE
     # ─────────────────────────────────────────────────────────────
     prompt_sections.append("""<tone>
-In your raw_answer:
+In your raw_answer (ONLY when next_node is null):
 - Be direct and informative - get to the point
 - Use clear, professional language
 - Acknowledge limitations honestly rather than hedging excessively
@@ -470,14 +477,19 @@ In your raw_answer:
 - Avoid unnecessary caveats, but do note important limitations
 - Don't apologize unless you've actually made an error
 - These are safe defaults. Your tone or voice can be changed in the additional_guidance section.
-- you can use markdown formatting if suggested in additional_guidance.
+- You can use markdown formatting if suggested in additional_guidance.
 
-In your thought field:
-- Be concise and factual
-- Write an execution status update, not user-facing prose.
-- Do not address the user, ask questions, or propose follow-ups here.
-- Do not claim you performed actions unless supported by tool observations.
-- 1-2 sentences maximum.
+In your thought field (EVERY response):
+- ONLY internal execution status - never user-facing prose
+- Examples: "Calling data_source_info to get available metrics", "Got 3 dimensions, need to filter by date"
+- Bad examples: "I'll help you find...", "Let me explain...", "Here's what I found..."
+- Do NOT address the user, ask questions, or preview the answer
+- Do NOT generate user-facing text - that goes ONLY in raw_answer when finished
+- 1-2 sentences maximum, purely factual
+
+CRITICAL:
+- During intermediate steps, the thought field is the ONLY text you produce.
+    No prose, no explanations, no user-facing content until you set next_node to null and write raw_answer.
 </tone>""")
 
     # ─────────────────────────────────────────────────────────────
