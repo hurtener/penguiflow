@@ -173,6 +173,9 @@ def _build_trajectory(
         "steps": steps,
         "hint_state": {},
     }
+    trajectory_meta = metadata.get("trajectory_metadata")
+    if isinstance(trajectory_meta, Mapping):
+        payload["metadata"] = dict(trajectory_meta)
     if "artifacts" in metadata:
         payload["artifacts"] = metadata["artifacts"]
     if "sources" in metadata:

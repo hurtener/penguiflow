@@ -174,6 +174,23 @@ def _salvage_action_payload(raw: str) -> PlannerAction | None:
         return None
 
 
+def _summarize_validation_error(exc: ValidationError, *, limit: int = 240) -> str:
+    """Build a compact, human-readable validation summary."""
+    summary = str(exc)
+    try:
+        errors = exc.errors()
+    except Exception:
+        errors = []
+    if errors:
+        first = errors[0]
+        loc = ".".join(str(part) for part in first.get("loc", []))
+        msg = str(first.get("msg") or "validation error")
+        summary = f"{loc}: {msg}" if loc else msg
+    if len(summary) > limit:
+        summary = summary[: limit - 3] + "..."
+    return summary
+
+
 def _default_for_annotation(annotation: Any) -> Any:
     """Generate a lightweight placeholder for a required field."""
 
@@ -2127,7 +2144,7 @@ class ReactPlanner:
         last_error: str | None = None
         last_raw: str | None = None
 
-        for _ in range(self._repair_attempts):
+        for attempt in range(1, self._repair_attempts + 1):
             if last_error is not None:
                 messages = list(base_messages) + [
                     {
@@ -2281,6 +2298,15 @@ class ReactPlanner:
                 return PlannerAction.model_validate_json(raw)
             except ValidationError as exc:
                 salvaged = _salvage_action_payload(raw)
+                will_retry = salvaged is None and attempt < self._repair_attempts
+                self._record_invalid_response(
+                    trajectory,
+                    attempt=attempt,
+                    raw=raw,
+                    error=exc,
+                    salvage_action=salvaged,
+                    will_retry=will_retry,
+                )
                 if salvaged is not None:
                     logger.info(
                         "planner_action_salvaged",
@@ -2701,7 +2727,8 @@ class ReactPlanner:
         payload = event.to_payload()
         for reserved in ("args", "msg", "levelname", "levelno", "exc_info"):
             payload.pop(reserved, None)
-        logger.info(event.event_type, extra=payload)
+        log_fn = logger.debug if event.event_type == "llm_stream_chunk" else logger.info
+        log_fn(event.event_type, extra=payload)
 
         # Invoke callback if provided
         if self._event_callback is not None:
@@ -2716,6 +2743,66 @@ class ReactPlanner:
                     },
                 )
         self._last_event = event
+
+    def _record_invalid_response(
+        self,
+        trajectory: Trajectory,
+        *,
+        attempt: int,
+        raw: str,
+        error: ValidationError,
+        salvage_action: PlannerAction | None,
+        will_retry: bool,
+    ) -> None:
+        stripped = raw.lstrip()
+        had_non_json_prefix = bool(stripped) and stripped[0] not in "{["
+        had_code_fence = "```" in raw
+        response_len = len(raw)
+        error_type = error.__class__.__name__
+        error_summary = _summarize_validation_error(error)
+        next_node_detected = salvage_action.next_node if salvage_action is not None else None
+
+        metadata = trajectory.metadata
+        invalid_responses = metadata.get("invalid_responses")
+        if not isinstance(invalid_responses, list):
+            invalid_responses = []
+            metadata["invalid_responses"] = invalid_responses
+
+        entry = {
+            "step": len(trajectory.steps),
+            "attempt": attempt,
+            "error_type": error_type,
+            "error_summary": error_summary,
+            "next_node_detected": next_node_detected,
+            "response_len": response_len,
+            "had_code_fence": had_code_fence,
+            "had_non_json_prefix": had_non_json_prefix,
+            "ts": self._time_source(),
+        }
+        invalid_responses.append(entry)
+
+        metadata["validation_failures_count"] = int(metadata.get("validation_failures_count", 0)) + 1
+        if will_retry:
+            metadata["repair_attempts"] = int(metadata.get("repair_attempts", 0)) + 1
+        if salvage_action is not None:
+            metadata["salvage_used"] = True
+
+        self._emit_event(
+            PlannerEvent(
+                event_type="planner_repair_attempt",
+                ts=self._time_source(),
+                trajectory_step=len(trajectory.steps),
+                extra={
+                    "attempt": attempt,
+                    "error_type": error_type,
+                    "error_summary": error_summary,
+                    "next_node_detected": next_node_detected,
+                    "response_len": response_len,
+                    "had_code_fence": had_code_fence,
+                    "had_non_json_prefix": had_non_json_prefix,
+                },
+            )
+        )
 
     def _finish(
         self,
@@ -2743,6 +2830,12 @@ class ReactPlanner:
             metadata["error"] = error
         if metadata_extra:
             metadata.update(metadata_extra)
+        if trajectory.metadata:
+            metadata["trajectory_metadata"] = dict(trajectory.metadata)
+
+        metadata["validation_failures_count"] = int(trajectory.metadata.get("validation_failures_count", 0))
+        metadata["repair_attempts"] = int(trajectory.metadata.get("repair_attempts", 0))
+        metadata["salvage_used"] = bool(trajectory.metadata.get("salvage_used", False))
 
         # Emit finish event
         extra_data: dict[str, Any] = {

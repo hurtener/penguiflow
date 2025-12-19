@@ -779,6 +779,7 @@ planner = ReactPlanner(
 | `error` | Exception occurs |
 | `reflection_critique` | Reflection scores an answer |
 | `stream_chunk` | Tool emits streaming chunk |
+| `planner_repair_attempt` | LLM response failed JSON/schema validation |
 
 ### Metrics in PlannerFinish
 
@@ -800,6 +801,54 @@ if isinstance(result, PlannerFinish):
     #   }
     # }
 ```
+
+### Capturing Repair Telemetry
+
+ReactPlanner emits a `planner_repair_attempt` event whenever the LLM response
+fails JSON/schema validation. Use this to build ACE/GEPA feedback loops and
+compare model reliability.
+
+Event payload fields:
+- `step`: planner step index (already in the event payload)
+- `attempt`: 1-based attempt number within the step
+- `error_type`: validation exception type
+- `error_summary`: short, sanitised error string
+- `next_node_detected`: tool name if salvage inferred it, else null
+- `response_len`: length of the raw LLM response (no content stored)
+- `had_code_fence`: true if response included ``` fences
+- `had_non_json_prefix`: true if response started with non-JSON text
+
+Example event capture:
+
+```python
+from penguiflow.planner import PlannerEvent
+
+def record_event(evt: PlannerEvent) -> None:
+    if evt.event_type == "planner_repair_attempt":
+        payload = evt.to_payload()
+        # Persist to your event store or metrics pipeline
+        logger.warning("planner_repair_attempt", extra=payload)
+
+planner = ReactPlanner(
+    llm="gpt-4o",
+    catalog=catalog,
+    event_callback=record_event,
+)
+```
+
+Summary counters are also surfaced on completion:
+
+```python
+result = await planner.run(...)
+if isinstance(result, PlannerFinish):
+    print(result.metadata["validation_failures_count"])
+    print(result.metadata["repair_attempts"])
+    print(result.metadata["salvage_used"])
+```
+
+If you persist trajectories (e.g., via the Playground state store), detailed
+invalid-response entries are attached under `trajectory.metadata.invalid_responses`
+with the same sanitised fields. This avoids storing raw LLM text by default.
 
 ---
 

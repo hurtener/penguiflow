@@ -73,6 +73,7 @@ class Trajectory:
     tool_context: dict[str, Any] | None = None
     artifacts: dict[str, Any] = field(default_factory=dict)
     sources: list[Mapping[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
     steps: list[TrajectoryStep] = field(default_factory=list)
     summary: TrajectorySummary | None = None
     hint_state: dict[str, Any] = field(default_factory=dict)
@@ -94,6 +95,7 @@ class Trajectory:
             "tool_context": tool_context,
             "artifacts": dict(self.artifacts),
             "sources": [dict(src) for src in self.sources],
+            "metadata": dict(self.metadata),
             "steps": self.to_history(),
             "summary": self.summary.model_dump(mode="json") if self.summary else None,
             "hint_state": dict(self.hint_state),
@@ -111,6 +113,8 @@ class Trajectory:
             llm_context=llm_context,
             tool_context=dict(tool_context or {}),
         )
+        if isinstance(payload.get("metadata"), Mapping):
+            trajectory.metadata.update(dict(payload["metadata"]))
         for step_data in payload.get("steps", []):
             action = PlannerAction.model_validate(step_data["action"])
             streams_payload = step_data.get("streams")

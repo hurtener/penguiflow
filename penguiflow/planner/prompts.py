@@ -312,7 +312,7 @@ Current date: {current_date}
     # ─────────────────────────────────────────────────────────────
     prompt_sections.append("""<output_format>
 Think briefly in plain text, then respond with a single JSON object that matches the PlannerAction schema.
-
+If a tool would help, set "next_node" to the tool name and provide "args" in first turn.
 Write your JSON inside one markdown code block (```json ... ```).
 Do not emit multiple JSON objects or extra commentary after the code block.
 
