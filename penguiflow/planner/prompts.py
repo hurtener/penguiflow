@@ -687,3 +687,120 @@ def render_missing_args_message(
         '"requires_followup": true}}\n\n'
         "This is your LAST chance. Missing args again will force termination."
     )
+
+
+def render_arg_fill_prompt(
+    tool_name: str,
+    missing_fields: list[str],
+    field_descriptions: dict[str, str] | None = None,
+    user_query: str | None = None,
+) -> str:
+    """
+    Generate a minimal prompt asking only for missing arg values.
+
+    This is a simplified format designed for small models that struggle
+    with full JSON schema compliance but can fill individual values.
+
+    Parameters
+    ----------
+    tool_name : str
+        Name of the tool being called.
+    missing_fields : list[str]
+        List of field names that need values.
+    field_descriptions : dict[str, str] | None
+        Optional mapping of field names to descriptions.
+    user_query : str | None
+        Original user query for context.
+
+    Returns
+    -------
+    str
+        A minimal prompt asking for the missing values.
+    """
+    field_descriptions = field_descriptions or {}
+
+    # Build field list with descriptions
+    field_lines: list[str] = []
+    for field in missing_fields:
+        desc = field_descriptions.get(field, "")
+        if desc:
+            field_lines.append(f'  - "{field}": {desc}')
+        else:
+            field_lines.append(f'  - "{field}"')
+
+    fields_block = "\n".join(field_lines)
+
+    # Build example response
+    example_values: dict[str, str] = {}
+    for field in missing_fields:
+        # Smart defaults based on common field names
+        if field in {"query", "question", "prompt", "input", "search_query"}:
+            example_values[field] = user_query if user_query else "your value here"
+        else:
+            example_values[field] = "your value here"
+
+    example_json = json.dumps(example_values, ensure_ascii=False, indent=2)
+
+    user_context = f'\nUser\'s request: "{user_query}"\n' if user_query else ""
+
+    return (
+        f"FILL MISSING VALUES\n\n"
+        f"Tool: {tool_name}\n"
+        f"Missing fields:\n{fields_block}\n"
+        f"{user_context}\n"
+        f"Reply with ONLY a JSON object containing the missing field values:\n"
+        f"{example_json}\n\n"
+        "Rules:\n"
+        "- Provide REAL values only (no placeholders like '<auto>' or 'unknown')\n"
+        "- Include ONLY the fields listed above\n"
+        "- Reply with valid JSON only, no explanation"
+    )
+
+
+def render_arg_fill_clarification(
+    tool_name: str,
+    missing_fields: list[str],
+    field_descriptions: dict[str, str] | None = None,
+) -> str:
+    """
+    Generate a user-friendly clarification message when arg-fill fails.
+
+    This is shown to the user instead of a diagnostic dump.
+
+    Parameters
+    ----------
+    tool_name : str
+        Name of the tool being called.
+    missing_fields : list[str]
+        List of field names that need values.
+    field_descriptions : dict[str, str] | None
+        Optional mapping of field names to descriptions.
+
+    Returns
+    -------
+    str
+        A friendly message asking the user for the missing information.
+    """
+    field_descriptions = field_descriptions or {}
+
+    if len(missing_fields) == 1:
+        field = missing_fields[0]
+        desc = field_descriptions.get(field, "")
+        if desc:
+            return f"To use {tool_name}, I need you to provide: {desc}"
+        return f"To use {tool_name}, I need you to provide a value for '{field}'."
+
+    # Multiple fields
+    field_list: list[str] = []
+    for field in missing_fields:
+        desc = field_descriptions.get(field, "")
+        if desc:
+            field_list.append(f"- {field}: {desc}")
+        else:
+            field_list.append(f"- {field}")
+
+    fields_str = "\n".join(field_list)
+    return (
+        f"To use {tool_name}, I need you to provide the following information:\n"
+        f"{fields_str}"
+    )
