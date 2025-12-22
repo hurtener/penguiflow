@@ -431,6 +431,10 @@ class ToolNode:
 
             bound_fn = functools.partial(_make_call, namespaced)
 
+            extra = {"source": "mcp", "namespace": self.config.name}
+            if isinstance(self.config.arg_validation, dict):
+                extra["arg_validation"] = dict(self.config.arg_validation)
+
             specs.append(
                 NodeSpec(
                     node=Node(bound_fn, name=namespaced),
@@ -440,7 +444,7 @@ class ToolNode:
                     out_model=out_model,
                     side_effects="external",
                     tags=("mcp", self.config.name),
-                    extra={"source": "mcp", "namespace": self.config.name},
+                    extra=extra,
                 ),
             )
 
@@ -480,6 +484,10 @@ class ToolNode:
 
             bound_fn = functools.partial(_make_call, namespaced)
 
+            extra = {"source": "utcp", "namespace": self.config.name}
+            if isinstance(self.config.arg_validation, dict):
+                extra["arg_validation"] = dict(self.config.arg_validation)
+
             specs.append(
                 NodeSpec(
                     node=Node(bound_fn, name=namespaced),
@@ -489,7 +497,7 @@ class ToolNode:
                     out_model=out_model,
                     side_effects="external",
                     tags=("utcp", self.config.name),
-                    extra={"source": "utcp", "namespace": self.config.name},
+                    extra=extra,
                 ),
             )
         return specs

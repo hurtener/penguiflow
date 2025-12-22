@@ -80,6 +80,12 @@ class ExternalToolConfig(BaseModel):
         description="Regex patterns to include specific tools (None = all)",
     )
 
+    # Tool arg validation defaults (telemetry-only)
+    arg_validation: dict[str, Any] = Field(
+        default_factory=lambda: {"emit_suspect": True},
+        description="Planner arg validation policy for discovered tools.",
+    )
+
     @model_validator(mode="after")
     def validate_config(self) -> ExternalToolConfig:
         """Validate transport-specific requirements."""

@@ -633,3 +633,57 @@ def render_repair_message(error: str) -> str:
         f"{error}. Reply with corrected JSON only. "
         "When finishing, set next_node to null and include raw_answer in args."
     )
+
+
+def render_arg_repair_message(tool_name: str, error: str) -> str:
+    return (
+        f"CRITICAL: Your tool call to '{tool_name}' failed validation.\n\n"
+        f"Error: {error}\n\n"
+        "You MUST do ONE of the following:\n\n"
+        f"OPTION 1 - Fix the args and retry '{tool_name}':\n"
+        "- Provide ALL required arguments with REAL values\n"
+        "- Do NOT use placeholders like '<auto>', 'unknown', 'n/a', or empty strings\n"
+        "- Match the exact schema types (strings, numbers, booleans, arrays)\n\n"
+        "OPTION 2 - If you cannot provide valid args, FINISH instead:\n"
+        '- Set "next_node": null\n'
+        '- Set "args": {"raw_answer": "I cannot proceed because...", "requires_followup": true}\n\n'
+        "Respond with a single JSON object. No prose or markdown."
+    )
+
+
+def render_missing_args_message(
+    tool_name: str,
+    missing_fields: list[str],
+    *,
+    user_query: str | None = None,
+) -> str:
+    """Strict message when model forgot to provide required args (we autofilled them)."""
+    fields_str = ", ".join(f"'{f}'" for f in missing_fields)
+    example_args: dict[str, Any] = {}
+    if user_query:
+        for field in missing_fields:
+            if field in {"query", "question", "prompt", "input"}:
+                example_args[field] = user_query
+    example_payload = {
+        "thought": "fix missing tool args",
+        "next_node": tool_name,
+        "args": example_args if example_args else {missing_fields[0]: "<FILL_VALUE>"},
+    }
+    example_json = json.dumps(example_payload, ensure_ascii=False)
+    user_query_line = f"USER QUESTION: {user_query}\n\n" if user_query else ""
+    return (
+        "SYSTEM OVERRIDE: INVALID TOOL CALL.\n\n"
+        f"You called '{tool_name}' but FORGOT required arguments.\n"
+        f"MISSING FIELDS: {fields_str}\n\n"
+        f"{user_query_line}"
+        "You MUST do exactly ONE of the following:\n\n"
+        f"1) Retry '{tool_name}' with ALL missing fields filled using REAL values.\n"
+        "   - Do NOT leave fields empty.\n"
+        "   - Do NOT use placeholders like '<auto>', 'unknown', or ''.\n\n"
+        "Example (replace values as needed):\n"
+        f"{example_json}\n\n"
+        "2) If you cannot supply valid values, FINISH instead with:\n"
+        '   {"next_node": null, "args": {"raw_answer": "I need more information: ...", '
+        '"requires_followup": true}}\n\n'
+        "This is your LAST chance. Missing args again will force termination."
+    )
