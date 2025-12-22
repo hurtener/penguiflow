@@ -15,6 +15,7 @@ from .core import (
 )
 from .debug import format_flow_event
 from .errors import FlowError, FlowErrorCode
+from .logging import ExtraFormatter, StructuredFormatter, configure_logging
 from .metrics import FlowEvent
 from .middlewares import LatencyCallback, Middleware, log_flow_events
 from .node import Node, NodePolicy
@@ -47,6 +48,9 @@ from .viz import flow_to_dot, flow_to_mermaid
 
 __all__ = [
     "__version__",
+    "configure_logging",
+    "ExtraFormatter",
+    "StructuredFormatter",
     "Context",
     "CycleError",
     "PenguiFlow",
@@ -105,4 +109,4 @@ __all__ = [
     "TrajectoryStep",
 ]
 
-__version__ = "2.7.2"
+__version__ = "2.7.3"

@@ -757,6 +757,59 @@ def render_arg_fill_prompt(
     )
 
 
+def render_finish_repair_prompt(
+    thought: str | None = None,
+    user_query: str | None = None,
+    voice_context: str | None = None,
+) -> str:
+    """
+    Generate a prompt asking the model to provide the raw_answer it forgot.
+
+    This is used when the model tries to finish (next_node: null) but doesn't
+    include raw_answer in the args.
+
+    Parameters
+    ----------
+    thought : str | None
+        The model's thought from the finish action.
+    user_query : str | None
+        The original user query.
+    voice_context : str | None
+        Optional voice/personality context (from system_prompt_extra).
+        Included in full - no truncation.
+    """
+    context_parts: list[str] = []
+    if thought:
+        context_parts.append(f'Your thought was: "{thought}"')
+    if user_query:
+        context_parts.append(f'The user asked: "{user_query}"')
+
+    context = "\n".join(context_parts) if context_parts else ""
+
+    # Include full voice context if provided - no truncation
+    voice_section = ""
+    if voice_context:
+        voice_section = (
+            "\n<voice_and_style>\n"
+            "IMPORTANT - Your answer MUST follow this voice and style:\n\n"
+            f"{voice_context}\n"
+            "</voice_and_style>\n"
+        )
+
+    return (
+        "FINISH INCOMPLETE: You set next_node to null but didn't provide raw_answer.\n\n"
+        f"{context}\n"
+        f"{voice_section}\n"
+        "You MUST provide your answer. Reply with ONLY a JSON object:\n"
+        '{"raw_answer": "Your complete answer to the user here"}\n\n'
+        "Rules:\n"
+        "- Write a full, helpful response to the user's query\n"
+        "- Follow the voice and style specified above\n"
+        "- Do NOT use placeholders\n"
+        "- Reply with valid JSON only, no explanation"
+    )
+
+
 def render_arg_fill_clarification(
     tool_name: str,
     missing_fields: list[str],

@@ -542,6 +542,13 @@ def create_playground_app(
 
     @asynccontextmanager
     async def _lifespan(_: FastAPI):
+        # Eagerly initialize the agent wrapper (connects external tools, sets up planner)
+        # This ensures event callbacks can be attached before the first request
+        try:
+            await agent_wrapper.initialize()
+        except Exception as exc:
+            _LOGGER.warning(f"Agent initialization failed during startup: {exc}")
+            # Continue anyway - lazy init will retry on first request
         try:
             yield
         finally:  # pragma: no cover - exercised in integration

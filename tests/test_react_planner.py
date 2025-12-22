@@ -479,6 +479,7 @@ async def test_autofill_rejection_force_finish_after_retry() -> None:
         llm_client=StubClient(responses),
         catalog=catalog,
         max_iters=10,
+        arg_fill_enabled=False,  # Disable arg-fill to test pure autofill rejection
         event_callback=events.append,
     )
     result = await planner.run("test autofill rejection")

@@ -23,6 +23,7 @@ class AuthType(str, Enum):
     NONE = "none"
     API_KEY = "api_key"  # Static API key (header injection)
     BEARER = "bearer"  # Static bearer token
+    COOKIE = "cookie"  # Cookie-based auth (e.g., Databricks Apps session)
     OAUTH2_USER = "oauth2_user"  # User-level OAuth (HITL)
 
 
@@ -32,6 +33,18 @@ class UtcpMode(str, Enum):
     AUTO = "auto"  # Try manual_url first, fallback to base_url
     MANUAL_URL = "manual_url"  # Connection is a UTCP manual endpoint (recommended)
     BASE_URL = "base_url"  # Connection is a REST base URL (limited discovery)
+
+
+class McpTransportMode(str, Enum):
+    """MCP transport mode for URL-based connections.
+
+    FastMCP supports multiple transports. This setting controls which is used
+    when connecting to MCP servers over HTTP/HTTPS.
+    """
+
+    AUTO = "auto"  # Let FastMCP auto-detect (default when no auth headers)
+    SSE = "sse"  # Force Server-Sent Events transport (legacy)
+    STREAMABLE_HTTP = "streamable_http"  # Force Streamable HTTP (modern, recommended)
 
 
 class RetryPolicy(BaseModel):
@@ -60,6 +73,12 @@ class ExternalToolConfig(BaseModel):
     utcp_mode: UtcpMode = Field(
         default=UtcpMode.AUTO,
         description="For HTTP/UTCP: how to interpret connection (manual_url recommended)",
+    )
+
+    # MCP-specific: which transport to use for URL-based connections
+    mcp_transport_mode: McpTransportMode = Field(
+        default=McpTransportMode.AUTO,
+        description="For MCP over HTTP: auto-detect, sse, or streamable_http",
     )
 
     # Environment (for MCP subprocess)
@@ -93,6 +112,11 @@ class ExternalToolConfig(BaseModel):
             raise ValueError("auth_type=BEARER requires auth_config.token")
         if self.auth_type == AuthType.API_KEY and "api_key" not in self.auth_config:
             raise ValueError("auth_type=API_KEY requires auth_config.api_key")
+        if self.auth_type == AuthType.COOKIE:
+            if "cookie_name" not in self.auth_config:
+                raise ValueError("auth_type=COOKIE requires auth_config.cookie_name")
+            if "cookie_value" not in self.auth_config:
+                raise ValueError("auth_type=COOKIE requires auth_config.cookie_value")
 
         if self.transport == TransportType.MCP and self.utcp_mode != UtcpMode.AUTO:
             raise ValueError("utcp_mode is only valid for HTTP/UTCP transports")
@@ -103,6 +127,7 @@ class ExternalToolConfig(BaseModel):
 __all__ = [
     "AuthType",
     "ExternalToolConfig",
+    "McpTransportMode",
     "RetryPolicy",
     "TransportType",
     "UtcpMode",

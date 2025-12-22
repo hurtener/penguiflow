@@ -1127,6 +1127,8 @@ class ReactPlanner:
             extra=system_prompt_extra,
             planning_hints=hints_payload,
         )
+        # Store extra for use in repair prompts (voice/personality context)
+        self._system_prompt_extra = system_prompt_extra
         self._max_iters = max_iters
         self._repair_attempts = repair_attempts
         self._max_consecutive_arg_failures = max_consecutive_arg_failures
@@ -1729,15 +1731,30 @@ class ReactPlanner:
                 action = await self.step(trajectory)
 
                 # Log the action received from LLM
-                logger.info(
-                    "planner_action",
-                    extra={
-                        "step": len(trajectory.steps),
-                        "thought": action.thought,
-                        "next_node": action.next_node,
-                        "has_plan": action.plan is not None,
-                    },
-                )
+                action_extra: dict[str, Any] = {
+                    "step": len(trajectory.steps),
+                    "thought": action.thought,
+                    "next_node": action.next_node,
+                    "has_plan": action.plan is not None,
+                }
+                # For finish actions, log the args to help debug answer extraction issues
+                if action.next_node is None:
+                    if action.args:
+                        args_preview = str(action.args)
+                        if len(args_preview) > 500:
+                            args_preview = args_preview[:500] + "..."
+                        action_extra["args_preview"] = args_preview
+                        if isinstance(action.args, dict):
+                            action_extra["args_keys"] = list(action.args.keys())
+                            action_extra["has_raw_answer"] = "raw_answer" in action.args
+                        else:
+                            action_extra["args_keys"] = None
+                            action_extra["has_raw_answer"] = False
+                    else:
+                        action_extra["args_preview"] = "None"
+                        action_extra["args_keys"] = None
+                        action_extra["has_raw_answer"] = False
+                logger.info("planner_action", extra=action_extra)
 
                 # Check constraints BEFORE executing parallel plan or any action
                 constraint_error = self._check_action_constraints(action, trajectory, tracker)
@@ -1764,6 +1781,45 @@ class ReactPlanner:
                     continue
 
                 if action.next_node is None:
+                    # Check if raw_answer is missing and attempt finish repair
+                    has_raw_answer = (
+                        isinstance(action.args, dict)
+                        and action.args.get("raw_answer")
+                        and action.args["raw_answer"] not in {"", None, "<auto>"}
+                    )
+
+                    if not has_raw_answer and not trajectory.metadata.get("finish_repair_attempted"):
+                        # Model tried to finish without raw_answer - attempt repair
+                        logger.info(
+                            "finish_repair_attempt",
+                            extra={
+                                "has_args": action.args is not None,
+                                "args_keys": list(action.args.keys()) if isinstance(action.args, dict) else None,
+                                "thought": action.thought,
+                            },
+                        )
+
+                        filled_answer = await self._attempt_finish_repair(
+                            trajectory,
+                            action,
+                        )
+
+                        if filled_answer is not None:
+                            # Success! Update action.args with the raw_answer
+                            if action.args is None:
+                                action.args = {}
+                            if isinstance(action.args, dict):
+                                action.args["raw_answer"] = filled_answer
+                            logger.info(
+                                "finish_repair_success",
+                                extra={"answer_len": len(filled_answer)},
+                            )
+                        else:
+                            logger.warning(
+                                "finish_repair_failed",
+                                extra={"thought": action.thought},
+                            )
+
                     candidate_answer = action.args or last_observation
                     metadata_reflection: dict[str, Any] | None = None
 
@@ -2388,7 +2444,7 @@ class ReactPlanner:
         if isinstance(trajectory.metadata, MutableMapping):
             arg_repair_message = trajectory.metadata.pop("arg_repair_message", None)
         if arg_repair_message:
-            patched: list[Mapping[str, str]] = []
+            patched: list[dict[str, str]] = []
             inserted = False
             for msg in base_messages:
                 if not inserted and msg.get("role") != "system":
@@ -2552,8 +2608,29 @@ class ReactPlanner:
             last_raw = raw
             self._cost_tracker.record_main_call(cost)
 
+            # Debug log the raw LLM response for troubleshooting
+            logger.debug(
+                "llm_raw_response",
+                extra={
+                    "attempt": attempt,
+                    "response_len": len(raw),
+                    "response_preview": raw[:1000] if len(raw) > 1000 else raw,
+                },
+            )
+
             try:
-                return PlannerAction.model_validate_json(raw)
+                action = PlannerAction.model_validate_json(raw)
+                # Log successful parse with args info for finish actions
+                if action.next_node is None:
+                    logger.debug(
+                        "finish_action_parsed",
+                        extra={
+                            "has_args": action.args is not None,
+                            "args_keys": list(action.args.keys()) if isinstance(action.args, dict) else None,
+                            "raw_answer_present": "raw_answer" in (action.args or {}),
+                        },
+                    )
+                return action
             except ValidationError as exc:
                 salvaged = _salvage_action_payload(raw)
                 will_retry = salvaged is None and attempt < self._repair_attempts
@@ -2797,11 +2874,19 @@ class ReactPlanner:
                         payload_data["raw_answer"] = extracted
                         break
             else:
+                # Log detailed info to help debug why no answer was extracted
+                args_keys = list(args.keys()) if isinstance(args, dict) else None
                 logger.warning(
                     "no_answer_extracted",
                     extra={
-                        "input_args": str(args)[:200] if args else None,
+                        "input_args": str(args)[:500] if args else None,
+                        "input_args_type": type(args).__name__ if args else None,
+                        "input_args_keys": args_keys,
                         "last_observation": str(last_observation)[:200] if last_observation else None,
+                        "expected_keys": [
+                            "raw_answer", "answer", "text", "result", "output",
+                            "response", "message", "content",
+                        ],
                     },
                 )
                 payload_data["raw_answer"] = "No answer produced."
@@ -3350,9 +3435,11 @@ class ReactPlanner:
         )
 
         # Build messages: use existing conversation context + arg-fill prompt
+        # Use "user" role so it's a follow-up request within the conversation
+        # (the system prompt with full instructions is already in base_messages)
         base_messages = await self._build_messages(trajectory)
         messages = list(base_messages) + [
-            {"role": "system", "content": fill_prompt},
+            {"role": "user", "content": fill_prompt},
         ]
 
         # Emit event for observability
@@ -3478,6 +3565,193 @@ class ReactPlanner:
 
             return None
 
+    async def _attempt_finish_repair(
+        self,
+        trajectory: Trajectory,
+        action: PlannerAction,
+    ) -> str | None:
+        """
+        Attempt to get the raw_answer when the model finishes without providing one.
+
+        This uses a simplified prompt asking only for the answer text,
+        which is easier for small models than re-emitting the full action JSON.
+
+        Parameters
+        ----------
+        trajectory : Trajectory
+            Current planning trajectory (for context).
+        action : PlannerAction
+            The finish action missing raw_answer.
+
+        Returns
+        -------
+        str | None
+            The raw_answer text if successful, None if repair failed.
+        """
+        # Mark that we're attempting finish repair
+        trajectory.metadata["finish_repair_attempted"] = True
+
+        # Get user query for context
+        user_query = trajectory.resume_user_input or trajectory.query
+
+        # Build the finish repair prompt with voice context
+        repair_prompt = prompts.render_finish_repair_prompt(
+            thought=action.thought,
+            user_query=user_query,
+            voice_context=self._system_prompt_extra,
+        )
+
+        # Build messages: use existing conversation context + repair prompt
+        # Use "user" role so it's a follow-up request within the conversation
+        # (the system prompt with full instructions is already in base_messages)
+        base_messages = await self._build_messages(trajectory)
+        messages = list(base_messages) + [
+            {"role": "user", "content": repair_prompt},
+        ]
+
+        # Emit event for observability
+        self._emit_event(
+            PlannerEvent(
+                event_type="finish_repair_attempt",
+                ts=self._time_source(),
+                trajectory_step=len(trajectory.steps),
+                thought=action.thought,
+            )
+        )
+
+        start_time = self._time_source()
+
+        try:
+            # Make the LLM call
+            llm_result = await self._client.complete(
+                messages=messages,
+                response_format={"type": "json_object"},
+                stream=False,
+                on_stream_chunk=None,
+            )
+            raw, cost = _coerce_llm_response(llm_result)
+            self._cost_tracker.record_main_call(cost)
+
+            latency_ms = (self._time_source() - start_time) * 1000
+
+            logger.debug(
+                "finish_repair_raw_response",
+                extra={
+                    "response_len": len(raw),
+                    "response_preview": raw[:500] if len(raw) > 500 else raw,
+                },
+            )
+
+            # Parse the response - look for raw_answer
+            raw_answer = self._parse_finish_repair_response(raw)
+
+            if raw_answer is not None:
+                # Success! Record metrics
+                finish_repair_success_count = int(
+                    trajectory.metadata.get("finish_repair_success_count", 0)
+                )
+                trajectory.metadata["finish_repair_success_count"] = finish_repair_success_count + 1
+
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="finish_repair_success",
+                        ts=self._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        latency_ms=latency_ms,
+                        extra={"answer_len": len(raw_answer)},
+                    )
+                )
+
+                return raw_answer
+
+            # Parsing failed
+            finish_repair_failure_count = int(
+                trajectory.metadata.get("finish_repair_failure_count", 0)
+            )
+            trajectory.metadata["finish_repair_failure_count"] = finish_repair_failure_count + 1
+
+            self._emit_event(
+                PlannerEvent(
+                    event_type="finish_repair_failure",
+                    ts=self._time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    latency_ms=latency_ms,
+                    error="parse_failed",
+                )
+            )
+
+            return None
+
+        except Exception as exc:
+            latency_ms = (self._time_source() - start_time) * 1000
+
+            finish_repair_failure_count = int(
+                trajectory.metadata.get("finish_repair_failure_count", 0)
+            )
+            trajectory.metadata["finish_repair_failure_count"] = finish_repair_failure_count + 1
+
+            self._emit_event(
+                PlannerEvent(
+                    event_type="finish_repair_failure",
+                    ts=self._time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    latency_ms=latency_ms,
+                    error=f"{exc.__class__.__name__}: {exc}",
+                )
+            )
+
+            logger.warning(
+                "finish_repair_exception",
+                extra={"error": str(exc)},
+            )
+
+            return None
+
+    def _parse_finish_repair_response(self, raw: str) -> str | None:
+        """
+        Parse a finish repair response to extract raw_answer.
+
+        Returns:
+            The raw_answer string if found and valid, None otherwise.
+        """
+        # Strip any markdown fences
+        text = raw.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+
+        # Try JSON parsing
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                # Look for raw_answer or common answer keys
+                for key in ("raw_answer", "answer", "text", "response", "content"):
+                    if key in parsed:
+                        value = parsed[key]
+                        if isinstance(value, str) and value.strip():
+                            # Reject placeholder values
+                            lower = value.lower().strip()
+                            if lower not in {"<auto>", "unknown", "n/a", "", "<fill_value>"}:
+                                return value
+        except json.JSONDecodeError:
+            pass
+
+        # If the response is just plain text (not JSON), use it directly
+        # This handles cases where the model ignores the JSON instruction
+        if text and not text.startswith("{"):
+            # Clean up common prefixes
+            for prefix in ("raw_answer:", "answer:", "response:"):
+                if text.lower().startswith(prefix):
+                    text = text[len(prefix):].strip()
+            if text and text.lower() not in {"<auto>", "unknown", "n/a", "<fill_value>"}:
+                return text
+
+        return None
+
     def _record_invalid_response(
         self,
         trajectory: Trajectory,
@@ -3576,6 +3850,8 @@ class ReactPlanner:
         metadata["autofill_rejection_count"] = int(trajectory.metadata.get("autofill_rejection_count", 0))
         metadata["arg_fill_success_count"] = int(trajectory.metadata.get("arg_fill_success_count", 0))
         metadata["arg_fill_failure_count"] = int(trajectory.metadata.get("arg_fill_failure_count", 0))
+        metadata["finish_repair_success_count"] = int(trajectory.metadata.get("finish_repair_success_count", 0))
+        metadata["finish_repair_failure_count"] = int(trajectory.metadata.get("finish_repair_failure_count", 0))
 
         # Emit finish event
         extra_data: dict[str, Any] = {
