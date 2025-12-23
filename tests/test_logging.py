@@ -6,8 +6,6 @@ import json
 import logging
 from io import StringIO
 
-import pytest
-
 from penguiflow.logging import (
     ExtraFormatter,
     StructuredFormatter,
@@ -327,7 +325,6 @@ class TestConfigureLogging:
         # Add a dummy handler
         dummy_handler = logging.StreamHandler()
         logger.addHandler(dummy_handler)
-        initial_count = len(logger.handlers)
 
         configure_logging(level="INFO", logger_name=logger_name)
 

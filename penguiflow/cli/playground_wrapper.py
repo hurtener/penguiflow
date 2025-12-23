@@ -33,6 +33,10 @@ class ChatResult:
 class AgentWrapper(Protocol):
     """Common interface exposed to the FastAPI layer."""
 
+    async def initialize(self) -> None:
+        """Eagerly initialize resources (e.g., connect to MCP servers)."""
+        ...
+
     async def chat(
         self,
         query: str,
