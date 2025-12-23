@@ -1,3 +1,8 @@
+---
+name: update-local-development-agents
+description: Workflow for propagating penguiflow library changes to test agents. Use when modifying library code and need to test changes in test_generation agents.
+---
+
 # Updating Local Development Agents
 
 ## Overview

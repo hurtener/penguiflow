@@ -1,3 +1,8 @@
+---
+name: databricks-apps-cookie-auth
+description: Guide for authenticating with Databricks Apps using cookie-based auth when OAuth/PAT tokens don't work. Use when connecting to Databricks Apps with User Authorization enabled.
+---
+
 # Databricks Apps Cookie Authentication
 
 ## Problem Solved

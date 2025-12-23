@@ -1,3 +1,8 @@
+---
+name: library-implementation-principles
+description: Guidelines for implementing generalizable solutions in the penguiflow library. Use when modifying library code, adding features, or fixing bugs in penguiflow core.
+---
+
 # Library Implementation Principles
 
 ## Core Principle: Generalizability
