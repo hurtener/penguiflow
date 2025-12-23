@@ -51,20 +51,19 @@
 
 <style>
   .bottom-panel {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
+    flex-shrink: 0;
     background: #ffffff;
     border-top: 1px solid var(--color-border, #e8e1d7);
     box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
-    z-index: 90;
-    transition: max-height 0.3s ease;
+    display: flex;
+    flex-direction: column;
     max-height: 48px;
+    transition: max-height 0.3s ease;
   }
 
   .bottom-panel.open {
-    max-height: 50vh;
+    max-height: 45vh;
+    flex: 0 0 auto;
   }
 
   .toggle-bar {
@@ -77,6 +76,7 @@
     flex-direction: column;
     align-items: center;
     gap: 6px;
+    flex-shrink: 0;
   }
 
   .toggle-handle {
@@ -100,6 +100,7 @@
     gap: 8px;
     border-bottom: 1px solid var(--color-border, #e8e1d7);
     background: var(--color-bg, #f5f1eb);
+    flex-shrink: 0;
   }
 
   .panel-tab {
@@ -121,8 +122,25 @@
   }
 
   .panel-content {
+    flex: 1;
     padding: 16px;
-    max-height: calc(50vh - 100px);
     overflow-y: auto;
+    min-height: 0;
+  }
+
+  /* Override card styles within mobile panel for consistent sizing */
+  .panel-content :global(.card) {
+    max-height: none;
+    height: auto;
+    overflow: visible;
+  }
+
+  .panel-content :global(.trajectory-card),
+  .panel-content :global(.events-card),
+  .panel-content :global(.config-card) {
+    flex: none;
+    max-height: none;
+    min-height: auto;
+    overflow: visible;
   }
 </style>

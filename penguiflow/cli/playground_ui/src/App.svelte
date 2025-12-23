@@ -183,8 +183,9 @@
     flex: 1;
     display: flex;
     flex-direction: column;
-    padding: 64px 0 48px 0;
+    padding-top: 64px; /* Space for fixed header */
     overflow: hidden;
+    min-height: 0; /* Allow flex shrinking */
   }
 
   .mobile-main :global(.chat-card) {
@@ -194,5 +195,6 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    min-height: 200px; /* Ensure minimum usable space */
   }
 </style>

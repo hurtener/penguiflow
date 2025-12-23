@@ -40,7 +40,8 @@
   }
 
   :global(.trajectory-card) {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    min-height: 100px;
     max-height: 40%;
     overflow-y: auto;
   }

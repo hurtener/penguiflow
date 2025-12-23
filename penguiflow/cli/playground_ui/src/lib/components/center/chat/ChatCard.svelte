@@ -47,6 +47,7 @@
     display: flex;
     flex-direction: column;
     flex: 1;
+    min-height: 300px;
     overflow: hidden;
   }
 </style>
