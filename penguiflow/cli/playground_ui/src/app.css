@@ -110,7 +110,15 @@ body {
 
 #app {
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
+}
+
+/* Mobile-specific overrides */
+@media (max-width: 1200px) {
+  html, body, #app {
+    overflow: hidden;
+  }
 }
 
 button {

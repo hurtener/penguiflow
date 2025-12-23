@@ -69,7 +69,7 @@
   }
 
   .bubble.agent {
-    background: var(--color-card-bg, #fcfaf7);
+    background: #ffffff;
     border: 1px solid var(--color-border, #e8e1d7);
     border-radius: 16px 16px 16px 4px;
     color: var(--color-text, #1f1f1f);

@@ -18,11 +18,24 @@
   import { Page } from "$lib/components/layout";
   import { LeftSidebar, ProjectCard, SpecCard, GeneratorCard } from "$lib/components/sidebar-left";
   import { CenterColumn } from "$lib/components/center";
+  import { TrajectoryCard } from "$lib/components/center/trajectory";
   import { RightSidebar } from "$lib/components/sidebar-right";
+  import { EventsCard } from "$lib/components/sidebar-right/events";
+  import { ConfigCard } from "$lib/components/sidebar-right/config";
+  import { MobileHeader, MobileBottomPanel } from "$lib/components/mobile";
+  import { ChatCard } from "$lib/components/center/chat";
 
   // Reference to chat body for auto-scrolling
   let chatBodyEl = $state<HTMLDivElement | null>(null);
   let centerColumnRef: CenterColumn;
+  let chatCardRef: ChatCard;
+
+  // Responsive breakpoint detection
+  let isMobile = $state(false);
+
+  const checkMobile = () => {
+    isMobile = window.innerWidth <= 1200;
+  };
 
   // Auto-scroll to bottom when new messages arrive
   $effect(() => {
@@ -40,8 +53,11 @@
   });
 
   onMount(() => {
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
     initializeApp();
     return () => {
+      window.removeEventListener('resize', checkMobile);
       chatStreamManager.close();
       eventStreamManager.close();
     };
@@ -65,7 +81,11 @@
     setupStore.clearError();
     const contexts = setupStore.parseContexts();
     if (!contexts) {
-      centerColumnRef?.switchToSetup();
+      if (isMobile) {
+        chatCardRef?.switchToSetup();
+      } else {
+        centerColumnRef?.switchToSetup();
+      }
       return;
     }
     const { toolContext, llmContext } = contexts;
@@ -100,18 +120,79 @@
   };
 </script>
 
-<Page>
-  <LeftSidebar>
-    <ProjectCard />
-    <SpecCard />
-    <GeneratorCard />
-  </LeftSidebar>
+{#if isMobile}
+  <!-- Mobile Layout -->
+  <div class="mobile-layout">
+    <MobileHeader>
+      {#snippet infoContent()}
+        <ProjectCard />
+      {/snippet}
+      {#snippet specContent()}
+        <SpecCard />
+      {/snippet}
+      {#snippet actionsContent()}
+        <GeneratorCard />
+      {/snippet}
+    </MobileHeader>
 
-  <CenterColumn
-    bind:this={centerColumnRef}
-    onSendChat={sendChat}
-    bind:chatBodyEl
-  />
+    <main class="mobile-main">
+      <ChatCard bind:this={chatCardRef} onSendChat={sendChat} bind:chatBodyEl />
+    </main>
 
-  <RightSidebar />
-</Page>
+    <MobileBottomPanel>
+      {#snippet trajectoryContent()}
+        <TrajectoryCard />
+      {/snippet}
+      {#snippet eventsContent()}
+        <EventsCard />
+      {/snippet}
+      {#snippet configContent()}
+        <ConfigCard />
+      {/snippet}
+    </MobileBottomPanel>
+  </div>
+{:else}
+  <!-- Desktop Layout -->
+  <Page>
+    <LeftSidebar>
+      <ProjectCard />
+      <SpecCard />
+      <GeneratorCard />
+    </LeftSidebar>
+
+    <CenterColumn
+      bind:this={centerColumnRef}
+      onSendChat={sendChat}
+      bind:chatBodyEl
+    />
+
+    <RightSidebar />
+  </Page>
+{/if}
+
+<style>
+  .mobile-layout {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  .mobile-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 64px 0 48px 0;
+    overflow: hidden;
+  }
+
+  .mobile-main :global(.chat-card) {
+    flex: 1;
+    margin: 0;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+</style>

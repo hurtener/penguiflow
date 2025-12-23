@@ -35,6 +35,7 @@
     display: flex;
     gap: 8px;
     padding: 10px;
+    background: #ffffff;
     border-top: 1px solid var(--color-border, #e8e1d7);
   }
 
@@ -45,7 +46,7 @@
     border-radius: 12px;
     padding: 10px 14px;
     font-size: 13px;
-    background: var(--color-code-bg, #fbf8f3);
+    background: #ffffff;
     min-height: 44px;
     max-height: 120px;
     outline: none;
