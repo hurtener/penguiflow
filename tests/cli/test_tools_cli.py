@@ -5,11 +5,9 @@ from click.testing import CliRunner
 
 from penguiflow.cli import app
 from penguiflow.cli.tools import (
-    ConnectResult,
     ToolsCLIError,
     parse_env_overrides,
     run_tools_connect,
-    run_tools_list,
 )
 
 
@@ -42,9 +40,10 @@ def test_run_tools_connect_invalid_preset():
     """Test that invalid preset name raises ToolsCLIError."""
     with pytest.raises(ToolsCLIError) as exc_info:
         run_tools_connect("nonexistent_preset_xyz")
-    assert "nonexistent_preset_xyz" in str(exc_info.value.message).lower() or "not found" in str(
-        exc_info.value.message
-    ).lower()
+    assert (
+        "nonexistent_preset_xyz" in str(exc_info.value.message).lower()
+        or "not found" in str(exc_info.value.message).lower()
+    )
 
 
 def test_run_tools_connect_with_env_overrides():
