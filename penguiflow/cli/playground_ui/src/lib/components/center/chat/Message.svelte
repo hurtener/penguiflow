@@ -63,28 +63,28 @@
   }
 
   .bubble.user {
-    background: var(--color-btn-primary-gradient, linear-gradient(135deg, #31a6a0, #1a7c75));
+    background: var(--color-btn-primary-gradient);
     color: white;
     border-radius: 16px 16px 4px 16px;
   }
 
   .bubble.agent {
-    background: #ffffff;
-    border: 1px solid var(--color-border, #e8e1d7);
+    background: #ffffff; /* Intentionally pure white for chat bubbles */
+    border: 1px solid var(--color-border);
     border-radius: 16px 16px 16px 4px;
-    color: var(--color-text, #1f1f1f);
+    color: var(--color-text);
   }
 
   .meta-row {
     display: flex;
-    gap: 8px;
-    margin-top: 4px;
+    gap: var(--space-md);
+    margin-top: var(--space-xs);
     font-size: 10px;
-    color: var(--color-muted, #7a756d);
+    color: var(--color-muted);
   }
 
   .link {
-    color: var(--color-primary, #106c67);
+    color: var(--color-primary);
     cursor: pointer;
   }
 </style>

@@ -24,7 +24,7 @@
 
 <header class="mobile-header">
   <div class="header-bar">
-    <button class="menu-btn" onclick={() => isOpen = !isOpen} aria-label="Toggle menu">
+    <button type="button" class="menu-btn" onclick={() => isOpen = !isOpen} aria-label="Toggle menu">
       <span class="hamburger" class:open={isOpen}>
         <span></span>
         <span></span>
@@ -40,6 +40,7 @@
       <div class="drawer-tabs">
         {#each tabs as tab (tab.id)}
           <button
+            type="button"
             class="drawer-tab"
             class:active={activeTab === tab.id}
             onclick={() => activeTab = tab.id}
@@ -62,7 +63,7 @@
 </header>
 
 {#if isOpen}
-  <button class="backdrop" onclick={closeDrawer} aria-label="Close menu"></button>
+  <button type="button" class="backdrop" onclick={closeDrawer} aria-label="Close menu"></button>
 {/if}
 
 <style>
@@ -79,16 +80,16 @@
   .header-bar {
     display: flex;
     align-items: center;
-    padding: 12px 16px;
-    gap: 12px;
+    padding: var(--space-lg) var(--space-xl);
+    gap: var(--space-lg);
   }
 
   .menu-btn {
     width: 40px;
     height: 40px;
     border: none;
-    background: var(--color-tab-bg, #f2eee8);
-    border-radius: 10px;
+    background: var(--color-tab-bg);
+    border-radius: var(--radius-md);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -105,7 +106,7 @@
   .hamburger span {
     display: block;
     height: 2px;
-    background: var(--color-text, #1f1f1f);
+    background: var(--color-text);
     border-radius: 1px;
     transition: all 0.2s ease;
   }
@@ -125,7 +126,7 @@
   .agent-name {
     font-size: 16px;
     font-weight: 700;
-    color: var(--color-text, #1f1f1f);
+    color: var(--color-text);
     flex: 1;
     white-space: nowrap;
     overflow: hidden;
@@ -137,40 +138,40 @@
   }
 
   .drawer {
-    background: #ffffff;
-    border-top: 1px solid var(--color-border, #e8e1d7);
-    max-height: calc(100vh - 64px);
+    background: var(--color-card-bg);
+    border-top: 1px solid var(--color-border);
+    max-height: calc(100vh - var(--mobile-header-height));
     overflow-y: auto;
   }
 
   .drawer-tabs {
     display: flex;
-    padding: 8px 16px;
-    gap: 8px;
-    border-bottom: 1px solid var(--color-border, #e8e1d7);
-    background: var(--color-bg, #f5f1eb);
+    padding: var(--space-md) var(--space-xl);
+    gap: var(--space-md);
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-bg);
   }
 
   .drawer-tab {
     flex: 1;
-    padding: 8px 12px;
+    padding: var(--space-md) var(--space-lg);
     border: none;
-    border-radius: 8px;
+    border-radius: var(--radius-sm);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
     background: transparent;
-    color: var(--color-muted, #6b665f);
+    color: var(--color-muted);
     transition: all 0.15s ease;
   }
 
   .drawer-tab.active {
-    background: var(--color-tab-active-bg, #e8f6f2);
-    color: var(--color-tab-active-text, #106c67);
+    background: var(--color-tab-active-bg);
+    color: var(--color-tab-active-text);
   }
 
   .drawer-content {
-    padding: 16px;
+    padding: var(--space-xl);
   }
 
   .backdrop {

@@ -183,7 +183,7 @@
     flex: 1;
     display: flex;
     flex-direction: column;
-    padding-top: 64px; /* Space for fixed header */
+    padding-top: var(--mobile-header-height);
     overflow: hidden;
     min-height: 0; /* Allow flex shrinking */
   }

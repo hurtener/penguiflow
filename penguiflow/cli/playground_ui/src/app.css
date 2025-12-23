@@ -83,6 +83,11 @@
   --sidebar-right-width: 320px;
   --page-gap: 16px;
   --page-padding: 16px;
+
+  /* Mobile Layout */
+  --mobile-header-height: 64px;
+  --mobile-panel-collapsed: 48px;
+  --mobile-panel-expanded: 45vh;
 }
 
 /* ========== CSS RESET ========== */

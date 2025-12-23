@@ -33,34 +33,34 @@
 <style>
   .chat-input {
     display: flex;
-    gap: 8px;
-    padding: 10px;
-    background: #ffffff;
-    border-top: 1px solid var(--color-border, #e8e1d7);
+    gap: var(--space-md);
+    padding: var(--space-md);
+    background: #ffffff; /* Intentionally pure white for chat input area */
+    border-top: 1px solid var(--color-border);
   }
 
   textarea {
     flex: 1;
     resize: none;
-    border: 1px solid var(--color-border, #e8e1d7);
-    border-radius: 12px;
-    padding: 10px 14px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-md) 14px;
     font-size: 13px;
-    background: #ffffff;
+    background: #ffffff; /* Intentionally pure white for input field */
     min-height: 44px;
     max-height: 120px;
     outline: none;
   }
 
   textarea:focus {
-    border-color: var(--color-primary, #31a6a0);
+    border-color: var(--color-primary);
   }
 
   .send-btn {
     width: 44px;
     height: 44px;
-    border-radius: 12px;
-    background: var(--color-btn-primary-gradient, linear-gradient(135deg, #31a6a0, #1a7c75));
+    border-radius: var(--radius-lg);
+    background: var(--color-btn-primary-gradient);
     color: white;
     font-size: 18px;
     border: none;
