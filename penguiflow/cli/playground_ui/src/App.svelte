@@ -417,8 +417,9 @@
         }
 
         // Only add if not already present (prevent duplicates from follow stream)
+        const eventKey = `${data.event ?? ""}|${data.step ?? ""}|${data.ts ?? ""}`;
         const isDuplicate = plannerEvents.some(
-          (e) => e.node === data.node && e.thought === data.thought && e.latency_ms === data.latency_ms
+          (e) => `${e.event ?? ""}|${e.step ?? ""}|${e.ts ?? ""}` === eventKey
         );
         if (!isDuplicate) {
           plannerEvents.unshift({ id: randomId(), ...data, event: eventName });
@@ -571,8 +572,9 @@
         return;
       }
       // Only add if not already present (prevent duplicates)
+      const eventKey = `${data.event ?? ""}|${data.step ?? ""}|${data.ts ?? ""}`;
       const isDuplicate = plannerEvents.some(
-        (e) => e.node === data.node && e.thought === data.thought && e.latency_ms === data.latency_ms
+        (e) => `${e.event ?? ""}|${e.step ?? ""}|${e.ts ?? ""}` === eventKey
       );
       if (!isDuplicate) {
         plannerEvents.unshift({ id: randomId(), ...data, event: incomingEvent || (data.event as string) || "event" });

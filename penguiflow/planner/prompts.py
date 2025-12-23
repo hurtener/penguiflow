@@ -312,7 +312,7 @@ Current date: {current_date}
     # ─────────────────────────────────────────────────────────────
     prompt_sections.append("""<output_format>
 Think briefly in plain text, then respond with a single JSON object that matches the PlannerAction schema.
-
+If a tool would help, set "next_node" to the tool name and provide "args" in first turn.
 Write your JSON inside one markdown code block (```json ... ```).
 Do not emit multiple JSON objects or extra commentary after the code block.
 
@@ -632,4 +632,228 @@ def render_repair_message(error: str) -> str:
         "Previous response was invalid JSON or schema mismatch: "
         f"{error}. Reply with corrected JSON only. "
         "When finishing, set next_node to null and include raw_answer in args."
+    )
+
+
+def render_arg_repair_message(tool_name: str, error: str) -> str:
+    return (
+        f"CRITICAL: Your tool call to '{tool_name}' failed validation.\n\n"
+        f"Error: {error}\n\n"
+        "You MUST do ONE of the following:\n\n"
+        f"OPTION 1 - Fix the args and retry '{tool_name}':\n"
+        "- Provide ALL required arguments with REAL values\n"
+        "- Do NOT use placeholders like '<auto>', 'unknown', 'n/a', or empty strings\n"
+        "- Match the exact schema types (strings, numbers, booleans, arrays)\n\n"
+        "OPTION 2 - If you cannot provide valid args, FINISH instead:\n"
+        '- Set "next_node": null\n'
+        '- Set "args": {"raw_answer": "I cannot proceed because...", "requires_followup": true}\n\n'
+        "Respond with a single JSON object. No prose or markdown."
+    )
+
+
+def render_missing_args_message(
+    tool_name: str,
+    missing_fields: list[str],
+    *,
+    user_query: str | None = None,
+) -> str:
+    """Strict message when model forgot to provide required args (we autofilled them)."""
+    fields_str = ", ".join(f"'{f}'" for f in missing_fields)
+    example_args: dict[str, Any] = {}
+    if user_query:
+        for field in missing_fields:
+            if field in {"query", "question", "prompt", "input"}:
+                example_args[field] = user_query
+    example_payload = {
+        "thought": "fix missing tool args",
+        "next_node": tool_name,
+        "args": example_args if example_args else {missing_fields[0]: "<FILL_VALUE>"},
+    }
+    example_json = json.dumps(example_payload, ensure_ascii=False)
+    user_query_line = f"USER QUESTION: {user_query}\n\n" if user_query else ""
+    return (
+        "SYSTEM OVERRIDE: INVALID TOOL CALL.\n\n"
+        f"You called '{tool_name}' but FORGOT required arguments.\n"
+        f"MISSING FIELDS: {fields_str}\n\n"
+        f"{user_query_line}"
+        "You MUST do exactly ONE of the following:\n\n"
+        f"1) Retry '{tool_name}' with ALL missing fields filled using REAL values.\n"
+        "   - Do NOT leave fields empty.\n"
+        "   - Do NOT use placeholders like '<auto>', 'unknown', or ''.\n\n"
+        "Example (replace values as needed):\n"
+        f"{example_json}\n\n"
+        "2) If you cannot supply valid values, FINISH instead with:\n"
+        '   {"next_node": null, "args": {"raw_answer": "I need more information: ...", '
+        '"requires_followup": true}}\n\n'
+        "This is your LAST chance. Missing args again will force termination."
+    )
+
+
+def render_arg_fill_prompt(
+    tool_name: str,
+    missing_fields: list[str],
+    field_descriptions: dict[str, str] | None = None,
+    user_query: str | None = None,
+) -> str:
+    """
+    Generate a minimal prompt asking only for missing arg values.
+
+    This is a simplified format designed for small models that struggle
+    with full JSON schema compliance but can fill individual values.
+
+    Parameters
+    ----------
+    tool_name : str
+        Name of the tool being called.
+    missing_fields : list[str]
+        List of field names that need values.
+    field_descriptions : dict[str, str] | None
+        Optional mapping of field names to descriptions.
+    user_query : str | None
+        Original user query for context.
+
+    Returns
+    -------
+    str
+        A minimal prompt asking for the missing values.
+    """
+    field_descriptions = field_descriptions or {}
+
+    # Build field list with descriptions
+    field_lines: list[str] = []
+    for field in missing_fields:
+        desc = field_descriptions.get(field, "")
+        if desc:
+            field_lines.append(f'  - "{field}": {desc}')
+        else:
+            field_lines.append(f'  - "{field}"')
+
+    fields_block = "\n".join(field_lines)
+
+    # Build example response
+    example_values: dict[str, str] = {}
+    for field in missing_fields:
+        # Smart defaults based on common field names
+        if field in {"query", "question", "prompt", "input", "search_query"}:
+            example_values[field] = user_query if user_query else "your value here"
+        else:
+            example_values[field] = "your value here"
+
+    example_json = json.dumps(example_values, ensure_ascii=False, indent=2)
+
+    user_context = f'\nUser\'s request: "{user_query}"\n' if user_query else ""
+
+    return (
+        f"FILL MISSING VALUES\n\n"
+        f"Tool: {tool_name}\n"
+        f"Missing fields:\n{fields_block}\n"
+        f"{user_context}\n"
+        f"Reply with ONLY a JSON object containing the missing field values:\n"
+        f"{example_json}\n\n"
+        "Rules:\n"
+        "- Provide REAL values only (no placeholders like '<auto>' or 'unknown')\n"
+        "- Include ONLY the fields listed above\n"
+        "- Reply with valid JSON only, no explanation"
+    )
+
+
+def render_finish_repair_prompt(
+    thought: str | None = None,
+    user_query: str | None = None,
+    voice_context: str | None = None,
+) -> str:
+    """
+    Generate a prompt asking the model to provide the raw_answer it forgot.
+
+    This is used when the model tries to finish (next_node: null) but doesn't
+    include raw_answer in the args.
+
+    Parameters
+    ----------
+    thought : str | None
+        The model's thought from the finish action.
+    user_query : str | None
+        The original user query.
+    voice_context : str | None
+        Optional voice/personality context (from system_prompt_extra).
+        Included in full - no truncation.
+    """
+    context_parts: list[str] = []
+    if thought:
+        context_parts.append(f'Your thought was: "{thought}"')
+    if user_query:
+        context_parts.append(f'The user asked: "{user_query}"')
+
+    context = "\n".join(context_parts) if context_parts else ""
+
+    # Include full voice context if provided - no truncation
+    voice_section = ""
+    if voice_context:
+        voice_section = (
+            "\n<voice_and_style>\n"
+            "IMPORTANT - Your answer MUST follow this voice and style:\n\n"
+            f"{voice_context}\n"
+            "</voice_and_style>\n"
+        )
+
+    return (
+        "FINISH INCOMPLETE: You set next_node to null but didn't provide raw_answer.\n\n"
+        f"{context}\n"
+        f"{voice_section}\n"
+        "You MUST provide your answer. Reply with ONLY a JSON object:\n"
+        '{"raw_answer": "Your complete answer to the user here"}\n\n'
+        "Rules:\n"
+        "- Write a full, helpful response to the user's query\n"
+        "- Follow the voice and style specified above\n"
+        "- Do NOT use placeholders\n"
+        "- Reply with valid JSON only, no explanation"
+    )
+
+
+def render_arg_fill_clarification(
+    tool_name: str,
+    missing_fields: list[str],
+    field_descriptions: dict[str, str] | None = None,
+) -> str:
+    """
+    Generate a user-friendly clarification message when arg-fill fails.
+
+    This is shown to the user instead of a diagnostic dump.
+
+    Parameters
+    ----------
+    tool_name : str
+        Name of the tool being called.
+    missing_fields : list[str]
+        List of field names that need values.
+    field_descriptions : dict[str, str] | None
+        Optional mapping of field names to descriptions.
+
+    Returns
+    -------
+    str
+        A friendly message asking the user for the missing information.
+    """
+    field_descriptions = field_descriptions or {}
+
+    if len(missing_fields) == 1:
+        field = missing_fields[0]
+        desc = field_descriptions.get(field, "")
+        if desc:
+            return f"To use {tool_name}, I need you to provide: {desc}"
+        return f"To use {tool_name}, I need you to provide a value for '{field}'."
+
+    # Multiple fields
+    field_list: list[str] = []
+    for field in missing_fields:
+        desc = field_descriptions.get(field, "")
+        if desc:
+            field_list.append(f"- {field}: {desc}")
+        else:
+            field_list.append(f"- {field}")
+
+    fields_str = "\n".join(field_list)
+    return (
+        f"To use {tool_name}, I need you to provide the following information:\n"
+        f"{fields_str}"
     )

@@ -779,6 +779,9 @@ planner = ReactPlanner(
 | `error` | Exception occurs |
 | `reflection_critique` | Reflection scores an answer |
 | `stream_chunk` | Tool emits streaming chunk |
+| `planner_repair_attempt` | LLM response failed JSON/schema validation |
+| `planner_args_invalid` | Tool args rejected by validation policy |
+| `planner_args_suspect` | Suspect tool args detected (telemetry only) |
 
 ### Metrics in PlannerFinish
 
@@ -800,6 +803,133 @@ if isinstance(result, PlannerFinish):
     #   }
     # }
 ```
+
+### Capturing Repair Telemetry
+
+ReactPlanner emits a `planner_repair_attempt` event whenever the LLM response
+fails JSON/schema validation. Use this to build ACE/GEPA feedback loops and
+compare model reliability.
+
+Event payload fields:
+- `step`: planner step index (already in the event payload)
+- `attempt`: 1-based attempt number within the step
+- `error_type`: validation exception type
+- `error_summary`: short, sanitised error string
+- `next_node_detected`: tool name if salvage inferred it, else null
+- `response_len`: length of the raw LLM response (no content stored)
+- `had_code_fence`: true if response included ``` fences
+- `had_non_json_prefix`: true if response started with non-JSON text
+
+Example event capture:
+
+```python
+from penguiflow.planner import PlannerEvent
+
+def record_event(evt: PlannerEvent) -> None:
+    if evt.event_type == "planner_repair_attempt":
+        payload = evt.to_payload()
+        # Persist to your event store or metrics pipeline
+        logger.warning("planner_repair_attempt", extra=payload)
+
+planner = ReactPlanner(
+    llm="gpt-4o",
+    catalog=catalog,
+    event_callback=record_event,
+)
+```
+
+Summary counters are also surfaced on completion:
+
+```python
+result = await planner.run(...)
+if isinstance(result, PlannerFinish):
+    print(result.metadata["validation_failures_count"])
+    print(result.metadata["repair_attempts"])
+    print(result.metadata["salvage_used"])
+    print(result.metadata["consecutive_arg_failures"])
+```
+
+If you persist trajectories (e.g., via the Playground state store), detailed
+invalid-response entries are attached under `trajectory.metadata.invalid_responses`
+with the same sanitised fields. This avoids storing raw LLM text by default.
+
+### Tool Arg Validation (Production Guardrails)
+
+ReactPlanner can detect and optionally reject placeholder/tool-arg issues without
+hard-coding global heuristics. Configure this per tool via the `extra` metadata
+passed to the `@tool(...)` decorator:
+
+```python
+from penguiflow import tool
+from pydantic import BaseModel
+
+class QueryArgs(BaseModel):
+    query: str
+
+@tool(
+    desc="Search the analytics index.",
+    extra={
+        "arg_validation": {
+            "reject_placeholders": True,
+            "reject_autofill": True,
+            "placeholders": ["<auto>", "unknown", "n/a"],
+            "emit_suspect": True,
+        }
+    },
+)
+async def search(args: QueryArgs, ctx):
+    ...
+```
+
+Policy fields:
+- `reject_placeholders`: block calls when placeholder strings are detected
+- `reject_autofill`: block calls when required args were auto-filled
+- `placeholders`: list of strings to treat as placeholders (defaults to `<auto>`)
+- `emit_suspect`: emit telemetry for placeholder/autofill signals (default true)
+
+You can also attach a custom validator:
+
+```python
+def my_arg_validator(parsed_args, action):
+    if len(parsed_args.query.split()) < 3:
+        return "query too short"
+    return None
+
+@tool(extra={"arg_validator": my_arg_validator})
+async def search(args: QueryArgs, ctx):
+    ...
+```
+
+Telemetry:
+- `planner_args_invalid` is emitted when validation rejects args
+- `planner_args_suspect` is emitted when placeholder/autofill signals are detected
+
+Both events include: `tool`, `error_summary`, `placeholders`, `placeholder_paths`,
+`autofilled_fields`, and `source`. Detailed entries are also stored in
+`trajectory.metadata.invalid_args` / `trajectory.metadata.suspect_args`.
+
+#### Consecutive Failure Threshold
+
+Small models may loop indefinitely on invalid args, retrying the same tool with
+bad arguments. To prevent this, ReactPlanner includes a threshold that forces
+early termination:
+
+```python
+planner = ReactPlanner(
+    llm="llama-3.2-3b",
+    catalog=catalog,
+    max_consecutive_arg_failures=3,  # Default: 3
+)
+```
+
+When the threshold is reached:
+- Planner finishes with `reason="no_path"`
+- `payload.requires_followup = True` signals the caller that user input is needed
+- `payload.failure_reason = "consecutive_arg_failures"` identifies the cause
+- `metadata.consecutive_arg_failures` contains the count
+
+The counter resets whenever a tool executes successfully, so interleaving valid
+calls prevents false positives.
 
 ---
 

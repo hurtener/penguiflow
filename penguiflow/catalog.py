@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
@@ -34,6 +35,15 @@ class NodeSpec:
 
     def to_tool_record(self) -> dict[str, Any]:
         """Convert the spec to a serialisable record for prompting."""
+        safe_extra: dict[str, Any] = {}
+        for key, value in self.extra.items():
+            if callable(value):
+                continue
+            try:
+                json.dumps(value, ensure_ascii=False)
+            except (TypeError, ValueError):
+                continue
+            safe_extra[key] = value
 
         return {
             "name": self.name,
@@ -46,7 +56,7 @@ class NodeSpec:
             "safety_notes": self.safety_notes,
             "args_schema": self.args_model.model_json_schema(),
             "out_schema": self.out_model.model_json_schema(),
-            "extra": dict(self.extra),
+            "extra": safe_extra,
         }
 
 
@@ -65,9 +75,17 @@ def tool(
     cost_hint: str | None = None,
     latency_hint_ms: int | None = None,
     safety_notes: str | None = None,
+    arg_validation: Mapping[str, Any] | None = None,
+    arg_validator: Callable[..., Any] | None = None,
     extra: Mapping[str, Any] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Annotate a node function with catalog metadata."""
+
+    extra_payload = dict(extra) if extra else {}
+    if arg_validation is not None:
+        extra_payload["arg_validation"] = dict(arg_validation)
+    if arg_validator is not None:
+        extra_payload["arg_validator"] = arg_validator
 
     payload: dict[str, Any] = {
         "desc": desc,
@@ -77,7 +95,7 @@ def tool(
         "cost_hint": cost_hint,
         "latency_hint_ms": latency_hint_ms,
         "safety_notes": safety_notes,
-        "extra": dict(extra) if extra else {},
+        "extra": extra_payload,
     }
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:

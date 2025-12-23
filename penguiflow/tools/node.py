@@ -17,7 +17,7 @@ from penguiflow.planner.context import ToolContext
 from penguiflow.registry import ModelRegistry
 
 from .adapters import adapt_exception
-from .config import AuthType, ExternalToolConfig, TransportType, UtcpMode
+from .config import AuthType, ExternalToolConfig, McpTransportMode, TransportType, UtcpMode
 from .errors import ToolAuthError, ToolConnectionError, ToolNodeError
 
 if TYPE_CHECKING:
@@ -45,8 +45,13 @@ class ToolNode:
         self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
         self._connect_lock = asyncio.Lock()
 
-    async def connect(self) -> None:
-        """Connect to tool source and discover available tools."""
+    async def connect(self, ctx: ToolContext | None = None) -> None:
+        """Connect to tool source and discover available tools.
+
+        Args:
+            ctx: Optional ToolContext for HITL OAuth during connection.
+                 Required if auth_type is OAUTH2_USER.
+        """
         current_loop = asyncio.get_running_loop()
 
         # Check if we need to reconnect due to event loop change
@@ -66,8 +71,11 @@ class ToolNode:
             self._tools = []
             self._tool_name_map.clear()
 
+            # Resolve auth headers for connection (supports HITL OAuth if ctx provided)
+            auth_headers = await self._resolve_connection_auth(ctx)
+
             if self.config.transport == TransportType.MCP:
-                await self._connect_mcp()
+                await self._connect_mcp(auth_headers)
             elif self.config.transport in {TransportType.HTTP, TransportType.UTCP, TransportType.CLI}:
                 await self._connect_utcp()
             else:
@@ -78,11 +86,39 @@ class ToolNode:
             self._connected = True
             self._connected_loop = current_loop
 
-    async def _connect_mcp(self) -> None:
-        """Connect via FastMCP client."""
+    async def _resolve_connection_auth(self, ctx: ToolContext | None) -> dict[str, str]:
+        """Resolve auth headers for connection phase.
+
+        For static auth (BEARER, API_KEY, COOKIE), returns headers directly.
+        For OAUTH2_USER, requires ctx and triggers HITL OAuth flow.
+        """
+        if self.config.auth_type == AuthType.NONE:
+            return {}
+
+        # Static auth types don't need ctx
+        if self.config.auth_type in {AuthType.BEARER, AuthType.API_KEY, AuthType.COOKIE}:
+            return self._get_static_auth_headers()
+
+        # OAUTH2_USER requires ctx for HITL flow
+        if self.config.auth_type == AuthType.OAUTH2_USER:
+            if ctx is None:
+                raise ToolAuthError(
+                    f"ToolNode '{self.config.name}' requires HITL OAuth but no ToolContext provided. "
+                    "Call connect(ctx) with a ToolContext containing user_id."
+                )
+            return await self._resolve_user_oauth(ctx)
+
+        return {}
+
+    async def _connect_mcp(self, auth_headers: dict[str, str] | None = None) -> None:
+        """Connect via FastMCP client.
+
+        Args:
+            auth_headers: Optional auth headers resolved during connect().
+        """
         try:
             from fastmcp import Client as MCPClient
-            from fastmcp.client.transports import StdioTransport
+            from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
         except ModuleNotFoundError as exc:  # pragma: no cover - dependency hint
             raise ToolConnectionError(
                 "fastmcp is required for MCP ToolNode. Install penguiflow[planner].",
@@ -93,8 +129,13 @@ class ToolNode:
             connection = self.config.connection
             transport: Any
             if connection.startswith(("http://", "https://", "ws://", "wss://")):
-                # URL-based transport (SSE, WebSocket) - let fastmcp infer
-                transport = connection
+                # URL-based transport - determine which to use
+                transport = self._resolve_mcp_url_transport(
+                    connection,
+                    auth_headers,
+                    SSETransport,
+                    StreamableHttpTransport,
+                )
             else:
                 # Shell command - split into command + args and create StdioTransport
                 import shlex
@@ -125,6 +166,54 @@ class ToolNode:
             ) from exc
 
         self._tools = self._convert_mcp_tools(mcp_tools)
+
+    def _resolve_mcp_url_transport(
+        self,
+        connection: str,
+        auth_headers: dict[str, str] | None,
+        sse_transport_cls: type[Any],
+        streamable_http_transport_cls: type[Any],
+    ) -> Any:
+        """Resolve the appropriate MCP transport for URL-based connections.
+
+        Transport selection logic:
+        1. If mcp_transport_mode is explicitly set (SSE or STREAMABLE_HTTP), use that
+        2. For AUTO mode without auth headers, let FastMCP auto-detect (pass URL string)
+        3. For AUTO mode with auth headers, detect from URL pattern:
+           - /sse → SSE transport
+           - /mcp or other → StreamableHTTP (modern default)
+
+        Args:
+            connection: The URL to connect to
+            auth_headers: Auth headers if any
+            sse_transport_cls: SSETransport class from fastmcp
+            streamable_http_transport_cls: StreamableHttpTransport class from fastmcp
+
+        Returns:
+            Transport object or URL string for FastMCP client
+        """
+        mode = self.config.mcp_transport_mode
+
+        # Explicit SSE mode
+        if mode == McpTransportMode.SSE:
+            return sse_transport_cls(url=connection, headers=auth_headers or {})
+
+        # Explicit StreamableHTTP mode
+        if mode == McpTransportMode.STREAMABLE_HTTP:
+            return streamable_http_transport_cls(url=connection, headers=auth_headers or {})
+
+        # AUTO mode
+        if not auth_headers:
+            # No auth headers - let FastMCP auto-detect from URL
+            return connection
+
+        # AUTO mode with auth headers - need to construct transport explicitly
+        # Detect from URL pattern
+        if "/sse" in connection.lower():
+            return sse_transport_cls(url=connection, headers=auth_headers)
+
+        # Default to StreamableHTTP (modern MCP standard)
+        return streamable_http_transport_cls(url=connection, headers=auth_headers)
 
     async def _connect_utcp(self) -> None:
         """Connect via UTCP client (manual_url or base_url)."""
@@ -225,6 +314,27 @@ class ToolNode:
 
     # ─── Auth Resolution ────────────────────────────────────────────────────────
 
+    def _get_static_auth_headers(self) -> dict[str, str]:
+        """Get static auth headers (BEARER/API_KEY/COOKIE) for connection-time auth.
+
+        Returns empty dict for NONE or OAUTH2_USER (which requires ToolContext).
+        """
+        if self.config.auth_type == AuthType.API_KEY:
+            key = self._substitute_env(str(self.config.auth_config.get("api_key", "")))
+            header = self.config.auth_config.get("header", "X-API-Key")
+            return {str(header): key}
+
+        if self.config.auth_type == AuthType.BEARER:
+            token = self._substitute_env(str(self.config.auth_config.get("token", "")))
+            return {"Authorization": f"Bearer {token}"}
+
+        if self.config.auth_type == AuthType.COOKIE:
+            cookie_name = self._substitute_env(str(self.config.auth_config.get("cookie_name", "")))
+            cookie_value = self._substitute_env(str(self.config.auth_config.get("cookie_value", "")))
+            return {"Cookie": f"{cookie_name}={cookie_value}"}
+
+        return {}
+
     async def _resolve_auth(self, ctx: ToolContext) -> dict[str, str]:
         """Resolve authentication headers, pausing for OAuth if needed."""
         if self.config.auth_type == AuthType.NONE:
@@ -238,6 +348,11 @@ class ToolNode:
         if self.config.auth_type == AuthType.BEARER:
             token = self._substitute_env(str(self.config.auth_config.get("token", "")))
             return {"Authorization": f"Bearer {token}"}
+
+        if self.config.auth_type == AuthType.COOKIE:
+            cookie_name = self._substitute_env(str(self.config.auth_config.get("cookie_name", "")))
+            cookie_value = self._substitute_env(str(self.config.auth_config.get("cookie_value", "")))
+            return {"Cookie": f"{cookie_name}={cookie_value}"}
 
         if self.config.auth_type == AuthType.OAUTH2_USER:
             return await self._resolve_user_oauth(ctx)
@@ -431,6 +546,10 @@ class ToolNode:
 
             bound_fn = functools.partial(_make_call, namespaced)
 
+            extra: dict[str, Any] = {"source": "mcp", "namespace": self.config.name}
+            if isinstance(self.config.arg_validation, dict):
+                extra["arg_validation"] = dict(self.config.arg_validation)
+
             specs.append(
                 NodeSpec(
                     node=Node(bound_fn, name=namespaced),
@@ -440,7 +559,7 @@ class ToolNode:
                     out_model=out_model,
                     side_effects="external",
                     tags=("mcp", self.config.name),
-                    extra={"source": "mcp", "namespace": self.config.name},
+                    extra=extra,
                 ),
             )
 
@@ -480,6 +599,10 @@ class ToolNode:
 
             bound_fn = functools.partial(_make_call, namespaced)
 
+            extra: dict[str, Any] = {"source": "utcp", "namespace": self.config.name}
+            if isinstance(self.config.arg_validation, dict):
+                extra["arg_validation"] = dict(self.config.arg_validation)
+
             specs.append(
                 NodeSpec(
                     node=Node(bound_fn, name=namespaced),
@@ -489,7 +612,7 @@ class ToolNode:
                     out_model=out_model,
                     side_effects="external",
                     tags=("utcp", self.config.name),
-                    extra={"source": "utcp", "namespace": self.config.name},
+                    extra=extra,
                 ),
             )
         return specs

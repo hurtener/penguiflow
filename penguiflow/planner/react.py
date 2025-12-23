@@ -71,6 +71,7 @@ from .trajectory import Trajectory, TrajectoryStep, TrajectorySummary
 logger = logging.getLogger("penguiflow.planner")
 
 _STM_SUMMARY_SCHEMA_NAME = "short_term_memory_summary"
+AUTO_STR_SENTINEL = "<auto>"
 
 
 class _ShortTermMemorySummary(BaseModel):
@@ -174,6 +175,23 @@ def _salvage_action_payload(raw: str) -> PlannerAction | None:
         return None
 
 
+def _summarize_validation_error(exc: ValidationError, *, limit: int = 240) -> str:
+    """Build a compact, human-readable validation summary."""
+    summary = str(exc)
+    try:
+        errors = exc.errors()
+    except Exception:
+        errors = []
+    if errors:
+        first = errors[0]
+        loc = ".".join(str(part) for part in first.get("loc", []))
+        msg = str(first.get("msg") or "validation error")
+        summary = f"{loc}: {msg}" if loc else msg
+    if len(summary) > limit:
+        summary = summary[: limit - 3] + "..."
+    return summary
+
+
 def _default_for_annotation(annotation: Any) -> Any:
     """Generate a lightweight placeholder for a required field."""
 
@@ -185,7 +203,7 @@ def _default_for_annotation(annotation: Any) -> Any:
 
     if origin is None:
         if annotation is str:
-            return "unknown"
+            return AUTO_STR_SENTINEL
         if annotation is bool:
             return False
         if annotation is int:
@@ -235,6 +253,28 @@ def _autofill_missing_args(
         return None
 
     return provided, tuple(filled.keys())
+
+
+def _scan_placeholder_paths(
+    value: Any,
+    placeholders: Sequence[str],
+    path: str = "",
+) -> list[str]:
+    matches: list[str] = []
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            key_str = str(key)
+            child_path = f"{path}.{key_str}" if path else key_str
+            matches.extend(_scan_placeholder_paths(item, placeholders, child_path))
+        return matches
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for idx, item in enumerate(value):
+            child_path = f"{path}[{idx}]" if path else f"[{idx}]"
+            matches.extend(_scan_placeholder_paths(item, placeholders, child_path))
+        return matches
+    if isinstance(value, str) and value in placeholders:
+        matches.append(path or "<root>")
+    return matches
 
 
 @dataclass(slots=True)
@@ -962,6 +1002,16 @@ class ReactPlanner:
         blacklists, or tag requirements) for multi-tenant and safety use cases.
     repair_attempts : int
         Max attempts to repair invalid JSON from LLM. Default: 3.
+    max_consecutive_arg_failures : int
+        Max consecutive tool arg validation failures before forcing a finish
+        with requires_followup=True. Helps small models avoid infinite loops
+        when they repeatedly produce invalid args. Default: 3.
+    arg_fill_enabled : bool
+        Enable arg-fill mode for missing tool arguments. When True, if a tool
+        call has valid tool selection but missing/invalid args, the planner
+        will make a simplified LLM call asking only for the missing values
+        instead of requiring a full JSON repair. This significantly improves
+        success rates for small models. Default: True.
     deadline_s : float | None
         Wall-clock deadline for planning session (seconds from start).
     hop_budget : int | None
@@ -1019,6 +1069,8 @@ class ReactPlanner:
         summarizer_llm: str | Mapping[str, Any] | None = None,
         planning_hints: Mapping[str, Any] | None = None,
         repair_attempts: int = 3,
+        max_consecutive_arg_failures: int = 3,
+        arg_fill_enabled: bool = True,
         deadline_s: float | None = None,
         hop_budget: int | None = None,
         time_source: Callable[[], float] | None = None,
@@ -1075,8 +1127,12 @@ class ReactPlanner:
             extra=system_prompt_extra,
             planning_hints=hints_payload,
         )
+        # Store extra for use in repair prompts (voice/personality context)
+        self._system_prompt_extra = system_prompt_extra
         self._max_iters = max_iters
         self._repair_attempts = repair_attempts
+        self._max_consecutive_arg_failures = max_consecutive_arg_failures
+        self._arg_fill_enabled = arg_fill_enabled
         self._json_schema_mode = json_schema_mode
         self._token_budget = token_budget
         self._pause_enabled = pause_enabled
@@ -1675,15 +1731,30 @@ class ReactPlanner:
                 action = await self.step(trajectory)
 
                 # Log the action received from LLM
-                logger.info(
-                    "planner_action",
-                    extra={
-                        "step": len(trajectory.steps),
-                        "thought": action.thought,
-                        "next_node": action.next_node,
-                        "has_plan": action.plan is not None,
-                    },
-                )
+                action_extra: dict[str, Any] = {
+                    "step": len(trajectory.steps),
+                    "thought": action.thought,
+                    "next_node": action.next_node,
+                    "has_plan": action.plan is not None,
+                }
+                # For finish actions, log the args to help debug answer extraction issues
+                if action.next_node is None:
+                    if action.args:
+                        args_preview = str(action.args)
+                        if len(args_preview) > 500:
+                            args_preview = args_preview[:500] + "..."
+                        action_extra["args_preview"] = args_preview
+                        if isinstance(action.args, dict):
+                            action_extra["args_keys"] = list(action.args.keys())
+                            action_extra["has_raw_answer"] = "raw_answer" in action.args
+                        else:
+                            action_extra["args_keys"] = None
+                            action_extra["has_raw_answer"] = False
+                    else:
+                        action_extra["args_preview"] = "None"
+                        action_extra["args_keys"] = None
+                        action_extra["has_raw_answer"] = False
+                logger.info("planner_action", extra=action_extra)
 
                 # Check constraints BEFORE executing parallel plan or any action
                 constraint_error = self._check_action_constraints(action, trajectory, tracker)
@@ -1710,6 +1781,45 @@ class ReactPlanner:
                     continue
 
                 if action.next_node is None:
+                    # Check if raw_answer is missing and attempt finish repair
+                    has_raw_answer = (
+                        isinstance(action.args, dict)
+                        and action.args.get("raw_answer")
+                        and action.args["raw_answer"] not in {"", None, "<auto>"}
+                    )
+
+                    if not has_raw_answer and not trajectory.metadata.get("finish_repair_attempted"):
+                        # Model tried to finish without raw_answer - attempt repair
+                        logger.info(
+                            "finish_repair_attempt",
+                            extra={
+                                "has_args": action.args is not None,
+                                "args_keys": list(action.args.keys()) if isinstance(action.args, dict) else None,
+                                "thought": action.thought,
+                            },
+                        )
+
+                        filled_answer = await self._attempt_finish_repair(
+                            trajectory,
+                            action,
+                        )
+
+                        if filled_answer is not None:
+                            # Success! Update action.args with the raw_answer
+                            if action.args is None:
+                                action.args = {}
+                            if isinstance(action.args, dict):
+                                action.args["raw_answer"] = filled_answer
+                            logger.info(
+                                "finish_repair_success",
+                                extra={"answer_len": len(filled_answer)},
+                            )
+                        else:
+                            logger.warning(
+                                "finish_repair_failed",
+                                extra={"thought": action.thought},
+                            )
+
                     candidate_answer = action.args or last_observation
                     metadata_reflection: dict[str, Any] | None = None
 
@@ -1969,6 +2079,7 @@ class ReactPlanner:
                     trajectory.summary = None
                     continue
 
+                autofilled_fields: tuple[str, ...] = ()
                 try:
                     parsed_args = spec.args_model.model_validate(action.args or {})
                 except ValidationError as exc:
@@ -1978,6 +2089,7 @@ class ReactPlanner:
                         try:
                             parsed_args = spec.args_model.model_validate(autofilled_args)
                             action.args = autofilled_args
+                            autofilled_fields = filled_fields
                             logger.info(
                                 "planner_autofill_args",
                                 extra={
@@ -1998,6 +2110,207 @@ class ReactPlanner:
                             spec.name,
                             json.dumps(exc.errors(), ensure_ascii=False),
                         )
+                        trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                        trajectory.summary = None
+                        continue
+
+                arg_validation_error = self._apply_arg_validation(
+                    trajectory,
+                    spec=spec,
+                    action=action,
+                    parsed_args=parsed_args,
+                    autofilled_fields=autofilled_fields,
+                )
+                if arg_validation_error is not None:
+                    autofill_rejection_count = int(trajectory.metadata.get("autofill_rejection_count", 0))
+                    consecutive_failures = int(trajectory.metadata.get("consecutive_arg_failures", 0))
+
+                    # Force finish conditions:
+                    # 1. Second autofill rejection (gave model one chance with explicit field names)
+                    # 2. Consecutive failures threshold reached
+                    force_finish = (
+                        (autofilled_fields and autofill_rejection_count >= 2)
+                        or consecutive_failures >= self._max_consecutive_arg_failures
+                    )
+
+                    if force_finish:
+                        failure_reason = (
+                            "autofill_rejection"
+                            if autofilled_fields and autofill_rejection_count >= 2
+                            else "consecutive_arg_failures"
+                        )
+                        logger.warning(
+                            "planner_arg_failure_threshold",
+                            extra={
+                                "tool": spec.name,
+                                "consecutive_failures": consecutive_failures,
+                                "autofill_rejection_count": autofill_rejection_count,
+                                "threshold": self._max_consecutive_arg_failures,
+                                "last_error": arg_validation_error,
+                                "failure_reason": failure_reason,
+                            },
+                        )
+                        trajectory.steps.append(TrajectoryStep(action=action, error=arg_validation_error))
+                        trajectory.artifacts = artifact_collector.snapshot()
+                        trajectory.sources = source_collector.snapshot()
+                        return self._finish(
+                            trajectory,
+                            reason="no_path",
+                            payload={
+                                "requires_followup": True,
+                                "failure_reason": failure_reason,
+                                "tool": spec.name,
+                                "last_error": arg_validation_error,
+                                "missing_fields": list(autofilled_fields) if autofilled_fields else None,
+                            },
+                            thought=(
+                                f"Cannot proceed: {failure_reason} for tool '{spec.name}'. "
+                                f"Last error: {arg_validation_error}"
+                            ),
+                            constraints=tracker,
+                            metadata_extra={"requires_followup": True},
+                        )
+
+                    # Try arg-fill if eligible (only for autofilled fields, i.e. missing required args)
+                    if autofilled_fields and self._is_arg_fill_eligible(
+                        spec, autofilled_fields, trajectory
+                    ):
+                        filled_args = await self._attempt_arg_fill(
+                            trajectory,
+                            spec,
+                            action,
+                            list(autofilled_fields),
+                        )
+
+                        if filled_args is not None:
+                            # Merge filled args into action
+                            merged_args = dict(action.args or {})
+                            merged_args.update(filled_args)
+
+                            # Re-validate with merged args
+                            try:
+                                parsed_args = spec.args_model.model_validate(merged_args)
+                                action.args = merged_args
+
+                                # Re-run arg validation (placeholders, custom validators)
+                                revalidation_error = self._apply_arg_validation(
+                                    trajectory,
+                                    spec=spec,
+                                    action=action,
+                                    parsed_args=parsed_args,
+                                    autofilled_fields=(),  # No longer autofilled
+                                )
+
+                                if revalidation_error is None:
+                                    # Success! Reset failure counters and proceed to tool execution
+                                    trajectory.metadata["consecutive_arg_failures"] = 0
+                                    trajectory.metadata["arg_fill_attempted"] = False
+
+                                    logger.info(
+                                        "arg_fill_merged_success",
+                                        extra={
+                                            "tool": spec.name,
+                                            "filled_fields": list(filled_args.keys()),
+                                        },
+                                    )
+
+                                    # Jump to tool execution (parsed_args is now valid)
+                                    # We need to NOT continue the loop, but proceed with execution below
+                                    # This is done by not entering the repair flow
+                                    pass  # Fall through to tool execution
+                                else:
+                                    # Arg-fill succeeded but validation still failed
+                                    logger.warning(
+                                        "arg_fill_revalidation_failed",
+                                        extra={
+                                            "tool": spec.name,
+                                            "filled_fields": list(filled_args.keys()),
+                                            "error": revalidation_error,
+                                        },
+                                    )
+                                    # Fall through to repair message
+                                    repair_msg = prompts.render_arg_repair_message(
+                                        spec.name,
+                                        revalidation_error,
+                                    )
+                                    if isinstance(trajectory.metadata, MutableMapping):
+                                        trajectory.metadata["arg_repair_message"] = repair_msg
+                                    error = prompts.render_validation_error(spec.name, revalidation_error)
+                                    trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                                    trajectory.summary = None
+                                    continue
+
+                            except ValidationError as merge_exc:
+                                # Merge failed validation
+                                logger.warning(
+                                    "arg_fill_merge_validation_failed",
+                                    extra={
+                                        "tool": spec.name,
+                                        "filled_fields": list(filled_args.keys()),
+                                        "error": str(merge_exc),
+                                    },
+                                )
+                                # Fall through to repair message
+                                repair_msg = prompts.render_arg_repair_message(
+                                    spec.name,
+                                    json.dumps(merge_exc.errors(), ensure_ascii=False),
+                                )
+                                if isinstance(trajectory.metadata, MutableMapping):
+                                    trajectory.metadata["arg_repair_message"] = repair_msg
+                                error = prompts.render_validation_error(
+                                    spec.name,
+                                    json.dumps(merge_exc.errors(), ensure_ascii=False),
+                                )
+                                trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                                trajectory.summary = None
+                                continue
+                        else:
+                            # Arg-fill failed, generate user-friendly clarification
+                            field_descriptions = self._extract_field_descriptions(spec)
+                            clarification = prompts.render_arg_fill_clarification(
+                                spec.name,
+                                list(autofilled_fields),
+                                field_descriptions,
+                            )
+
+                            # Use clarification as the failure message instead of diagnostic dump
+                            trajectory.steps.append(TrajectoryStep(action=action, error=arg_validation_error))
+                            trajectory.artifacts = artifact_collector.snapshot()
+                            trajectory.sources = source_collector.snapshot()
+                            return self._finish(
+                                trajectory,
+                                reason="no_path",
+                                payload={
+                                    "requires_followup": True,
+                                    "failure_reason": "arg_fill_failed",
+                                    "tool": spec.name,
+                                    "clarification": clarification,
+                                    "missing_fields": list(autofilled_fields),
+                                },
+                                thought=clarification,
+                                constraints=tracker,
+                                metadata_extra={"requires_followup": True},
+                            )
+                    else:
+                        # Arg-fill not eligible or not enabled, use standard repair flow
+                        # Choose repair message based on whether this was an autofill rejection
+                        if autofilled_fields:
+                            # First autofill rejection: tell model exactly which fields it forgot
+                            repair_msg = prompts.render_missing_args_message(
+                                spec.name,
+                                list(autofilled_fields),
+                                user_query=(trajectory.resume_user_input or trajectory.query),
+                            )
+                        else:
+                            # Regular arg validation failure
+                            repair_msg = prompts.render_arg_repair_message(
+                                spec.name,
+                                arg_validation_error,
+                            )
+
+                        if isinstance(trajectory.metadata, MutableMapping):
+                            trajectory.metadata["arg_repair_message"] = repair_msg
+                        error = prompts.render_validation_error(spec.name, arg_validation_error)
                         trajectory.steps.append(TrajectoryStep(action=action, error=error))
                         trajectory.summary = None
                         continue
@@ -2093,6 +2406,10 @@ class ReactPlanner:
                     )
                 )
 
+                # Reset consecutive arg failure counter on successful tool execution
+                if trajectory.metadata.get("consecutive_arg_failures"):
+                    trajectory.metadata["consecutive_arg_failures"] = 0
+
             if tracker.deadline_triggered or tracker.hop_exhausted:
                 thought = (
                     prompts.render_deadline_exhausted()
@@ -2123,11 +2440,25 @@ class ReactPlanner:
 
     async def step(self, trajectory: Trajectory) -> PlannerAction:
         base_messages = await self._build_messages(trajectory)
+        arg_repair_message: str | None = None
+        if isinstance(trajectory.metadata, MutableMapping):
+            arg_repair_message = trajectory.metadata.pop("arg_repair_message", None)
+        if arg_repair_message:
+            patched: list[dict[str, str]] = []
+            inserted = False
+            for msg in base_messages:
+                if not inserted and msg.get("role") != "system":
+                    patched.append({"role": "system", "content": arg_repair_message})
+                    inserted = True
+                patched.append(msg)
+            if not inserted:
+                patched.append({"role": "system", "content": arg_repair_message})
+            base_messages = patched
         messages: list[dict[str, str]] = list(base_messages)
         last_error: str | None = None
         last_raw: str | None = None
 
-        for _ in range(self._repair_attempts):
+        for attempt in range(1, self._repair_attempts + 1):
             if last_error is not None:
                 messages = list(base_messages) + [
                     {
@@ -2277,10 +2608,40 @@ class ReactPlanner:
             last_raw = raw
             self._cost_tracker.record_main_call(cost)
 
+            # Debug log the raw LLM response for troubleshooting
+            logger.debug(
+                "llm_raw_response",
+                extra={
+                    "attempt": attempt,
+                    "response_len": len(raw),
+                    "response_preview": raw[:1000] if len(raw) > 1000 else raw,
+                },
+            )
+
             try:
-                return PlannerAction.model_validate_json(raw)
+                action = PlannerAction.model_validate_json(raw)
+                # Log successful parse with args info for finish actions
+                if action.next_node is None:
+                    logger.debug(
+                        "finish_action_parsed",
+                        extra={
+                            "has_args": action.args is not None,
+                            "args_keys": list(action.args.keys()) if isinstance(action.args, dict) else None,
+                            "raw_answer_present": "raw_answer" in (action.args or {}),
+                        },
+                    )
+                return action
             except ValidationError as exc:
                 salvaged = _salvage_action_payload(raw)
+                will_retry = salvaged is None and attempt < self._repair_attempts
+                self._record_invalid_response(
+                    trajectory,
+                    attempt=attempt,
+                    raw=raw,
+                    error=exc,
+                    salvage_action=salvaged,
+                    will_retry=will_retry,
+                )
                 if salvaged is not None:
                     logger.info(
                         "planner_action_salvaged",
@@ -2513,11 +2874,19 @@ class ReactPlanner:
                         payload_data["raw_answer"] = extracted
                         break
             else:
+                # Log detailed info to help debug why no answer was extracted
+                args_keys = list(args.keys()) if isinstance(args, dict) else None
                 logger.warning(
                     "no_answer_extracted",
                     extra={
-                        "input_args": str(args)[:200] if args else None,
+                        "input_args": str(args)[:500] if args else None,
+                        "input_args_type": type(args).__name__ if args else None,
+                        "input_args_keys": args_keys,
                         "last_observation": str(last_observation)[:200] if last_observation else None,
+                        "expected_keys": [
+                            "raw_answer", "answer", "text", "result", "output",
+                            "response", "message", "content",
+                        ],
                     },
                 )
                 payload_data["raw_answer"] = "No answer produced."
@@ -2701,7 +3070,8 @@ class ReactPlanner:
         payload = event.to_payload()
         for reserved in ("args", "msg", "levelname", "levelno", "exc_info"):
             payload.pop(reserved, None)
-        logger.info(event.event_type, extra=payload)
+        log_fn = logger.debug if event.event_type == "llm_stream_chunk" else logger.info
+        log_fn(event.event_type, extra=payload)
 
         # Invoke callback if provided
         if self._event_callback is not None:
@@ -2716,6 +3086,731 @@ class ReactPlanner:
                     },
                 )
         self._last_event = event
+
+    def _record_arg_event(
+        self,
+        trajectory: Trajectory,
+        *,
+        event_type: str,
+        spec: NodeSpec,
+        error_summary: str | None,
+        placeholders: Sequence[str],
+        placeholder_paths: Sequence[str],
+        autofilled_fields: Sequence[str],
+        source: str,
+    ) -> None:
+        metadata = trajectory.metadata
+        key = "invalid_args" if event_type == "planner_args_invalid" else "suspect_args"
+        entries = metadata.get(key)
+        if not isinstance(entries, list):
+            entries = []
+            metadata[key] = entries
+
+        entry = {
+            "step": len(trajectory.steps),
+            "tool": spec.name,
+            "error_summary": error_summary,
+            "placeholders": list(placeholders),
+            "placeholder_paths": list(placeholder_paths),
+            "autofilled_fields": list(autofilled_fields),
+            "source": source,
+            "ts": self._time_source(),
+        }
+        entries.append(entry)
+
+        count_key = "args_invalid_count" if event_type == "planner_args_invalid" else "args_suspect_count"
+        metadata[count_key] = int(metadata.get(count_key, 0)) + 1
+
+        if event_type == "planner_args_invalid":
+            metadata["consecutive_arg_failures"] = int(metadata.get("consecutive_arg_failures", 0)) + 1
+            if autofilled_fields:
+                metadata["autofill_rejection_count"] = int(metadata.get("autofill_rejection_count", 0)) + 1
+
+        self._emit_event(
+            PlannerEvent(
+                event_type=event_type,
+                ts=self._time_source(),
+                trajectory_step=len(trajectory.steps),
+                extra={
+                    "tool": spec.name,
+                    "error_summary": error_summary,
+                    "placeholders": list(placeholders),
+                    "placeholder_paths": list(placeholder_paths),
+                    "autofilled_fields": list(autofilled_fields),
+                    "source": source,
+                },
+            )
+        )
+
+    def _apply_arg_validation(
+        self,
+        trajectory: Trajectory,
+        *,
+        spec: NodeSpec,
+        action: PlannerAction,
+        parsed_args: BaseModel,
+        autofilled_fields: Sequence[str],
+    ) -> str | None:
+        extra = spec.extra or {}
+        raw_validation = extra.get("arg_validation")
+        validator = extra.get("arg_validator")
+        if raw_validation is None and validator is None:
+            return None
+
+        validation: dict[str, Any] = {}
+        if isinstance(raw_validation, Mapping):
+            validation = dict(raw_validation)
+        elif raw_validation is True:
+            validation = {"reject_placeholders": True}
+
+        placeholders = list(validation.get("placeholders") or [])
+        if AUTO_STR_SENTINEL not in placeholders:
+            placeholders.append(AUTO_STR_SENTINEL)
+
+        placeholder_paths: list[str] = []
+        if placeholders:
+            placeholder_paths = _scan_placeholder_paths(action.args or {}, placeholders)
+
+        emit_suspect = validation.get("emit_suspect", True)
+        reject_placeholders = validation.get("reject_placeholders", False)
+        reject_autofill = validation.get("reject_autofill", False)
+
+        if emit_suspect and (placeholder_paths or autofilled_fields):
+            self._record_arg_event(
+                trajectory,
+                event_type="planner_args_suspect",
+                spec=spec,
+                error_summary=None,
+                placeholders=placeholders,
+                placeholder_paths=placeholder_paths,
+                autofilled_fields=autofilled_fields,
+                source="placeholder",
+            )
+
+        if reject_placeholders and placeholder_paths:
+            error_summary = "placeholder values detected in tool args"
+            self._record_arg_event(
+                trajectory,
+                event_type="planner_args_invalid",
+                spec=spec,
+                error_summary=error_summary,
+                placeholders=placeholders,
+                placeholder_paths=placeholder_paths,
+                autofilled_fields=autofilled_fields,
+                source="placeholder",
+            )
+            return error_summary
+
+        if reject_autofill and autofilled_fields:
+            error_summary = "required tool args were autofilled"
+            self._record_arg_event(
+                trajectory,
+                event_type="planner_args_invalid",
+                spec=spec,
+                error_summary=error_summary,
+                placeholders=placeholders,
+                placeholder_paths=placeholder_paths,
+                autofilled_fields=autofilled_fields,
+                source="autofill",
+            )
+            return error_summary
+
+        if callable(validator):
+            try:
+                result = validator(parsed_args, action)
+            except Exception as exc:
+                error_summary = f"arg_validator raised {exc.__class__.__name__}: {exc}"
+                self._record_arg_event(
+                    trajectory,
+                    event_type="planner_args_invalid",
+                    spec=spec,
+                    error_summary=error_summary,
+                    placeholders=placeholders,
+                    placeholder_paths=placeholder_paths,
+                    autofilled_fields=autofilled_fields,
+                    source="validator_error",
+                )
+                return error_summary
+
+            if result is None or result is True:
+                return None
+
+            if isinstance(result, str):
+                error_summary = result
+            elif isinstance(result, Mapping):
+                error_summary = str(result.get("error") or result)
+            else:
+                error_summary = "arg_validator rejected args"
+
+            self._record_arg_event(
+                trajectory,
+                event_type="planner_args_invalid",
+                spec=spec,
+                error_summary=error_summary,
+                placeholders=placeholders,
+                placeholder_paths=placeholder_paths,
+                autofilled_fields=autofilled_fields,
+                source="validator",
+            )
+            return error_summary
+
+        return None
+
+    def _extract_field_descriptions(self, spec: NodeSpec) -> dict[str, str]:
+        """Extract field descriptions from the tool's args schema."""
+        schema = spec.args_model.model_json_schema()
+        properties = schema.get("properties", {})
+        descriptions: dict[str, str] = {}
+        for field_name, field_info in properties.items():
+            if isinstance(field_info, dict):
+                desc = field_info.get("description")
+                if desc:
+                    descriptions[field_name] = desc
+        return descriptions
+
+    def _is_arg_fill_eligible(
+        self,
+        spec: NodeSpec,
+        missing_fields: Sequence[str],
+        trajectory: Trajectory,
+    ) -> bool:
+        """
+        Check if arg-fill should be attempted for this tool call.
+
+        Arg-fill is eligible when:
+        1. arg_fill_enabled is True
+        2. Missing fields are simple types (string, number, boolean)
+        3. Arg-fill hasn't already been attempted for this action
+        4. Tool exists in catalog (already validated by caller)
+        """
+        if not self._arg_fill_enabled:
+            return False
+
+        # Check if already attempted
+        if trajectory.metadata.get("arg_fill_attempted"):
+            return False
+
+        # Get schema to check field types
+        schema = spec.args_model.model_json_schema()
+        properties = schema.get("properties", {})
+
+        # Only allow simple types (string, number, boolean, integer)
+        allowed_types = {"string", "number", "integer", "boolean"}
+        for field in missing_fields:
+            field_info = properties.get(field, {})
+            if not isinstance(field_info, dict):
+                return False
+            field_type = field_info.get("type")
+            # If type is not specified or not simple, skip arg-fill
+            if field_type not in allowed_types:
+                # Check if it's a union/anyOf with allowed types
+                any_of = field_info.get("anyOf", [])
+                if not any_of or not all(
+                    isinstance(t, dict) and t.get("type") in allowed_types | {"null"}
+                    for t in any_of
+                ):
+                    logger.debug(
+                        "arg_fill_ineligible_complex_type",
+                        extra={"field": field, "type": field_type, "any_of": any_of},
+                    )
+                    return False
+
+        return True
+
+    def _parse_arg_fill_response(
+        self,
+        raw: str,
+        expected_fields: Sequence[str],
+    ) -> dict[str, Any] | None:
+        """
+        Parse an arg-fill response, trying JSON first then tagged format.
+
+        Returns:
+            Parsed field values dict, or None if parsing failed.
+        """
+        # Strip any markdown fences
+        text = raw.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            # Remove first and last lines if they're fences
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+
+        # Try JSON parsing first
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                # Validate that all values are non-placeholder
+                result: dict[str, Any] = {}
+                for field in expected_fields:
+                    if field in parsed:
+                        value = parsed[field]
+                        # Reject placeholder values
+                        if isinstance(value, str):
+                            lower = value.lower().strip()
+                            if lower in {"<auto>", "unknown", "n/a", "", "<fill_value>", "your value here"}:
+                                logger.debug(
+                                    "arg_fill_placeholder_detected",
+                                    extra={"field": field, "value": value},
+                                )
+                                return None
+                        result[field] = value
+                # Check we got at least one valid field
+                if result:
+                    return result
+        except json.JSONDecodeError:
+            pass
+
+        # Try tagged format as fallback: <field>value</field>
+        import re
+
+        result = {}
+        for field in expected_fields:
+            pattern = rf"<{re.escape(field)}>(.*?)</{re.escape(field)}>"
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                value = match.group(1).strip()
+                # Reject placeholder values
+                lower = value.lower()
+                if lower in {"<auto>", "unknown", "n/a", "", "<fill_value>", "your value here"}:
+                    logger.debug(
+                        "arg_fill_placeholder_detected_tagged",
+                        extra={"field": field, "value": value},
+                    )
+                    return None
+                result[field] = value
+
+        if result:
+            return result
+
+        return None
+
+    async def _attempt_arg_fill(
+        self,
+        trajectory: Trajectory,
+        spec: NodeSpec,
+        action: PlannerAction,
+        missing_fields: list[str],
+    ) -> dict[str, Any] | None:
+        """
+        Attempt to fill missing args with a simplified LLM call.
+
+        This uses a minimal prompt asking only for the missing field values,
+        which is easier for small models than re-emitting the full action JSON.
+
+        Parameters
+        ----------
+        trajectory : Trajectory
+            Current planning trajectory (for context).
+        spec : NodeSpec
+            Tool specification.
+        action : PlannerAction
+            Original action with missing args.
+        missing_fields : list[str]
+            List of field names that need values.
+
+        Returns
+        -------
+        dict[str, Any] | None
+            Filled args dict if successful, None if arg-fill failed.
+        """
+        # Mark that we're attempting arg-fill
+        trajectory.metadata["arg_fill_attempted"] = True
+
+        # Get field descriptions for context
+        field_descriptions = self._extract_field_descriptions(spec)
+
+        # Get user query for context
+        user_query = trajectory.resume_user_input or trajectory.query
+
+        # Build the arg-fill prompt
+        fill_prompt = prompts.render_arg_fill_prompt(
+            tool_name=spec.name,
+            missing_fields=missing_fields,
+            field_descriptions=field_descriptions,
+            user_query=user_query,
+        )
+
+        # Build messages: use existing conversation context + arg-fill prompt
+        # Use "user" role so it's a follow-up request within the conversation
+        # (the system prompt with full instructions is already in base_messages)
+        base_messages = await self._build_messages(trajectory)
+        messages = list(base_messages) + [
+            {"role": "user", "content": fill_prompt},
+        ]
+
+        # Emit event for observability
+        self._emit_event(
+            PlannerEvent(
+                event_type="arg_fill_attempt",
+                ts=self._time_source(),
+                trajectory_step=len(trajectory.steps),
+                node_name=spec.name,
+                extra={
+                    "missing_fields": missing_fields,
+                    "field_count": len(missing_fields),
+                },
+            )
+        )
+
+        start_time = self._time_source()
+
+        try:
+            # Make the LLM call with a simple JSON response format
+            # Use a minimal schema for just the expected fields
+            llm_result = await self._client.complete(
+                messages=messages,
+                response_format={"type": "json_object"},
+                stream=False,
+                on_stream_chunk=None,
+            )
+            raw, cost = _coerce_llm_response(llm_result)
+            self._cost_tracker.record_main_call(cost)
+
+            latency_ms = (self._time_source() - start_time) * 1000
+
+            # Parse the response
+            filled = self._parse_arg_fill_response(raw, missing_fields)
+
+            if filled is not None:
+                # Success! Record metrics
+                arg_fill_success_count = int(trajectory.metadata.get("arg_fill_success_count", 0))
+                trajectory.metadata["arg_fill_success_count"] = arg_fill_success_count + 1
+
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="arg_fill_success",
+                        ts=self._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        node_name=spec.name,
+                        latency_ms=latency_ms,
+                        extra={
+                            "filled_fields": list(filled.keys()),
+                            "missing_fields": missing_fields,
+                        },
+                    )
+                )
+
+                logger.info(
+                    "arg_fill_success",
+                    extra={
+                        "tool": spec.name,
+                        "missing_fields": missing_fields,
+                        "filled_fields": list(filled.keys()),
+                        "latency_ms": latency_ms,
+                    },
+                )
+
+                return filled
+
+            # Parsing failed
+            arg_fill_failure_count = int(trajectory.metadata.get("arg_fill_failure_count", 0))
+            trajectory.metadata["arg_fill_failure_count"] = arg_fill_failure_count + 1
+
+            self._emit_event(
+                PlannerEvent(
+                    event_type="arg_fill_failure",
+                    ts=self._time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    node_name=spec.name,
+                    latency_ms=latency_ms,
+                    error="parse_failed",
+                    extra={
+                        "missing_fields": missing_fields,
+                        "raw_response_len": len(raw),
+                    },
+                )
+            )
+
+            logger.warning(
+                "arg_fill_parse_failed",
+                extra={
+                    "tool": spec.name,
+                    "missing_fields": missing_fields,
+                    "raw_preview": raw[:200] if raw else "",
+                },
+            )
+
+            return None
+
+        except Exception as exc:
+            latency_ms = (self._time_source() - start_time) * 1000
+
+            arg_fill_failure_count = int(trajectory.metadata.get("arg_fill_failure_count", 0))
+            trajectory.metadata["arg_fill_failure_count"] = arg_fill_failure_count + 1
+
+            self._emit_event(
+                PlannerEvent(
+                    event_type="arg_fill_failure",
+                    ts=self._time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    node_name=spec.name,
+                    latency_ms=latency_ms,
+                    error=f"{exc.__class__.__name__}: {exc}",
+                    extra={"missing_fields": missing_fields},
+                )
+            )
+
+            logger.warning(
+                "arg_fill_exception",
+                extra={
+                    "tool": spec.name,
+                    "missing_fields": missing_fields,
+                    "error": str(exc),
+                },
+            )
+
+            return None
+
+    async def _attempt_finish_repair(
+        self,
+        trajectory: Trajectory,
+        action: PlannerAction,
+    ) -> str | None:
+        """
+        Attempt to get the raw_answer when the model finishes without providing one.
+
+        This uses a simplified prompt asking only for the answer text,
+        which is easier for small models than re-emitting the full action JSON.
+
+        Parameters
+        ----------
+        trajectory : Trajectory
+            Current planning trajectory (for context).
+        action : PlannerAction
+            The finish action missing raw_answer.
+
+        Returns
+        -------
+        str | None
+            The raw_answer text if successful, None if repair failed.
+        """
+        # Mark that we're attempting finish repair
+        trajectory.metadata["finish_repair_attempted"] = True
+
+        # Get user query for context
+        user_query = trajectory.resume_user_input or trajectory.query
+
+        # Build the finish repair prompt with voice context
+        repair_prompt = prompts.render_finish_repair_prompt(
+            thought=action.thought,
+            user_query=user_query,
+            voice_context=self._system_prompt_extra,
+        )
+
+        # Build messages: use existing conversation context + repair prompt
+        # Use "user" role so it's a follow-up request within the conversation
+        # (the system prompt with full instructions is already in base_messages)
+        base_messages = await self._build_messages(trajectory)
+        messages = list(base_messages) + [
+            {"role": "user", "content": repair_prompt},
+        ]
+
+        # Emit event for observability
+        self._emit_event(
+            PlannerEvent(
+                event_type="finish_repair_attempt",
+                ts=self._time_source(),
+                trajectory_step=len(trajectory.steps),
+                thought=action.thought,
+            )
+        )
+
+        start_time = self._time_source()
+
+        try:
+            # Make the LLM call
+            llm_result = await self._client.complete(
+                messages=messages,
+                response_format={"type": "json_object"},
+                stream=False,
+                on_stream_chunk=None,
+            )
+            raw, cost = _coerce_llm_response(llm_result)
+            self._cost_tracker.record_main_call(cost)
+
+            latency_ms = (self._time_source() - start_time) * 1000
+
+            logger.debug(
+                "finish_repair_raw_response",
+                extra={
+                    "response_len": len(raw),
+                    "response_preview": raw[:500] if len(raw) > 500 else raw,
+                },
+            )
+
+            # Parse the response - look for raw_answer
+            raw_answer = self._parse_finish_repair_response(raw)
+
+            if raw_answer is not None:
+                # Success! Record metrics
+                finish_repair_success_count = int(
+                    trajectory.metadata.get("finish_repair_success_count", 0)
+                )
+                trajectory.metadata["finish_repair_success_count"] = finish_repair_success_count + 1
+
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="finish_repair_success",
+                        ts=self._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        latency_ms=latency_ms,
+                        extra={"answer_len": len(raw_answer)},
+                    )
+                )
+
+                return raw_answer
+
+            # Parsing failed
+            finish_repair_failure_count = int(
+                trajectory.metadata.get("finish_repair_failure_count", 0)
+            )
+            trajectory.metadata["finish_repair_failure_count"] = finish_repair_failure_count + 1
+
+            self._emit_event(
+                PlannerEvent(
+                    event_type="finish_repair_failure",
+                    ts=self._time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    latency_ms=latency_ms,
+                    error="parse_failed",
+                )
+            )
+
+            return None
+
+        except Exception as exc:
+            latency_ms = (self._time_source() - start_time) * 1000
+
+            finish_repair_failure_count = int(
+                trajectory.metadata.get("finish_repair_failure_count", 0)
+            )
+            trajectory.metadata["finish_repair_failure_count"] = finish_repair_failure_count + 1
+
+            self._emit_event(
+                PlannerEvent(
+                    event_type="finish_repair_failure",
+                    ts=self._time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    latency_ms=latency_ms,
+                    error=f"{exc.__class__.__name__}: {exc}",
+                )
+            )
+
+            logger.warning(
+                "finish_repair_exception",
+                extra={"error": str(exc)},
+            )
+
+            return None
+
+    def _parse_finish_repair_response(self, raw: str) -> str | None:
+        """
+        Parse a finish repair response to extract raw_answer.
+
+        Returns:
+            The raw_answer string if found and valid, None otherwise.
+        """
+        # Strip any markdown fences
+        text = raw.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+
+        # Try JSON parsing
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                # Look for raw_answer or common answer keys
+                for key in ("raw_answer", "answer", "text", "response", "content"):
+                    if key in parsed:
+                        value = parsed[key]
+                        if isinstance(value, str) and value.strip():
+                            # Reject placeholder values
+                            lower = value.lower().strip()
+                            if lower not in {"<auto>", "unknown", "n/a", "", "<fill_value>"}:
+                                return value
+        except json.JSONDecodeError:
+            pass
+
+        # If the response is just plain text (not JSON), use it directly
+        # This handles cases where the model ignores the JSON instruction
+        if text and not text.startswith("{"):
+            # Clean up common prefixes
+            for prefix in ("raw_answer:", "answer:", "response:"):
+                if text.lower().startswith(prefix):
+                    text = text[len(prefix):].strip()
+            if text and text.lower() not in {"<auto>", "unknown", "n/a", "<fill_value>"}:
+                return text
+
+        return None
+
+    def _record_invalid_response(
+        self,
+        trajectory: Trajectory,
+        *,
+        attempt: int,
+        raw: str,
+        error: ValidationError,
+        salvage_action: PlannerAction | None,
+        will_retry: bool,
+    ) -> None:
+        stripped = raw.lstrip()
+        had_non_json_prefix = bool(stripped) and stripped[0] not in "{["
+        had_code_fence = "```" in raw
+        response_len = len(raw)
+        error_type = error.__class__.__name__
+        error_summary = _summarize_validation_error(error)
+        next_node_detected = salvage_action.next_node if salvage_action is not None else None
+
+        metadata = trajectory.metadata
+        invalid_responses = metadata.get("invalid_responses")
+        if not isinstance(invalid_responses, list):
+            invalid_responses = []
+            metadata["invalid_responses"] = invalid_responses
+
+        entry = {
+            "step": len(trajectory.steps),
+            "attempt": attempt,
+            "error_type": error_type,
+            "error_summary": error_summary,
+            "next_node_detected": next_node_detected,
+            "response_len": response_len,
+            "had_code_fence": had_code_fence,
+            "had_non_json_prefix": had_non_json_prefix,
+            "ts": self._time_source(),
+        }
+        invalid_responses.append(entry)
+
+        metadata["validation_failures_count"] = int(metadata.get("validation_failures_count", 0)) + 1
+        if will_retry:
+            metadata["repair_attempts"] = int(metadata.get("repair_attempts", 0)) + 1
+        if salvage_action is not None:
+            metadata["salvage_used"] = True
+
+        self._emit_event(
+            PlannerEvent(
+                event_type="planner_repair_attempt",
+                ts=self._time_source(),
+                trajectory_step=len(trajectory.steps),
+                extra={
+                    "attempt": attempt,
+                    "error_type": error_type,
+                    "error_summary": error_summary,
+                    "next_node_detected": next_node_detected,
+                    "response_len": response_len,
+                    "had_code_fence": had_code_fence,
+                    "had_non_json_prefix": had_non_json_prefix,
+                },
+            )
+        )
 
     def _finish(
         self,
@@ -2743,6 +3838,20 @@ class ReactPlanner:
             metadata["error"] = error
         if metadata_extra:
             metadata.update(metadata_extra)
+        if trajectory.metadata:
+            metadata["trajectory_metadata"] = dict(trajectory.metadata)
+
+        metadata["validation_failures_count"] = int(trajectory.metadata.get("validation_failures_count", 0))
+        metadata["repair_attempts"] = int(trajectory.metadata.get("repair_attempts", 0))
+        metadata["salvage_used"] = bool(trajectory.metadata.get("salvage_used", False))
+        metadata["args_invalid_count"] = int(trajectory.metadata.get("args_invalid_count", 0))
+        metadata["args_suspect_count"] = int(trajectory.metadata.get("args_suspect_count", 0))
+        metadata["consecutive_arg_failures"] = int(trajectory.metadata.get("consecutive_arg_failures", 0))
+        metadata["autofill_rejection_count"] = int(trajectory.metadata.get("autofill_rejection_count", 0))
+        metadata["arg_fill_success_count"] = int(trajectory.metadata.get("arg_fill_success_count", 0))
+        metadata["arg_fill_failure_count"] = int(trajectory.metadata.get("arg_fill_failure_count", 0))
+        metadata["finish_repair_success_count"] = int(trajectory.metadata.get("finish_repair_success_count", 0))
+        metadata["finish_repair_failure_count"] = int(trajectory.metadata.get("finish_repair_failure_count", 0))
 
         # Emit finish event
         extra_data: dict[str, Any] = {

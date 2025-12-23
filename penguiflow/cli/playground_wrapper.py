@@ -33,6 +33,10 @@ class ChatResult:
 class AgentWrapper(Protocol):
     """Common interface exposed to the FastAPI layer."""
 
+    async def initialize(self) -> None:
+        """Eagerly initialize resources (e.g., connect to MCP servers)."""
+        ...
+
     async def chat(
         self,
         query: str,
@@ -173,6 +177,9 @@ def _build_trajectory(
         "steps": steps,
         "hint_state": {},
     }
+    trajectory_meta = metadata.get("trajectory_metadata")
+    if isinstance(trajectory_meta, Mapping):
+        payload["metadata"] = dict(trajectory_meta)
     if "artifacts" in metadata:
         payload["artifacts"] = metadata["artifacts"]
     if "sources" in metadata:
@@ -196,6 +203,10 @@ class PlannerAgentWrapper:
         self._state_store = state_store
         self._event_recorder = _EventRecorder(state_store)
         self._tool_context_defaults = dict(tool_context_defaults or {})
+
+    async def initialize(self) -> None:
+        """No-op for planners (already initialized by build_planner)."""
+        pass
 
     async def chat(
         self,
@@ -292,6 +303,21 @@ class OrchestratorAgentWrapper:
         self._tenant_id = tenant_id
         self._user_id = user_id
         self._event_recorder = _EventRecorder(state_store)
+        self._initialized = False
+
+    async def initialize(self) -> None:
+        """Eagerly initialize the orchestrator if it supports lazy initialization.
+
+        This ensures the internal planner is created before the first request,
+        allowing event callbacks to be properly attached.
+        """
+        if self._initialized:
+            return
+        # Check if orchestrator has _ensure_initialized (lazy init pattern)
+        ensure_init = getattr(self._orchestrator, "_ensure_initialized", None)
+        if ensure_init is not None and callable(ensure_init):
+            await ensure_init()
+        self._initialized = True
 
     async def chat(
         self,

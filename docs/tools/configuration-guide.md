@@ -270,6 +270,31 @@ dev_github = ToolNode(
 
 ---
 
+## Arg Validation Telemetry
+
+ToolNode can attach a planner arg-validation policy to all discovered tools. The
+default is **telemetry-only** (no blocking), which helps catch placeholder args
+from smaller models without false positives.
+
+```python
+ExternalToolConfig(
+    name="github",
+    transport=TransportType.MCP,
+    connection="npx -y @modelcontextprotocol/server-github",
+    arg_validation={
+        "emit_suspect": True,       # telemetry only
+        "reject_placeholders": False,
+        "reject_autofill": False,
+        "placeholders": ["<auto>"], # optional override
+    },
+)
+```
+
+When enabled, the planner emits `planner_args_suspect` events and records
+details under `trajectory.metadata.suspect_args`.
+
+---
+
 ## Transport Configuration
 
 ### MCP Transport

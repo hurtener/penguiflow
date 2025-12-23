@@ -86,6 +86,27 @@ class AuditArgs(BaseModel):
     failures: list[dict[str, Any]]
 
 
+class StrictArgs(BaseModel):
+    query: str
+
+
+class StrictResult(BaseModel):
+    result: str
+
+
+@tool(
+    desc="Strict tool with placeholder validation",
+    arg_validation={
+        "emit_suspect": True,
+        "reject_placeholders": True,
+        "reject_autofill": False,
+        "placeholders": ["<auto>"],
+    },
+)
+async def strict_tool(args: StrictArgs, ctx: object) -> StrictResult:
+    return StrictResult(result=args.query)
+
+
 @tool(desc="Detect intent", tags=["nlp"])
 async def triage(args: Query, ctx: object) -> Intent:
     return Intent(intent="docs")
@@ -290,6 +311,184 @@ def make_planner(client: StubClient, **kwargs: object) -> ReactPlanner:
     ]
     catalog = build_catalog(nodes, registry)
     return ReactPlanner(llm_client=client, catalog=catalog, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_arg_validation_emits_events_for_placeholders() -> None:
+    registry = ModelRegistry()
+    registry.register("strict_tool", StrictArgs, StrictResult)
+    catalog = build_catalog([Node(strict_tool, name="strict_tool")], registry)
+
+    responses = [
+        {
+            "thought": "Call strict tool without required args",
+            "next_node": "strict_tool",
+            "args": {},
+            "plan": None,
+            "join": None,
+        }
+    ]
+    events: list[PlannerEvent] = []
+
+    planner = ReactPlanner(
+        llm_client=StubClient(responses),
+        catalog=catalog,
+        max_iters=1,
+        event_callback=events.append,
+    )
+    result = await planner.run("test strict validation")
+
+    assert result.metadata["args_invalid_count"] == 1
+    assert result.metadata["args_suspect_count"] == 1
+
+    event_types = {evt.event_type for evt in events}
+    assert "planner_args_invalid" in event_types
+    assert "planner_args_suspect" in event_types
+
+    trajectory_meta = result.metadata.get("trajectory_metadata", {})
+    invalid_args = trajectory_meta.get("invalid_args")
+    assert isinstance(invalid_args, list)
+    assert invalid_args and invalid_args[0]["tool"] == "strict_tool"
+
+
+@pytest.mark.asyncio
+async def test_consecutive_arg_failures_force_finish() -> None:
+    """Test that consecutive arg validation failures trigger early finish."""
+    registry = ModelRegistry()
+    registry.register("strict_tool", StrictArgs, StrictResult)
+    catalog = build_catalog([Node(strict_tool, name="strict_tool")], registry)
+
+    # LLM keeps sending invalid args with placeholder values
+    responses = [
+        {
+            "thought": "First try with placeholder",
+            "next_node": "strict_tool",
+            "args": {"query": "<auto>"},  # Placeholder - will be rejected
+        },
+        {
+            "thought": "Second try with placeholder",
+            "next_node": "strict_tool",
+            "args": {"query": "<auto>"},  # Still placeholder
+        },
+        {
+            "thought": "Third try with placeholder",
+            "next_node": "strict_tool",
+            "args": {"query": "<auto>"},  # Threshold reached
+        },
+    ]
+    events: list[PlannerEvent] = []
+
+    planner = ReactPlanner(
+        llm_client=StubClient(responses),
+        catalog=catalog,
+        max_iters=10,  # High limit to prove threshold works
+        max_consecutive_arg_failures=3,
+        event_callback=events.append,
+    )
+    result = await planner.run("test consecutive failures")
+
+    # Should finish early due to threshold, not max_iters
+    assert result.reason == "no_path"
+    assert result.metadata.get("requires_followup") is True
+    assert result.metadata["consecutive_arg_failures"] == 3
+
+    # Payload should indicate why we stopped
+    assert result.payload.get("requires_followup") is True
+    assert result.payload.get("failure_reason") == "consecutive_arg_failures"
+    assert result.payload.get("tool") == "strict_tool"
+
+
+@pytest.mark.asyncio
+async def test_consecutive_arg_failures_reset_on_success() -> None:
+    """Test that consecutive failure counter resets after successful tool call."""
+    registry = ModelRegistry()
+    registry.register("strict_tool", StrictArgs, StrictResult)
+    registry.register("triage", Query, Intent)
+    catalog = build_catalog(
+        [
+            Node(strict_tool, name="strict_tool"),
+            Node(triage, name="triage"),
+        ],
+        registry,
+    )
+
+    responses = [
+        # First failure
+        {
+            "thought": "Try with placeholder",
+            "next_node": "strict_tool",
+            "args": {"query": "<auto>"},
+        },
+        # Successful call resets counter
+        {
+            "thought": "Call triage instead",
+            "next_node": "triage",
+            "args": {"question": "real query"},
+        },
+        # New failure - counter starts fresh
+        {
+            "thought": "Try placeholder again",
+            "next_node": "strict_tool",
+            "args": {"query": "<auto>"},
+        },
+        # Finish normally
+        {
+            "thought": "Give up and finish",
+            "next_node": None,
+            "args": {"raw_answer": "Done"},
+        },
+    ]
+
+    planner = ReactPlanner(
+        llm_client=StubClient(responses),
+        catalog=catalog,
+        max_iters=10,
+        max_consecutive_arg_failures=2,  # Would trigger on 2nd consecutive failure
+    )
+    result = await planner.run("test reset behavior")
+
+    # Should complete normally - counter was reset by successful triage call
+    assert result.reason == "answer_complete"
+    # Final consecutive count should be 1 (not 2) since it was reset
+    assert result.metadata["consecutive_arg_failures"] == 1
+
+
+@pytest.mark.asyncio
+async def test_autofill_rejection_force_finish_after_retry() -> None:
+    """Test that autofill + reject gives one retry chance, then forces finish."""
+    registry = ModelRegistry()
+    registry.register("strict_tool", StrictArgs, StrictResult)
+    catalog = build_catalog([Node(strict_tool, name="strict_tool")], registry)
+
+    # Model keeps forgetting 'query' arg - autofill injects default, validation rejects
+    responses = [
+        {
+            "thought": "First call without query",
+            "next_node": "strict_tool",
+            "args": {},  # Missing 'query' - will be autofilled then rejected
+        },
+        {
+            "thought": "Second call still without query",
+            "next_node": "strict_tool",
+            "args": {},  # Still missing - second autofill rejection = force finish
+        },
+    ]
+    events: list[PlannerEvent] = []
+
+    planner = ReactPlanner(
+        llm_client=StubClient(responses),
+        catalog=catalog,
+        max_iters=10,
+        arg_fill_enabled=False,  # Disable arg-fill to test pure autofill rejection
+        event_callback=events.append,
+    )
+    result = await planner.run("test autofill rejection")
+
+    # Should force finish after 2nd autofill rejection (gave one chance)
+    assert result.reason == "no_path"
+    assert result.metadata.get("requires_followup") is True
+    assert result.payload.get("failure_reason") == "autofill_rejection"
+    assert "query" in (result.payload.get("missing_fields") or [])
 
 
 @pytest.mark.asyncio()

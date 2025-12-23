@@ -167,9 +167,9 @@ def test_default_for_annotation_literal():
 
 
 def test_default_for_annotation_str():
-    """_default_for_annotation should return 'unknown' for str."""
+    """_default_for_annotation should return '<auto>' for str."""
     result = _default_for_annotation(str)
-    assert result == "unknown"
+    assert result == "<auto>"
 
 
 def test_default_for_annotation_bool():
@@ -221,8 +221,8 @@ def test_default_for_annotation_basemodel():
 def test_default_for_annotation_optional():
     """_default_for_annotation should handle Optional (Union with None)."""
     result = _default_for_annotation(str | None)
-    # Should return "unknown" for the str part
-    assert result == "unknown"
+    # Should return "<auto>" for the str part (AUTO_STR_SENTINEL)
+    assert result == "<auto>"
 
 
 def test_default_for_annotation_unknown():
@@ -584,3 +584,392 @@ def test_fallback_answer_json_fallback():
     """_fallback_answer should JSON serialize as last resort."""
     result = _fallback_answer({"some_key": 123})
     assert '"some_key"' in result or result == "No answer produced."
+
+
+# ─── Arg-fill and Finish-repair parsing tests ─────────────────────────────────
+
+
+class MockJSONLLMClient:
+    """Minimal mock client for testing ReactPlanner methods."""
+
+    async def send_messages(
+        self,
+        messages: list[dict],
+        *,
+        response_format: type | None = None,
+        stream: bool = False,
+        on_stream_chunk: object | None = None,
+    ):
+        return '{"thought": "test", "next_node": null}'
+
+
+@pytest.fixture
+def minimal_planner():
+    """Create a minimal ReactPlanner for testing helper methods."""
+    from penguiflow.catalog import build_catalog
+    from penguiflow.planner import ReactPlanner
+    from penguiflow.registry import ModelRegistry
+
+    catalog = build_catalog([], ModelRegistry())
+    return ReactPlanner(
+        llm_client=MockJSONLLMClient(),
+        catalog=catalog,
+        max_iters=1,
+    )
+
+
+class TestParseArgFillResponse:
+    """Tests for ReactPlanner._parse_arg_fill_response."""
+
+    def test_valid_json(self, minimal_planner):
+        """Should parse valid JSON response."""
+        raw = '{"query": "test query", "limit": 10}'
+        result = minimal_planner._parse_arg_fill_response(raw, ["query", "limit"])
+        assert result == {"query": "test query", "limit": 10}
+
+    def test_json_with_markdown_fences(self, minimal_planner):
+        """Should strip markdown code fences."""
+        raw = '```json\n{"query": "test"}\n```'
+        result = minimal_planner._parse_arg_fill_response(raw, ["query"])
+        assert result == {"query": "test"}
+
+    def test_json_partial_fields(self, minimal_planner):
+        """Should extract only expected fields from JSON."""
+        raw = '{"query": "test", "extra_field": "ignored"}'
+        result = minimal_planner._parse_arg_fill_response(raw, ["query"])
+        assert result == {"query": "test"}
+
+    def test_placeholder_auto_rejected(self, minimal_planner):
+        """Should reject <auto> placeholder."""
+        raw = '{"query": "<auto>"}'
+        result = minimal_planner._parse_arg_fill_response(raw, ["query"])
+        assert result is None
+
+    def test_placeholder_unknown_rejected(self, minimal_planner):
+        """Should reject 'unknown' placeholder."""
+        raw = '{"query": "unknown"}'
+        result = minimal_planner._parse_arg_fill_response(raw, ["query"])
+        assert result is None
+
+    def test_placeholder_na_rejected(self, minimal_planner):
+        """Should reject 'n/a' placeholder."""
+        raw = '{"query": "n/a"}'
+        result = minimal_planner._parse_arg_fill_response(raw, ["query"])
+        assert result is None
+
+    def test_placeholder_empty_rejected(self, minimal_planner):
+        """Should reject empty string placeholder."""
+        raw = '{"query": ""}'
+        result = minimal_planner._parse_arg_fill_response(raw, ["query"])
+        assert result is None
+
+    def test_tagged_format(self, minimal_planner):
+        """Should parse tagged format <field>value</field>."""
+        raw = "<query>search term</query><limit>5</limit>"
+        result = minimal_planner._parse_arg_fill_response(raw, ["query", "limit"])
+        assert result == {"query": "search term", "limit": "5"}
+
+    def test_tagged_format_with_whitespace(self, minimal_planner):
+        """Should handle whitespace in tagged values."""
+        raw = "<query>  search term  </query>"
+        result = minimal_planner._parse_arg_fill_response(raw, ["query"])
+        assert result == {"query": "search term"}
+
+    def test_tagged_format_placeholder_rejected(self, minimal_planner):
+        """Should reject placeholders in tagged format."""
+        raw = "<query><auto></query>"
+        result = minimal_planner._parse_arg_fill_response(raw, ["query"])
+        assert result is None
+
+    def test_invalid_json_no_tags(self, minimal_planner):
+        """Should return None for invalid input."""
+        raw = "This is not valid JSON or tags"
+        result = minimal_planner._parse_arg_fill_response(raw, ["query"])
+        assert result is None
+
+    def test_no_expected_fields_found(self, minimal_planner):
+        """Should return None when no expected fields found."""
+        raw = '{"other_field": "value"}'
+        result = minimal_planner._parse_arg_fill_response(raw, ["query"])
+        assert result is None
+
+
+class TestParseFinishRepairResponse:
+    """Tests for ReactPlanner._parse_finish_repair_response."""
+
+    def test_json_with_raw_answer(self, minimal_planner):
+        """Should extract raw_answer from JSON."""
+        raw = '{"raw_answer": "The answer is 42"}'
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result == "The answer is 42"
+
+    def test_json_with_answer(self, minimal_planner):
+        """Should extract answer key from JSON."""
+        raw = '{"answer": "The answer is 42"}'
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result == "The answer is 42"
+
+    def test_json_with_text(self, minimal_planner):
+        """Should extract text key from JSON."""
+        raw = '{"text": "The answer is 42"}'
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result == "The answer is 42"
+
+    def test_json_with_response(self, minimal_planner):
+        """Should extract response key from JSON."""
+        raw = '{"response": "The answer is 42"}'
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result == "The answer is 42"
+
+    def test_json_with_content(self, minimal_planner):
+        """Should extract content key from JSON."""
+        raw = '{"content": "The answer is 42"}'
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result == "The answer is 42"
+
+    def test_json_with_markdown_fences(self, minimal_planner):
+        """Should strip markdown code fences."""
+        raw = '```json\n{"raw_answer": "Test"}\n```'
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result == "Test"
+
+    def test_json_placeholder_rejected(self, minimal_planner):
+        """Should reject placeholder values in JSON."""
+        raw = '{"raw_answer": "<auto>"}'
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result is None
+
+    def test_plain_text(self, minimal_planner):
+        """Should accept plain text response."""
+        raw = "The answer is simply 42"
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result == "The answer is simply 42"
+
+    def test_plain_text_with_prefix(self, minimal_planner):
+        """Should strip common prefixes from plain text."""
+        raw = "raw_answer: The answer is 42"
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result == "The answer is 42"
+
+    def test_plain_text_placeholder_rejected(self, minimal_planner):
+        """Should reject placeholder plain text."""
+        raw = "<auto>"
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result is None
+
+    def test_empty_answer_rejected(self, minimal_planner):
+        """Should reject empty answer in JSON."""
+        raw = '{"raw_answer": ""}'
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result is None
+
+    def test_whitespace_only_rejected(self, minimal_planner):
+        """Should reject whitespace-only answer."""
+        raw = '{"raw_answer": "   "}'
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result is None
+
+
+class TestIsArgFillEligible:
+    """Tests for ReactPlanner._is_arg_fill_eligible."""
+
+    def test_disabled_returns_false(self):
+        """Should return False when arg_fill_enabled is False."""
+        from penguiflow.catalog import build_catalog, tool
+        from penguiflow.node import Node
+        from penguiflow.planner import ReactPlanner
+        from penguiflow.planner.react import Trajectory
+        from penguiflow.registry import ModelRegistry
+
+        class SimpleArgs(BaseModel):
+            field: str = ""
+
+        class SimpleOut(BaseModel):
+            result: str = ""
+
+        @tool(desc="Simple tool")
+        async def simple(args: SimpleArgs, ctx: object):
+            return {}
+
+        registry = ModelRegistry()
+        registry.register("simple", SimpleArgs, SimpleOut)
+        catalog = build_catalog([Node(simple, name="simple")], registry)
+        planner = ReactPlanner(
+            llm_client=MockJSONLLMClient(),
+            catalog=catalog,
+            max_iters=1,
+            arg_fill_enabled=False,
+        )
+
+        trajectory = Trajectory(query="test")
+        spec = planner._spec_by_name["simple"]
+        result = planner._is_arg_fill_eligible(spec, ["field"], trajectory)
+        assert result is False
+
+    def test_already_attempted_returns_false(self):
+        """Should return False when arg_fill was already attempted."""
+        from penguiflow.catalog import build_catalog, tool
+        from penguiflow.node import Node
+        from penguiflow.planner import ReactPlanner
+        from penguiflow.planner.react import Trajectory
+        from penguiflow.registry import ModelRegistry
+
+        class SimpleArgs(BaseModel):
+            query: str
+
+        class SimpleOut(BaseModel):
+            result: str = ""
+
+        @tool(desc="Tool with string arg")
+        async def string_tool(args: SimpleArgs, ctx: object):
+            return {"result": args.query}
+
+        registry = ModelRegistry()
+        registry.register("string_tool", SimpleArgs, SimpleOut)
+        catalog = build_catalog([Node(string_tool, name="string_tool")], registry)
+        planner = ReactPlanner(
+            llm_client=MockJSONLLMClient(),
+            catalog=catalog,
+            max_iters=1,
+            arg_fill_enabled=True,
+        )
+
+        trajectory = Trajectory(query="test")
+        trajectory.metadata["arg_fill_attempted"] = True
+
+        spec = planner._spec_by_name["string_tool"]
+        result = planner._is_arg_fill_eligible(spec, ["query"], trajectory)
+        assert result is False
+
+    def test_simple_string_type_eligible(self):
+        """Should be eligible for simple string fields."""
+        from penguiflow.catalog import build_catalog, tool
+        from penguiflow.node import Node
+        from penguiflow.planner import ReactPlanner
+        from penguiflow.planner.react import Trajectory
+        from penguiflow.registry import ModelRegistry
+
+        class SimpleArgs(BaseModel):
+            query: str
+
+        class SimpleOut(BaseModel):
+            result: str = ""
+
+        @tool(desc="Tool with string arg")
+        async def string_tool(args: SimpleArgs, ctx: object):
+            return {"result": args.query}
+
+        registry = ModelRegistry()
+        registry.register("string_tool", SimpleArgs, SimpleOut)
+        catalog = build_catalog([Node(string_tool, name="string_tool")], registry)
+        planner = ReactPlanner(
+            llm_client=MockJSONLLMClient(),
+            catalog=catalog,
+            max_iters=1,
+            arg_fill_enabled=True,
+        )
+
+        trajectory = Trajectory(query="test")
+        spec = planner._spec_by_name["string_tool"]
+        result = planner._is_arg_fill_eligible(spec, ["query"], trajectory)
+        assert result is True
+
+    def test_simple_number_type_eligible(self):
+        """Should be eligible for simple number fields."""
+        from penguiflow.catalog import build_catalog, tool
+        from penguiflow.node import Node
+        from penguiflow.planner import ReactPlanner
+        from penguiflow.planner.react import Trajectory
+        from penguiflow.registry import ModelRegistry
+
+        class NumberArgs(BaseModel):
+            count: int
+            rate: float
+
+        class NumberOut(BaseModel):
+            result: int = 0
+
+        @tool(desc="Tool with number args")
+        async def number_tool(args: NumberArgs, ctx: object):
+            return {"result": args.count}
+
+        registry = ModelRegistry()
+        registry.register("number_tool", NumberArgs, NumberOut)
+        catalog = build_catalog([Node(number_tool, name="number_tool")], registry)
+        planner = ReactPlanner(
+            llm_client=MockJSONLLMClient(),
+            catalog=catalog,
+            max_iters=1,
+            arg_fill_enabled=True,
+        )
+
+        trajectory = Trajectory(query="test")
+        spec = planner._spec_by_name["number_tool"]
+        result = planner._is_arg_fill_eligible(spec, ["count", "rate"], trajectory)
+        assert result is True
+
+    def test_complex_type_not_eligible(self):
+        """Should not be eligible for complex types like list/dict."""
+        from penguiflow.catalog import build_catalog, tool
+        from penguiflow.node import Node
+        from penguiflow.planner import ReactPlanner
+        from penguiflow.planner.react import Trajectory
+        from penguiflow.registry import ModelRegistry
+
+        class ComplexArgs(BaseModel):
+            items: list[str]
+
+        class ComplexOut(BaseModel):
+            result: int = 0
+
+        @tool(desc="Tool with complex arg")
+        async def complex_tool(args: ComplexArgs, ctx: object):
+            return {"result": len(args.items)}
+
+        registry = ModelRegistry()
+        registry.register("complex_tool", ComplexArgs, ComplexOut)
+        catalog = build_catalog([Node(complex_tool, name="complex_tool")], registry)
+        planner = ReactPlanner(
+            llm_client=MockJSONLLMClient(),
+            catalog=catalog,
+            max_iters=1,
+            arg_fill_enabled=True,
+        )
+
+        trajectory = Trajectory(query="test")
+        spec = planner._spec_by_name["complex_tool"]
+        result = planner._is_arg_fill_eligible(spec, ["items"], trajectory)
+        assert result is False
+
+    def test_optional_simple_type_eligible(self):
+        """Should be eligible for optional simple types (anyOf with null)."""
+        from penguiflow.catalog import build_catalog, tool
+        from penguiflow.node import Node
+        from penguiflow.planner import ReactPlanner
+        from penguiflow.planner.react import Trajectory
+        from penguiflow.registry import ModelRegistry
+
+        class OptionalArgs(BaseModel):
+            query: str | None = None
+
+        class OptionalOut(BaseModel):
+            result: str | None = None
+
+        @tool(desc="Tool with optional arg")
+        async def optional_tool(args: OptionalArgs, ctx: object):
+            return {"result": args.query}
+
+        registry = ModelRegistry()
+        registry.register("optional_tool", OptionalArgs, OptionalOut)
+        catalog = build_catalog([Node(optional_tool, name="optional_tool")], registry)
+        planner = ReactPlanner(
+            llm_client=MockJSONLLMClient(),
+            catalog=catalog,
+            max_iters=1,
+            arg_fill_enabled=True,
+        )
+
+        trajectory = Trajectory(query="test")
+        spec = planner._spec_by_name["optional_tool"]
+        result = planner._is_arg_fill_eligible(spec, ["query"], trajectory)
+        assert result is True
