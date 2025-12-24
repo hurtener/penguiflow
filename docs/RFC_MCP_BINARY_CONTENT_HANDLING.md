@@ -3,7 +3,17 @@
 **Status**: Draft
 **Created**: 2025-12-22
 **Author**: Claude + Santiago
-**Version**: 0.2
+**Version**: 0.3
+
+---
+
+## Revision History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 0.1 | 2025-12-22 | Initial draft |
+| 0.2 | 2025-12-22 | Added MCP content types, layered strategy |
+| 0.3 | 2025-12-23 | Resolved open questions, added planner guardrail (Section 4.4), hybrid ArtifactStore discovery (Section 5.2), revised implementation phases with realistic estimates |
 
 ---
 
@@ -572,7 +582,7 @@ class ExternalToolConfig(BaseModel):
 **In `ReactPlanner` + `ToolContext` (applies to all tools):**
 - Define `ArtifactRef` + a separate `ArtifactStore` protocol.
 - Expose an artifact store handle via `ToolContext` (e.g. `ctx.artifacts`) so *any* tool (native or external) can store bytes/large text out-of-band and return compact refs.
-- Accept `artifact_store` in `ReactPlanner`. If not provided, attempt to discover it from `state_store` via duck-typing (same adapter object can implement both).
+- Accept `artifact_store` in `ReactPlanner` with hybrid discovery (see Section 5.2).
 
 **In `ToolNode.call()` (intercept external outputs):**
 ```python
@@ -592,28 +602,220 @@ async def _transform_output(
 ) -> Any:
     """Apply artifact extraction and output transformation."""
 
-    # Layer 5: Custom transformer
+    # Layer 5: Custom transformer (escape hatch)
     if self.config.output_transformer:
         transformed = self.config.output_transformer(tool_name, result, ctx)
         if inspect.isawaitable(transformed):
             transformed = await transformed
         return transformed
 
-    # Layer 4: Per-tool config
+    # Layer 4: Per-tool configured extraction
     if tool_name in self.config.artifact_extraction.tool_fields:
-        result = self._extract_configured_fields(tool_name, result, ctx)
+        result = await self._extract_configured_fields(tool_name, result, ctx)
 
-    # Layer 2: MCP typed content blocks
+    # Layer 1: MCP resource_link handling (preserve as lazy reference)
+    result = await self._handle_resource_links(result, ctx)
+
+    # Layer 2: MCP typed content blocks (image/audio/embedded blob)
     result = await self._transform_mcp_content_blocks(result, ctx)
 
-    # Layer 3: Binary detection (recursive)
-    result = self._detect_and_extract_binary(result, ctx)
+    # Layer 3: Heuristic binary detection (recursive)
+    result = await self._detect_and_extract_binary(result, ctx)
 
     # Layer 0: Size safety net
-    result = self._apply_size_limits(result, ctx)
+    result = await self._apply_size_limits(result, ctx)
 
     return result
+
+
+async def _handle_resource_links(
+    self,
+    result: Any,
+    ctx: ToolContext,
+) -> Any:
+    """
+    Handle MCP resource_link content blocks.
+    
+    Policy options:
+    - preserve: Keep as URI reference (default, lazy)
+    - auto_read_small: Fetch if size < threshold
+    """
+    if not hasattr(result, "content"):
+        return result
+    
+    policy = self.config.artifact_extraction.resources
+    transformed_content = []
+    
+    for item in result.content:
+        if getattr(item, "type", None) == "resource_link":
+            # Extract link metadata
+            link_info = {
+                "type": "resource_link",
+                "uri": item.uri,
+                "mime_type": getattr(item, "mimeType", None),
+                "size_bytes": getattr(item, "size", None),
+            }
+            
+            # Policy: auto-read small resources
+            if (
+                policy.enabled
+                and policy.auto_read_if_size_under_bytes > 0
+                and link_info["size_bytes"] is not None
+                and link_info["size_bytes"] < policy.auto_read_if_size_under_bytes
+            ):
+                try:
+                    resource_contents = await self._mcp_client.read_resource(item.uri)
+                    artifact_ref = await self._resource_contents_to_artifact(
+                        resource_contents, ctx
+                    )
+                    link_info["artifact"] = artifact_ref
+                    link_info["fetched"] = True
+                except Exception as e:
+                    link_info["fetch_error"] = str(e)
+                    link_info["fetched"] = False
+            else:
+                # Preserve as lazy reference with hint for LLM
+                link_info["fetched"] = False
+                link_info["hint"] = (
+                    f"Resource available at {item.uri}. "
+                    f"Use {self.config.name}.resources_read to fetch."
+                )
+            
+            transformed_content.append(link_info)
+        else:
+            transformed_content.append(item)
+    
+    if transformed_content:
+        return {"content": transformed_content, **_extract_non_content(result)}
+    return result
 ```
+
+---
+
+### 4.4 Planner-Level Observation Guardrail
+
+The planner applies a **final guardrail** after tool execution to prevent any observation (from any tool source) from overflowing the LLM context window.
+
+**Configuration:**
+
+```python
+class ObservationGuardrailConfig(BaseModel):
+    """Configuration for observation size limits."""
+    
+    # Character limits
+    max_observation_chars: int = 50_000
+    max_field_chars: int = 10_000
+    
+    # Truncation behavior
+    truncation_suffix: str = "\n... [truncated: {truncated_chars} chars]"
+    preserve_structure: bool = True  # Keep JSON structure, truncate values
+    
+    # Artifact fallback
+    auto_artifact_threshold: int = 20_000  # Store as artifact if above this
+```
+
+**Implementation in `ReactPlanner.step()`:**
+
+```python
+async def step(self, trajectory: Trajectory) -> StepResult:
+    # ... existing action selection and tool execution ...
+    
+    raw_observation = await self._execute_tool(action, ctx)
+    
+    # Apply observation guardrail
+    clamped_observation, was_clamped = await self._clamp_observation(
+        raw_observation,
+        ctx,
+    )
+    
+    if was_clamped:
+        logger.warning(
+            "Observation clamped for tool %s (original: %d chars, clamped: %d chars)",
+            action.tool,
+            self._estimate_size(raw_observation),
+            self._estimate_size(clamped_observation),
+        )
+        self._emit_event(
+            PlannerEvent(
+                event_type="observation_clamped",
+                ts=self._time_source(),
+                trajectory_step=len(trajectory.steps),
+                extra={
+                    "tool": action.tool,
+                    "original_size": self._estimate_size(raw_observation),
+                    "clamped_size": self._estimate_size(clamped_observation),
+                },
+            )
+        )
+    
+    # Use clamped observation for trajectory
+    trajectory.steps.append(Step(action=action, observation=clamped_observation))
+
+
+async def _clamp_observation(
+    self,
+    observation: Any,
+    ctx: ToolContext,
+) -> tuple[Any, bool]:
+    """
+    Clamp observation to prevent context overflow.
+    
+    Strategy:
+    1. If small enough, return as-is
+    2. If has artifact store and large, store as artifact
+    3. Otherwise, truncate with structure preservation
+    """
+    size = self._estimate_size(observation)
+    
+    if size <= self._guardrail.max_observation_chars:
+        return observation, False
+    
+    # Try artifact storage for very large content
+    if (
+        size > self._guardrail.auto_artifact_threshold
+        and hasattr(ctx, "artifacts")
+        and not isinstance(ctx.artifacts, NoOpArtifactStore)
+    ):
+        return await self._observation_to_artifact(observation, ctx), True
+    
+    # Fallback: truncate with structure preservation
+    return self._truncate_observation(observation), True
+
+
+def _truncate_observation(self, observation: Any) -> Any:
+    """Truncate observation while preserving JSON structure."""
+    
+    if isinstance(observation, str):
+        return self._truncate_string(observation)
+    
+    if isinstance(observation, dict):
+        return self._truncate_dict(observation)
+    
+    if isinstance(observation, list):
+        return self._truncate_list(observation)
+    
+    return self._truncate_string(str(observation))
+```
+
+**Two-Level Defense:**
+
+```
+┌─────────────┐     ┌─────────────────────┐     ┌─────────────────────┐
+│ MCP Server  │────▶│ ToolNode            │────▶│ ReactPlanner        │
+│             │     │ _transform_output() │     │ _clamp_observation()│
+└─────────────┘     └─────────────────────┘     └─────────────────────┘
+                            │                            │
+                            │ Layer 0-5:                 │ Final guardrail:
+                            │ - Binary detection         │ - Size limit
+                            │ - MCP content types        │ - Auto-artifact
+                            │ - Per-tool config          │ - Truncation
+                            │ - Size safety net          │
+```
+
+| Layer | Location | Purpose |
+|-------|----------|---------|
+| ToolNode (L0-L5) | Per-tool, MCP-aware | Handle known patterns, binary content |
+| Planner guardrail | Universal | Catch anything that slipped through |
 
 ---
 
@@ -631,22 +833,123 @@ This RFC is primarily about (3), while remaining compatible with (1) and (2).
 
 ---
 
-### 5.2 ArtifactStore: Separate Protocol, Discoverable from StateStore
+### 5.2 ArtifactStore: Hybrid Discovery Mechanism
 
-**Recommendation:**
-- Define `ArtifactStore` as a separate protocol.
-- `ReactPlanner` accepts `artifact_store: ArtifactStore | None`.
-- If not provided, attempt to discover it from `state_store` via duck-typing (same adapter object can implement both).
-- Playground provides an in-memory implementation by default.
+**Decision:** Use explicit parameter with optional discovery fallback.
 
-**Duck-typing options:**
-- `state_store.artifact_store -> ArtifactStore` attribute, or
-- optional methods directly on `state_store` (e.g. `put_artifact`, `get_artifact`, `delete_artifact`), adapted to `ArtifactStore`.
+**Protocol Definition (`penguiflow/artifacts.py`):**
+
+```python
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class ArtifactStore(Protocol):
+    """Protocol for binary/large-text artifact storage."""
+    
+    async def put_bytes(
+        self,
+        data: bytes,
+        *,
+        mime_type: str | None = None,
+        filename: str | None = None,
+        namespace: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> ArtifactRef:
+        """Store binary data, return compact reference."""
+        ...
+    
+    async def put_text(
+        self,
+        text: str,
+        *,
+        mime_type: str = "text/plain",
+        filename: str | None = None,
+        namespace: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> ArtifactRef:
+        """Store large text, return compact reference."""
+        ...
+    
+    async def get(self, artifact_id: str) -> bytes | None:
+        """Retrieve artifact bytes by ID. Returns None if not found."""
+        ...
+    
+    async def delete(self, artifact_id: str) -> bool:
+        """Delete artifact. Returns True if deleted, False if not found."""
+        ...
+    
+    async def exists(self, artifact_id: str) -> bool:
+        """Check if artifact exists."""
+        ...
+```
+
+**Discovery Function:**
+
+```python
+def discover_artifact_store(state_store: Any) -> ArtifactStore | None:
+    """
+    Attempt to discover ArtifactStore from state_store via duck-typing.
+    
+    Checks for:
+    1. state_store.artifact_store attribute (preferred)
+    2. state_store implementing ArtifactStore protocol directly
+    """
+    # Option 1: Explicit attribute
+    if hasattr(state_store, "artifact_store"):
+        candidate = state_store.artifact_store
+        if isinstance(candidate, ArtifactStore):
+            return candidate
+    
+    # Option 2: State store implements ArtifactStore directly
+    if isinstance(state_store, ArtifactStore):
+        return state_store
+    
+    return None
+```
+
+**ReactPlanner Integration:**
+
+```python
+class ReactPlanner:
+    def __init__(
+        self,
+        *,
+        state_store: StateStore | None = None,
+        artifact_store: ArtifactStore | None = None,  # Explicit param
+        # ...
+    ):
+        self._state_store = state_store
+        
+        # Resolution order:
+        # 1. Explicit parameter (highest priority)
+        # 2. Discovered from state_store
+        # 3. NoOpArtifactStore fallback (lowest priority)
+        if artifact_store is not None:
+            self._artifact_store = artifact_store
+        elif state_store is not None:
+            discovered = discover_artifact_store(state_store)
+            if discovered:
+                self._artifact_store = discovered
+                logger.debug("Discovered ArtifactStore from state_store")
+            else:
+                self._artifact_store = NoOpArtifactStore()
+        else:
+            self._artifact_store = NoOpArtifactStore()
+```
+
+**Resolution Summary:**
+
+| Scenario | Artifact Store Used | Behavior |
+|----------|---------------------|----------|
+| `artifact_store=MyStore()` passed | `MyStore` | Full binary storage |
+| `state_store` has `.artifact_store` | Discovered store | Full binary storage |
+| `state_store` implements `ArtifactStore` | State store directly | Full binary storage |
+| Neither provided | `NoOpArtifactStore` | Warnings + truncation |
 
 **Rationale:**
-- `StateStore` is optimized for event history and pause/resume payloads.
-- Binary artifacts have different durability, size, throughput, and access-control needs (often best served by disk/object storage).
-- Duck-typing keeps “single adapter object” deployments possible without forcing every `StateStore` backend to implement blob storage.
+- Explicit parameter gives users full control
+- Duck-typing enables "single adapter" deployments without forcing all `StateStore` backends to implement blob storage
+- `NoOpArtifactStore` fallback ensures library users aren't blocked if they don't configure artifact storage
 
 ---
 
@@ -737,95 +1040,482 @@ summary_template = "Downloaded {content_type} '{filename}' ({size_human}). Artif
 
 ## 6. Implementation Plan
 
-### Phase 0: Protocols and Context Wiring (Foundation)
+### Overview
 
-**Scope:**
-- Define `ArtifactRef` and a separate `ArtifactStore` protocol (bytes + large text).
-- Expose an artifact store handle via `ToolContext` (e.g. `ctx.artifacts`) so *any* tool (native or external) can store artifacts out-of-band.
-- Add `artifact_store` to `ReactPlanner`. If not provided, attempt to discover it from `state_store` via duck-typing.
-- Provide an in-memory `ArtifactStore` for Playground (session/trace scoped) and a no-op fallback for library users who don't configure one.
+The implementation is split into 5 phases, each independently shippable. Phases 0-2 form the **core functionality**; Phases 3-4 add **polish and hardening**.
 
-**Files to modify/add (expected):**
-- `penguiflow/planner/context.py`
-- `penguiflow/planner/react.py`
-- new `penguiflow/artifacts.py`
-- `penguiflow/cli/playground_state.py` (Playground storage)
-- `docs/tools/statestore-guide.md` (document optional artifact extensions)
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Phase 0: Foundation (2-3 days)                                          │
+│ ArtifactStore protocol, ArtifactRef, ToolContext.artifacts, NoOp fallback│
+├─────────────────────────────────────────────────────────────────────────┤
+│ Phase 1: ToolNode Transform + Planner Guardrail (4-6 days)              │
+│ _transform_output() layers, _clamp_observation(), binary detection      │
+├─────────────────────────────────────────────────────────────────────────┤
+│ Phase 2: MCP Resources (5-8 days)                                       │
+│ resources/list, resources/read, subscribe, cache, generated tools       │
+├─────────────────────────────────────────────────────────────────────────┤
+│ Phase 3: Playground Integration (3-5 days)                              │
+│ /artifacts endpoint, session scoping, UI downloads, resource browser    │
+├─────────────────────────────────────────────────────────────────────────┤
+│ Phase 4: Hardening & Documentation (3-5 days)                           │
+│ Presets, negative tests, retention cleanup, docs                        │
+└─────────────────────────────────────────────────────────────────────────┘
 
-**Acceptance criteria:**
-- A native tool can `await ctx.artifacts.put_bytes(...)` and safely return an `ArtifactRef`.
-- No bytes/base64 are required to be present in `tool_context` or SSE events to make downloads possible.
-
-**Estimated effort:** 1-2 days
-
-### Phase 1: ToolNode Output Transformation + Universal Guardrails
-
-**Scope:**
-- Implement `_transform_output()` in ToolNode with the updated layered strategy:
-  1. Custom transformer (sync/async)
-  2. Per-tool configured extraction (`tool_fields`)
-  3. MCP typed content blocks (`image`/`audio`/embedded `blob`/`resource_link`)
-  4. Recursive heuristic detection (base64-likeness + magic-bytes validation)
-  5. Size-based safety net for large text/JSON (store as text artifact)
-- Add a planner-level “last resort” observation clamp so *any* tool (not just ToolNode) can't blow up the context window. If the clamp triggers:
-  - store content to `ArtifactStore` when possible and replace with `ArtifactRef`, or
-  - truncate and emit a clear warning when no store is configured.
-
-**Acceptance criteria:**
-- The original Tableau incident becomes impossible: base64 never reaches the LLM unbounded.
-- ToolNode returns remain JSON-serialisable and small by default (refs + summaries only).
-
-**Estimated effort:** 2-4 days
-
-### Phase 2: Full MCP Resources Support (Required)
-
-**Scope:**
-- Implement resources in ToolNode:
-  - `list_resources()` and pagination support
-  - `list_resource_templates()` and pagination support
-  - `read_resource(uri, ctx)` with conversion:
-    - `BlobResourceContents.blob` → `ArtifactRef` (stored to `ArtifactStore`)
-    - `TextResourceContents.text` → inline if small; else store as text artifact and return `ArtifactRef`
-  - `subscribe_resource(uri)` / `unsubscribe_resource(uri)`
-  - handle `notifications/resources/updated`
-- Add caching for `read_resource` results (URI → `ArtifactRef`) when `cache_reads_to_artifacts=True`.
-- Expose resources to:
-  - Planner: generated NodeSpecs (e.g. `{namespace}.resources_list`, `{namespace}.resources_read`, `{namespace}.resources_templates_list`), and/or
-  - Playground: REST endpoints for browsing and reading resources.
-
-**Acceptance criteria:**
-- Resources can be discovered and fetched end-to-end without inlining blobs into LLM context.
-- Resource updates can be observed (subscribe + updated notifications) and reflected in host state.
-
-**Estimated effort:** 3-6 days
-
-### Phase 3: Playground API + UI
-
-**Scope:**
-- Add `/artifacts/{artifact_id}` endpoint backed by `ArtifactStore` with strict session/trace scoping.
-- Add Playground endpoints for resources browse/read/subscribe (per ToolNode namespace).
-- UI: show (a) artifact refs as downloadable items and (b) resource links as clickable entries with on-demand read/preview.
-
-**Estimated effort:** 2-4 days
-
-### Phase 4: Documentation, Presets, and Hardening
-
-**Scope:**
-- Document the `ArtifactStore` protocol, recommended backends, and how to co-locate it with `StateStore` via duck-typing.
-- Add presets for common servers (e.g. Tableau) with `tool_fields` rules to extract known base64 fields.
-- Add negative-path tests: missing store, decode failures, access denied, oversized payloads, servers that return malformed base64.
-- Define lifecycle/retention defaults (TTL, max bytes per session/trace) and cleanup hooks.
-
-**Estimated effort:** 2-4 days
+Total estimated: 17-27 days (3-5 weeks)
+```
 
 ---
 
-## 7. Open Questions
+### Phase 0: Foundation — Protocols and Context Wiring
 
-1. **Default retention and limits**: what are the default TTL and max-bytes per (session, trace) for the Playground `ArtifactStore`?
-2. **Access control contract**: should `ArtifactStore` enforce `tenant_id/user_id/session_id/trace_id` scoping itself, or should the host enforce it at the HTTP layer (or both)?
-3. **Resource caching semantics**: how should `resources/updated` invalidation work (e.g., always invalidate, or compare `size`/`lastModified` when available)?
-4. **Fallback behavior**: if no `ArtifactStore` is configured, do we hard-error on large/binary outputs or truncate with warnings?
+**Goal:** Establish the core abstractions so any tool can store/retrieve binary artifacts.
+
+**Scope:**
+
+1. **New file `penguiflow/artifacts.py`:**
+   - `ArtifactRef` model (id, mime_type, size_bytes, filename, sha256, scope, source)
+   - `ArtifactScope` model (tenant_id, user_id, session_id, trace_id)
+   - `ArtifactStore` protocol (put_bytes, put_text, get, delete, exists)
+   - `ArtifactRetentionConfig` model (ttl, size limits, cleanup strategy)
+   - `NoOpArtifactStore` implementation (warnings + truncation fallback)
+   - `discover_artifact_store()` function for duck-typing from StateStore
+   - `InMemoryArtifactStore` implementation (for Playground)
+
+2. **Modify `penguiflow/planner/context.py`:**
+   - Add `artifacts: ArtifactStore` property to `ToolContext` protocol
+
+3. **Modify `penguiflow/planner/react.py`:**
+   - Add `artifact_store: ArtifactStore | None` parameter to `ReactPlanner.__init__`
+   - Implement hybrid discovery (explicit > discovered > NoOp)
+   - Wire `ctx.artifacts` in `_PlannerContext`
+
+4. **Modify `penguiflow/cli/playground_state.py`:**
+   - Add `PlaygroundArtifactStore` with session-scoped in-memory storage
+
+**Files to modify/add:**
+- `penguiflow/artifacts.py` (new)
+- `penguiflow/planner/context.py`
+- `penguiflow/planner/react.py`
+- `penguiflow/cli/playground_state.py`
+
+**Acceptance criteria:**
+- `await ctx.artifacts.put_bytes(data)` returns `ArtifactRef` in any tool
+- `await ctx.artifacts.get(ref.id)` returns bytes (or None if NoOp)
+- NoOpArtifactStore logs warning on first use, returns truncated ref
+- Unit tests for all ArtifactStore implementations
+
+**Estimated effort:** 2-3 days
+
+---
+
+### Phase 1: ToolNode Output Transformation + Planner Guardrail
+
+**Goal:** Intercept MCP tool outputs and clamp observations to prevent context overflow.
+
+**Scope:**
+
+1. **ToolNode output transformation (`penguiflow/tools/node.py`):**
+   - Add `_transform_output()` with layered strategy:
+     - L5: Custom transformer (escape hatch)
+     - L4: Per-tool field extraction (`tool_fields` config)
+     - L1: Resource link handling (`_handle_resource_links`)
+     - L2: MCP typed content (`_transform_mcp_content_blocks`)
+     - L3: Heuristic binary detection (`_detect_and_extract_binary`)
+     - L0: Size safety net (`_apply_size_limits`)
+   - Add `ArtifactExtractionConfig` to `ExternalToolConfig`
+   - Add binary signature detection (PDF, PNG, JPEG, ZIP, GIF)
+
+2. **Planner guardrail (`penguiflow/planner/react.py`):**
+   - Add `ObservationGuardrailConfig` to `ReactPlanner`
+   - Implement `_clamp_observation()` in `step()`
+   - Add `_truncate_observation()` with structure preservation
+   - Emit `observation_clamped` event when triggered
+
+3. **Configuration models (`penguiflow/tools/config.py` or similar):**
+   - `BinaryDetectionConfig` (signatures, min_size, require_magic_bytes)
+   - `ResourceHandlingConfig` (auto_read threshold, cache settings)
+   - `ArtifactFieldConfig` (field_path, content_type, summary_template)
+   - `ObservationGuardrailConfig` (max chars, truncation settings)
+
+**Files to modify/add:**
+- `penguiflow/tools/node.py`
+- `penguiflow/tools/config.py` (or inline in node.py)
+- `penguiflow/planner/react.py`
+
+**Acceptance criteria:**
+- Tableau base64 PDF incident is impossible (auto-detected, stored as artifact)
+- Tool returning 1MB JSON gets clamped with clear warning
+- All layers tested in isolation and integration
+- ToolNode returns remain < 50KB by default
+
+**Estimated effort:** 4-6 days
+
+---
+
+### Phase 2: Full MCP Resources Support
+
+**Goal:** Implement MCP resources protocol for lazy loading of large content.
+
+**Scope:**
+
+1. **ToolNode resources methods:**
+   - `list_resources()` with pagination
+   - `list_resource_templates()` with pagination
+   - `read_resource(uri, ctx)` → `ArtifactRef` or inline text
+   - `subscribe_resource(uri)` / `unsubscribe_resource(uri)`
+   - Handle `notifications/resources/updated`
+
+2. **Resource cache:**
+   - `ResourceCache` class (URI → ArtifactRef mapping)
+   - Invalidation on `resources/updated` notifications
+   - Integration with ArtifactStore for persistence
+
+3. **Generated tools for planner:**
+   - `{namespace}.resources_list` → list available resources
+   - `{namespace}.resources_read` → fetch resource by URI
+   - `{namespace}.resources_templates_list` → list templates
+   - Auto-generate NodeSpecs during `ToolNode.connect()`
+
+4. **Error handling:**
+   - Resource not found
+   - Server doesn't support resources
+   - Timeout on large resource reads
+
+**Files to modify/add:**
+- `penguiflow/tools/node.py`
+- `penguiflow/tools/resources.py` (new, optional separation)
+
+**Acceptance criteria:**
+- Resources discoverable via generated tools
+- Large binary resources never inline (always ArtifactRef)
+- Cache invalidates correctly on server notifications
+- Works gracefully when server doesn't support resources
+
+**Estimated effort:** 5-8 days
+
+---
+
+### Phase 3: Playground Integration
+
+**Goal:** Enable artifact downloads and resource browsing in Playground UI.
+
+**Scope:**
+
+1. **REST endpoints (`penguiflow/cli/playground.py`):**
+   - `GET /artifacts/{artifact_id}` → binary download
+   - `GET /artifacts/{artifact_id}/meta` → ArtifactRef metadata
+   - `GET /resources/{namespace}` → list resources for a ToolNode
+   - `GET /resources/{namespace}/{uri}` → read resource (with caching)
+   - Session-scoped access control
+
+2. **SSE events:**
+   - `artifact_stored` event with ArtifactRef
+   - `resource_updated` event for cache invalidation
+   - No binary data over SSE (refs only)
+
+3. **UI updates (`penguiflow/cli/playground_ui/`):**
+   - Render ArtifactRef as download button/link
+   - Resource browser panel (list + read on demand)
+   - Preview for images, PDF viewer for PDFs
+   - Size/type indicators
+
+**Files to modify/add:**
+- `penguiflow/cli/playground.py`
+- `penguiflow/cli/playground_sse.py`
+- `penguiflow/cli/playground_ui/` (various components)
+
+**Acceptance criteria:**
+- Artifacts downloadable via UI button
+- Resources browseable without leaving Playground
+- Session isolation enforced (can't access other sessions' artifacts)
+- Works with large files (streaming download)
+
+**Estimated effort:** 3-5 days
+
+---
+
+### Phase 4: Hardening, Documentation, and Presets
+
+**Goal:** Production-ready quality with comprehensive docs and tests.
+
+**Scope:**
+
+1. **Presets for common MCP servers:**
+   - Tableau: `tool_fields` for `download_workbook`, `get_view_as_pdf`
+   - GitHub: file content extraction
+   - Extensible preset registry
+
+2. **Negative-path tests:**
+   - Missing ArtifactStore (NoOp fallback behavior)
+   - Malformed base64 content
+   - Decode failures (corrupted data)
+   - Oversized payloads (exceed limits)
+   - Access denied (wrong session)
+   - MCP server errors during resource read
+
+3. **Retention and cleanup:**
+   - TTL expiration hook
+   - Size-based eviction (LRU)
+   - Cleanup on session end
+   - Playground garbage collection
+
+4. **Documentation:**
+   - `docs/artifacts-guide.md` — ArtifactStore protocol, implementations, configuration
+   - `docs/mcp-resources-guide.md` — resources support, caching, generated tools
+   - Update `docs/tools/statestore-guide.md` with artifact extension patterns
+   - API reference for new endpoints
+
+**Files to modify/add:**
+- `penguiflow/tools/presets/` (new directory)
+- `tests/test_artifacts.py` (new)
+- `tests/test_toolnode_binary.py` (new)
+- `tests/test_mcp_resources.py` (new)
+- `docs/artifacts-guide.md` (new)
+- `docs/mcp-resources-guide.md` (new)
+
+**Acceptance criteria:**
+- ≥85% test coverage for new code
+- All negative paths tested
+- Presets work out-of-box for Tableau
+- Docs reviewed and clear
+
+**Estimated effort:** 3-5 days
+
+---
+
+### Phase Dependencies
+
+```
+Phase 0 ─────────────────────────────────────────────────────────▶
+         │
+         ▼
+Phase 1 ─────────────────────────────────────────────────────────▶
+         │
+         ├──────────────────────┐
+         ▼                      ▼
+Phase 2 ──────────────▶   Phase 3 ──────────────▶
+         │                      │
+         └──────────┬───────────┘
+                    ▼
+              Phase 4 ──────────────▶
+```
+
+- Phase 0 is prerequisite for all others
+- Phase 1 depends on Phase 0
+- Phases 2 and 3 can run in parallel after Phase 1
+- Phase 4 depends on Phases 2 and 3
+
+---
+
+### Risk Mitigation
+
+| Risk | Mitigation |
+|------|------------|
+| MCP servers don't use typed content | Heuristic detection (L3) catches base64 regardless |
+| ArtifactStore adds latency | In-memory store for Playground; async writes |
+| Large files overwhelm memory | Streaming support in Phase 3; size limits |
+| Breaking change for existing tools | All changes additive; NoOp fallback preserves behavior |
+
+---
+
+## 7. Resolved Design Decisions
+
+### 7.1 Default Retention and Limits
+
+**Decision:** Use conservative defaults suitable for Playground development sessions.
+
+```python
+class ArtifactRetentionConfig(BaseModel):
+    """Retention policy for artifacts."""
+    
+    # Time-to-live
+    ttl_seconds: int = 3600  # 1 hour default
+    
+    # Size limits
+    max_artifact_bytes: int = 50 * 1024 * 1024  # 50MB per artifact
+    max_session_bytes: int = 500 * 1024 * 1024  # 500MB per session
+    max_trace_bytes: int = 100 * 1024 * 1024    # 100MB per trace
+    
+    # Count limits
+    max_artifacts_per_trace: int = 100
+    max_artifacts_per_session: int = 1000
+    
+    # Cleanup behavior
+    cleanup_strategy: Literal["lru", "fifo", "none"] = "lru"
+```
+
+**Rationale:**
+- 1-hour TTL covers typical Playground dev sessions
+- 50MB per artifact handles most PDFs/images
+- 500MB session limit prevents runaway storage
+- LRU cleanup evicts least-used when limits hit
+
+---
+
+### 7.2 Access Control Contract
+
+**Decision:** Host enforces at HTTP layer; `ArtifactStore` is scope-aware but not enforcing.
+
+```python
+class ArtifactRef(BaseModel):
+    """Compact reference to stored artifact."""
+    
+    id: str
+    mime_type: str | None = None
+    size_bytes: int | None = None
+    filename: str | None = None
+    sha256: str | None = None
+    
+    # Scoping metadata (for access control, not enforcement)
+    scope: ArtifactScope | None = None
+
+
+class ArtifactScope(BaseModel):
+    """Scoping information for access control."""
+    
+    tenant_id: str | None = None
+    user_id: str | None = None
+    session_id: str | None = None
+    trace_id: str | None = None
+```
+
+**Access Control Flow:**
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│   Frontend   │────▶│  HTTP Layer  │────▶│ ArtifactStore│
+│              │     │ (enforces    │     │ (stores +    │
+│ GET /artifacts/x   │  scope match)│     │  retrieves)  │
+└──────────────┘     └──────────────┘     └──────────────┘
+                            │
+                            ▼
+                     Check: request.session_id == artifact.scope.session_id
+                     Check: request.tenant_id == artifact.scope.tenant_id
+```
+
+**Rationale:**
+- Separation of concerns: storage vs access control
+- Production deployments can use different enforcement mechanisms (JWT, signed URLs, etc.)
+- `ArtifactStore` implementations remain simple and reusable
+
+---
+
+### 7.3 Resource Caching Semantics
+
+**Decision:** Always invalidate on `resources/updated`; no version comparison.
+
+```python
+class ResourceCache:
+    """Cache for MCP resource reads."""
+    
+    def __init__(self, artifact_store: ArtifactStore):
+        self._store = artifact_store
+        self._uri_to_artifact: dict[str, ArtifactRef] = {}
+    
+    async def get_or_fetch(
+        self,
+        uri: str,
+        mcp_client: Any,
+        ctx: ToolContext,
+    ) -> ArtifactRef:
+        """Get cached artifact or fetch from server."""
+        if uri in self._uri_to_artifact:
+            ref = self._uri_to_artifact[uri]
+            if await self._store.exists(ref.id):
+                return ref
+            del self._uri_to_artifact[uri]
+        
+        contents = await mcp_client.read_resource(uri)
+        ref = await self._contents_to_artifact(contents, ctx)
+        self._uri_to_artifact[uri] = ref
+        return ref
+    
+    def invalidate(self, uri: str) -> None:
+        """Invalidate cache entry (called on resources/updated)."""
+        if uri in self._uri_to_artifact:
+            logger.debug("Invalidating cached resource: %s", uri)
+            del self._uri_to_artifact[uri]
+```
+
+**Rationale:**
+- Always invalidate is simple and correct
+- Version comparison adds complexity for minimal gain (resources change infrequently)
+- Host can react to invalidation events if needed
+
+---
+
+### 7.4 Fallback Behavior (No ArtifactStore)
+
+**Decision:** Truncate with structured warning; never hard-error.
+
+```python
+class NoOpArtifactStore:
+    """Fallback when no real store configured."""
+    
+    def __init__(self, max_inline_preview: int = 500):
+        self._max_preview = max_inline_preview
+        self._warned = False
+    
+    async def put_bytes(
+        self,
+        data: bytes,
+        *,
+        mime_type: str | None = None,
+        filename: str | None = None,
+        **kwargs,
+    ) -> ArtifactRef:
+        if not self._warned:
+            logger.warning(
+                "No ArtifactStore configured. Binary content will not be stored. "
+                "Configure artifact_store= in ReactPlanner for full binary support."
+            )
+            self._warned = True
+        
+        return ArtifactRef(
+            id=f"truncated_{hashlib.sha256(data).hexdigest()[:12]}",
+            mime_type=mime_type,
+            size_bytes=len(data),
+            filename=filename,
+            sha256=hashlib.sha256(data).hexdigest(),
+            source={
+                "warning": "Content not stored (no ArtifactStore configured)",
+                "truncated": True,
+                "original_size": len(data),
+            },
+        )
+    
+    async def put_text(self, text: str, **kwargs) -> ArtifactRef:
+        # Similar implementation with preview
+        ...
+    
+    async def get(self, artifact_id: str) -> bytes | None:
+        return None  # Cannot retrieve truncated content
+    
+    async def exists(self, artifact_id: str) -> bool:
+        return False
+```
+
+**LLM sees (when no store configured):**
+```json
+{
+  "artifact": {
+    "id": "truncated_a1b2c3d4e5f6",
+    "mime_type": "application/pdf",
+    "size_bytes": 524288,
+    "source": {
+      "warning": "Content not stored (no ArtifactStore configured)",
+      "truncated": true
+    }
+  },
+  "summary": "Downloaded PDF (512KB). Note: Binary content not stored."
+}
+```
+
+**Rationale:**
+- Library users shouldn't be blocked if they don't configure artifact storage
+- Clear warnings help users understand the limitation
+- Structured metadata allows downstream handling
 
 ---
 
