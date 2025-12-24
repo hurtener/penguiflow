@@ -3,7 +3,7 @@
 **Status**: Draft
 **Created**: 2025-12-22
 **Author**: Claude + Santiago
-**Version**: 0.1
+**Version**: 0.2
 
 ---
 
@@ -52,9 +52,9 @@ When using the Tableau MCP server's `download_workbook` tool, the server returne
       │                   │                    │
       │ Returns:          │ Transforms to:     │ Receives:
       │ {                 │ {                  │ "Observation: Downloaded
-      │   "content":      │   "artifact_id":   │  workbook 'Sales' (2.3MB
-      │   "JVBERi..."     │   "art_abc123",    │  PDF). Artifact ID:
-      │   (500KB)         │   "summary": "..." │  art_abc123"
+      │   "content":      │   "artifact":      │  workbook 'Sales' (2.3MB
+      │   "JVBERi..."     │   {"id":"..."},    │  PDF). Artifact: ..."
+      │   (500KB)         │   "summary": "..." │
       │ }                 │ }                  │
       │                   │                    │
       │                   ▼                    │
@@ -72,33 +72,31 @@ When using the Tableau MCP server's `download_workbook` tool, the server returne
 
 ### 2.1 Penguiflow Native Tools
 
-Native tools in penguiflow have full access to `ToolContext`:
+Native tools in penguiflow already receive a `ToolContext`, but binary artifact handling is not first-class yet.
+
+**Today:**
+- `tool_context` can hold arbitrary Python objects, but it is not guaranteed to be JSON-serialisable (and is dropped during trajectory serialisation if it can't be encoded).
+- `emit_artifact()` emits JSON-serialisable chunks into the planner event stream (useful for Playground/UI), but it is not a byte store.
+
+**Target (this RFC):** introduce a dedicated `ArtifactStore` (bytes + large text) surfaced to *all* tools via `ToolContext` (e.g. `ctx.artifacts`), returning a small, JSON-safe `ArtifactRef` that can be included in observations.
 
 ```python
+# Target tool shape once ArtifactStore is available
 async def download_report(query: DownloadQuery, ctx: ToolContext) -> DownloadResult:
     pdf_bytes = await fetch_pdf(query.report_id)
 
-    # Option 1: Store in tool_context (available to other tools)
-    ctx.tool_context["last_pdf"] = pdf_bytes
-
-    # Option 2: Emit as artifact (available to frontend)
-    artifact_id = await ctx.emit_artifact(
-        artifact_type="pdf",
-        content=pdf_bytes,
-        metadata={"filename": "report.pdf", "size": len(pdf_bytes)},
+    artifact = await ctx.artifacts.put_bytes(
+        pdf_bytes,
+        mime_type="application/pdf",
+        filename="report.pdf",
+        meta={"report_id": query.report_id},
     )
 
-    # Return summary for LLM
     return DownloadResult(
-        summary=f"Downloaded report ({len(pdf_bytes)} bytes)",
-        artifact_id=artifact_id,
+        summary=f"Downloaded report PDF ({artifact.size_bytes} bytes).",
+        artifact=artifact,
     )
 ```
-
-**Key capabilities:**
-- `tool_context`: Dict for inter-tool data (not LLM-visible)
-- `emit_artifact()`: Stream binary content with metadata
-- Return value goes to LLM as observation
 
 ### 2.2 MCP/ToolNode Current Implementation
 
@@ -126,25 +124,41 @@ def _serialize_mcp_result(self, result: Any) -> Any:
 
 ### 2.3 MCP Protocol Content Types
 
-The MCP specification (2024-11-05) defines several content types:
+The MCP specification (2025-11-25) defines content blocks that explicitly represent binary payloads *and* out-of-band resource references:
 
 ```typescript
-// MCP Content Types
-interface TextContent {
-  type: "text";
-  text: string;
-}
+type ContentBlock =
+  | TextContent
+  | ImageContent     // base64 `data`
+  | AudioContent     // base64 `data`
+  | ResourceLink     // URI pointer (no bytes)
+  | EmbeddedResource // inline text or base64 `blob`
+```
 
+```typescript
 interface ImageContent {
   type: "image";
   data: string;      // base64
   mimeType: string;  // e.g., "image/png"
 }
 
+interface AudioContent {
+  type: "audio";
+  data: string;      // base64
+  mimeType: string;  // e.g., "audio/wav"
+}
+
+interface ResourceLink {
+  type: "resource_link";
+  uri: string;
+  mimeType?: string;
+  size?: number;     // raw bytes, if known
+}
+
 interface EmbeddedResource {
   type: "resource";
   resource: {
-    uri: string;     // Resource URI
+    uri: string;
     mimeType?: string;
     text?: string;   // For text resources
     blob?: string;   // For binary resources (base64)
@@ -152,25 +166,22 @@ interface EmbeddedResource {
 }
 ```
 
-**Observation**: MCP already has `ImageContent` and `EmbeddedResource` types that signal binary content. We could detect these at the protocol level.
+**Observation**: MCP already provides (1) a typed-inline path (`image`/`audio`/`resource` with `blob`) and (2) an out-of-band path (`resource_link` + `resources/read`) with a `size` hint to help Hosts avoid context blowups. A correct client should preserve resource links by default and only materialize bytes when explicitly requested or when policy allows.
 
 ### 2.4 MCP Resources (Not Yet Supported)
 
-MCP has a "resources" capability where servers can expose named resources:
+MCP resources are a first-class, lazy-loading mechanism intended for large data. The relevant RPCs include:
+
+- `resources/list` (paginated)
+- `resources/templates/list` (paginated)
+- `resources/read` (returns `TextResourceContents` or `BlobResourceContents`)
+- `resources/subscribe` / `resources/unsubscribe` and `notifications/resources/updated` (optional)
 
 ```typescript
-// Server advertises resources
-{
-  "resources": [
-    {
-      "uri": "tableau://workbook/12345/pdf",
-      "name": "Sales Report PDF",
-      "mimeType": "application/pdf"
-    }
-  ]
-}
+// Client lists resources (paginated)
+await client.listResources();
 
-// Client reads resource
+// Client reads a resource by URI
 await client.readResource("tableau://workbook/12345/pdf");
 // Returns: { contents: [{ uri, mimeType, blob }] }
 ```
@@ -181,7 +192,7 @@ await client.readResource("tableau://workbook/12345/pdf");
 - Natural fit for large binary data
 - Supports streaming via resource subscriptions
 
-**Current status in penguiflow:** Not implemented. ToolNode only uses `list_tools()` and `call_tool()`.
+**Current status in penguiflow:** Not implemented. ToolNode only uses `tools/list` and `tools/call`.
 
 ---
 
@@ -200,13 +211,18 @@ class ExternalToolConfig:
 
 **Implementation:**
 ```python
-def _maybe_extract_artifact(self, result: Any, ctx: ToolContext) -> Any:
+async def _maybe_extract_artifact(self, result: Any, ctx: ToolContext) -> Any:
     if isinstance(result, str) and len(result) > self.config.max_inline_size:
-        artifact_id = ctx.store_artifact(result)
+        artifact = await ctx.artifacts.put_text(
+            result,
+            mime_type="text/plain",
+            filename="tool-output.txt",
+            meta={"tool": self.config.name},
+        )
         return {
-            "artifact_id": artifact_id,
-            "summary": f"Large content stored as artifact ({len(result)} chars)",
-            "truncated_preview": result[:200] + "...",
+            "artifact": artifact,
+            "summary": f"Large text stored as artifact ({len(result)} chars)",
+            "preview": result[:200] + "…",
         }
     return result
 ```
@@ -266,28 +282,33 @@ def _detect_binary(self, content: str) -> tuple[str, str] | None:
 
 ### 3.3 Option C: MCP Content Type Detection
 
-**Approach**: Leverage MCP's native content types (`ImageContent`, `EmbeddedResource`).
+**Approach**: Leverage MCP's native content types (`ImageContent`, `AudioContent`, `ResourceLink`, `EmbeddedResource`).
 
 ```python
-def _serialize_mcp_result(self, result: Any, ctx: ToolContext) -> Any:
+async def _transform_mcp_content_blocks(self, result: Any, ctx: ToolContext) -> Any:
     if hasattr(result, "content"):
         for item in result.content:
-            if item.type == "image":
-                # ImageContent - always artifact
-                artifact_id = ctx.store_artifact(
-                    base64.b64decode(item.data),
+            if item.type in {"image", "audio"}:
+                # Explicit binary payloads: always materialize to ArtifactStore
+                artifact = await ctx.artifacts.put_base64(
+                    item.data,
                     mime_type=item.mimeType,
                 )
-                return {"artifact_id": artifact_id, "type": "image"}
+                return {"type": item.type, "artifact": artifact}
+
+            if item.type == "resource_link":
+                # URI-only pointer: preserve as a link (lazy read via resources/read)
+                return {"type": "resource_link", "uri": item.uri, "mimeType": item.mimeType, "size": item.size}
 
             if item.type == "resource":
-                # EmbeddedResource - check if binary
-                if item.resource.blob:
-                    artifact_id = ctx.store_artifact(
-                        base64.b64decode(item.resource.blob),
-                        mime_type=item.resource.mimeType,
+                # EmbeddedResource: may include inline text or inline binary (base64 blob)
+                if getattr(item.resource, "blob", None):
+                    artifact = await ctx.artifacts.put_base64(
+                        item.resource.blob,
+                        mime_type=getattr(item.resource, "mimeType", None),
                     )
-                    return {"artifact_id": artifact_id, "uri": item.resource.uri}
+                    return {"type": "resource", "uri": item.resource.uri, "artifact": artifact}
+                return {"type": "resource", "uri": item.resource.uri, "text": getattr(item.resource, "text", None)}
     ...
 ```
 
@@ -356,7 +377,7 @@ class ExternalToolConfig:
 
 ### 3.5 Option E: Implement MCP Resources
 
-**Approach**: Add full MCP resources support to ToolNode.
+**Approach**: Add full MCP resources support to ToolNode (list, templates, read, subscribe) and integrate with `ArtifactStore`.
 
 ```python
 class ToolNode:
@@ -364,15 +385,21 @@ class ToolNode:
         # Existing tool discovery
         mcp_tools = await self._mcp_client.list_tools()
 
-        # NEW: Resource discovery
-        if self._mcp_client.supports_resources:
-            mcp_resources = await self._mcp_client.list_resources()
-            self._resources = self._convert_resources(mcp_resources)
+        # NEW: Resource discovery (best-effort; server may not support)
+        self._resources = await self._mcp_client.list_resources()
+        self._resource_templates = await self._mcp_client.list_resource_templates()
 
-    async def read_resource(self, uri: str) -> bytes:
-        """Fetch resource content by URI."""
+    async def read_resource(self, uri: str, ctx: ToolContext) -> Any:
+        """Fetch resource contents by URI, returning inline text or ArtifactRef(s)."""
         result = await self._mcp_client.read_resource(uri)
-        return result.contents[0].blob  # or .text
+        # If contents include a blob -> store bytes to ArtifactStore and return ArtifactRef
+        # If contents include large text -> store text to ArtifactStore and return ArtifactRef
+        # Otherwise return text inline
+        return self._convert_resource_contents(result, ctx)
+
+    async def subscribe_resource(self, uri: str) -> None:
+        """Subscribe to resource updates (notifications/resources/updated)."""
+        await self._mcp_client.subscribe(uri)
 ```
 
 **Usage flow:**
@@ -404,15 +431,21 @@ class ToolNode:
 
 ```python
 class ExternalToolConfig:
-    output_transformer: Callable[[str, dict, ToolContext], dict] | None = None
+    # May be sync or async; ToolNode should await if needed.
+    output_transformer: Callable[[str, Any, ToolContext], Any] | None = None
 
 # Usage
-def tableau_transformer(tool_name: str, result: dict, ctx: ToolContext) -> dict:
+async def tableau_transformer(tool_name: str, result: dict, ctx: ToolContext) -> dict:
     if tool_name == "download_workbook" and "content" in result:
         pdf_bytes = base64.b64decode(result["content"])
-        artifact_id = ctx.store_artifact(pdf_bytes, mime_type="application/pdf")
+        artifact = await ctx.artifacts.put_bytes(
+            pdf_bytes,
+            mime_type="application/pdf",
+            filename="workbook.pdf",
+            meta={"tool": tool_name},
+        )
         return {
-            "artifact_id": artifact_id,
+            "artifact": artifact,
             "summary": f"Downloaded workbook ({len(pdf_bytes)} bytes)",
             "workbook_name": result.get("name"),
         }
@@ -448,26 +481,35 @@ Implement multiple layers that work together:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Layer 4: Custom Transformer                   │
+│                    Layer 5: Custom Transformer                   │
 │                    (User-provided function)                      │
 ├─────────────────────────────────────────────────────────────────┤
-│                    Layer 3: Per-Tool Config                      │
+│                    Layer 4: Per-Tool Config                      │
 │                    (artifact_fields mapping)                     │
 ├─────────────────────────────────────────────────────────────────┤
-│                    Layer 2: Binary Detection                     │
-│                    (Base64 signatures + MCP content types)       │
+│                    Layer 3: Heuristic Detection                  │
+│                    (Base64 + magic-bytes, recursive)             │
 ├─────────────────────────────────────────────────────────────────┤
-│                    Layer 1: Size Safety Net                      │
-│                    (Auto-artifact if > max_inline_size)          │
+│                    Layer 2: MCP Typed Content                    │
+│              (image/audio/embedded blob/resource_link)           │
+├─────────────────────────────────────────────────────────────────┤
+│                    Layer 1: MCP Resources                        │
+│           (resource_link + resources/read, lazy by default)      │
+├─────────────────────────────────────────────────────────────────┤
+│                    Layer 0: Size Safety Net                      │
+│              (Auto-artifact if above thresholds)                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 **Processing order:**
-1. Check for custom transformer → if exists, use it
-2. Check per-tool artifact_fields config → extract configured fields
-3. Detect MCP ImageContent/EmbeddedResource → extract as artifacts
-4. Detect base64 binary signatures → extract as artifacts
-5. Check size limits → auto-artifact if too large
+1. Apply custom transformer (escape hatch) → if it returns, stop
+2. Apply per-tool configured field extraction → convert known fields to `ArtifactRef`
+3. Parse MCP typed content blocks:
+   - `image`/`audio`/embedded `blob` → store bytes to `ArtifactStore`, return `ArtifactRef`
+   - `resource_link` → preserve as link (URI + metadata), lazy-read by default
+4. Apply recursive heuristic extraction on structured JSON (base64-likeness + magic bytes)
+5. Apply size limits on remaining large text/JSON to avoid LLM context blowups
+6. Final guardrail (planner-level): clamp any over-budget observation regardless of tool source
 
 ### 4.2 Configuration Schema
 
@@ -482,6 +524,17 @@ class BinaryDetectionConfig(BaseModel):
         "UEsDB": ("zip", "application/zip"),
     }
     min_size_for_detection: int = 1000  # Don't check tiny strings
+    max_decode_bytes: int = 5_000_000   # Safety cap while probing content
+    require_magic_bytes: bool = True    # Avoid false positives on base64-like strings
+
+
+class ResourceHandlingConfig(BaseModel):
+    """Policy for MCP resources/resource_links."""
+
+    enabled: bool = True
+    auto_read_if_size_under_bytes: int = 0  # 0 = never auto-read; prefer explicit read
+    inline_text_if_under_chars: int = 10_000
+    cache_reads_to_artifacts: bool = True
 
 
 class ArtifactExtractionConfig(BaseModel):
@@ -493,6 +546,9 @@ class ArtifactExtractionConfig(BaseModel):
 
     # Binary detection
     binary_detection: BinaryDetectionConfig = BinaryDetectionConfig()
+
+    # MCP resources + links
+    resources: ResourceHandlingConfig = ResourceHandlingConfig()
 
     # Per-tool field configuration
     tool_fields: dict[str, list[ArtifactFieldConfig]] = {}
@@ -507,13 +563,18 @@ class ExternalToolConfig(BaseModel):
     # NEW: Artifact extraction
     artifact_extraction: ArtifactExtractionConfig = ArtifactExtractionConfig()
 
-    # NEW: Custom transformer (escape hatch)
-    output_transformer: Callable[[str, dict, ToolContext], dict] | None = None
+    # NEW: Custom transformer (escape hatch). May be sync or async.
+    output_transformer: Callable[[str, Any, ToolContext], Any] | None = None
 ```
 
 ### 4.3 Implementation Location
 
-**In `ToolNode.call()`:**
+**In `ReactPlanner` + `ToolContext` (applies to all tools):**
+- Define `ArtifactRef` + a separate `ArtifactStore` protocol.
+- Expose an artifact store handle via `ToolContext` (e.g. `ctx.artifacts`) so *any* tool (native or external) can store bytes/large text out-of-band and return compact refs.
+- Accept `artifact_store` in `ReactPlanner`. If not provided, attempt to discover it from `state_store` via duck-typing (same adapter object can implement both).
+
+**In `ToolNode.call()` (intercept external outputs):**
 ```python
 async def call(self, tool_name: str, args: dict, ctx: ToolContext) -> Any:
     # ... existing code ...
@@ -531,18 +592,24 @@ async def _transform_output(
 ) -> Any:
     """Apply artifact extraction and output transformation."""
 
-    # Layer 4: Custom transformer
+    # Layer 5: Custom transformer
     if self.config.output_transformer:
-        return self.config.output_transformer(tool_name, result, ctx)
+        transformed = self.config.output_transformer(tool_name, result, ctx)
+        if inspect.isawaitable(transformed):
+            transformed = await transformed
+        return transformed
 
-    # Layer 3: Per-tool config
+    # Layer 4: Per-tool config
     if tool_name in self.config.artifact_extraction.tool_fields:
         result = self._extract_configured_fields(tool_name, result, ctx)
 
-    # Layer 2: Binary detection
+    # Layer 2: MCP typed content blocks
+    result = await self._transform_mcp_content_blocks(result, ctx)
+
+    # Layer 3: Binary detection (recursive)
     result = self._detect_and_extract_binary(result, ctx)
 
-    # Layer 1: Size safety net
+    # Layer 0: Size safety net
     result = self._apply_size_limits(result, ctx)
 
     return result
@@ -552,24 +619,44 @@ async def _transform_output(
 
 ## 5. Decision Points
 
-### 5.1 Where to Store Artifacts?
+### 5.1 Two "Artifact" Concepts (Avoid Confusion)
 
-**Options:**
-1. **ToolContext dict**: `ctx.tool_context["artifacts"][artifact_id] = data`
-2. **Dedicated artifact store**: Separate service/storage
-3. **Emit via event callback**: `ctx.emit_artifact()` streams to frontend
+Penguiflow has multiple artifact-like mechanisms, and they serve different purposes:
 
-**Recommendation**: Use existing `ctx.emit_artifact()` mechanism for consistency with native tools. Add `store_artifact()` for synchronous storage if needed.
+1. **Planner artifacts (structured)**: small JSON values collected into `trajectory.artifacts` via `json_schema_extra={"artifact": True}` and redacted from LLM context.
+2. **Streaming artifact chunks**: `ctx.emit_artifact()` emits JSON-serialisable chunks into the planner event stream (Playground/UI).
+3. **Binary artifacts (this RFC)**: bytes and large text stored out-of-band in an `ArtifactStore`, referenced by a compact `ArtifactRef` included in tool observations.
+
+This RFC is primarily about (3), while remaining compatible with (1) and (2).
 
 ---
 
-### 5.2 Artifact ID Generation
+### 5.2 ArtifactStore: Separate Protocol, Discoverable from StateStore
+
+**Recommendation:**
+- Define `ArtifactStore` as a separate protocol.
+- `ReactPlanner` accepts `artifact_store: ArtifactStore | None`.
+- If not provided, attempt to discover it from `state_store` via duck-typing (same adapter object can implement both).
+- Playground provides an in-memory implementation by default.
+
+**Duck-typing options:**
+- `state_store.artifact_store -> ArtifactStore` attribute, or
+- optional methods directly on `state_store` (e.g. `put_artifact`, `get_artifact`, `delete_artifact`), adapted to `ArtifactStore`.
+
+**Rationale:**
+- `StateStore` is optimized for event history and pause/resume payloads.
+- Binary artifacts have different durability, size, throughput, and access-control needs (often best served by disk/object storage).
+- Duck-typing keeps “single adapter object” deployments possible without forcing every `StateStore` backend to implement blob storage.
+
+---
+
+### 5.3 Artifact ID Generation
 
 **Options:**
 1. **UUID**: `str(uuid.uuid4())`
 2. **Content hash**: `hashlib.sha256(content).hexdigest()[:16]`
 3. **Sequential**: `f"art_{counter}"`
-4. **Namespaced**: `f"{tool_name}_{uuid4()[:8]}"`
+4. **Namespaced**: `f"{namespace}_{uuid4()[:8]}"`
 
 **Recommendation**: Content hash with namespace prefix: `f"{namespace}_{sha256[:12]}"`. Benefits:
 - Deduplication (same content = same ID)
@@ -578,146 +665,178 @@ async def _transform_output(
 
 ---
 
-### 5.3 What Goes in the LLM Summary?
+### 5.4 ArtifactRef Shape (LLM-safe)
+
+The LLM should only ever see compact refs (never base64, never raw bytes):
+
+```python
+class ArtifactRef(BaseModel):
+    id: str
+    mime_type: str | None = None
+    size_bytes: int | None = None
+    filename: str | None = None
+    sha256: str | None = None
+    source: dict[str, Any] = {}
+```
+
+---
+
+### 5.5 What Goes in the LLM Summary?
 
 **Minimum:**
-- Artifact ID (so LLM can reference it)
+- Artifact ref (`ArtifactRef.id` at minimum)
 - Content type (PDF, image, etc.)
 - Size indicator
 
 **Ideal:**
 - Meaningful description from tool metadata
 - Filename if available
-- Action hints ("Use artifact_id to reference this file")
+- Action hints ("Use this artifact id to reference the file")
 
 **Template system:**
 ```python
-summary_template = "Downloaded {content_type} '{filename}' ({size_human}). Reference: {artifact_id}"
-# Output: "Downloaded PDF 'Sales Report.pdf' (2.3 MB). Reference: tableau_a1b2c3d4"
+summary_template = "Downloaded {content_type} '{filename}' ({size_human}). Artifact: {artifact_id}"
 ```
 
 ---
 
-### 5.4 How Does Frontend Access Artifacts?
+### 5.6 How Does Frontend Access Artifacts?
 
 **Options:**
-1. **Inline in final response**: Include artifact data in response metadata
-2. **Separate endpoint**: `/artifacts/{artifact_id}`
-3. **SSE streaming**: Emit artifact chunks via existing event stream
-4. **Signed URLs**: Generate temporary download URLs
+1. **Separate endpoint**: `/artifacts/{artifact_id}` (Playground, backed by `ArtifactStore`)
+2. **Signed URLs**: Generate temporary download URLs (production stores)
+3. **Inline metadata only**: Include `ArtifactRef` in observations/metadata (never bytes)
+4. **SSE for refs/metadata**: Emit `ArtifactRef` notifications/chunks (never raw bytes)
 
 **Recommendation**:
-- Stream via `emit_artifact()` for real-time access
-- Store in response metadata for persistence
-- Add `/artifacts/{artifact_id}` endpoint to playground for download
+- Use `/artifacts/{artifact_id}` (or signed URLs) for bytes
+- Keep only `ArtifactRef` + summaries in observations/metadata
+- Use SSE only for announcing refs/updates, not for delivering blobs
 
 ---
 
-### 5.5 MCP Resources: Now or Later?
+### 5.7 MCP Resources: Required (Full Support)
 
-**Arguments for now:**
-- Protocol-correct solution
-- Future-proofs the implementation
-- Some servers already support it
+**Definition of “full support” for resources:**
+- `resources/list` (paginated)
+- `resources/templates/list` (paginated)
+- `resources/read` (text/blob contents)
+- `resources/subscribe` / `resources/unsubscribe`
+- `notifications/resources/updated` handling (invalidate cache + emit a host event)
 
-**Arguments for later:**
-- Tableau doesn't seem to use resources
-- Adds complexity
-- Can be added incrementally
-
-**Recommendation**: Implement basic resources support in parallel, but don't block artifact extraction on it. Resources are the "right" long-term solution; artifact extraction is the pragmatic immediate fix.
+**Policy defaults:**
+- Preserve `resource_link` in tool results (URI + metadata) and lazy-read by default.
+- Only call `resources/read` when:
+  - the LLM explicitly asks (via a dedicated tool), or
+  - the frontend requests preview/download, or
+  - `auto_read_if_size_under_bytes` policy allows.
+- Never inline binary blobs: always store to `ArtifactStore` and return `ArtifactRef`.
+- Inline small text resources only up to `inline_text_if_under_chars`; otherwise store as text artifact.
 
 ---
 
 ## 6. Implementation Plan
 
-### Phase 1: Core Artifact Extraction (MVP)
+### Phase 0: Protocols and Context Wiring (Foundation)
 
 **Scope:**
-- Add `ArtifactExtractionConfig` to `ExternalToolConfig`
-- Implement `_transform_output()` in ToolNode
-- Binary signature detection
-- Size-based safety net
-- Integration with `ToolContext` artifact system
+- Define `ArtifactRef` and a separate `ArtifactStore` protocol (bytes + large text).
+- Expose an artifact store handle via `ToolContext` (e.g. `ctx.artifacts`) so *any* tool (native or external) can store artifacts out-of-band.
+- Add `artifact_store` to `ReactPlanner`. If not provided, attempt to discover it from `state_store` via duck-typing.
+- Provide an in-memory `ArtifactStore` for Playground (session/trace scoped) and a no-op fallback for library users who don't configure one.
 
-**Files to modify:**
-- `penguiflow/tools/config.py` - New config classes
-- `penguiflow/tools/node.py` - Output transformation logic
-- `penguiflow/planner/context.py` - Ensure `store_artifact()` available
+**Files to modify/add (expected):**
+- `penguiflow/planner/context.py`
+- `penguiflow/planner/react.py`
+- new `penguiflow/artifacts.py`
+- `penguiflow/cli/playground_state.py` (Playground storage)
+- `docs/tools/statestore-guide.md` (document optional artifact extensions)
 
-**Estimated effort:** 2-3 days
-
-### Phase 2: Per-Tool Configuration
-
-**Scope:**
-- Add `tool_fields` configuration
-- Field path extraction (dot notation or JSONPath)
-- Summary templates with variable substitution
-- Documentation for common MCP servers
-
-**Files to modify:**
-- `penguiflow/tools/config.py` - `ArtifactFieldConfig`
-- `penguiflow/tools/node.py` - Field extraction logic
+**Acceptance criteria:**
+- A native tool can `await ctx.artifacts.put_bytes(...)` and safely return an `ArtifactRef`.
+- No bytes/base64 are required to be present in `tool_context` or SSE events to make downloads possible.
 
 **Estimated effort:** 1-2 days
 
-### Phase 3: Frontend Integration
+### Phase 1: ToolNode Output Transformation + Universal Guardrails
 
 **Scope:**
-- Add `/artifacts/{id}` endpoint to playground
-- Modify SSE events to include artifact references
-- UI component for artifact download/preview
+- Implement `_transform_output()` in ToolNode with the updated layered strategy:
+  1. Custom transformer (sync/async)
+  2. Per-tool configured extraction (`tool_fields`)
+  3. MCP typed content blocks (`image`/`audio`/embedded `blob`/`resource_link`)
+  4. Recursive heuristic detection (base64-likeness + magic-bytes validation)
+  5. Size-based safety net for large text/JSON (store as text artifact)
+- Add a planner-level “last resort” observation clamp so *any* tool (not just ToolNode) can't blow up the context window. If the clamp triggers:
+  - store content to `ArtifactStore` when possible and replace with `ArtifactRef`, or
+  - truncate and emit a clear warning when no store is configured.
 
-**Files to modify:**
-- `penguiflow/cli/playground.py` - New endpoint
-- `penguiflow/cli/playground_ui/` - UI components
+**Acceptance criteria:**
+- The original Tableau incident becomes impossible: base64 never reaches the LLM unbounded.
+- ToolNode returns remain JSON-serialisable and small by default (refs + summaries only).
 
-**Estimated effort:** 2-3 days
+**Estimated effort:** 2-4 days
 
-### Phase 4: MCP Resources Support
+### Phase 2: Full MCP Resources Support (Required)
 
 **Scope:**
-- Add `list_resources()` to ToolNode
-- Add `read_resource()` method
-- Expose resources as tool capabilities
-- Resource URI resolution
+- Implement resources in ToolNode:
+  - `list_resources()` and pagination support
+  - `list_resource_templates()` and pagination support
+  - `read_resource(uri, ctx)` with conversion:
+    - `BlobResourceContents.blob` → `ArtifactRef` (stored to `ArtifactStore`)
+    - `TextResourceContents.text` → inline if small; else store as text artifact and return `ArtifactRef`
+  - `subscribe_resource(uri)` / `unsubscribe_resource(uri)`
+  - handle `notifications/resources/updated`
+- Add caching for `read_resource` results (URI → `ArtifactRef`) when `cache_reads_to_artifacts=True`.
+- Expose resources to:
+  - Planner: generated NodeSpecs (e.g. `{namespace}.resources_list`, `{namespace}.resources_read`, `{namespace}.resources_templates_list`), and/or
+  - Playground: REST endpoints for browsing and reading resources.
 
-**Files to modify:**
-- `penguiflow/tools/node.py` - Resource methods
-- New file: `penguiflow/tools/resources.py`
+**Acceptance criteria:**
+- Resources can be discovered and fetched end-to-end without inlining blobs into LLM context.
+- Resource updates can be observed (subscribe + updated notifications) and reflected in host state.
 
-**Estimated effort:** 3-4 days
+**Estimated effort:** 3-6 days
+
+### Phase 3: Playground API + UI
+
+**Scope:**
+- Add `/artifacts/{artifact_id}` endpoint backed by `ArtifactStore` with strict session/trace scoping.
+- Add Playground endpoints for resources browse/read/subscribe (per ToolNode namespace).
+- UI: show (a) artifact refs as downloadable items and (b) resource links as clickable entries with on-demand read/preview.
+
+**Estimated effort:** 2-4 days
+
+### Phase 4: Documentation, Presets, and Hardening
+
+**Scope:**
+- Document the `ArtifactStore` protocol, recommended backends, and how to co-locate it with `StateStore` via duck-typing.
+- Add presets for common servers (e.g. Tableau) with `tool_fields` rules to extract known base64 fields.
+- Add negative-path tests: missing store, decode failures, access denied, oversized payloads, servers that return malformed base64.
+- Define lifecycle/retention defaults (TTL, max bytes per session/trace) and cleanup hooks.
+
+**Estimated effort:** 2-4 days
 
 ---
 
 ## 7. Open Questions
 
-1. **Should artifact extraction be opt-in or opt-out?**
-   - Current recommendation: Opt-out (enabled by default with sensible limits)
-
-2. **How to handle partial failures?**
-   - If artifact storage fails, should we fall back to inline content?
-
-3. **Artifact lifecycle management?**
-   - When are artifacts cleaned up?
-   - Session-scoped? Request-scoped? Explicit deletion?
-
-4. **Cross-tool artifact references?**
-   - Can Tool B access artifacts created by Tool A?
-   - Via `tool_context` or explicit passing?
-
-5. **Streaming large artifacts?**
-   - For very large files (100MB+), should we stream to disk?
-   - Memory limits?
+1. **Default retention and limits**: what are the default TTL and max-bytes per (session, trace) for the Playground `ArtifactStore`?
+2. **Access control contract**: should `ArtifactStore` enforce `tenant_id/user_id/session_id/trace_id` scoping itself, or should the host enforce it at the HTTP layer (or both)?
+3. **Resource caching semantics**: how should `resources/updated` invalidation work (e.g., always invalidate, or compare `size`/`lastModified` when available)?
+4. **Fallback behavior**: if no `ArtifactStore` is configured, do we hard-error on large/binary outputs or truncate with warnings?
 
 ---
 
 ## 8. References
 
-- [MCP Specification 2024-11-05](https://spec.modelcontextprotocol.io/)
+- [MCP Schema (TypeScript)](https://github.com/modelcontextprotocol/specification/blob/main/schema/2025-11-25/schema.ts)
 - [FastMCP Documentation](https://gofastmcp.com/)
+- [OpenAPI 3.1 binary guidance](https://spec.openapis.org/oas/latest.html)
+- [GitHub REST: size-gated inline content pattern](https://docs.github.com/en/rest/repos/contents?apiVersion=2022-11-28#get-repository-content)
 - [Penguiflow ToolNode Implementation](../penguiflow/tools/node.py)
-- [Penguiflow Artifact System](../penguiflow/planner/context.py)
+- [Penguiflow ToolContext Protocol](../penguiflow/planner/context.py)
 
 ---
 
