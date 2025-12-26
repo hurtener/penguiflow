@@ -17,6 +17,11 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
+from ..artifacts import (
+    ArtifactStore,
+    NoOpArtifactStore,
+    discover_artifact_store,
+)
 from ..catalog import NodeSpec, build_catalog
 from ..node import Node
 from ..registry import ModelRegistry
@@ -50,6 +55,7 @@ from .models import (
     FinalPayload,
     JoinInjection,
     JSONLLMClient,
+    ObservationGuardrailConfig,
     ParallelCall,
     ParallelJoin,
     PlannerAction,
@@ -806,6 +812,15 @@ class _PlannerContext(ToolContext):
             self._meta_warned = True
         return ChainMap(self._tool_context, self._llm_context)
 
+    @property
+    def artifacts(self) -> ArtifactStore:
+        """Binary/large-text artifact storage.
+
+        Use this to store binary content (PDFs, images) or large text
+        out-of-band, keeping only compact ArtifactRef in LLM context.
+        """
+        return self._planner._artifact_store
+
     async def emit_chunk(
         self,
         stream_id: str,
@@ -1066,6 +1081,8 @@ class ReactPlanner:
         token_budget: int | None = None,
         pause_enabled: bool = True,
         state_store: Any | None = None,
+        artifact_store: ArtifactStore | None = None,
+        observation_guardrail: ObservationGuardrailConfig | None = None,
         summarizer_llm: str | Mapping[str, Any] | None = None,
         planning_hints: Mapping[str, Any] | None = None,
         repair_attempts: int = 3,
@@ -1137,6 +1154,26 @@ class ReactPlanner:
         self._token_budget = token_budget
         self._pause_enabled = pause_enabled
         self._state_store = state_store
+
+        # Artifact store resolution:
+        # 1. Explicit parameter (highest priority)
+        # 2. Discovered from state_store
+        # 3. NoOpArtifactStore fallback (lowest priority)
+        if artifact_store is not None:
+            self._artifact_store: ArtifactStore = artifact_store
+        elif state_store is not None:
+            discovered = discover_artifact_store(state_store)
+            if discovered is not None:
+                self._artifact_store = discovered
+                logger.debug("Discovered ArtifactStore from state_store")
+            else:
+                self._artifact_store = NoOpArtifactStore()
+        else:
+            self._artifact_store = NoOpArtifactStore()
+
+        # Observation guardrail (enabled by default)
+        self._observation_guardrail = observation_guardrail or ObservationGuardrailConfig()
+
         self._pause_records: dict[str, _PauseRecord] = {}
         self._active_trajectory: Trajectory | None = None
         self._active_tracker: _ConstraintTracker | None = None
@@ -2374,14 +2411,27 @@ class ReactPlanner:
 
                 observation_json = observation.model_dump(mode="json")
 
+                # Apply observation size guardrails
+                observation_json, was_clamped = await self._clamp_observation(
+                    observation_json,
+                    spec.name,
+                    len(trajectory.steps),
+                )
+
                 artifact_collector.collect(spec.name, spec.out_model, observation_json)
                 source_collector.collect(spec.out_model, observation_json)
 
+                # If observation was clamped, use it directly; otherwise apply artifact redaction
+                llm_obs = (
+                    observation_json
+                    if was_clamped
+                    else _redact_artifacts(spec.out_model, observation_json)
+                )
                 trajectory.steps.append(
                     TrajectoryStep(
                         action=action,
                         observation=observation_json,
-                        llm_observation=_redact_artifacts(spec.out_model, observation_json),
+                        llm_observation=llm_obs,
                         streams=step_chunks or None,
                     )
                 )
@@ -2832,6 +2882,174 @@ class ReactPlanner:
         if suggestion:
             payload["suggestion"] = str(suggestion)
         return payload
+
+    async def _clamp_observation(
+        self,
+        observation: dict[str, Any],
+        spec_name: str,
+        trajectory_step: int,
+    ) -> tuple[dict[str, Any], bool]:
+        """Apply observation size guardrails to prevent context overflow.
+
+        This is the final safety net after ToolNode's artifact extraction.
+        It ensures no single observation exceeds the configured limits.
+
+        Args:
+            observation: The observation dict (already JSON-serializable)
+            spec_name: Tool name for logging/events
+            trajectory_step: Current step number for events
+
+        Returns:
+            Tuple of (clamped observation, was_clamped flag)
+        """
+        config = self._observation_guardrail
+
+        # Serialize to check total size
+        try:
+            serialized = json.dumps(observation, ensure_ascii=False)
+        except (TypeError, ValueError):
+            # Already JSON-serializable from model_dump, but defensive
+            serialized = str(observation)
+
+        original_size = len(serialized)
+
+        # Fast path: observation is within limits
+        if original_size <= config.max_observation_chars:
+            return observation, False
+
+        # Store as artifact if above threshold and artifact store supports it
+        if config.auto_artifact_threshold > 0 and original_size >= config.auto_artifact_threshold:
+            try:
+                ref = await self._artifact_store.put_text(
+                    serialized,
+                    namespace=f"observation.{spec_name}",
+                )
+                preview = (
+                    serialized[: config.preview_length] + "..."
+                    if len(serialized) > config.preview_length
+                    else serialized
+                )
+                clamped = {
+                    "artifact": ref.model_dump(),
+                    "summary": (
+                        f"Large observation stored as artifact ({original_size} chars). "
+                        f"Artifact ID: {ref.id}"
+                    ),
+                    "preview": preview,
+                }
+                self._emit_observation_clamped_event(
+                    spec_name, trajectory_step, original_size, len(json.dumps(clamped)), "artifact"
+                )
+                return clamped, True
+            except Exception as e:
+                logger.debug(f"Failed to store observation as artifact: {e}")
+                # Fall through to truncation
+
+        # Truncate approach
+        if config.preserve_structure:
+            clamped = self._truncate_observation_preserving_structure(
+                observation, config.max_observation_chars, config.max_field_chars
+            )
+        else:
+            # Simple truncation of serialized form
+            suffix_template = config.truncation_suffix
+            suffix_len = len(suffix_template.format(truncated_chars=0))
+            truncated_chars = original_size - config.max_observation_chars + suffix_len
+            truncated_text = serialized[: config.max_observation_chars - suffix_len]
+            clamped = {
+                "truncated_observation": truncated_text,
+                "truncation_note": suffix_template.format(truncated_chars=truncated_chars),
+            }
+
+        clamped_size = len(json.dumps(clamped, ensure_ascii=False))
+        self._emit_observation_clamped_event(
+            spec_name, trajectory_step, original_size, clamped_size, "truncate"
+        )
+        return clamped, True
+
+    def _truncate_observation_preserving_structure(
+        self,
+        observation: dict[str, Any],
+        max_total_chars: int,
+        max_field_chars: int,
+    ) -> dict[str, Any]:
+        """Truncate observation while preserving dict structure.
+
+        Truncates individual string values rather than the entire serialized form.
+        """
+        config = self._observation_guardrail
+        result: dict[str, Any] = {}
+
+        for key, value in observation.items():
+            if isinstance(value, str) and len(value) > max_field_chars:
+                truncated_chars = len(value) - max_field_chars
+                result[key] = value[:max_field_chars] + config.truncation_suffix.format(truncated_chars=truncated_chars)
+            elif isinstance(value, dict):
+                # Recursively handle nested dicts
+                result[key] = self._truncate_observation_preserving_structure(
+                    value, max_total_chars, max_field_chars
+                )
+            elif isinstance(value, list):
+                # Truncate list if too many items
+                if len(value) > 20:
+                    result[key] = value[:20] + [f"... [{len(value) - 20} more items]"]
+                else:
+                    result[key] = value
+            else:
+                result[key] = value
+
+        # Check if still too large after field truncation
+        serialized = json.dumps(result, ensure_ascii=False)
+        if len(serialized) > max_total_chars:
+            # Further truncate the largest string fields
+            str_fields = [(k, len(json.dumps(v))) for k, v in result.items() if isinstance(v, str)]
+            str_fields.sort(key=lambda x: x[1], reverse=True)
+
+            for field_name, _ in str_fields:
+                if len(serialized) <= max_total_chars:
+                    break
+                current_val = result[field_name]
+                if isinstance(current_val, str) and len(current_val) > 100:
+                    # Truncate to preview length
+                    result[field_name] = current_val[:config.preview_length] + config.truncation_suffix.format(
+                        truncated_chars=len(current_val) - config.preview_length
+                    )
+                    serialized = json.dumps(result, ensure_ascii=False)
+
+        return result
+
+    def _emit_observation_clamped_event(
+        self,
+        node_name: str,
+        trajectory_step: int,
+        original_size: int,
+        clamped_size: int,
+        method: str,
+    ) -> None:
+        """Emit event when observation is clamped."""
+        self._emit_event(
+            PlannerEvent(
+                event_type="observation_clamped",
+                ts=self._time_source(),
+                trajectory_step=trajectory_step,
+                node_name=node_name,
+                extra={
+                    "original_size": original_size,
+                    "clamped_size": clamped_size,
+                    "method": method,
+                    "reduction_pct": round((1 - clamped_size / original_size) * 100, 1) if original_size > 0 else 0,
+                },
+            )
+        )
+        logger.info(
+            "observation_clamped",
+            extra={
+                "node_name": node_name,
+                "original_size": original_size,
+                "clamped_size": clamped_size,
+                "method": method,
+            },
+        )
 
     def _build_final_payload(
         self,

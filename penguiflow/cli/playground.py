@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -263,6 +263,31 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
             }
         )
         return format_sse("artifact_chunk", payload)
+
+    if event.event_type == "artifact_stored":
+        # Emit when a binary artifact is stored (e.g., from MCP tool output)
+        payload.update(
+            {
+                "artifact_id": extra.get("artifact_id"),
+                "mime_type": extra.get("mime_type"),
+                "size_bytes": extra.get("size_bytes"),
+                "filename": extra.get("filename"),
+                "source": extra.get("source"),
+                "event": "artifact_stored",
+            }
+        )
+        return format_sse("artifact_stored", payload)
+
+    if event.event_type == "resource_updated":
+        # Emit when an MCP resource is updated (cache invalidation)
+        payload.update(
+            {
+                "uri": extra.get("uri"),
+                "namespace": extra.get("namespace"),
+                "event": "resource_updated",
+            }
+        )
+        return format_sse("resource_updated", payload)
 
     if event.event_type == "llm_stream_chunk":
         phase_val_llm = extra.get("phase")
@@ -811,6 +836,212 @@ def create_playground_app(
         payload["trace_id"] = trace_id
         payload["session_id"] = session_id
         return payload
+
+    # ─── Artifact Endpoints ───────────────────────────────────────────────────
+
+    @app.get("/artifacts/{artifact_id}")
+    async def get_artifact(
+        artifact_id: str,
+        session_id: str | None = None,
+        x_session_id: str | None = Header(None, alias="X-Session-ID"),
+    ) -> Response:
+        """Download artifact binary content.
+
+        Session ID can be provided as query param or X-Session-ID header.
+        If no session ID provided, returns artifact without session validation.
+        """
+        if store is None:
+            raise HTTPException(status_code=500, detail="State store is not configured")
+
+        artifact_store = getattr(store, "artifact_store", None)
+        if artifact_store is None:
+            raise HTTPException(status_code=500, detail="Artifact store is not configured")
+
+        # Resolve session ID from query param or header
+        resolved_session = session_id or x_session_id
+
+        # Get artifact with session validation if session provided
+        if resolved_session is not None:
+            # Use session-aware retrieval for access control
+            if hasattr(artifact_store, "get_with_session_check"):
+                data = await artifact_store.get_with_session_check(artifact_id, resolved_session)
+                if data is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Artifact not found or access denied",
+                    )
+            else:
+                data = await artifact_store.get(artifact_id)
+        else:
+            # No session validation - allow access (for backward compatibility)
+            data = await artifact_store.get(artifact_id)
+
+        if data is None:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+
+        # Get metadata for content-type
+        ref = None
+        if hasattr(artifact_store, "get_ref"):
+            ref = await artifact_store.get_ref(artifact_id)
+
+        mime_type = ref.mime_type if ref and ref.mime_type else "application/octet-stream"
+        filename = ref.filename if ref and ref.filename else artifact_id
+
+        return Response(
+            content=data,
+            media_type=mime_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(data)),
+            },
+        )
+
+    @app.get("/artifacts/{artifact_id}/meta")
+    async def get_artifact_meta(
+        artifact_id: str,
+        session_id: str | None = None,
+        x_session_id: str | None = Header(None, alias="X-Session-ID"),
+    ) -> Mapping[str, Any]:
+        """Get artifact metadata without downloading content."""
+        if store is None:
+            raise HTTPException(status_code=500, detail="State store is not configured")
+
+        artifact_store = getattr(store, "artifact_store", None)
+        if artifact_store is None:
+            raise HTTPException(status_code=500, detail="Artifact store is not configured")
+
+        # Resolve session ID
+        resolved_session = session_id or x_session_id
+
+        # Check existence with session validation if provided
+        if resolved_session is not None and hasattr(artifact_store, "get_with_session_check"):
+            data = await artifact_store.get_with_session_check(artifact_id, resolved_session)
+            if data is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Artifact not found or access denied",
+                )
+
+        # Get metadata
+        if not hasattr(artifact_store, "get_ref"):
+            raise HTTPException(
+                status_code=500,
+                detail="Artifact store does not support metadata retrieval",
+            )
+
+        ref = await artifact_store.get_ref(artifact_id)
+        if ref is None:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+
+        return ref.model_dump()
+
+    # ─── Resource Endpoints ───────────────────────────────────────────────────
+
+    @app.get("/resources/{namespace}")
+    async def list_resources(namespace: str) -> Mapping[str, Any]:
+        """List available MCP resources for a ToolNode namespace."""
+        # Get tool node from agent wrapper
+        tool_nodes = getattr(agent_wrapper, "_tool_nodes", None)
+        if tool_nodes is None:
+            # Try to find tool nodes from planner
+            planner = getattr(agent_wrapper, "_planner", None)
+            if planner is not None:
+                tool_nodes = getattr(planner, "_tool_nodes", None)
+
+        if tool_nodes is None:
+            return {"resources": [], "templates": [], "error": "No tool nodes available"}
+
+        # Find the tool node with matching namespace
+        tool_node = None
+        if isinstance(tool_nodes, dict):
+            tool_node = tool_nodes.get(namespace)
+        elif isinstance(tool_nodes, list):
+            for tn in tool_nodes:
+                if getattr(tn, "config", None) and getattr(tn.config, "name", None) == namespace:
+                    tool_node = tn
+                    break
+
+        if tool_node is None:
+            raise HTTPException(status_code=404, detail=f"Tool node '{namespace}' not found")
+
+        if not getattr(tool_node, "resources_supported", False):
+            return {
+                "resources": [],
+                "templates": [],
+                "supported": False,
+            }
+
+        resources = getattr(tool_node, "resources", [])
+        templates = getattr(tool_node, "resource_templates", [])
+
+        return {
+            "resources": [r.model_dump() if hasattr(r, "model_dump") else r for r in resources],
+            "templates": [t.model_dump() if hasattr(t, "model_dump") else t for t in templates],
+            "supported": True,
+        }
+
+    @app.get("/resources/{namespace}/{uri:path}")
+    async def read_resource(
+        namespace: str,
+        uri: str,
+        session_id: str | None = None,
+        x_session_id: str | None = Header(None, alias="X-Session-ID"),
+    ) -> Mapping[str, Any]:
+        """Read a resource by URI from an MCP server.
+
+        The resource content is cached and stored as an artifact.
+        """
+        # Get tool node
+        tool_nodes = getattr(agent_wrapper, "_tool_nodes", None)
+        if tool_nodes is None:
+            planner = getattr(agent_wrapper, "_planner", None)
+            if planner is not None:
+                tool_nodes = getattr(planner, "_tool_nodes", None)
+
+        if tool_nodes is None:
+            raise HTTPException(status_code=500, detail="No tool nodes available")
+
+        # Find tool node
+        tool_node = None
+        if isinstance(tool_nodes, dict):
+            tool_node = tool_nodes.get(namespace)
+        elif isinstance(tool_nodes, list):
+            for tn in tool_nodes:
+                if getattr(tn, "config", None) and getattr(tn.config, "name", None) == namespace:
+                    tool_node = tn
+                    break
+
+        if tool_node is None:
+            raise HTTPException(status_code=404, detail=f"Tool node '{namespace}' not found")
+
+        if not getattr(tool_node, "resources_supported", False):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tool node '{namespace}' does not support resources",
+            )
+
+        # Create a minimal context for resource reading
+        resolved_session = session_id or x_session_id or "default"
+        artifact_store = getattr(store, "artifact_store", None)
+
+        # Create a context-like object for the read operation
+        class MinimalCtx:
+            def __init__(self, artifacts: Any, session: str):
+                self._artifacts = artifacts
+                self._session = session
+
+            @property
+            def artifacts(self) -> Any:
+                return self._artifacts
+
+        ctx = MinimalCtx(artifact_store, resolved_session)
+
+        try:
+            result = await tool_node.read_resource(uri, ctx)
+            return result
+        except Exception as exc:
+            _LOGGER.warning(f"Resource read failed for {uri}: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     if discovery:
         app.state.discovery = discovery

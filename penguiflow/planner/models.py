@@ -258,10 +258,55 @@ class ClarificationResponse(BaseModel):
     )
 
 
+class ObservationGuardrailConfig(BaseModel):
+    """Configuration for planner-level observation size limits.
+
+    This is the final safety net to prevent any tool output from
+    overflowing the LLM context window, regardless of source.
+    """
+
+    # Character limits
+    max_observation_chars: int = Field(
+        default=50_000,
+        ge=1000,
+        description="Maximum characters allowed in a single observation",
+    )
+    max_field_chars: int = Field(
+        default=10_000,
+        ge=100,
+        description="Maximum characters per field when truncating",
+    )
+
+    # Truncation behavior
+    truncation_suffix: str = Field(
+        default="\n... [truncated: {truncated_chars} chars]",
+        description="Suffix appended to truncated content",
+    )
+    preserve_structure: bool = Field(
+        default=True,
+        description="Keep JSON structure when truncating, only truncate values",
+    )
+
+    # Artifact fallback
+    auto_artifact_threshold: int = Field(
+        default=20_000,
+        ge=0,
+        description="Store as artifact if larger than this (0 = disabled)",
+    )
+
+    # Preview generation
+    preview_length: int = Field(
+        default=500,
+        ge=0,
+        description="Length of preview to include in truncated refs",
+    )
+
+
 __all__ = [
     "ClarificationResponse",
     "JoinInjection",
     "JSONLLMClient",
+    "ObservationGuardrailConfig",
     "ParallelCall",
     "ParallelJoin",
     "PlannerAction",

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from _collections_abc import Awaitable, Mapping, MutableMapping
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+if TYPE_CHECKING:
+    from penguiflow.artifacts import ArtifactStore
 
 try:
     # Optional import to help tools that share signatures with flow Context
@@ -33,6 +36,22 @@ class ToolContext(Protocol):
     @property
     def meta(self) -> MutableMapping[str, Any]:
         """Combined context. Deprecated: prefer llm_context/tool_context."""
+
+    @property
+    def artifacts(self) -> ArtifactStore:
+        """Binary/large-text artifact storage.
+
+        Use this to store binary content (PDFs, images) or large text
+        out-of-band, keeping only compact ArtifactRef in LLM context.
+
+        Example:
+            ref = await ctx.artifacts.put_bytes(
+                pdf_bytes,
+                mime_type="application/pdf",
+                filename="report.pdf",
+            )
+            return {"artifact": ref, "summary": "Downloaded PDF"}
+        """
 
     def pause(
         self,
