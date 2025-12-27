@@ -618,6 +618,10 @@ class TestArtifactEndpoints:
             mock_wrapper = MagicMock()
             mock_wrapper.initialize = AsyncMock()
             mock_wrapper.shutdown = AsyncMock()
+            # Explicitly set _planner to None so _discover_artifact_store returns None
+            # (MagicMock auto-creates attributes which would bypass the None checks)
+            mock_wrapper._planner = None
+            mock_wrapper._orchestrator = None
 
             app = create_playground_app(
                 project_root=tmpdir,
