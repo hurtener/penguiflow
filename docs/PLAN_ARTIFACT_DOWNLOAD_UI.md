@@ -1,8 +1,192 @@
-# Implementation Plan: Artifact Download UI for Playground
+# Implementation Plan: Artifact Download UI + UI Restructuring
 
 ## Executive Summary
 
-Add download functionality for binary artifacts (PDFs, images, Tableau exports) to the Playground UI. The backend infrastructure is **already complete**—this plan focuses on frontend changes to expose existing capabilities.
+Add download functionality for binary artifacts (PDFs, images, Tableau exports) to the Playground UI, **combined with a significant UI restructuring** to improve semantic organization. The backend infrastructure is **already complete**—this plan focuses on frontend changes.
+
+---
+
+## UI Restructuring Overview
+
+### Motivation
+
+The current layout mixes static reference data with dynamic execution data. This restructuring:
+1. Groups **static agent reference** info in the left sidebar
+2. Groups **dynamic execution outputs** in the right sidebar
+3. Removes unused Validate/Generate functionality (kept but disabled)
+4. Adds artifact download capability
+
+### Current Layout (Before)
+
+**Desktop:**
+```
+Left Sidebar              Center              Right Sidebar
+├── ProjectCard           ├── ChatCard        ├── EventsCard
+├── SpecCard              └── TrajectoryCard  └── ConfigCard
+└── GeneratorCard (Validate/Generate + stepper)
+```
+
+**Mobile:**
+```
+Header (drawer): Info | Spec | Actions (GeneratorCard)
+Bottom (panel):  Steps | Events | Config
+```
+
+### Target Layout (After)
+
+**Desktop:**
+```
+Left Sidebar              Center              Right Sidebar
+├── ProjectCard           ├── ChatCard        ├── EventsCard
+├── SpecCard              └── TrajectoryCard  └── ArtifactsCard (NEW)
+└── ConfigCard (moved)
+```
+
+**Mobile:**
+```
+Header (drawer): Info | Spec | Config
+Bottom (panel):  Steps | Events | Artifacts
+```
+
+### Semantic Organization
+
+| Left Sidebar (Static Reference) | Right Sidebar (Dynamic Execution) |
+|--------------------------------|-----------------------------------|
+| ProjectCard - Agent identity | EventsCard - Real-time planner events |
+| SpecCard - Agent definition (YAML) | ArtifactsCard - Downloadable outputs |
+| ConfigCard - Agent configuration | |
+
+---
+
+## Implementation Phases
+
+### Phase 0: UI Restructuring (NEW)
+
+#### 0.1 Remove GeneratorCard from UI (Keep Files)
+
+**Files to keep (do NOT delete):**
+- `src/lib/components/sidebar-left/GeneratorCard.svelte`
+- `src/lib/components/sidebar-left/GeneratorStepper.svelte`
+
+**Files to modify:**
+
+**`src/lib/components/sidebar-left/index.ts`** - Remove GeneratorCard export:
+```typescript
+// BEFORE
+export { default as GeneratorCard } from './GeneratorCard.svelte';
+// AFTER - Comment out or remove this line
+// export { default as GeneratorCard } from './GeneratorCard.svelte'; // DISABLED - not currently used
+```
+
+**`src/App.svelte`** - Remove GeneratorCard from desktop and mobile:
+```svelte
+// Desktop: Remove from LeftSidebar
+<LeftSidebar>
+  <ProjectCard />
+  <SpecCard />
+  <!-- GeneratorCard removed - not currently used -->
+  <ConfigCard />  <!-- MOVED from RightSidebar -->
+</LeftSidebar>
+
+// Mobile: Update MobileHeader tabs
+<MobileHeader>
+  {#snippet infoContent()}
+    <ProjectCard />
+  {/snippet}
+  {#snippet specContent()}
+    <SpecCard />
+  {/snippet}
+  {#snippet configContent()}  <!-- RENAMED from actionsContent -->
+    <ConfigCard />  <!-- CHANGED from GeneratorCard -->
+  {/snippet}
+</MobileHeader>
+```
+
+#### 0.2 Move ConfigCard to Left Sidebar
+
+**`src/lib/components/sidebar-right/RightSidebar.svelte`** - Remove ConfigCard:
+```svelte
+<script lang="ts">
+  import { Column } from '$lib/components/layout';
+  import { EventsCard } from './events';
+  // ConfigCard import removed - moved to left sidebar
+  import { ArtifactsCard } from './artifacts';  // NEW
+</script>
+
+<Column position="right">
+  <EventsCard />
+  <ArtifactsCard />  <!-- NEW - replaces ConfigCard -->
+</Column>
+```
+
+**`src/App.svelte`** - Add ConfigCard import and use in LeftSidebar:
+```svelte
+import { ConfigCard } from '$lib/components/sidebar-right/config';
+// ... in LeftSidebar:
+<LeftSidebar>
+  <ProjectCard />
+  <SpecCard />
+  <ConfigCard />
+</LeftSidebar>
+```
+
+#### 0.3 Update MobileHeader Tabs
+
+**`src/lib/components/mobile/MobileHeader.svelte`** - Update tab labels:
+```typescript
+const tabs = [
+  { id: 'info', label: 'Info' },
+  { id: 'spec', label: 'Spec' },
+  { id: 'config', label: 'Config' }  // CHANGED from 'Actions'
+] as const;
+```
+
+Update Props interface:
+```typescript
+interface Props {
+  infoContent?: Snippet;
+  specContent?: Snippet;
+  configContent?: Snippet;  // RENAMED from actionsContent
+}
+```
+
+#### 0.4 Update MobileBottomPanel Tabs
+
+**`src/lib/components/mobile/MobileBottomPanel.svelte`** - Update tabs:
+```typescript
+const tabs = [
+  { id: 'trajectory', label: 'Steps' },
+  { id: 'events', label: 'Events' },
+  { id: 'artifacts', label: 'Artifacts' }  // CHANGED from 'Config'
+] as const;
+```
+
+Update Props interface:
+```typescript
+interface Props {
+  trajectoryContent?: Snippet;
+  eventsContent?: Snippet;
+  artifactsContent?: Snippet;  // RENAMED from configContent
+}
+```
+
+#### 0.5 Update App.svelte Mobile Layout
+
+```svelte
+<MobileBottomPanel>
+  {#snippet trajectoryContent()}
+    <TrajectoryCard />
+  {/snippet}
+  {#snippet eventsContent()}
+    <EventsCard />
+  {/snippet}
+  {#snippet artifactsContent()}  <!-- RENAMED from configContent -->
+    <ArtifactsCard />  <!-- CHANGED from ConfigCard -->
+  {/snippet}
+</MobileBottomPanel>
+```
+
+---
 
 ## Current State Analysis
 
@@ -583,3 +767,146 @@ function resetSession() {
 - Session header `X-Session-ID` is already supported by endpoints
 - Existing Pill/IconButton components can be reused
 - Consider adding Lucide icons package for better download icon
+
+---
+
+## Master Implementation Checklist
+
+### Phase 0: UI Restructuring ✅ COMPLETE
+- [x] Comment out GeneratorCard export in `sidebar-left/index.ts`
+- [x] Update MobileHeader: rename `actionsContent` → `configContent`, update tab label
+- [x] Update MobileBottomPanel: rename `configContent` → `artifactsContent`, update tab label
+- [x] Update App.svelte desktop: remove GeneratorCard, add ConfigCard to LeftSidebar
+- [x] Update App.svelte mobile: use ConfigCard in header, placeholder for ArtifactsCard in bottom
+- [x] Update RightSidebar: remove ConfigCard import (placeholder for ArtifactsCard added)
+- [x] Update unit tests (MobileHeader, MobileBottomPanel) for new tab names
+- [x] Update E2E tests for new tab names
+- [x] All 179 tests passing
+
+### Phase 1: Type Definitions & Store ✅ COMPLETE
+- [x] Create `src/lib/types/artifacts.ts` with ArtifactRef and ArtifactStoredEvent
+- [x] Create `src/lib/stores/artifacts.svelte.ts` with artifactsStore
+- [x] Export from `src/lib/stores/index.ts`
+- [x] Export from `src/lib/types/index.ts`
+- [x] Create unit tests (`tests/unit/stores/artifacts.test.ts` - 18 tests)
+- [x] All 197 tests passing
+
+### Phase 2: API Service Layer ✅ COMPLETE
+- [x] Add `downloadArtifact()` function to `src/lib/services/api.ts`
+- [x] Add `getArtifactMeta()` function to `src/lib/services/api.ts`
+- [x] Add `extractFilename()` helper function
+- [x] Add unit tests (18 new tests: 8 extractFilename, 7 downloadArtifact, 3 getArtifactMeta)
+- [x] All 215 tests passing
+
+### Phase 3: SSE Event Handling ✅ COMPLETE
+- [x] Add `artifact_stored` event handling to `src/lib/services/event-stream.ts`
+- [x] Add `artifact_stored` event handling to `src/lib/services/chat-stream.ts`
+- [x] Import `artifactsStore` and `ArtifactStoredEvent` type in both files
+- [x] Register `artifact_stored` event listener in event arrays
+- [x] All 215 tests passing
+
+### Phase 4: UI Components ✅ COMPLETE
+- [x] Create `src/lib/components/sidebar-right/artifacts/ArtifactItem.svelte`
+- [x] Create `src/lib/components/sidebar-right/artifacts/ArtifactsCard.svelte`
+- [x] Update `src/lib/components/sidebar-right/artifacts/index.ts` exports
+- [x] Update `src/lib/components/sidebar-right/RightSidebar.svelte` to include ArtifactsCard
+- [x] Update App.svelte mobile to use ArtifactsCard in bottom panel
+- [x] Extract helper functions to `src/lib/utils/artifact-helpers.ts`
+- [x] Create unit tests for artifact helpers (15 tests)
+- [x] All 230 tests passing
+
+### Phase 5: Session Cleanup ✅ COMPLETE
+- [x] Update `src/lib/stores/session.svelte.ts` to clear artifacts on reset
+- [x] Update `src/lib/stores/session.svelte.ts` to clear artifacts on newSession
+- [x] Add unit tests for artifact clearing in session.test.ts (2 tests)
+- [x] All 266 tests passing
+
+### Phase 6: Testing ✅ COMPLETE
+- [x] Create unit tests for artifactsStore (Phase 1 - 18 tests)
+- [x] Create unit tests for artifact helpers (Phase 4 - 15 tests)
+- [x] Create unit tests for ArtifactItem component (17 tests)
+- [x] Create unit tests for ArtifactsCard component (17 tests)
+- [x] All 266 tests passing
+- [ ] Manual E2E test with reporting-agent + Tableau MCP (optional)
+
+### Phase 7: Documentation ✅ COMPLETE
+- [x] Update PLAN_ARTIFACT_DOWNLOAD_UI.md with implementation status
+- [x] Mark all checklist items complete
+
+---
+
+## File Change Summary (Complete)
+
+| File | Action | Phase |
+|------|--------|-------|
+| `src/lib/components/sidebar-left/index.ts` | MODIFY | 0 |
+| `src/lib/components/mobile/MobileHeader.svelte` | MODIFY | 0 |
+| `src/lib/components/mobile/MobileBottomPanel.svelte` | MODIFY | 0 |
+| `src/App.svelte` | MODIFY | 0, 4 |
+| `src/lib/types/artifacts.ts` | CREATE | 1 |
+| `src/lib/types/index.ts` | MODIFY | 1 |
+| `src/lib/stores/artifacts.svelte.ts` | CREATE | 1 |
+| `src/lib/stores/index.ts` | MODIFY | 1 |
+| `src/lib/services/api.ts` | MODIFY | 2 |
+| `src/lib/services/event-stream.ts` | MODIFY | 3 |
+| `src/lib/services/chat-stream.ts` | MODIFY | 3 |
+| `src/lib/components/sidebar-right/artifacts/ArtifactItem.svelte` | CREATE | 4 |
+| `src/lib/components/sidebar-right/artifacts/ArtifactsCard.svelte` | CREATE | 4 |
+| `src/lib/components/sidebar-right/artifacts/index.ts` | MODIFY | 4 |
+| `src/lib/components/sidebar-right/RightSidebar.svelte` | MODIFY | 4 |
+| `src/lib/utils/artifact-helpers.ts` | CREATE | 4 |
+| `src/lib/utils/index.ts` | MODIFY | 4 |
+| `tests/unit/utils/artifact-helpers.test.ts` | CREATE | 4 |
+| `src/lib/stores/session.svelte.ts` | MODIFY | 5 |
+| `tests/unit/stores/session.test.ts` | MODIFY | 5 |
+| `tests/unit/stores/artifacts.test.ts` | CREATE | 1 |
+| `tests/unit/components/sidebar-right/ArtifactItem.test.ts` | CREATE | 6 |
+| `tests/unit/components/sidebar-right/ArtifactsCard.test.ts` | CREATE | 6 |
+
+**Total: 24 files (11 create, 13 modify)**
+
+---
+
+## Estimated Effort
+
+| Phase | Description | Time |
+|-------|-------------|------|
+| 0 | UI Restructuring | 20 min |
+| 1 | Types & Store | 15 min |
+| 2 | API Functions | 10 min |
+| 3 | SSE Wiring | 10 min |
+| 4 | UI Components | 25 min |
+| 5 | Session Cleanup | 5 min |
+| 6 | Testing | 30 min |
+| 7 | Documentation | 10 min |
+| **Total** | | **~2 hours**
+
+---
+
+## Implementation Complete
+
+**All phases completed successfully!**
+
+### Test Summary
+- **266 tests passing**
+- 18 tests for artifactsStore
+- 15 tests for artifact helpers (formatSize, getMimeIcon, getMimeLabel)
+- 17 tests for ArtifactItem component
+- 17 tests for ArtifactsCard component
+- 2 tests for session store artifact clearing
+- All existing tests continue to pass
+
+### Features Implemented
+1. **Artifact Download UI** - ArtifactsCard in right sidebar showing downloadable files
+2. **File Icons** - Visual icons based on MIME type (PDF, image, spreadsheet, presentation)
+3. **Size Formatting** - Human-readable file sizes (B, KB, MB)
+4. **Download Button** - Per-artifact download with loading state and error handling
+5. **Download All** - Batch download for multiple artifacts
+6. **Session Cleanup** - Artifacts clear when session resets or changes
+7. **SSE Integration** - Real-time artifact notifications via artifact_stored events
+8. **Mobile Support** - ArtifactsCard in mobile bottom panel
+
+### Build Status
+- Build successful (223 modules)
+- No TypeScript errors
+- All Svelte 5 patterns followed ($state, $props, $effect)

@@ -1,10 +1,10 @@
 <script lang="ts">
   import { Column } from '$lib/components/layout';
   import { EventsCard } from './events';
-  import { ConfigCard } from './config';
+  import { ArtifactsCard } from './artifacts';
 </script>
 
 <Column position="right">
   <EventsCard />
-  <ConfigCard />
+  <ArtifactsCard />
 </Column>

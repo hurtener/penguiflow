@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from penguiflow.artifacts import ArtifactScope
+from penguiflow.artifacts import ArtifactScope, InMemoryArtifactStore
 from penguiflow.cli.playground_sse import format_sse
 from penguiflow.cli.playground_state import InMemoryStateStore, PlaygroundArtifactStore
 from penguiflow.planner import PlannerEvent
@@ -366,9 +366,9 @@ class TestArtifactEndpoints:
 
         from penguiflow.cli.playground import create_playground_app
 
-        # Store an artifact first
+        artifact_store = InMemoryArtifactStore()
         scope = ArtifactScope(session_id="test_session")
-        ref = await state_store.artifact_store.put_bytes(
+        ref = await artifact_store.put_bytes(
             b"Test binary data",
             mime_type="application/pdf",
             filename="report.pdf",
@@ -379,6 +379,7 @@ class TestArtifactEndpoints:
             mock_wrapper = MagicMock()
             mock_wrapper.initialize = AsyncMock()
             mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._planner = MagicMock(artifact_store=artifact_store)
 
             app = create_playground_app(
                 project_root=tmpdir,
@@ -412,8 +413,9 @@ class TestArtifactEndpoints:
 
         from penguiflow.cli.playground import create_playground_app
 
+        artifact_store = InMemoryArtifactStore()
         scope = ArtifactScope(session_id="test_session")
-        ref = await state_store.artifact_store.put_bytes(
+        ref = await artifact_store.put_bytes(
             b"Data",
             mime_type="text/plain",
             scope=scope,
@@ -423,6 +425,7 @@ class TestArtifactEndpoints:
             mock_wrapper = MagicMock()
             mock_wrapper.initialize = AsyncMock()
             mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._planner = MagicMock(artifact_store=artifact_store)
 
             app = create_playground_app(
                 project_root=tmpdir,
@@ -454,8 +457,9 @@ class TestArtifactEndpoints:
 
         from penguiflow.cli.playground import create_playground_app
 
+        artifact_store = InMemoryArtifactStore()
         scope = ArtifactScope(session_id="session1")
-        ref = await state_store.artifact_store.put_bytes(
+        ref = await artifact_store.put_bytes(
             b"Secret data",
             scope=scope,
         )
@@ -464,6 +468,7 @@ class TestArtifactEndpoints:
             mock_wrapper = MagicMock()
             mock_wrapper.initialize = AsyncMock()
             mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._planner = MagicMock(artifact_store=artifact_store)
 
             app = create_playground_app(
                 project_root=tmpdir,
@@ -496,9 +501,11 @@ class TestArtifactEndpoints:
         from penguiflow.cli.playground import create_playground_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_store = InMemoryArtifactStore()
             mock_wrapper = MagicMock()
             mock_wrapper.initialize = AsyncMock()
             mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._planner = MagicMock(artifact_store=artifact_store)
 
             app = create_playground_app(
                 project_root=tmpdir,
@@ -526,8 +533,9 @@ class TestArtifactEndpoints:
 
         from penguiflow.cli.playground import create_playground_app
 
+        artifact_store = InMemoryArtifactStore()
         scope = ArtifactScope(session_id="test_session")
-        ref = await state_store.artifact_store.put_bytes(
+        ref = await artifact_store.put_bytes(
             b"Data",
             mime_type="image/png",
             filename="chart.png",
@@ -538,6 +546,7 @@ class TestArtifactEndpoints:
             mock_wrapper = MagicMock()
             mock_wrapper.initialize = AsyncMock()
             mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._planner = MagicMock(artifact_store=artifact_store)
 
             app = create_playground_app(
                 project_root=tmpdir,
@@ -573,9 +582,11 @@ class TestArtifactEndpoints:
         from penguiflow.cli.playground import create_playground_app
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_store = InMemoryArtifactStore()
             mock_wrapper = MagicMock()
             mock_wrapper.initialize = AsyncMock()
             mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._planner = MagicMock(artifact_store=artifact_store)
 
             app = create_playground_app(
                 project_root=tmpdir,
@@ -590,6 +601,37 @@ class TestArtifactEndpoints:
                 response = await client.get("/artifacts/nonexistent/meta")
 
                 assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_get_artifact_not_enabled(
+        self,
+        state_store: InMemoryStateStore,
+    ) -> None:
+        """GET /artifacts/{id} should return 501 when storage is disabled."""
+        import tempfile
+
+        from httpx import ASGITransport, AsyncClient
+
+        from penguiflow.cli.playground import create_playground_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mock_wrapper = MagicMock()
+            mock_wrapper.initialize = AsyncMock()
+            mock_wrapper.shutdown = AsyncMock()
+
+            app = create_playground_app(
+                project_root=tmpdir,
+                agent=mock_wrapper,
+                state_store=state_store,
+            )
+
+            async with AsyncClient(
+                transport=ASGITransport(app=app),
+                base_url="http://test",
+            ) as client:
+                response = await client.get("/artifacts/nonexistent")
+
+                assert response.status_code == 501
 
 
 # ─── Resource Endpoint Tests ─────────────────────────────────────────────────
@@ -913,13 +955,15 @@ class TestEdgeCases:
         state_store = InMemoryStateStore()
         test_data = b"x" * 1000
 
+        artifact_store = InMemoryArtifactStore()
         scope = ArtifactScope(session_id="test")
-        ref = await state_store.artifact_store.put_bytes(test_data, scope=scope)
+        ref = await artifact_store.put_bytes(test_data, scope=scope)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_wrapper = MagicMock()
             mock_wrapper.initialize = AsyncMock()
             mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._planner = MagicMock(artifact_store=artifact_store)
 
             app = create_playground_app(
                 project_root=tmpdir,

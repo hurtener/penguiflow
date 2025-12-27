@@ -15,13 +15,13 @@ This module tests:
 from __future__ import annotations
 
 import base64
+import binascii
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from penguiflow.artifacts import (
-    ArtifactRef,
     ArtifactRetentionConfig,
     ArtifactScope,
     InMemoryArtifactStore,
@@ -44,7 +44,6 @@ from penguiflow.tools.presets import (
     list_artifact_presets,
     merge_artifact_preset,
 )
-
 
 # ─── Preset Tests ─────────────────────────────────────────────────────────────
 
@@ -473,8 +472,8 @@ class TestMalformedContent:
         # This looks like base64 but has invalid characters
         invalid_b64 = "JVBERi!!@@##$%^"
 
-        with pytest.raises(Exception):
-            base64.b64decode(invalid_b64)
+        with pytest.raises(binascii.Error):
+            base64.b64decode(invalid_b64, validate=True)
 
     def test_truncated_base64(self) -> None:
         """Truncated base64 should be handled."""

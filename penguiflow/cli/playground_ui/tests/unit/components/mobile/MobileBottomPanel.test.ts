@@ -74,7 +74,7 @@ describe('MobileBottomPanel component', () => {
 
     expect(screen.getByText('Steps')).toBeTruthy();
     expect(screen.getByText('Events')).toBeTruthy();
-    expect(screen.getByText('Config')).toBeTruthy();
+    expect(screen.getByText('Artifacts')).toBeTruthy();
   });
 
   it('tab buttons have correct type attribute', async () => {

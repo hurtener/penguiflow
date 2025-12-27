@@ -1,5 +1,7 @@
 # PenguiFlow: React Planner Integration Guide (v2.4+)
 
+> **v2.8 Update**: Artifact Store for binary content (PDFs, images, large files). MCP tools can store artifacts accessible via the Playground UI and REST API. See [Artifact Store](#14-artifact-store) for configuration.
+>
 > **v2.7 Update**: Planner now returns structured `FinalPayload` with `raw_answer` field. All examples updated to show the new format. See [Handling Different Result Types](#handling-different-result-types) for payload extraction patterns.
 
 This guide is the **source of truth** for wiring `ReactPlanner` into a production agent. It captures patterns from `planner_enterprise_agent_v2`, `react_typed_tools`, `react_parallel_join`, and `react_pause_resume`.
@@ -22,6 +24,7 @@ This guide is the **source of truth** for wiring `ReactPlanner` into a productio
 11. [Testing Patterns](#11-testing-patterns)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Quick Reference](#13-quick-reference)
+14. [Artifact Store](#14-artifact-store)
 
 ---
 
@@ -1182,3 +1185,206 @@ async def merge(args: JoinArgs, ctx: ToolContext) -> MergedResult:
 
 For concise migration steps, see `docs/MIGRATION_V24.md`.
 For end-to-end examples, run `examples/planner_enterprise_agent_v2`.
+
+---
+
+## 14. Artifact Store
+
+**New in v2.8**: Store and serve binary content (PDFs, images, large files) from MCP tools.
+
+### Overview
+
+The Artifact Store provides:
+- Binary content storage for MCP tool outputs (e.g., Tableau PDFs)
+- Session-scoped isolation for multi-tenant deployments
+- Real-time UI updates via `artifact_stored` events
+- REST API for downloading artifacts
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        ReactPlanner                              │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │                     MCP Tool                             │    │
+│  │  (e.g., Tableau export_dashboard_as_pdf)                │    │
+│  └───────────────────────────┬─────────────────────────────┘    │
+│                              │                                   │
+│                              ▼                                   │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              InMemoryArtifactStore                       │    │
+│  │  put_bytes(data, mime_type, filename, scope)            │    │
+│  │  get_bytes(id, scope) → bytes                           │    │
+│  └───────────────────────────┬─────────────────────────────┘    │
+│                              │                                   │
+│                              ▼                                   │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │           artifact_stored event                          │    │
+│  │  {artifact_id, mime_type, size_bytes, filename}         │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Playground                                   │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  SSE: artifact_stored → UI updates                       │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                              │                                   │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  GET /artifacts/{id}?session_id=... → binary download   │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Configuration
+
+#### Via Agent Spec (recommended)
+
+```yaml
+planner:
+  artifact_store:
+    enabled: true
+    retention:
+      ttl_seconds: 3600               # 1 hour TTL
+      max_artifact_bytes: 52428800    # 50MB per artifact
+      max_session_bytes: 524288000    # 500MB per session
+      max_trace_bytes: 104857600      # 100MB per trace
+      max_artifacts_per_trace: 100
+      max_artifacts_per_session: 1000
+      cleanup_strategy: lru           # lru, fifo, none
+```
+
+#### Manual Configuration
+
+```python
+from penguiflow.artifacts import ArtifactRetentionConfig, InMemoryArtifactStore
+from penguiflow.planner import ReactPlanner
+
+# Create artifact store with retention policy
+artifact_store = InMemoryArtifactStore(
+    retention=ArtifactRetentionConfig(
+        ttl_seconds=3600,
+        max_artifact_bytes=50 * 1024 * 1024,   # 50MB
+        max_session_bytes=500 * 1024 * 1024,   # 500MB
+        cleanup_strategy="lru",
+    ),
+)
+
+# Pass to ReactPlanner
+planner = ReactPlanner(
+    llm="gpt-4o",
+    catalog=catalog,
+    artifact_store=artifact_store,  # Enable artifact storage
+)
+```
+
+### Accessing the Artifact Store
+
+The `ReactPlanner.artifact_store` property provides stable access for external discovery:
+
+```python
+# In playground or orchestrator
+planner = build_planner(config).planner
+
+# Access the artifact store
+store = planner.artifact_store  # InMemoryArtifactStore or NoOpArtifactStore
+```
+
+### MCP Tool Integration
+
+MCP tools automatically use the artifact store when configured. The planner wraps the store with an event-emitting proxy that:
+
+1. Injects `session_id` from `tool_context` into artifact scope
+2. Emits `artifact_stored` events for real-time UI updates
+3. Stores artifacts with proper session isolation
+
+```python
+# Example: Tableau MCP tool storing a PDF
+# (handled automatically by ToolNode)
+ref = await artifact_store.put_bytes(
+    pdf_data,
+    mime_type="application/pdf",
+    filename="dashboard_export.pdf",
+    scope=ArtifactScope(session_id=session_id),
+)
+# ref.id is now accessible for download
+```
+
+### Playground Integration
+
+When artifact store is enabled, the Playground:
+
+1. **Discovers the store**: Calls `planner.artifact_store` to access the agent's store
+2. **Receives events**: SSE stream includes `artifact_stored` events
+3. **Shows UI**: Artifacts appear in the sidebar with download buttons
+4. **Serves downloads**: `GET /artifacts/{id}?session_id=...` returns binary content
+
+**Session Isolation**: Downloads require matching `session_id` to prevent cross-session access.
+
+### Event Format
+
+```python
+# artifact_stored event payload
+{
+    "event": "artifact_stored",
+    "artifact_id": "uuid-123",
+    "mime_type": "application/pdf",
+    "size_bytes": 1234567,
+    "filename": "dashboard_export.pdf",
+    "source": {"namespace": "mcp:tableau"},
+    "trace_id": "trace-abc",
+    "session_id": "session-xyz",
+    "ts": 1703520000.0
+}
+```
+
+### Retention Policies
+
+| Strategy | Behavior |
+|----------|----------|
+| `lru` | Least Recently Used - evicts oldest accessed first |
+| `fifo` | First In First Out - evicts oldest stored first |
+| `none` | No automatic cleanup (manual only) |
+
+**Size limits are enforced per:**
+- Session (`max_session_bytes`)
+- Trace (`max_trace_bytes`)
+- Individual artifact (`max_artifact_bytes`)
+- Count (`max_artifacts_per_trace`, `max_artifacts_per_session`)
+
+### Best Practices
+
+1. **Enable for MCP integrations**: If using MCP tools that export files, enable artifact store
+2. **Set appropriate TTL**: Short-lived for ephemeral exports, longer for audit trails
+3. **Size limits**: Configure based on expected file sizes and concurrency
+4. **Session isolation**: Always pass `session_id` in `tool_context` for proper scoping
+
+```python
+# In orchestrator
+result = await planner.run(
+    query=query,
+    tool_context={
+        "session_id": session_id,  # Required for artifact isolation
+        "tenant_id": tenant_id,
+    },
+)
+```
+
+### Troubleshooting
+
+**Artifacts not appearing in UI:**
+- Check `artifact_store.enabled: true` in spec
+- Verify `session_id` is passed in `tool_context`
+- Check console for SSE `artifact_stored` events
+
+**404 on artifact download:**
+- Verify session ID matches the one used during storage
+- Check artifact hasn't expired (TTL)
+- Ensure artifact store is properly discovered by playground
+
+**Large file failures:**
+- Increase `max_artifact_bytes` in retention config
+- Check `max_session_bytes` isn't exceeded
+
+---

@@ -1,7 +1,7 @@
-import type { ChatMessage } from '$lib/types';
+import type { ChatMessage, ArtifactStoredEvent } from '$lib/types';
 import { safeParse } from '$lib/utils';
 import { ANSWER_GATE_SENTINEL } from '$lib/utils/constants';
-import { chatStore, eventsStore, timelineStore } from '$lib/stores';
+import { chatStore, eventsStore, timelineStore, artifactsStore } from '$lib/stores';
 
 export interface ChatStreamCallbacks {
   onDone: (traceId: string | null) => void;
@@ -46,7 +46,7 @@ class ChatStreamManager {
     this.eventSource = new EventSource(url.toString());
 
     // Register event handlers
-    const events = ['chunk', 'artifact_chunk', 'llm_stream_chunk', 'step', 'event', 'done', 'error'];
+    const events = ['chunk', 'artifact_chunk', 'artifact_stored', 'llm_stream_chunk', 'step', 'event', 'done', 'error'];
     events.forEach(eventName => {
       this.eventSource!.addEventListener(eventName, (evt: MessageEvent) => {
         this.handleEvent(eventName, evt, callbacks);
@@ -97,6 +97,10 @@ class ChatStreamManager {
 
       case 'artifact_chunk':
         this.handleArtifactChunk(data);
+        break;
+
+      case 'artifact_stored':
+        this.handleArtifactStored(data);
         break;
 
       case 'step':
@@ -202,6 +206,22 @@ class ChatStreamManager {
     const streamId = (data.stream_id as string) ?? 'artifact';
     timelineStore.addArtifactChunk(streamId, data.chunk);
     eventsStore.addEvent(data, 'artifact_chunk');
+  }
+
+  private handleArtifactStored(data: Record<string, unknown>): void {
+    // Add to artifacts store for download
+    artifactsStore.addArtifact({
+      artifact_id: data.artifact_id as string,
+      mime_type: data.mime_type as string,
+      size_bytes: data.size_bytes as number,
+      filename: data.filename as string,
+      source: (data.source as Record<string, unknown>) || {},
+      trace_id: data.trace_id as string,
+      session_id: data.session_id as string,
+      ts: data.ts as number
+    } as ArtifactStoredEvent);
+    // Also add to events for visibility
+    eventsStore.addEvent(data, 'artifact_stored');
   }
 
   private handleStepEvent(

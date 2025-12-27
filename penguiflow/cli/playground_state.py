@@ -92,7 +92,7 @@ class PlaygroundArtifactStore:
         meta: dict[str, Any] | None = None,
     ) -> ArtifactRef:
         """Store binary data with session scoping."""
-        session_id = scope.session_id if scope else "default"
+        session_id = scope.session_id if scope is not None and scope.session_id is not None else "default"
         async with self._lock:
             store = self._get_or_create_store(session_id)
         ref = await store.put_bytes(
@@ -118,7 +118,7 @@ class PlaygroundArtifactStore:
         meta: dict[str, Any] | None = None,
     ) -> ArtifactRef:
         """Store large text with session scoping."""
-        session_id = scope.session_id if scope else "default"
+        session_id = scope.session_id if scope is not None and scope.session_id is not None else "default"
         async with self._lock:
             store = self._get_or_create_store(session_id)
         ref = await store.put_text(

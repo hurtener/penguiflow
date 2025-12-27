@@ -4,18 +4,18 @@
   interface Props {
     trajectoryContent?: Snippet;
     eventsContent?: Snippet;
-    configContent?: Snippet;
+    artifactsContent?: Snippet;
   }
 
-  let { trajectoryContent, eventsContent, configContent }: Props = $props();
+  let { trajectoryContent, eventsContent, artifactsContent }: Props = $props();
 
   let isOpen = $state(false);
-  let activeTab = $state<'trajectory' | 'events' | 'config'>('trajectory');
+  let activeTab = $state<'trajectory' | 'events' | 'artifacts'>('trajectory');
 
   const tabs = [
     { id: 'trajectory', label: 'Steps' },
     { id: 'events', label: 'Events' },
-    { id: 'config', label: 'Config' }
+    { id: 'artifacts', label: 'Artifacts' }
   ] as const;
 </script>
 
@@ -50,7 +50,7 @@
       {:else if activeTab === 'events'}
         {@render eventsContent?.()}
       {:else}
-        {@render configContent?.()}
+        {@render artifactsContent?.()}
       {/if}
     </div>
   {/if}
@@ -144,7 +144,7 @@
 
   .panel-content :global(.trajectory-card),
   .panel-content :global(.events-card),
-  .panel-content :global(.config-card) {
+  .panel-content :global(.artifacts-card) {
     flex: none;
     max-height: none;
     min-height: auto;

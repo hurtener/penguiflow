@@ -1,4 +1,5 @@
 import { randomId } from '$lib/utils';
+import { artifactsStore } from './artifacts.svelte';
 
 function createSessionStore() {
   let sessionId = $state(randomId());
@@ -19,11 +20,13 @@ function createSessionStore() {
       sessionId = randomId();
       activeTraceId = null;
       isSending = false;
+      artifactsStore.clear();
     },
 
     newSession() {
       sessionId = randomId();
       activeTraceId = null;
+      artifactsStore.clear();
     }
   };
 }

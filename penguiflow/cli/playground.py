@@ -266,12 +266,13 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
 
     if event.event_type == "artifact_stored":
         # Emit when a binary artifact is stored (e.g., from MCP tool output)
+        # Note: Use artifact_filename in extra to avoid LogRecord reserved key conflict
         payload.update(
             {
                 "artifact_id": extra.get("artifact_id"),
                 "mime_type": extra.get("mime_type"),
                 "size_bytes": extra.get("size_bytes"),
-                "filename": extra.get("filename"),
+                "filename": extra.get("artifact_filename") or extra.get("filename"),
                 "source": extra.get("source"),
                 "event": "artifact_stored",
             }
@@ -489,7 +490,10 @@ def _instantiate_orchestrator(cls: type[Any], config: Any | None) -> Any:
         raise PlaygroundError(f"Failed to instantiate orchestrator {cls.__name__}: {exc}") from exc
 
 
-def _call_builder(builder: Callable[..., Any], config: Any | None) -> Any:
+def _call_builder(
+    builder: Callable[..., Any],
+    config: Any | None,
+) -> Any:
     kwargs: dict[str, Any] = {}
     try:
         signature = inspect.signature(builder)
@@ -583,6 +587,118 @@ def create_playground_app(
                 await agent_wrapper.shutdown()
 
     app = FastAPI(title="PenguiFlow Playground", version="0.1.0", lifespan=_lifespan)
+
+    def _discover_planner() -> Any | None:
+        """Discover the underlying planner instance from the agent wrapper."""
+        planner = getattr(agent_wrapper, "_planner", None)
+        if planner is not None:
+            return planner
+        orchestrator = getattr(agent_wrapper, "_orchestrator", None)
+        if orchestrator is not None:
+            planner = getattr(orchestrator, "_planner", None)
+            if planner is not None:
+                return planner
+        return None
+
+    def _discover_artifact_store() -> Any | None:
+        """Discover the artifact store from the running agent (no injection).
+
+        Returns None if the agent has no artifact store configured or is using NoOp.
+        """
+        from penguiflow.artifacts import ArtifactStore, NoOpArtifactStore
+
+        planner = _discover_planner()
+        if planner is None:
+            return None
+
+        store = getattr(planner, "artifact_store", None)
+        if store is None:
+            store = getattr(planner, "_artifact_store", None)
+        if store is None:
+            return None
+        if isinstance(store, NoOpArtifactStore):
+            return None
+        if not isinstance(store, ArtifactStore):
+            return None
+        return store
+
+    class _ScopedArtifactStore:
+        """ArtifactStore wrapper that injects a default scope when missing."""
+
+        def __init__(self, store: Any, scope: Any) -> None:
+            self._store = store
+            self._scope = scope
+
+        async def put_bytes(
+            self,
+            data: bytes,
+            *,
+            mime_type: str | None = None,
+            filename: str | None = None,
+            namespace: str | None = None,
+            scope: Any | None = None,
+            meta: dict[str, Any] | None = None,
+        ) -> Any:
+            return await self._store.put_bytes(
+                data,
+                mime_type=mime_type,
+                filename=filename,
+                namespace=namespace,
+                scope=scope or self._scope,
+                meta=meta,
+            )
+
+        async def put_text(
+            self,
+            text: str,
+            *,
+            mime_type: str = "text/plain",
+            filename: str | None = None,
+            namespace: str | None = None,
+            scope: Any | None = None,
+            meta: dict[str, Any] | None = None,
+        ) -> Any:
+            return await self._store.put_text(
+                text,
+                mime_type=mime_type,
+                filename=filename,
+                namespace=namespace,
+                scope=scope or self._scope,
+                meta=meta,
+            )
+
+        async def get(self, artifact_id: str):
+            return await self._store.get(artifact_id)
+
+        async def get_ref(self, artifact_id: str):
+            return await self._store.get_ref(artifact_id)
+
+        async def delete(self, artifact_id: str):
+            return await self._store.delete(artifact_id)
+
+        async def exists(self, artifact_id: str):
+            return await self._store.exists(artifact_id)
+
+    class _DisabledArtifactStore:
+        """ArtifactStore shim used when artifact storage is not enabled."""
+
+        async def put_bytes(self, *_args, **_kwargs):
+            raise RuntimeError("Artifact storage is not enabled for this agent")
+
+        async def put_text(self, *_args, **_kwargs):
+            raise RuntimeError("Artifact storage is not enabled for this agent")
+
+        async def get(self, _artifact_id: str):
+            return None
+
+        async def get_ref(self, _artifact_id: str):
+            return None
+
+        async def delete(self, _artifact_id: str):
+            return False
+
+        async def exists(self, _artifact_id: str):
+            return False
 
     @app.on_event("shutdown")
     async def _shutdown_events() -> None:  # pragma: no cover - exercised at runtime
@@ -850,12 +966,9 @@ def create_playground_app(
         Session ID can be provided as query param or X-Session-ID header.
         If no session ID provided, returns artifact without session validation.
         """
-        if store is None:
-            raise HTTPException(status_code=500, detail="State store is not configured")
-
-        artifact_store = getattr(store, "artifact_store", None)
+        artifact_store = _discover_artifact_store()
         if artifact_store is None:
-            raise HTTPException(status_code=500, detail="Artifact store is not configured")
+            raise HTTPException(status_code=501, detail="Artifact storage not enabled for this agent")
 
         # Resolve session ID from query param or header
         resolved_session = session_id or x_session_id
@@ -871,6 +984,12 @@ def create_playground_app(
                         detail="Artifact not found or access denied",
                     )
             else:
+                ref = await artifact_store.get_ref(artifact_id) if hasattr(artifact_store, "get_ref") else None
+                if ref is None:
+                    raise HTTPException(status_code=404, detail="Artifact not found")
+                stored_session = getattr(getattr(ref, "scope", None), "session_id", None)
+                if stored_session is not None and stored_session != resolved_session:
+                    raise HTTPException(status_code=404, detail="Artifact not found or access denied")
                 data = await artifact_store.get(artifact_id)
         else:
             # No session validation - allow access (for backward compatibility)
@@ -903,12 +1022,9 @@ def create_playground_app(
         x_session_id: str | None = Header(None, alias="X-Session-ID"),
     ) -> Mapping[str, Any]:
         """Get artifact metadata without downloading content."""
-        if store is None:
-            raise HTTPException(status_code=500, detail="State store is not configured")
-
-        artifact_store = getattr(store, "artifact_store", None)
+        artifact_store = _discover_artifact_store()
         if artifact_store is None:
-            raise HTTPException(status_code=500, detail="Artifact store is not configured")
+            raise HTTPException(status_code=501, detail="Artifact storage not enabled for this agent")
 
         # Resolve session ID
         resolved_session = session_id or x_session_id
@@ -921,6 +1037,13 @@ def create_playground_app(
                     status_code=404,
                     detail="Artifact not found or access denied",
                 )
+        elif resolved_session is not None:
+            ref = await artifact_store.get_ref(artifact_id) if hasattr(artifact_store, "get_ref") else None
+            if ref is None:
+                raise HTTPException(status_code=404, detail="Artifact not found")
+            stored_session = getattr(getattr(ref, "scope", None), "session_id", None)
+            if stored_session is not None and stored_session != resolved_session:
+                raise HTTPException(status_code=404, detail="Artifact not found or access denied")
 
         # Get metadata
         if not hasattr(artifact_store, "get_ref"):
@@ -1022,19 +1145,28 @@ def create_playground_app(
 
         # Create a minimal context for resource reading
         resolved_session = session_id or x_session_id or "default"
-        artifact_store = getattr(store, "artifact_store", None)
+        artifact_store = _discover_artifact_store()
+        scoped_store: Any
+        if artifact_store is None:
+            scoped_store = _DisabledArtifactStore()
+        else:
+            from penguiflow.artifacts import ArtifactScope
+
+            scoped_store = _ScopedArtifactStore(
+                artifact_store,
+                ArtifactScope(session_id=resolved_session),
+            )
 
         # Create a context-like object for the read operation
         class MinimalCtx:
-            def __init__(self, artifacts: Any, session: str):
+            def __init__(self, artifacts: Any):
                 self._artifacts = artifacts
-                self._session = session
 
             @property
             def artifacts(self) -> Any:
                 return self._artifacts
 
-        ctx = MinimalCtx(artifact_store, resolved_session)
+        ctx = MinimalCtx(scoped_store)
 
         try:
             result = await tool_node.read_resource(uri, ctx)

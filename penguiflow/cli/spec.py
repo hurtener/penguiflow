@@ -600,6 +600,43 @@ class PlannerShortTermMemorySpec(BaseModel):
         return value
 
 
+class PlannerArtifactRetentionSpec(BaseModel):
+    """Retention policy for binary/large-text artifacts."""
+
+    ttl_seconds: int = 3600
+    max_artifact_bytes: int = 50 * 1024 * 1024
+    max_session_bytes: int = 500 * 1024 * 1024
+    max_trace_bytes: int = 100 * 1024 * 1024
+    max_artifacts_per_trace: int = 100
+    max_artifacts_per_session: int = 1000
+    cleanup_strategy: Literal["lru", "fifo", "none"] = "lru"
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator(
+        "ttl_seconds",
+        "max_artifact_bytes",
+        "max_session_bytes",
+        "max_trace_bytes",
+        "max_artifacts_per_trace",
+        "max_artifacts_per_session",
+    )
+    @classmethod
+    def _non_negative_int(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("must be >= 0.")
+        return value
+
+
+class PlannerArtifactStoreSpec(BaseModel):
+    """Artifact store configuration for ReactPlanner."""
+
+    enabled: bool = False
+    retention: PlannerArtifactRetentionSpec = Field(default_factory=PlannerArtifactRetentionSpec)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class PlannerSpec(BaseModel):
     max_iters: int = 12
     hop_budget: int = 8
@@ -607,6 +644,7 @@ class PlannerSpec(BaseModel):
     system_prompt_extra: str
     memory_prompt: str | None = None
     short_term_memory: PlannerShortTermMemorySpec | None = None
+    artifact_store: PlannerArtifactStoreSpec = Field(default_factory=PlannerArtifactStoreSpec)
     hints: PlannerHintsSpec | None = None
     stream_final_response: bool = False
 

@@ -18,6 +18,8 @@ from uuid import uuid4
 from pydantic import BaseModel, ValidationError
 
 from ..artifacts import (
+    ArtifactRef,
+    ArtifactScope,
     ArtifactStore,
     NoOpArtifactStore,
     discover_artifact_store,
@@ -78,6 +80,123 @@ logger = logging.getLogger("penguiflow.planner")
 
 _STM_SUMMARY_SCHEMA_NAME = "short_term_memory_summary"
 AUTO_STR_SENTINEL = "<auto>"
+
+
+class _EventEmittingArtifactStoreProxy:
+    """Proxy that wraps an ArtifactStore and emits artifact_stored events.
+
+    This enables real-time notification to frontends when binary artifacts
+    are stored (e.g., PDFs from MCP tools).
+    """
+
+    __slots__ = ("_store", "_emit_event", "_time_source", "_trajectory", "_namespace")
+
+    def __init__(
+        self,
+        store: ArtifactStore,
+        emit_event: Callable[[PlannerEvent], None],
+        time_source: Callable[[], float],
+        trajectory: Trajectory,
+        namespace: str | None = None,
+    ) -> None:
+        self._store = store
+        self._emit_event = emit_event
+        self._time_source = time_source
+        self._trajectory = trajectory
+        self._namespace = namespace
+
+    def _resolve_scope(self, scope: ArtifactScope | None) -> ArtifactScope | None:
+        """Inject session_id from trajectory if scope is missing."""
+        if scope is not None:
+            return scope
+        # Get session_id from trajectory's tool_context for proper session scoping
+        tool_ctx = self._trajectory.tool_context
+        if tool_ctx and isinstance(tool_ctx, dict):
+            session_id = tool_ctx.get("session_id")
+            if session_id:
+                return ArtifactScope(session_id=str(session_id))
+        return None
+
+    async def put_bytes(
+        self,
+        data: bytes,
+        *,
+        mime_type: str | None = None,
+        filename: str | None = None,
+        namespace: str | None = None,
+        scope: ArtifactScope | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> ArtifactRef:
+        """Store binary data and emit artifact_stored event."""
+        resolved_scope = self._resolve_scope(scope)
+        ref = await self._store.put_bytes(
+            data,
+            mime_type=mime_type,
+            filename=filename,
+            namespace=namespace,
+            scope=resolved_scope,
+            meta=meta,
+        )
+        self._emit_artifact_stored_event(ref, len(data), namespace)
+        return ref
+
+    async def put_text(
+        self,
+        text: str,
+        *,
+        mime_type: str = "text/plain",
+        filename: str | None = None,
+        namespace: str | None = None,
+        scope: ArtifactScope | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> ArtifactRef:
+        """Store large text and emit artifact_stored event."""
+        resolved_scope = self._resolve_scope(scope)
+        ref = await self._store.put_text(
+            text,
+            mime_type=mime_type,
+            filename=filename,
+            namespace=namespace,
+            scope=resolved_scope,
+            meta=meta,
+        )
+        self._emit_artifact_stored_event(ref, len(text.encode("utf-8")), namespace)
+        return ref
+
+    def _emit_artifact_stored_event(
+        self,
+        ref: ArtifactRef,
+        size_bytes: int,
+        namespace: str | None,
+    ) -> None:
+        """Emit artifact_stored event for real-time UI updates."""
+        self._emit_event(
+            PlannerEvent(
+                event_type="artifact_stored",
+                ts=self._time_source(),
+                trajectory_step=len(self._trajectory.steps),
+                extra={
+                    "artifact_id": ref.id,
+                    "mime_type": ref.mime_type,
+                    "size_bytes": size_bytes,
+                    "artifact_filename": ref.filename,  # Use artifact_filename to avoid LogRecord conflict
+                    "source": {"namespace": namespace or self._namespace},
+                },
+            )
+        )
+
+    # Delegate all other methods to the underlying store
+    async def get(self, artifact_id: str) -> bytes | None:
+        return await self._store.get(artifact_id)
+
+    async def get_ref(self, artifact_id: str) -> ArtifactRef | None:
+        return await self._store.get_ref(artifact_id)
+
+    async def delete(self, artifact_id: str) -> bool:
+        return await self._store.delete(artifact_id)
+
+    async def exists(self, artifact_id: str) -> bool:
+        return await self._store.exists(artifact_id)
 
 
 class _ShortTermMemorySummary(BaseModel):
@@ -780,6 +899,7 @@ class _PlannerContext(ToolContext):
         "_chunks",
         "_artifact_chunks",
         "_artifact_seq",
+        "_artifact_proxy",
         "_meta_warned",
     )
 
@@ -791,6 +911,12 @@ class _PlannerContext(ToolContext):
         self._chunks: list[_StreamChunk] = []
         self._artifact_chunks: list[_ArtifactChunk] = []
         self._artifact_seq: defaultdict[str, int] = defaultdict(int)
+        self._artifact_proxy = _EventEmittingArtifactStoreProxy(
+            store=planner._artifact_store,
+            emit_event=planner._emit_event,
+            time_source=planner._time_source,
+            trajectory=trajectory,
+        )
         self._meta_warned = False
 
     @property
@@ -818,8 +944,11 @@ class _PlannerContext(ToolContext):
 
         Use this to store binary content (PDFs, images) or large text
         out-of-band, keeping only compact ArtifactRef in LLM context.
+
+        Note: This returns an event-emitting proxy that notifies frontends
+        when artifacts are stored (e.g., for real-time UI updates).
         """
-        return self._planner._artifact_store
+        return self._artifact_proxy
 
     async def emit_chunk(
         self,
@@ -1317,6 +1446,11 @@ class ReactPlanner:
                     max_retries=llm_max_retries,
                     timeout_s=llm_timeout_s,
                 )
+
+    @property
+    def artifact_store(self) -> ArtifactStore:
+        """Return the configured artifact store (NoOp when disabled)."""
+        return self._artifact_store
 
     async def run(
         self,

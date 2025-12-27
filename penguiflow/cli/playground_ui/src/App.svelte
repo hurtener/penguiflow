@@ -16,12 +16,13 @@
     eventStreamManager,
   } from "$lib/services";
   import { Page } from "$lib/components/layout";
-  import { LeftSidebar, ProjectCard, SpecCard, GeneratorCard } from "$lib/components/sidebar-left";
+  import { LeftSidebar, ProjectCard, SpecCard } from "$lib/components/sidebar-left";
   import { CenterColumn } from "$lib/components/center";
   import { TrajectoryCard } from "$lib/components/center/trajectory";
   import { RightSidebar } from "$lib/components/sidebar-right";
   import { EventsCard } from "$lib/components/sidebar-right/events";
   import { ConfigCard } from "$lib/components/sidebar-right/config";
+  import { ArtifactsCard } from "$lib/components/sidebar-right/artifacts";
   import { MobileHeader, MobileBottomPanel } from "$lib/components/mobile";
   import { ChatCard } from "$lib/components/center/chat";
 
@@ -130,8 +131,8 @@
       {#snippet specContent()}
         <SpecCard />
       {/snippet}
-      {#snippet actionsContent()}
-        <GeneratorCard />
+      {#snippet configContent()}
+        <ConfigCard />
       {/snippet}
     </MobileHeader>
 
@@ -146,8 +147,8 @@
       {#snippet eventsContent()}
         <EventsCard />
       {/snippet}
-      {#snippet configContent()}
-        <ConfigCard />
+      {#snippet artifactsContent()}
+        <ArtifactsCard />
       {/snippet}
     </MobileBottomPanel>
   </div>
@@ -157,7 +158,7 @@
     <LeftSidebar>
       <ProjectCard />
       <SpecCard />
-      <GeneratorCard />
+      <ConfigCard />
     </LeftSidebar>
 
     <CenterColumn
@@ -197,4 +198,5 @@
     overflow: hidden;
     min-height: 200px; /* Ensure minimum usable space */
   }
+
 </style>

@@ -317,6 +317,7 @@ class OrchestratorAgentWrapper:
         ensure_init = getattr(self._orchestrator, "_ensure_initialized", None)
         if ensure_init is not None and callable(ensure_init):
             await ensure_init()
+
         self._initialized = True
 
     async def chat(

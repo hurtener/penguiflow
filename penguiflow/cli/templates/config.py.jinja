@@ -75,6 +75,16 @@ class Config:
     planner_absolute_max_parallel: int = {{ planner_absolute_max_parallel }}
     planner_stream_final_response: bool = {{ planner_stream_final_response }}
 
+    # Artifact Store (binary/large text)
+    artifact_store_enabled: bool = {{ artifact_store_enabled }}
+    artifact_store_ttl_seconds: int = {{ artifact_store_ttl_seconds }}
+    artifact_store_max_artifact_bytes: int = {{ artifact_store_max_artifact_bytes }}
+    artifact_store_max_session_bytes: int = {{ artifact_store_max_session_bytes }}
+    artifact_store_max_trace_bytes: int = {{ artifact_store_max_trace_bytes }}
+    artifact_store_max_artifacts_per_trace: int = {{ artifact_store_max_artifacts_per_trace }}
+    artifact_store_max_artifacts_per_session: int = {{ artifact_store_max_artifacts_per_session }}
+    artifact_store_cleanup_strategy: str = "{{ artifact_store_cleanup_strategy }}"
+
     # Built-in Short-Term Memory (ReactPlanner)
     short_term_memory_strategy: str = {{ short_term_memory_strategy }}
     short_term_memory_full_zone_turns: int = {{ short_term_memory_full_zone_turns }}
@@ -121,6 +131,34 @@ class Config:
             planner_hop_budget=_env_int("PLANNER_HOP_BUDGET", {{ planner_hop_budget }}),
             planner_absolute_max_parallel=_env_int("PLANNER_ABSOLUTE_MAX_PARALLEL", {{ planner_absolute_max_parallel }}),
             planner_stream_final_response=_env_flag("PLANNER_STREAM_FINAL_RESPONSE", {{ planner_stream_final_response }}),
+
+            # Artifact Store (binary/large text)
+            artifact_store_enabled=_env_flag("ARTIFACT_STORE_ENABLED", {{ artifact_store_enabled }}),
+            artifact_store_ttl_seconds=_env_int("ARTIFACT_STORE_TTL_SECONDS", {{ artifact_store_ttl_seconds }}),
+            artifact_store_max_artifact_bytes=_env_int(
+                "ARTIFACT_STORE_MAX_ARTIFACT_BYTES",
+                {{ artifact_store_max_artifact_bytes }},
+            ),
+            artifact_store_max_session_bytes=_env_int(
+                "ARTIFACT_STORE_MAX_SESSION_BYTES",
+                {{ artifact_store_max_session_bytes }},
+            ),
+            artifact_store_max_trace_bytes=_env_int(
+                "ARTIFACT_STORE_MAX_TRACE_BYTES",
+                {{ artifact_store_max_trace_bytes }},
+            ),
+            artifact_store_max_artifacts_per_trace=_env_int(
+                "ARTIFACT_STORE_MAX_ARTIFACTS_PER_TRACE",
+                {{ artifact_store_max_artifacts_per_trace }},
+            ),
+            artifact_store_max_artifacts_per_session=_env_int(
+                "ARTIFACT_STORE_MAX_ARTIFACTS_PER_SESSION",
+                {{ artifact_store_max_artifacts_per_session }},
+            ),
+            artifact_store_cleanup_strategy=_env_str(
+                "ARTIFACT_STORE_CLEANUP_STRATEGY",
+                "{{ artifact_store_cleanup_strategy }}",
+            ),
 
             # Built-in Short-Term Memory
             short_term_memory_strategy=_env_str("SHORT_TERM_MEMORY_STRATEGY", {{ short_term_memory_strategy }}),

@@ -1,5 +1,6 @@
 import { safeParse } from '$lib/utils';
-import { eventsStore, timelineStore } from '$lib/stores';
+import { eventsStore, timelineStore, artifactsStore } from '$lib/stores';
+import type { ArtifactStoredEvent } from '$lib/types';
 
 /**
  * Manages the follow EventSource for live event updates
@@ -35,6 +36,20 @@ class EventStreamManager {
         timelineStore.addArtifactChunk(streamId, data.chunk);
       }
 
+      // Handle artifact_stored - add to artifacts store for download
+      if (incomingEvent === 'artifact_stored') {
+        artifactsStore.addArtifact({
+          artifact_id: data.artifact_id as string,
+          mime_type: data.mime_type as string,
+          size_bytes: data.size_bytes as number,
+          filename: data.filename as string,
+          source: (data.source as Record<string, unknown>) || {},
+          trace_id: data.trace_id as string,
+          session_id: data.session_id as string,
+          ts: data.ts as number
+        } as ArtifactStoredEvent);
+      }
+
       // Skip llm_stream_chunk to avoid flooding
       if (incomingEvent === 'llm_stream_chunk') return;
 
@@ -43,7 +58,7 @@ class EventStreamManager {
     };
 
     // Register for multiple event types
-    ['event', 'step', 'chunk', 'llm_stream_chunk', 'artifact_chunk'].forEach(type => {
+    ['event', 'step', 'chunk', 'llm_stream_chunk', 'artifact_chunk', 'artifact_stored'].forEach(type => {
       this.eventSource!.addEventListener(type, listener);
     });
 

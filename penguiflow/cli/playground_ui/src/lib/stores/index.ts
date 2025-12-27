@@ -5,3 +5,4 @@ export { timelineStore } from './timeline.svelte';
 export { agentStore } from './agent.svelte';
 export { specStore } from './spec.svelte';
 export { setupStore, type SetupContext } from './setup.svelte';
+export { artifactsStore } from './artifacts.svelte';

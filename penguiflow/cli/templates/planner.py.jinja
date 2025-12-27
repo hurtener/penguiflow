@@ -8,6 +8,7 @@ from typing import Any
 import asyncio
 
 from penguiflow.catalog import build_catalog
+from penguiflow.artifacts import ArtifactRetentionConfig, InMemoryArtifactStore
 from penguiflow.planner import ReactPlanner{% if reflection_enabled %}, ReflectionConfig{% if reflection_criteria %}, ReflectionCriteria{% endif %}{% endif %} 
 from penguiflow.planner.memory import MemoryBudget, MemoryIsolation, ShortTermMemoryConfig
 
@@ -73,6 +74,27 @@ def _build_short_term_memory(config: Config) -> ShortTermMemoryConfig | None:
     )
 
 
+def _build_artifact_store(config: Config) -> InMemoryArtifactStore | None:
+    """Build artifact store from config.
+
+    When disabled, ReactPlanner falls back to NoOpArtifactStore.
+    """
+    if not config.artifact_store_enabled:
+        return None
+
+    return InMemoryArtifactStore(
+        retention=ArtifactRetentionConfig(
+            ttl_seconds=config.artifact_store_ttl_seconds,
+            max_artifact_bytes=config.artifact_store_max_artifact_bytes,
+            max_session_bytes=config.artifact_store_max_session_bytes,
+            max_trace_bytes=config.artifact_store_max_trace_bytes,
+            max_artifacts_per_trace=config.artifact_store_max_artifacts_per_trace,
+            max_artifacts_per_session=config.artifact_store_max_artifacts_per_session,
+            cleanup_strategy=config.artifact_store_cleanup_strategy,
+        ),
+    )
+
+
 def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
     """Build ReactPlanner with generated tool catalog."""
 
@@ -117,6 +139,8 @@ def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
     reflection_llm = None
 {% endif %}
 
+    artifact_store = _build_artifact_store(config)
+
     planner = ReactPlanner(
         llm=config.llm_model,
         catalog=catalog,
@@ -128,6 +152,7 @@ def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
         reflection_config=reflection_cfg,
         reflection_llm=reflection_llm,
         planning_hints={{ planning_hints_literal }},
+        artifact_store=artifact_store,
         event_callback=event_callback,
         stream_final_response=config.planner_stream_final_response,
         short_term_memory=_build_short_term_memory(config),

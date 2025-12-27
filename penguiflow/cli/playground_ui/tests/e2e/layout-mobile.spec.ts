@@ -36,13 +36,13 @@ test.describe('Mobile Layout', () => {
     await expect(page.getByLabel('Close menu')).toBeVisible();
   });
 
-  test('drawer shows Info, Spec, Actions tabs', async ({ page }) => {
+  test('drawer shows Info, Spec, Config tabs', async ({ page }) => {
     const menuBtn = page.getByLabel('Toggle menu');
     await menuBtn.click();
 
     await expect(page.getByRole('button', { name: 'Info' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Spec' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Actions' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Config' })).toBeVisible();
   });
 
   test('drawer tabs switch content', async ({ page }) => {
@@ -94,7 +94,7 @@ test.describe('Mobile Layout', () => {
     // Tabs should be visible
     await expect(page.getByRole('button', { name: 'Steps' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Events' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Config' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Artifacts' })).toBeVisible();
   });
 
   test('bottom panel label changes when open', async ({ page }) => {

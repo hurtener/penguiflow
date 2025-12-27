@@ -768,6 +768,8 @@ def _generate_config(
     stm = spec.planner.short_term_memory
     stm_budget = stm.budget if stm else None
     stm_isolation = stm.isolation if stm else None
+    artifact_cfg = spec.planner.artifact_store
+    artifact_retention = artifact_cfg.retention
 
     content = _render_template(
         "config.py.jinja",
@@ -786,6 +788,14 @@ def _generate_config(
             "planner_hop_budget": spec.planner.hop_budget,
             "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,
             "planner_stream_final_response": spec.planner.stream_final_response,
+            "artifact_store_enabled": bool(artifact_cfg.enabled),
+            "artifact_store_ttl_seconds": artifact_retention.ttl_seconds,
+            "artifact_store_max_artifact_bytes": artifact_retention.max_artifact_bytes,
+            "artifact_store_max_session_bytes": artifact_retention.max_session_bytes,
+            "artifact_store_max_trace_bytes": artifact_retention.max_trace_bytes,
+            "artifact_store_max_artifacts_per_trace": artifact_retention.max_artifacts_per_trace,
+            "artifact_store_max_artifacts_per_session": artifact_retention.max_artifacts_per_session,
+            "artifact_store_cleanup_strategy": artifact_retention.cleanup_strategy,
             "short_term_memory_enabled": bool(stm and stm.enabled),
             "short_term_memory_strategy": repr(stm.strategy if stm else "none"),
             "short_term_memory_full_zone_turns": stm_budget.full_zone_turns if stm_budget else 5,
@@ -836,6 +846,8 @@ def _generate_env_example(
     external_env_vars = _collect_external_env_vars(spec)
     stm = spec.planner.short_term_memory
     stm_budget = stm.budget if stm else None
+    artifact_cfg = spec.planner.artifact_store
+    artifact_retention = artifact_cfg.retention
 
     content = _render_template(
         "env.example.jinja",
@@ -852,6 +864,14 @@ def _generate_env_example(
             "planner_hop_budget": spec.planner.hop_budget,
             "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,
             "planner_stream_final_response": spec.planner.stream_final_response,
+            "artifact_store_enabled": str(bool(artifact_cfg.enabled)).lower(),
+            "artifact_store_ttl_seconds": artifact_retention.ttl_seconds,
+            "artifact_store_max_artifact_bytes": artifact_retention.max_artifact_bytes,
+            "artifact_store_max_session_bytes": artifact_retention.max_session_bytes,
+            "artifact_store_max_trace_bytes": artifact_retention.max_trace_bytes,
+            "artifact_store_max_artifacts_per_trace": artifact_retention.max_artifacts_per_trace,
+            "artifact_store_max_artifacts_per_session": artifact_retention.max_artifacts_per_session,
+            "artifact_store_cleanup_strategy": artifact_retention.cleanup_strategy,
             "short_term_memory_enabled": str(bool(stm and stm.enabled)).lower(),
             "short_term_memory_strategy": stm.strategy if stm else "none",
             "short_term_memory_full_zone_turns": stm_budget.full_zone_turns if stm_budget else 5,
