@@ -196,3 +196,22 @@ class TestEventBroker:
         # Only first item should be in queue
         assert await queue.get() == b"first"
         assert queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_close_handles_full_queue(self) -> None:
+        """Test close() handles full queue gracefully (lines 80-81)."""
+        broker = EventBroker()
+        # Create a queue with max size 1
+        queue: asyncio.Queue[bytes | object] = asyncio.Queue(maxsize=1)
+        broker._subscribers["trace-1"].add(queue)
+
+        # Fill the queue
+        await queue.put(b"data")
+
+        # close() should not raise even with full queue
+        await broker.close()
+
+        # Subscribers should be cleared
+        assert len(broker._subscribers) == 0
+
+

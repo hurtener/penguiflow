@@ -1574,7 +1574,7 @@ This migration is structured in phases (not weeks) so we can ship value incremen
 **Non-goals:** Removing legacy SSE immediately; forcing downstream users to migrate without overlap.
 
 **Tasks:**
-- [ ] Add tests for adapter event ordering and edge cases (errors, cancellation, pause/resume).
+- [ ] Add tests for adapter event ordering and edge cases (errors, cancellation, pause/resume). (Library COV gate 85%)
 - [ ] Document the contract: PenguiFlow contexts, artifacts, resources, tool-call events.
 - [ ] Run legacy SSE (`/chat/stream`) and AG-UI (`/agui/agent`) in parallel until stable; then deprecate legacy endpoints.
 
