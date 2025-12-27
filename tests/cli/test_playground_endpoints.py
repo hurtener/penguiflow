@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
+from ag_ui.core import RunAgentInput
 
 from penguiflow.cli.playground import create_playground_app
 from penguiflow.cli.playground_state import InMemoryStateStore
@@ -530,3 +531,31 @@ class TestStateStoreInitialization:
         app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
 
         assert app.state.state_store is store
+
+
+class TestAGUIEndpoint:
+    """Tests for /agui/agent endpoint."""
+
+    def test_agui_agent_streams_answer(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        input_payload = RunAgentInput(
+            thread_id="thread-1",
+            run_id="run-1",
+            messages=[{"id": "msg-1", "role": "user", "content": "Hello"}],
+            tools=[],
+            context=[],
+            state={},
+            forwarded_props={},
+        )
+
+        response = client.post(
+            "/agui/agent",
+            json=input_payload.model_dump(by_alias=True, mode="json"),
+            headers={"accept": "text/event-stream"},
+        )
+
+        assert response.status_code == 200
+        assert "Test answer" in response.text

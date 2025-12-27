@@ -82,6 +82,13 @@ _STM_SUMMARY_SCHEMA_NAME = "short_term_memory_summary"
 AUTO_STR_SENTINEL = "<auto>"
 
 
+def _safe_json_dumps(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 class _EventEmittingArtifactStoreProxy:
     """Proxy that wraps an ArtifactStore and emits artifact_stored events.
 
@@ -1266,6 +1273,7 @@ class ReactPlanner:
         self._specs = specs
         self._spec_by_name = {spec.name: spec for spec in self._specs}
         self._catalog_records = [spec.to_tool_record() for spec in self._specs]
+        self._register_resource_callbacks()
         self._planning_hints = _PlanningHints.from_mapping(planning_hints)
         hints_payload = self._planning_hints.to_prompt_payload() if not self._planning_hints.empty() else None
         self._system_prompt = prompts.build_system_prompt(
@@ -2486,6 +2494,39 @@ class ReactPlanner:
                         trajectory.summary = None
                         continue
 
+                tool_call_id = f"call_{current_action_seq}_{len(trajectory.steps)}"
+                try:
+                    args_payload = parsed_args.model_dump(mode="json")
+                except Exception:  # pragma: no cover - defensive
+                    args_payload = parsed_args.model_dump()
+                args_json = _safe_json_dumps(args_payload)
+
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="tool_call_start",
+                        ts=self._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        extra={
+                            "tool_call_id": tool_call_id,
+                            "tool_name": spec.name,
+                            "args_json": args_json,
+                            "action_seq": current_action_seq,
+                        },
+                    )
+                )
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="tool_call_end",
+                        ts=self._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        extra={
+                            "tool_call_id": tool_call_id,
+                            "tool_name": spec.name,
+                            "action_seq": current_action_seq,
+                        },
+                    )
+                )
+
                 ctx = _PlannerContext(self, trajectory)
                 try:
                     result = await spec.node.func(parsed_args, ctx)
@@ -2504,6 +2545,21 @@ class ReactPlanner:
                     )
                     trajectory.summary = None
                     await self._record_pause(signal.pause, trajectory, tracker)
+                    self._emit_event(
+                        PlannerEvent(
+                            event_type="tool_call_result",
+                            ts=self._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={
+                                "tool_call_id": tool_call_id,
+                                "tool_name": spec.name,
+                                "result_json": _safe_json_dumps(
+                                    {"pause": signal.pause.reason, "payload": dict(signal.pause.payload)}
+                                ),
+                                "action_seq": current_action_seq,
+                            },
+                        )
+                    )
                     return signal.pause
                 except Exception as exc:
                     failure_payload = self._build_failure_payload(spec, parsed_args, exc)
@@ -2520,6 +2576,19 @@ class ReactPlanner:
                     tracker.record_hop()
                     trajectory.summary = None
                     last_observation = None
+                    self._emit_event(
+                        PlannerEvent(
+                            event_type="tool_call_result",
+                            ts=self._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={
+                                "tool_call_id": tool_call_id,
+                                "tool_name": spec.name,
+                                "result_json": _safe_json_dumps({"error": error, "failure": failure_payload}),
+                                "action_seq": current_action_seq,
+                            },
+                        )
+                    )
                     continue
 
                 step_chunks = ctx._collect_chunks()
@@ -2541,6 +2610,19 @@ class ReactPlanner:
                     )
                     trajectory.summary = None
                     last_observation = None
+                    self._emit_event(
+                        PlannerEvent(
+                            event_type="tool_call_result",
+                            ts=self._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={
+                                "tool_call_id": tool_call_id,
+                                "tool_name": spec.name,
+                                "result_json": _safe_json_dumps({"error": error}),
+                                "action_seq": current_action_seq,
+                            },
+                        )
+                    )
                     continue
 
                 observation_json = observation.model_dump(mode="json")
@@ -2560,6 +2642,20 @@ class ReactPlanner:
                     observation_json
                     if was_clamped
                     else _redact_artifacts(spec.out_model, observation_json)
+                )
+                result_json = _safe_json_dumps(llm_obs)
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="tool_call_result",
+                        ts=self._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        extra={
+                            "tool_call_id": tool_call_id,
+                            "tool_name": spec.name,
+                            "result_json": result_json,
+                            "action_seq": current_action_seq,
+                        },
+                    )
                 )
                 trajectory.steps.append(
                     TrajectoryStep(
@@ -3438,6 +3534,42 @@ class ReactPlanner:
                     },
                 )
         self._last_event = event
+
+    def _register_resource_callbacks(self) -> None:
+        """Wire ToolNode resource update callbacks into planner events."""
+        seen: set[int] = set()
+        for spec in self._specs:
+            extra = spec.extra
+            if not isinstance(extra, Mapping):
+                continue
+            tool_node = extra.get("tool_node")
+            if tool_node is None:
+                continue
+            tool_node_id = id(tool_node)
+            if tool_node_id in seen:
+                continue
+            seen.add(tool_node_id)
+
+            set_callback = getattr(tool_node, "set_resource_updated_callback", None)
+            if not callable(set_callback):
+                continue
+
+            namespace = extra.get("namespace")
+            if not namespace:
+                namespace = getattr(getattr(tool_node, "config", None), "name", "unknown")
+
+            def _emit_resource_update(uri: str, *, _namespace: str = str(namespace)) -> None:
+                step = len(self._active_trajectory.steps) if self._active_trajectory else 0
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="resource_updated",
+                        ts=self._time_source(),
+                        trajectory_step=step,
+                        extra={"uri": uri, "namespace": _namespace},
+                    )
+                )
+
+            set_callback(_emit_resource_update)
 
     def _record_arg_event(
         self,

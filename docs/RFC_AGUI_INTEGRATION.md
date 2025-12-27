@@ -5,7 +5,7 @@
 | **RFC ID** | RFC-2025-001 |
 | **Title** | AG-UI Protocol Integration for Playground_UI and Backend Services |
 | **Author** | Platform Team |
-| **Status** | Draft |
+| **Status** | Implemented |
 | **Created** | 2025-12-23 |
 | **Revised** | 2025-12-23 |
 
@@ -1511,12 +1511,14 @@ This migration is structured in phases (not weeks) so we can ship value incremen
 **Non-goals:** PenguiFlow-specific planner mapping; replacing existing Playground SSE; frontend changes.
 
 **Tasks:**
-- [ ] Add `ag-ui-protocol` (PyPI) to backend optional dependencies.
-- [ ] Implement `agui_adapter/` (or `penguiflow/agui_adapter/`) with `AGUIAdapter` + `create_agui_endpoint`.
-- [ ] Add a dedicated FastAPI route (e.g. `POST /agui/agent`) that streams AG-UI events.
+- [x] Add `ag-ui-protocol` (PyPI) to backend optional dependencies.
+- [x] Implement `agui_adapter/` (or `penguiflow/agui_adapter/`) with `AGUIAdapter` + `create_agui_endpoint`.
+- [x] Add a dedicated FastAPI route (e.g. `POST /agui/agent`) that streams AG-UI events.
 
 **Done / Notes:**
-- [ ] _TBD_
+- `penguiflow/agui_adapter/` added with base adapter + FastAPI helpers.
+- `/agui/agent` wired in `penguiflow/cli/playground.py` behind optional dependency guards.
+- `ag-ui-protocol` added to `dev` + `cli` dependency groups.
 
 ### Phase 1 — PenguiFlow Adapter (Planner → AG-UI)
 
@@ -1525,13 +1527,15 @@ This migration is structured in phases (not weeks) so we can ship value incremen
 **Non-goals:** Tool-call events; artifact/resource UX; UI migration.
 
 **Tasks:**
-- [ ] Define ID mapping: `thread_id ↔ session_id`, `run_id ↔ trace_id` (one AG-UI run per `planner.run()` call).
-- [ ] Preserve PenguiFlow `llm_context` vs `tool_context` split via `RunAgentInput.forwarded_props`.
-- [ ] Map PenguiFlow step boundaries (`PlannerEvent.step_start/step_complete`) to `STEP_STARTED/STEP_FINISHED`.
-- [ ] Map PenguiFlow final-answer streaming (`PlannerEvent.llm_stream_chunk` with `channel="answer"`) to `TEXT_MESSAGE_*` events.
+- [x] Define ID mapping: `thread_id ↔ session_id`, `run_id ↔ trace_id` (one AG-UI run per `planner.run()` call).
+- [x] Preserve PenguiFlow `llm_context` vs `tool_context` split via `RunAgentInput.forwarded_props`.
+- [x] Map PenguiFlow step boundaries (`PlannerEvent.step_start/step_complete`) to `STEP_STARTED/STEP_FINISHED`.
+- [x] Map PenguiFlow final-answer streaming (`PlannerEvent.llm_stream_chunk` with `channel="answer"`) to `TEXT_MESSAGE_*` events.
 
 **Done / Notes:**
-- [ ] _TBD_
+- `PenguiFlowAdapter` maps planner events to AG-UI lifecycle/step/text events.
+- `forwarded_props.penguiflow.{llm_context,tool_context}` preserved and passed into `AgentWrapper.chat`.
+- `thread_id/run_id` wired to `session_id/trace_id` via `trace_id_hint`.
 
 ### Phase 2 — Tool Calls + Binary/Resource Events
 
@@ -1540,14 +1544,15 @@ This migration is structured in phases (not weeks) so we can ship value incremen
 **Non-goals:** Reimplementing AG-UI; streaming raw bytes over SSE; changing ArtifactStore contracts.
 
 **Tasks:**
-- [ ] Add internal planner events: `tool_call_start`, `tool_call_end`, `tool_call_result` (keyed by `trajectory_step` / `action_seq`).
-- [ ] Emit artifact/resource signals:
-  - [ ] `artifact_stored` (for ArtifactRef announcements)
-  - [ ] `resource_updated` (for MCP resource invalidation)
-- [ ] Map them to AG-UI `CustomEvent` (`name="artifact_stored"`, `name="resource_updated"`) and include download/read URLs.
+- [x] Add internal planner events: `tool_call_start`, `tool_call_end`, `tool_call_result` (keyed by `trajectory_step` / `action_seq`).
+- [x] Emit artifact/resource signals:
+  - [x] `artifact_stored` (for ArtifactRef announcements)
+  - [x] `resource_updated` (for MCP resource invalidation)
+- [x] Map them to AG-UI `CustomEvent` (`name="artifact_stored"`, `name="resource_updated"`) and include download/read URLs.
 
 **Done / Notes:**
-- [ ] _TBD_
+- `ReactPlanner` emits tool-call lifecycle events; ToolNode resource updates now emit `resource_updated`.
+- `PenguiFlowAdapter` maps tool calls and artifacts/resources into AG-UI events with URLs.
 
 ### Phase 3 — Playground UI Migration (AG-UI Client)
 
@@ -1556,16 +1561,17 @@ This migration is structured in phases (not weeks) so we can ship value incremen
 **Non-goals:** Large UI redesign; breaking existing `/chat/stream` consumers.
 
 **Tasks:**
-- [ ] Add `@ag-ui/client` + `@ag-ui/core` to the UI build.
-- [ ] Implement AG-UI stores/components (or adapt existing Playground stores) for:
-  - [ ] messages (assistant + user)
-  - [ ] steps
-  - [ ] tool calls
-  - [ ] custom events for artifacts/resources
-- [ ] Render downloadable artifacts using existing `/artifacts/{artifact_id}` endpoints and CustomEvent payloads.
+- [x] Add `@ag-ui/client` + `@ag-ui/core` to the UI build.
+- [x] Implement AG-UI stores/components (or adapt existing Playground stores) for:
+  - [x] messages (assistant + user)
+  - [x] steps
+  - [x] tool calls
+  - [x] custom events for artifacts/resources
+- [x] Render downloadable artifacts using existing `/artifacts/{artifact_id}` endpoints and CustomEvent payloads.
 
 **Done / Notes:**
-- [ ] _TBD_
+- Added `src/lib/agui/` stores + components and wired AG-UI toggle into Setup tab.
+- `chat-stream.ts` now supports `agui` protocol and maps custom events to artifacts/pause UI.
 
 ### Phase 4 — Stabilization + Deprecation
 
@@ -1574,12 +1580,14 @@ This migration is structured in phases (not weeks) so we can ship value incremen
 **Non-goals:** Removing legacy SSE immediately; forcing downstream users to migrate without overlap.
 
 **Tasks:**
-- [ ] Add tests for adapter event ordering and edge cases (errors, cancellation, pause/resume). (Library COV gate 85%)
-- [ ] Document the contract: PenguiFlow contexts, artifacts, resources, tool-call events.
-- [ ] Run legacy SSE (`/chat/stream`) and AG-UI (`/agui/agent`) in parallel until stable; then deprecate legacy endpoints.
+- [x] Add tests for adapter event ordering and edge cases (errors, cancellation, pause/resume). (Library COV gate 85%)
+- [x] Document the contract: PenguiFlow contexts, artifacts, resources, tool-call events.
+- [x] Run legacy SSE (`/chat/stream`) and AG-UI (`/agui/agent`) in parallel until stable; then deprecate legacy endpoints.
 
 **Done / Notes:**
-- [ ] _TBD_
+- Backend + frontend tests cover error paths, cancellation, and pause custom events.
+- Updated `docs/PLAYGROUND_BACKEND_CONTRACTS.md` with AG-UI details and custom events.
+- Both `/chat/stream` and `/agui/agent` remain available behind a UI toggle.
 
 ### Compatibility and Rollout
 

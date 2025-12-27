@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
+
+_LOGGER = logging.getLogger(__name__)
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -267,9 +270,19 @@ class PlannerAgentWrapper:
             raise RuntimeError("Planner did not finish execution")
 
         metadata = _normalise_metadata(getattr(result, "metadata", None))
+        _LOGGER.info(
+            "chat complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s, has_store=%s",
+            trace_id, session_id,
+            list(metadata.keys()) if metadata else None,
+            bool(metadata and isinstance(metadata.get("steps"), list)),
+            self._state_store is not None,
+        )
         trajectory = _build_trajectory(query, session_id, trace_id, metadata, llm_context, merged_tool_context)
         if trajectory is not None and self._state_store is not None:
             await self._state_store.save_trajectory(trace_id, session_id, trajectory)
+            _LOGGER.info("trajectory saved: trace_id=%s, session_id=%s", trace_id, session_id)
+        elif trajectory is None:
+            _LOGGER.warning("trajectory not saved: trajectory is None (metadata=%s)", metadata is not None)
 
         # Extract answer from payload, falling back to thought in metadata
         answer = _normalise_answer(result.payload)
@@ -360,14 +373,26 @@ class OrchestratorAgentWrapper:
             if planner is not None and callback is not None:
                 planner._event_callback = original_callback
 
-        trace_id = _get_attr(response, "trace_id") or _trace_id_supplier() or secrets.token_hex(8)
+        # Prefer trace_id_hint (from AG-UI run_id) over response.trace_id
+        # This ensures the frontend's run_id is used for trajectory storage
+        trace_id = trace_id_hint or _get_attr(response, "trace_id") or _trace_id_supplier() or secrets.token_hex(8)
         trace_holder["id"] = trace_id
         await self._event_recorder.persist(trace_id)
 
         metadata = _normalise_metadata(_get_attr(response, "metadata"))
+        _LOGGER.info(
+            "orchestrator chat complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s, has_store=%s",
+            trace_id, session_id,
+            list(metadata.keys()) if metadata else None,
+            bool(metadata and isinstance(metadata.get("steps"), list)),
+            self._state_store is not None,
+        )
         trajectory = _build_trajectory(query, session_id, trace_id, metadata, ctx, tool_ctx)
         if trajectory is not None and self._state_store is not None:
             await self._state_store.save_trajectory(trace_id, session_id, trajectory)
+            _LOGGER.info("trajectory saved: trace_id=%s, session_id=%s", trace_id, session_id)
+        elif trajectory is None:
+            _LOGGER.warning("trajectory not saved: trajectory is None (metadata=%s)", metadata is not None)
 
         return ChatResult(
             answer=_normalise_answer(_get_attr(response, "answer")),

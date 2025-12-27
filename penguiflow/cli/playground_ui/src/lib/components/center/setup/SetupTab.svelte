@@ -1,7 +1,44 @@
 <script lang="ts">
+  import { readable } from 'svelte/store';
   import { ErrorList } from '$lib/components/ui';
   import { sessionStore, setupStore, timelineStore, eventsStore } from '$lib/stores';
+  import { setAGUIContext } from '$lib/agui/stores';
+  import { MessageList, StateDebugger } from '$lib/agui/components';
   import SetupField from './SetupField.svelte';
+
+  const previewStore = {
+    messages: readable([
+      {
+        id: 'preview-msg',
+        role: 'assistant',
+        content: 'AG-UI preview message with a tool call.',
+        isStreaming: false,
+        toolCalls: [
+          {
+            id: 'preview-call',
+            name: 'search',
+            arguments: '{"query":"preview"}',
+            isStreaming: false,
+            result: 'ok'
+          }
+        ]
+      }
+    ]),
+    state: readable({
+      status: 'idle',
+      threadId: 'preview-thread',
+      runId: 'preview-run',
+      messages: [],
+      agentState: { mode: 'preview' },
+      activeSteps: [],
+      error: null
+    }),
+    status: readable('idle'),
+    agentState: readable({ mode: 'preview' }),
+    activeSteps: readable([])
+  };
+
+  setAGUIContext(previewStore as any);
 </script>
 
 <div class="setup-body">
@@ -53,10 +90,29 @@
         placeholder={'{}'}
       ></textarea>
     </SetupField>
+
+    <SetupField
+      label="Streaming Protocol"
+      hint="Enable AG-UI streaming for the playground."
+      full
+    >
+      <label class="toggle-row">
+        <input class="toggle-input" type="checkbox" bind:checked={setupStore.useAgui} />
+        <span>Use AG-UI</span>
+      </label>
+    </SetupField>
   </div>
 
   {#if setupStore.error}
     <ErrorList errors={[{ id: 'setup-err', message: setupStore.error }]} />
+  {/if}
+
+  {#if setupStore.useAgui}
+    <div class="agui-preview">
+      <div class="agui-preview-title">AG-UI Preview</div>
+      <MessageList />
+      <StateDebugger />
+    </div>
   {/if}
 </div>
 
@@ -110,6 +166,37 @@
 
   .setup-textarea:focus {
     border-color: var(--color-primary, #31a6a0);
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--color-text-secondary, #3c3a36);
+  }
+
+  .toggle-input {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--color-primary, #31a6a0);
+  }
+
+  .agui-preview {
+    margin-top: 16px;
+    padding: 12px;
+    border: 1px solid var(--color-border, #e8e1d7);
+    border-radius: 12px;
+    background: var(--color-card-bg, #fcfaf7);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .agui-preview-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-secondary, #3c3a36);
   }
 
   .ghost-btn {

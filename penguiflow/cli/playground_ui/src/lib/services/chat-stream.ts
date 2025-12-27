@@ -2,6 +2,8 @@ import type { ChatMessage, ArtifactStoredEvent } from '$lib/types';
 import { safeParse } from '$lib/utils';
 import { ANSWER_GATE_SENTINEL } from '$lib/utils/constants';
 import { chatStore, eventsStore, timelineStore, artifactsStore } from '$lib/stores';
+import { HttpAgent } from '@ag-ui/client';
+import type { BaseEvent, Message as AguiMessage, RunAgentInput } from '@ag-ui/core';
 
 export interface ChatStreamCallbacks {
   onDone: (traceId: string | null) => void;
@@ -14,6 +16,12 @@ export interface ChatStreamCallbacks {
 class ChatStreamManager {
   private eventSource: EventSource | null = null;
   private agentMsgId: string | null = null;
+  private aguiSubscription: { unsubscribe: () => void } | null = null;
+  private aguiMessageMap: Map<string, string> = new Map();
+  private aguiMappedPlaceholder = false;
+  private aguiRunId: string | null = null;
+  private aguiSessionId: string | null = null;
+  private aguiCompleted = false;
 
   /**
    * Start a new chat stream
@@ -23,10 +31,16 @@ class ChatStreamManager {
     sessionId: string,
     toolContext: Record<string, unknown>,
     llmContext: Record<string, unknown>,
-    callbacks: ChatStreamCallbacks
+    callbacks: ChatStreamCallbacks,
+    protocol: 'sse' | 'agui' = 'sse'
   ): void {
     // Close any existing connection
     this.close();
+
+    if (protocol === 'agui') {
+      this.startAgui(query, sessionId, toolContext, llmContext, callbacks);
+      return;
+    }
 
     // Create agent message placeholder
     const agentMsg = chatStore.addAgentMessage();
@@ -72,6 +86,15 @@ class ChatStreamManager {
       this.eventSource = null;
     }
     this.agentMsgId = null;
+    if (this.aguiSubscription) {
+      this.aguiSubscription.unsubscribe();
+      this.aguiSubscription = null;
+    }
+    this.aguiMessageMap.clear();
+    this.aguiMappedPlaceholder = false;
+    this.aguiRunId = null;
+    this.aguiSessionId = null;
+    this.aguiCompleted = false;
   }
 
   private findAgentMsg(): ChatMessage | undefined {
@@ -316,6 +339,250 @@ class ChatStreamManager {
     });
     callbacks.onError(error);
     this.close();
+  }
+
+  private startAgui(
+    query: string,
+    sessionId: string,
+    toolContext: Record<string, unknown>,
+    llmContext: Record<string, unknown>,
+    callbacks: ChatStreamCallbacks
+  ): void {
+    const history = this.buildHistory();
+    const hasUser = history.some(msg => msg.role === 'user' && this.hasTextContent(msg.content));
+    if (!hasUser && query.trim()) {
+      history.push({
+        id: `msg_${Date.now()}`,
+        role: 'user',
+        content: query
+      });
+    }
+
+    const agentMsg = chatStore.addAgentMessage();
+    this.agentMsgId = agentMsg.id;
+    this.aguiMessageMap.clear();
+    this.aguiMappedPlaceholder = false;
+    this.aguiCompleted = false;
+
+    const url = new URL('/agui/agent', window.location.origin);
+    const input: RunAgentInput = {
+      threadId: sessionId,
+      runId: `run_${Date.now()}`,
+      messages: history,
+      tools: [],
+      context: [],
+      state: {},
+      forwardedProps: {
+        penguiflow: {
+          llm_context: llmContext,
+          tool_context: toolContext
+        }
+      }
+    } as RunAgentInput;
+
+    this.aguiRunId = input.runId;
+    this.aguiSessionId = sessionId;
+    console.log('[AG-UI] Sending request:', JSON.stringify(input, null, 2));
+    const agent = new HttpAgent({ url: url.toString() });
+    // Use run() not runAgent() - run() returns Observable<BaseEvent>
+    const observable = agent.run(input);
+
+    this.aguiSubscription = observable.subscribe({
+      next: (event: BaseEvent) => this.handleAguiEvent(event, callbacks),
+      error: (err: Error) => {
+        const msg = this.findAgentMsg();
+        if (msg) {
+          chatStore.updateMessage(msg.id, { isStreaming: false });
+        }
+        callbacks.onError(err.message);
+        this.close();
+      },
+      complete: () => {
+        if (!this.aguiCompleted && this.aguiRunId) {
+          callbacks.onDone(this.aguiRunId);
+        }
+      }
+    });
+  }
+
+  private handleAguiEvent(event: BaseEvent, callbacks: ChatStreamCallbacks): void {
+    console.log('[AG-UI] Received event:', event.type, event);
+    switch (event.type) {
+      case 'RUN_STARTED':
+        this.aguiRunId = (event as any).runId ?? this.aguiRunId;
+        return;
+
+      case 'RUN_FINISHED': {
+        const msg = this.findAgentMsg();
+        if (msg) {
+          chatStore.updateMessage(msg.id, { isStreaming: false, isThinking: false });
+        }
+        if (!this.aguiCompleted) {
+          callbacks.onDone((event as any).runId ?? this.aguiRunId);
+        }
+        this.aguiCompleted = true;
+        return;
+      }
+
+      case 'RUN_ERROR': {
+        const msg = this.findAgentMsg();
+        if (msg) {
+          chatStore.updateMessage(msg.id, { isStreaming: false, isThinking: false });
+        }
+        if (!this.aguiCompleted) {
+          callbacks.onError((event as any).message || 'Run error');
+        }
+        this.aguiCompleted = true;
+        return;
+      }
+
+      case 'TEXT_MESSAGE_START': {
+        const e = event as any;
+        if (e.role !== 'assistant') return;
+        this.ensureAguiMessage(e.messageId);
+        return;
+      }
+
+      case 'TEXT_MESSAGE_CONTENT': {
+        const e = event as any;
+        const id = this.ensureAguiMessage(e.messageId);
+        const msg = chatStore.findMessage(id);
+        if (msg && e.delta) {
+          chatStore.updateMessage(msg.id, { text: `${msg.text}${e.delta}`, isStreaming: true });
+        }
+        return;
+      }
+
+      case 'TEXT_MESSAGE_END': {
+        const e = event as any;
+        const id = this.ensureAguiMessage(e.messageId);
+        chatStore.updateMessage(id, { isStreaming: false });
+        return;
+      }
+
+      case 'TOOL_CALL_START':
+      case 'TOOL_CALL_ARGS':
+      case 'TOOL_CALL_END':
+      case 'TOOL_CALL_RESULT': {
+        eventsStore.addEvent(event as any, event.type.toLowerCase());
+        return;
+      }
+
+      case 'CUSTOM': {
+        const name = (event as any).name as string;
+        const value = (event as any).value as Record<string, unknown> | string | null;
+
+        if (name === 'artifact_stored' && value && typeof value === 'object' && (value as any).artifact) {
+          const artifact = value.artifact as Record<string, unknown>;
+          artifactsStore.addArtifact({
+            artifact_id: artifact.id as string,
+            mime_type: artifact.mime_type as string,
+            size_bytes: artifact.size_bytes as number,
+            filename: artifact.filename as string,
+            source: (artifact.source as Record<string, unknown>) || {},
+            trace_id: this.aguiRunId ?? undefined,
+            session_id: this.aguiSessionId ?? '',
+            ts: Date.now()
+          } as ArtifactStoredEvent);
+        }
+
+        // Handle thinking events - show in observations panel
+        if (name === 'thinking' && value && typeof value === 'object') {
+          const msg = this.findAgentMsg();
+          if (msg) {
+            const text = (value as any).text as string || '';
+            const phase = (value as any).phase as string;
+            if (phase === 'action') {
+              // Action phase = agent is thinking
+              chatStore.updateMessage(msg.id, { isThinking: true });
+            } else if (text) {
+              // Observation/other thinking content
+              chatStore.updateMessage(msg.id, {
+                observations: `${msg.observations ?? ''}${text}`,
+                showObservations: true,
+                isThinking: false
+              });
+            }
+          }
+        }
+
+        // Handle revision events
+        if (name === 'revision' && value && typeof value === 'object') {
+          const msg = this.findAgentMsg();
+          if (msg) {
+            const text = (value as any).text as string || '';
+            const done = (value as any).done as boolean;
+            const updates: Partial<ChatMessage> = {
+              isThinking: false,
+              isStreaming: !done
+            };
+            if (!msg.revisionStreamActive) {
+              updates.revisionStreamActive = true;
+              updates.text = '';
+            }
+            if (text) {
+              updates.text = `${msg.revisionStreamActive ? msg.text : ''}${text}`;
+            }
+            chatStore.updateMessage(msg.id, updates);
+          }
+        }
+
+        if (name === 'pause' && value && typeof value === 'object') {
+          const msg = this.findAgentMsg();
+          if (msg) {
+            this.handlePause(msg, {}, value as Record<string, unknown>, this.aguiRunId, callbacks);
+          }
+          this.aguiCompleted = true;
+        }
+
+        const payload = value && typeof value === 'object' ? value : { value };
+        eventsStore.addEvent(payload, name);
+        return;
+      }
+
+      default:
+        return;
+    }
+  }
+
+  private ensureAguiMessage(messageId: string): string {
+    const existing = this.aguiMessageMap.get(messageId);
+    if (existing) {
+      return existing;
+    }
+
+    if (!this.aguiMappedPlaceholder && this.agentMsgId) {
+      this.aguiMappedPlaceholder = true;
+      this.aguiMessageMap.set(messageId, this.agentMsgId);
+      return this.agentMsgId;
+    }
+
+    const newMsg = chatStore.addAgentMessage();
+    this.aguiMessageMap.set(messageId, newMsg.id);
+    return newMsg.id;
+  }
+
+  private buildHistory(): AguiMessage[] {
+    console.log('[AG-UI] Building history from chatStore.messages:', chatStore.messages.length, 'messages');
+    const history = chatStore.messages
+      .filter(msg => msg.role === 'user' || msg.role === 'agent')
+      .map(msg => ({
+        id: msg.id,
+        role: msg.role === 'agent' ? 'assistant' : 'user',
+        content: msg.text
+      }));
+    console.log('[AG-UI] Built history:', history);
+    return history;
+  }
+
+  private hasTextContent(content: AguiMessage['content']): boolean {
+    if (typeof content === 'string') {
+      return content.trim().length > 0;
+    }
+    if (Array.isArray(content)) {
+      return content.some(item => typeof item === 'object' && item !== null && 'text' in item);
+    }
+    return false;
   }
 }
 

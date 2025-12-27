@@ -11,6 +11,7 @@ function createSetupStore() {
   let toolContextRaw = $state('{}');
   let llmContextRaw = $state('{}');
   let error = $state<string | null>(null);
+  let useAgui = $state(false);
 
   return {
     get tenantId() { return tenantId; },
@@ -27,6 +28,9 @@ function createSetupStore() {
 
     get error() { return error; },
     set error(v: string | null) { error = v; },
+
+    get useAgui() { return useAgui; },
+    set useAgui(v: boolean) { useAgui = v; },
 
     /**
      * Parse and validate contexts
@@ -59,6 +63,7 @@ function createSetupStore() {
       toolContextRaw = '{}';
       llmContextRaw = '{}';
       error = null;
+      useAgui = false;
     }
   };
 }

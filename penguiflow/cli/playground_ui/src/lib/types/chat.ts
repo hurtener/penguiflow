@@ -37,4 +37,23 @@ export type PlannerEventPayload = {
   chunk?: unknown;
   artifact_type?: string;
   meta?: Record<string, unknown>;
+  // Tool call aggregation fields
+  tool_call_id?: string;
+  tool_call_name?: string;
+  args?: string;
+  result?: string;
+  start_ts?: number;
+  end_ts?: number;
+};
+
+/** Aggregated event for display in events panel */
+export type DisplayEvent = {
+  id: string;
+  type: 'step' | 'tool_call' | 'artifact' | 'other';
+  name: string;
+  description?: string;
+  duration_ms?: number;
+  args?: string;
+  result?: string;
+  ts: number;
 };

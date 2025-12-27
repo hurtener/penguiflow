@@ -15,15 +15,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
+
+try:
+    from ag_ui.core import RunAgentInput
+except Exception:  # pragma: no cover - optional dependency
+    RunAgentInput = None  # type: ignore[assignment]
 
 from penguiflow.cli.generate import run_generate
 from penguiflow.cli.spec import Spec, load_spec
 from penguiflow.cli.spec_errors import SpecValidationError
 from penguiflow.planner import PlannerEvent
+try:
+    from penguiflow.agui_adapter import PenguiFlowAdapter, create_agui_endpoint
+except Exception:  # pragma: no cover - optional dependency
+    PenguiFlowAdapter = None  # type: ignore[assignment]
+    create_agui_endpoint = None  # type: ignore[assignment]
 
 from .playground_sse import EventBroker, SSESentinel, format_sse, stream_queue
 from .playground_state import InMemoryStateStore, PlaygroundStateStore
@@ -879,6 +889,21 @@ def create_playground_app(
             stream_queue(queue),
             media_type="text/event-stream",
         )
+
+    if PenguiFlowAdapter is not None and create_agui_endpoint is not None and RunAgentInput is not None:
+        agui_adapter = PenguiFlowAdapter(agent_wrapper)
+
+        @app.post("/agui/agent")
+        async def agui_agent(input: RunAgentInput, request: Request) -> StreamingResponse:
+            return await create_agui_endpoint(agui_adapter.run)(input, request)
+
+    else:  # pragma: no cover - optional dependency guard
+        @app.post("/agui/agent")
+        async def agui_agent_unavailable() -> None:
+            raise HTTPException(
+                status_code=501,
+                detail="AG-UI support requires ag-ui-protocol; install penguiflow[cli].",
+            )
 
     @app.get("/events")
     async def events(

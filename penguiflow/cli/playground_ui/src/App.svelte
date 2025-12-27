@@ -16,7 +16,7 @@
     eventStreamManager,
   } from "$lib/services";
   import { Page } from "$lib/components/layout";
-  import { LeftSidebar, ProjectCard, SpecCard } from "$lib/components/sidebar-left";
+  import { LeftSidebar, ProjectCard, SpecCard, GeneratorCard } from "$lib/components/sidebar-left";
   import { CenterColumn } from "$lib/components/center";
   import { TrajectoryCard } from "$lib/components/center/trajectory";
   import { RightSidebar } from "$lib/components/sidebar-right";
@@ -28,8 +28,8 @@
 
   // Reference to chat body for auto-scrolling
   let chatBodyEl = $state<HTMLDivElement | null>(null);
-  let centerColumnRef: CenterColumn;
-  let chatCardRef: ChatCard;
+  let centerColumnRef = $state<CenterColumn | undefined>(undefined);
+  let chatCardRef = $state<ChatCard | undefined>(undefined);
 
   // Responsive breakpoint detection
   let isMobile = $state(false);
@@ -116,7 +116,8 @@
         onError: () => {
           sessionStore.isSending = false;
         }
-      }
+      },
+      setupStore.useAgui ? 'agui' : 'sse'
     );
   };
 </script>
@@ -158,6 +159,7 @@
     <LeftSidebar>
       <ProjectCard />
       <SpecCard />
+      <GeneratorCard />
       <ConfigCard />
     </LeftSidebar>
 
