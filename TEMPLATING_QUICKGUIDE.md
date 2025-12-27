@@ -1,6 +1,8 @@
 # PenguiFlow Templating Quickguide
 
-> **Version**: 2.7 | **Last Updated**: December 2025
+> **Version**: 2.8 | **Last Updated**: December 2025
+>
+> **v2.8 Features**: Artifact Store for binary content (PDFs, images, large files) with spec-driven configuration. Artifacts are accessible via the Playground UI and REST API.
 >
 > **v2.7 Features**: Interactive Playground (`penguiflow dev`), External Tool Integration (ToolNode for MCP/UTCP/HTTP), Short-Term Memory with multi-tenant isolation. Planner now returns structured `FinalPayload` with `raw_answer` field. See [Extracting Answers from Payload](#4-extracting-answers-from-payload) for the recommended pattern.
 
@@ -48,6 +50,7 @@ The PenguiFlow CLI scaffolds production-ready agent projects with best practices
    - [Example Spec](#example-spec)
    - [Tested Template Examples](#tested-template-examples)
    - [Memory Configuration](#memory-configuration)
+   - [Artifact Store Configuration](#artifact-store-configuration)
 11. [Project Structure](#project-structure)
 12. [Configuration](#configuration)
 13. [Running Your Agent](#running-your-agent)
@@ -1527,6 +1530,15 @@ planner:
   hints:
     ordering: [search_documents, analyze_results]
     parallel_groups: [[fetch_a, fetch_b]]
+
+  # Artifact Store (v2.8+) - for binary/large content
+  artifact_store:
+    enabled: true
+    retention:
+      ttl_seconds: 3600
+      max_artifact_bytes: 52428800       # 50MB per artifact
+      max_session_bytes: 524288000       # 500MB per session
+      cleanup_strategy: lru              # lru, fifo, none
 ```
 
 ### Supported Types
@@ -1981,6 +1993,75 @@ When memory is disabled:
 - `memory_enabled: bool = False` in `config.py`
 - No memory client initialization
 - `llm_context` passed as empty dict
+
+---
+
+#### Artifact Store Configuration
+
+**New in v2.8**: Store binary content (PDFs, images, large files) from MCP tools and make them accessible via the Playground UI.
+
+```yaml
+planner:
+  artifact_store:
+    enabled: true                        # Enable artifact storage
+    retention:
+      ttl_seconds: 3600                  # Time-to-live (1 hour default)
+      max_artifact_bytes: 52428800       # 50MB per artifact
+      max_session_bytes: 524288000       # 500MB per session
+      max_trace_bytes: 104857600         # 100MB per trace
+      max_artifacts_per_trace: 100
+      max_artifacts_per_session: 1000
+      cleanup_strategy: lru              # lru, fifo, none
+```
+
+**When artifact store is enabled:**
+- `InMemoryArtifactStore` is created with retention config
+- Artifacts stored by MCP tools (e.g., Tableau PDFs) are accessible
+- Playground UI shows artifacts in the sidebar
+- REST endpoint `/artifacts/{id}` serves binary content
+
+**Generated config fields:**
+```python
+# In config.py
+artifact_store_enabled: bool = True
+artifact_store_ttl_seconds: int = 3600
+artifact_store_max_artifact_bytes: int = 52428800
+artifact_store_max_session_bytes: int = 524288000
+artifact_store_cleanup_strategy: str = "lru"
+```
+
+**Generated planner setup:**
+```python
+# In planner.py
+def _build_artifact_store(config: Config) -> InMemoryArtifactStore | None:
+    if not config.artifact_store_enabled:
+        return None
+
+    return InMemoryArtifactStore(
+        retention=ArtifactRetentionConfig(
+            ttl_seconds=config.artifact_store_ttl_seconds,
+            max_artifact_bytes=config.artifact_store_max_artifact_bytes,
+            max_session_bytes=config.artifact_store_max_session_bytes,
+            cleanup_strategy=config.artifact_store_cleanup_strategy,
+        ),
+    )
+```
+
+**Environment variables:**
+```bash
+# .env
+ARTIFACT_STORE_ENABLED=true
+ARTIFACT_STORE_TTL_SECONDS=3600
+ARTIFACT_STORE_MAX_ARTIFACT_BYTES=52428800
+ARTIFACT_STORE_MAX_SESSION_BYTES=524288000
+ARTIFACT_STORE_CLEANUP_STRATEGY=lru
+```
+
+**Use cases:**
+- MCP tools that export PDFs (e.g., Tableau)
+- Image generation tools
+- Document processing outputs
+- Large text files (logs, reports)
 
 ---
 

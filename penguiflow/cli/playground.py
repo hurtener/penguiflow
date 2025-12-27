@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -264,6 +264,32 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
         )
         return format_sse("artifact_chunk", payload)
 
+    if event.event_type == "artifact_stored":
+        # Emit when a binary artifact is stored (e.g., from MCP tool output)
+        # Note: Use artifact_filename in extra to avoid LogRecord reserved key conflict
+        payload.update(
+            {
+                "artifact_id": extra.get("artifact_id"),
+                "mime_type": extra.get("mime_type"),
+                "size_bytes": extra.get("size_bytes"),
+                "filename": extra.get("artifact_filename") or extra.get("filename"),
+                "source": extra.get("source"),
+                "event": "artifact_stored",
+            }
+        )
+        return format_sse("artifact_stored", payload)
+
+    if event.event_type == "resource_updated":
+        # Emit when an MCP resource is updated (cache invalidation)
+        payload.update(
+            {
+                "uri": extra.get("uri"),
+                "namespace": extra.get("namespace"),
+                "event": "resource_updated",
+            }
+        )
+        return format_sse("resource_updated", payload)
+
     if event.event_type == "llm_stream_chunk":
         phase_val_llm = extra.get("phase")
         phase_llm: str | None = phase_val_llm if isinstance(phase_val_llm, str) else None
@@ -464,7 +490,10 @@ def _instantiate_orchestrator(cls: type[Any], config: Any | None) -> Any:
         raise PlaygroundError(f"Failed to instantiate orchestrator {cls.__name__}: {exc}") from exc
 
 
-def _call_builder(builder: Callable[..., Any], config: Any | None) -> Any:
+def _call_builder(
+    builder: Callable[..., Any],
+    config: Any | None,
+) -> Any:
     kwargs: dict[str, Any] = {}
     try:
         signature = inspect.signature(builder)
@@ -558,6 +587,118 @@ def create_playground_app(
                 await agent_wrapper.shutdown()
 
     app = FastAPI(title="PenguiFlow Playground", version="0.1.0", lifespan=_lifespan)
+
+    def _discover_planner() -> Any | None:
+        """Discover the underlying planner instance from the agent wrapper."""
+        planner = getattr(agent_wrapper, "_planner", None)
+        if planner is not None:
+            return planner
+        orchestrator = getattr(agent_wrapper, "_orchestrator", None)
+        if orchestrator is not None:
+            planner = getattr(orchestrator, "_planner", None)
+            if planner is not None:
+                return planner
+        return None
+
+    def _discover_artifact_store() -> Any | None:
+        """Discover the artifact store from the running agent (no injection).
+
+        Returns None if the agent has no artifact store configured or is using NoOp.
+        """
+        from penguiflow.artifacts import ArtifactStore, NoOpArtifactStore
+
+        planner = _discover_planner()
+        if planner is None:
+            return None
+
+        store = getattr(planner, "artifact_store", None)
+        if store is None:
+            store = getattr(planner, "_artifact_store", None)
+        if store is None:
+            return None
+        if isinstance(store, NoOpArtifactStore):
+            return None
+        if not isinstance(store, ArtifactStore):
+            return None
+        return store
+
+    class _ScopedArtifactStore:
+        """ArtifactStore wrapper that injects a default scope when missing."""
+
+        def __init__(self, store: Any, scope: Any) -> None:
+            self._store = store
+            self._scope = scope
+
+        async def put_bytes(
+            self,
+            data: bytes,
+            *,
+            mime_type: str | None = None,
+            filename: str | None = None,
+            namespace: str | None = None,
+            scope: Any | None = None,
+            meta: dict[str, Any] | None = None,
+        ) -> Any:
+            return await self._store.put_bytes(
+                data,
+                mime_type=mime_type,
+                filename=filename,
+                namespace=namespace,
+                scope=scope or self._scope,
+                meta=meta,
+            )
+
+        async def put_text(
+            self,
+            text: str,
+            *,
+            mime_type: str = "text/plain",
+            filename: str | None = None,
+            namespace: str | None = None,
+            scope: Any | None = None,
+            meta: dict[str, Any] | None = None,
+        ) -> Any:
+            return await self._store.put_text(
+                text,
+                mime_type=mime_type,
+                filename=filename,
+                namespace=namespace,
+                scope=scope or self._scope,
+                meta=meta,
+            )
+
+        async def get(self, artifact_id: str):
+            return await self._store.get(artifact_id)
+
+        async def get_ref(self, artifact_id: str):
+            return await self._store.get_ref(artifact_id)
+
+        async def delete(self, artifact_id: str):
+            return await self._store.delete(artifact_id)
+
+        async def exists(self, artifact_id: str):
+            return await self._store.exists(artifact_id)
+
+    class _DisabledArtifactStore:
+        """ArtifactStore shim used when artifact storage is not enabled."""
+
+        async def put_bytes(self, *_args, **_kwargs):
+            raise RuntimeError("Artifact storage is not enabled for this agent")
+
+        async def put_text(self, *_args, **_kwargs):
+            raise RuntimeError("Artifact storage is not enabled for this agent")
+
+        async def get(self, _artifact_id: str):
+            return None
+
+        async def get_ref(self, _artifact_id: str):
+            return None
+
+        async def delete(self, _artifact_id: str):
+            return False
+
+        async def exists(self, _artifact_id: str):
+            return False
 
     @app.on_event("shutdown")
     async def _shutdown_events() -> None:  # pragma: no cover - exercised at runtime
@@ -811,6 +952,228 @@ def create_playground_app(
         payload["trace_id"] = trace_id
         payload["session_id"] = session_id
         return payload
+
+    # ─── Artifact Endpoints ───────────────────────────────────────────────────
+
+    @app.get("/artifacts/{artifact_id}")
+    async def get_artifact(
+        artifact_id: str,
+        session_id: str | None = None,
+        x_session_id: str | None = Header(None, alias="X-Session-ID"),
+    ) -> Response:
+        """Download artifact binary content.
+
+        Session ID can be provided as query param or X-Session-ID header.
+        If no session ID provided, returns artifact without session validation.
+        """
+        artifact_store = _discover_artifact_store()
+        if artifact_store is None:
+            raise HTTPException(status_code=501, detail="Artifact storage not enabled for this agent")
+
+        # Resolve session ID from query param or header
+        resolved_session = session_id or x_session_id
+
+        # Get artifact with session validation if session provided
+        if resolved_session is not None:
+            # Use session-aware retrieval for access control
+            if hasattr(artifact_store, "get_with_session_check"):
+                data = await artifact_store.get_with_session_check(artifact_id, resolved_session)
+                if data is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Artifact not found or access denied",
+                    )
+            else:
+                ref = await artifact_store.get_ref(artifact_id) if hasattr(artifact_store, "get_ref") else None
+                if ref is None:
+                    raise HTTPException(status_code=404, detail="Artifact not found")
+                stored_session = getattr(getattr(ref, "scope", None), "session_id", None)
+                if stored_session is not None and stored_session != resolved_session:
+                    raise HTTPException(status_code=404, detail="Artifact not found or access denied")
+                data = await artifact_store.get(artifact_id)
+        else:
+            # No session validation - allow access (for backward compatibility)
+            data = await artifact_store.get(artifact_id)
+
+        if data is None:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+
+        # Get metadata for content-type
+        ref = None
+        if hasattr(artifact_store, "get_ref"):
+            ref = await artifact_store.get_ref(artifact_id)
+
+        mime_type = ref.mime_type if ref and ref.mime_type else "application/octet-stream"
+        filename = ref.filename if ref and ref.filename else artifact_id
+
+        return Response(
+            content=data,
+            media_type=mime_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(data)),
+            },
+        )
+
+    @app.get("/artifacts/{artifact_id}/meta")
+    async def get_artifact_meta(
+        artifact_id: str,
+        session_id: str | None = None,
+        x_session_id: str | None = Header(None, alias="X-Session-ID"),
+    ) -> Mapping[str, Any]:
+        """Get artifact metadata without downloading content."""
+        artifact_store = _discover_artifact_store()
+        if artifact_store is None:
+            raise HTTPException(status_code=501, detail="Artifact storage not enabled for this agent")
+
+        # Resolve session ID
+        resolved_session = session_id or x_session_id
+
+        # Check existence with session validation if provided
+        if resolved_session is not None and hasattr(artifact_store, "get_with_session_check"):
+            data = await artifact_store.get_with_session_check(artifact_id, resolved_session)
+            if data is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Artifact not found or access denied",
+                )
+        elif resolved_session is not None:
+            ref = await artifact_store.get_ref(artifact_id) if hasattr(artifact_store, "get_ref") else None
+            if ref is None:
+                raise HTTPException(status_code=404, detail="Artifact not found")
+            stored_session = getattr(getattr(ref, "scope", None), "session_id", None)
+            if stored_session is not None and stored_session != resolved_session:
+                raise HTTPException(status_code=404, detail="Artifact not found or access denied")
+
+        # Get metadata
+        if not hasattr(artifact_store, "get_ref"):
+            raise HTTPException(
+                status_code=500,
+                detail="Artifact store does not support metadata retrieval",
+            )
+
+        ref = await artifact_store.get_ref(artifact_id)
+        if ref is None:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+
+        return ref.model_dump()
+
+    # ─── Resource Endpoints ───────────────────────────────────────────────────
+
+    @app.get("/resources/{namespace}")
+    async def list_resources(namespace: str) -> Mapping[str, Any]:
+        """List available MCP resources for a ToolNode namespace."""
+        # Get tool node from agent wrapper
+        tool_nodes = getattr(agent_wrapper, "_tool_nodes", None)
+        if tool_nodes is None:
+            # Try to find tool nodes from planner
+            planner = getattr(agent_wrapper, "_planner", None)
+            if planner is not None:
+                tool_nodes = getattr(planner, "_tool_nodes", None)
+
+        if tool_nodes is None:
+            return {"resources": [], "templates": [], "error": "No tool nodes available"}
+
+        # Find the tool node with matching namespace
+        tool_node = None
+        if isinstance(tool_nodes, dict):
+            tool_node = tool_nodes.get(namespace)
+        elif isinstance(tool_nodes, list):
+            for tn in tool_nodes:
+                if getattr(tn, "config", None) and getattr(tn.config, "name", None) == namespace:
+                    tool_node = tn
+                    break
+
+        if tool_node is None:
+            raise HTTPException(status_code=404, detail=f"Tool node '{namespace}' not found")
+
+        if not getattr(tool_node, "resources_supported", False):
+            return {
+                "resources": [],
+                "templates": [],
+                "supported": False,
+            }
+
+        resources = getattr(tool_node, "resources", [])
+        templates = getattr(tool_node, "resource_templates", [])
+
+        return {
+            "resources": [r.model_dump() if hasattr(r, "model_dump") else r for r in resources],
+            "templates": [t.model_dump() if hasattr(t, "model_dump") else t for t in templates],
+            "supported": True,
+        }
+
+    @app.get("/resources/{namespace}/{uri:path}")
+    async def read_resource(
+        namespace: str,
+        uri: str,
+        session_id: str | None = None,
+        x_session_id: str | None = Header(None, alias="X-Session-ID"),
+    ) -> Mapping[str, Any]:
+        """Read a resource by URI from an MCP server.
+
+        The resource content is cached and stored as an artifact.
+        """
+        # Get tool node
+        tool_nodes = getattr(agent_wrapper, "_tool_nodes", None)
+        if tool_nodes is None:
+            planner = getattr(agent_wrapper, "_planner", None)
+            if planner is not None:
+                tool_nodes = getattr(planner, "_tool_nodes", None)
+
+        if tool_nodes is None:
+            raise HTTPException(status_code=500, detail="No tool nodes available")
+
+        # Find tool node
+        tool_node = None
+        if isinstance(tool_nodes, dict):
+            tool_node = tool_nodes.get(namespace)
+        elif isinstance(tool_nodes, list):
+            for tn in tool_nodes:
+                if getattr(tn, "config", None) and getattr(tn.config, "name", None) == namespace:
+                    tool_node = tn
+                    break
+
+        if tool_node is None:
+            raise HTTPException(status_code=404, detail=f"Tool node '{namespace}' not found")
+
+        if not getattr(tool_node, "resources_supported", False):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tool node '{namespace}' does not support resources",
+            )
+
+        # Create a minimal context for resource reading
+        resolved_session = session_id or x_session_id or "default"
+        artifact_store = _discover_artifact_store()
+        scoped_store: Any
+        if artifact_store is None:
+            scoped_store = _DisabledArtifactStore()
+        else:
+            from penguiflow.artifacts import ArtifactScope
+
+            scoped_store = _ScopedArtifactStore(
+                artifact_store,
+                ArtifactScope(session_id=resolved_session),
+            )
+
+        # Create a context-like object for the read operation
+        class MinimalCtx:
+            def __init__(self, artifacts: Any):
+                self._artifacts = artifacts
+
+            @property
+            def artifacts(self) -> Any:
+                return self._artifacts
+
+        ctx = MinimalCtx(scoped_store)
+
+        try:
+            result = await tool_node.read_resource(uri, ctx)
+            return result
+        except Exception as exc:
+            _LOGGER.warning(f"Resource read failed for {uri}: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     if discovery:
         app.state.discovery = discovery

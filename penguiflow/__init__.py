@@ -3,6 +3,15 @@
 from __future__ import annotations
 
 from . import testkit
+from .artifacts import (
+    ArtifactRef,
+    ArtifactRetentionConfig,
+    ArtifactScope,
+    ArtifactStore,
+    InMemoryArtifactStore,
+    NoOpArtifactStore,
+    discover_artifact_store,
+)
 from .bus import BusEnvelope, MessageBus
 from .catalog import NodeSpec, SideEffect, build_catalog, tool
 from .core import (
@@ -48,6 +57,15 @@ from .viz import flow_to_dot, flow_to_mermaid
 
 __all__ = [
     "__version__",
+    # Artifacts
+    "ArtifactRef",
+    "ArtifactRetentionConfig",
+    "ArtifactScope",
+    "ArtifactStore",
+    "InMemoryArtifactStore",
+    "NoOpArtifactStore",
+    "discover_artifact_store",
+    # Logging
     "configure_logging",
     "ExtraFormatter",
     "StructuredFormatter",
@@ -109,4 +127,4 @@ __all__ = [
     "TrajectoryStep",
 ]
 
-__version__ = "2.8.0"
+__version__ = "2.8.1"

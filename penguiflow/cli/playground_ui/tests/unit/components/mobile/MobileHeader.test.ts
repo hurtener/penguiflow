@@ -66,7 +66,7 @@ describe('MobileHeader component', () => {
 
     expect(screen.getByText('Info')).toBeTruthy();
     expect(screen.getByText('Spec')).toBeTruthy();
-    expect(screen.getByText('Actions')).toBeTruthy();
+    expect(screen.getByText('Config')).toBeTruthy();
   });
 
   it('tab buttons have correct type attribute', async () => {
@@ -97,10 +97,10 @@ describe('MobileHeader component', () => {
 
     await fireEvent.click(menuBtn);
 
-    const specTab = screen.getByText('Spec');
-    await fireEvent.click(specTab);
+    const configTab = screen.getByText('Config');
+    await fireEvent.click(configTab);
 
-    expect(specTab.classList.contains('active')).toBe(true);
+    expect(configTab.classList.contains('active')).toBe(true);
 
     const infoTab = screen.getByText('Info');
     expect(infoTab.classList.contains('active')).toBe(false);

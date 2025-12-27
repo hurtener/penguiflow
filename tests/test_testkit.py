@@ -290,3 +290,131 @@ async def test_run_one_rejects_non_message() -> None:
     with pytest.raises(TypeError, match="Message instance"):
         await testkit.run_one(flow, "not a message")  # type: ignore
 
+
+@pytest.mark.asyncio
+async def test_node_sequence_with_unknown_trace() -> None:
+    """Test node_sequence returns empty list for unknown trace (lines 89-98)."""
+    from penguiflow.testkit import _RecorderState
+
+    state = _RecorderState()
+    # Get sequence for a trace that doesn't exist
+    sequence = state.node_sequence("nonexistent-trace")
+    assert sequence == []
+
+
+def _make_flow_event(
+    event_type: str,
+    trace_id: str | None = None,
+    node_name: str | None = None,
+    node_id: str | None = None,
+) -> Any:
+    """Create a FlowEvent with all required fields for testing."""
+    import time
+
+    from penguiflow.metrics import FlowEvent
+
+    return FlowEvent(
+        event_type=event_type,
+        ts=time.time(),
+        node_name=node_name,
+        node_id=node_id,
+        trace_id=trace_id,
+        attempt=1,
+        latency_ms=0.0,
+        queue_depth_in=0,
+        queue_depth_out=0,
+        outgoing_edges=0,
+        queue_maxsize=0,
+        trace_pending=0,
+        trace_inflight=0,
+        trace_cancelled=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_recorder_state_with_new_trace() -> None:
+    """Test recorder state handles new trace IDs (lines 83-85)."""
+    from penguiflow.testkit import _RecorderState
+
+    state = _RecorderState()
+    state.begin()  # Start without pre-registered traces
+
+    # Create an event with a new trace_id not in active_traces
+    event = _make_flow_event(
+        event_type="node_start",
+        trace_id="new-trace-123",
+        node_name="test_node",
+    )
+
+    # Record the event - this should create a new bucket
+    await state.record(event)
+
+    # Verify the trace was recorded
+    sequence = state.node_sequence("new-trace-123")
+    assert sequence == ["test_node"]
+
+
+@pytest.mark.asyncio
+async def test_node_sequence_with_anonymous_node() -> None:
+    """Test node_sequence handles anonymous nodes (line 96)."""
+    from penguiflow.testkit import _RecorderState
+
+    state = _RecorderState()
+    state.begin(["test-trace"])
+
+    # Create an event without node_name or node_id
+    event = _make_flow_event(
+        event_type="node_start",
+        trace_id="test-trace",
+        node_name=None,
+        node_id=None,
+    )
+
+    await state.record(event)
+
+    sequence = state.node_sequence("test-trace")
+    assert sequence == ["<anonymous>"]
+
+
+@pytest.mark.asyncio
+async def test_recorder_state_event_without_trace() -> None:
+    """Test recording event without trace_id returns early (line 80)."""
+    from penguiflow.testkit import _RecorderState
+
+    state = _RecorderState()
+    state.begin()
+
+    # Create an event without trace_id
+    event = _make_flow_event(
+        event_type="node_start",
+        trace_id=None,
+        node_name="test_node",
+    )
+
+    # Should not raise
+    await state.record(event)
+
+
+@pytest.mark.asyncio
+async def test_node_sequence_filters_non_start_events() -> None:
+    """Test node_sequence only includes node_start events (line 94-95)."""
+    from penguiflow.testkit import _RecorderState
+
+    state = _RecorderState()
+    state.begin(["test-trace"])
+
+    # Record various event types
+    events = [
+        _make_flow_event(event_type="node_start", trace_id="test-trace", node_name="node1"),
+        _make_flow_event(event_type="node_complete", trace_id="test-trace", node_name="node1"),
+        _make_flow_event(event_type="node_start", trace_id="test-trace", node_name="node2"),
+        _make_flow_event(event_type="node_error", trace_id="test-trace", node_name="node2"),
+    ]
+
+    for event in events:
+        await state.record(event)
+
+    sequence = state.node_sequence("test-trace")
+    # Should only include node_start events
+    assert sequence == ["node1", "node2"]
+

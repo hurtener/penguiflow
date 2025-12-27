@@ -1,7 +1,7 @@
 """Tests for penguiflow/planner/models.py edge cases."""
 
 
-from penguiflow.planner.models import JoinInjection, PlannerEvent
+from penguiflow.planner.models import JoinInjection, ObservationGuardrailConfig, PlannerEvent
 
 # ─── PlannerEvent tests ──────────────────────────────────────────────────────
 
@@ -103,3 +103,56 @@ def test_join_injection_empty():
     """JoinInjection should default to empty mapping."""
     injection = JoinInjection()
     assert injection.mapping == {}
+
+
+# ─── ObservationGuardrailConfig tests ─────────────────────────────────────────
+
+
+def test_observation_guardrail_config_defaults():
+    """ObservationGuardrailConfig should have reasonable defaults."""
+    config = ObservationGuardrailConfig()
+
+    assert config.max_observation_chars == 50_000
+    assert config.max_field_chars == 10_000
+    assert config.preserve_structure is True
+    assert config.auto_artifact_threshold == 20_000
+    assert config.preview_length == 500
+    assert "{truncated_chars}" in config.truncation_suffix
+
+
+def test_observation_guardrail_config_custom_values():
+    """ObservationGuardrailConfig should accept custom values."""
+    config = ObservationGuardrailConfig(
+        max_observation_chars=100_000,
+        max_field_chars=20_000,
+        preserve_structure=False,
+        auto_artifact_threshold=50_000,
+        preview_length=1000,
+        truncation_suffix="... [TRUNCATED]",
+    )
+
+    assert config.max_observation_chars == 100_000
+    assert config.max_field_chars == 20_000
+    assert config.preserve_structure is False
+    assert config.auto_artifact_threshold == 50_000
+    assert config.preview_length == 1000
+    assert config.truncation_suffix == "... [TRUNCATED]"
+
+
+def test_observation_guardrail_config_min_values():
+    """ObservationGuardrailConfig should enforce minimum values."""
+    import pytest
+
+    # max_observation_chars minimum is 1000
+    with pytest.raises(ValueError):
+        ObservationGuardrailConfig(max_observation_chars=500)
+
+    # max_field_chars minimum is 100
+    with pytest.raises(ValueError):
+        ObservationGuardrailConfig(max_field_chars=50)
+
+
+def test_observation_guardrail_config_disable_artifact_fallback():
+    """ObservationGuardrailConfig should allow disabling artifact fallback."""
+    config = ObservationGuardrailConfig(auto_artifact_threshold=0)
+    assert config.auto_artifact_threshold == 0

@@ -5,18 +5,18 @@
   interface Props {
     infoContent?: Snippet;
     specContent?: Snippet;
-    actionsContent?: Snippet;
+    configContent?: Snippet;
   }
 
-  let { infoContent, specContent, actionsContent }: Props = $props();
+  let { infoContent, specContent, configContent }: Props = $props();
 
   let isOpen = $state(false);
-  let activeTab = $state<'info' | 'spec' | 'actions'>('info');
+  let activeTab = $state<'info' | 'spec' | 'config'>('info');
 
   const tabs = [
     { id: 'info', label: 'Info' },
     { id: 'spec', label: 'Spec' },
-    { id: 'actions', label: 'Actions' }
+    { id: 'config', label: 'Config' }
   ] as const;
 
   const closeDrawer = () => { isOpen = false; };
@@ -55,7 +55,7 @@
         {:else if activeTab === 'spec'}
           {@render specContent?.()}
         {:else}
-          {@render actionsContent?.()}
+          {@render configContent?.()}
         {/if}
       </div>
     </div>
