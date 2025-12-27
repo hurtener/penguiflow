@@ -62,9 +62,13 @@ We’re building a system where LLMs generate rich, interactive UI by requesting
 
 ### 1.5 Terminology (avoid collisions)
 
-This RFC uses the term “artifact” in the “UI artifact” sense (a renderable component payload). PenguiFlow also has “binary artifacts” (stored bytes for download). They are related but distinct:
-- **UI artifact**: `{ component, props }` rendered inline.
+This RFC uses the term “artifact” in the “UI component artifact” sense (a renderable component payload). PenguiFlow also has “binary artifacts” (stored bytes for download). They are related but distinct:
+- **UI component artifact**: `{ component, props }` rendered inline.
 - **Binary artifact**: out-of-band stored bytes (PDFs, images, big JSON) referenced by ID/URL.
+
+To avoid collisions in naming and event handling:
+- **UI component artifacts**: `artifact_chunk` with `artifact_type: ui_component` (legacy SSE uses the `artifact_chunk` event; AG-UI uses `CUSTOM name="artifact_chunk"`).
+- **Binary artifacts**: `artifact_stored` (legacy SSE uses the `artifact_stored` event; AG-UI uses `CUSTOM name="artifact_stored"`).
 
 ---
 
@@ -84,7 +88,7 @@ In practice, a backend adapter streams these requests over AG-UI so the UI can r
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         Backend Adapter                                  │
-│  - Passive UI artifacts → CUSTOM event {"name": "artifact", ...}         │
+│  - Passive UI artifacts → artifact_chunk (`artifact_type=ui_component`)  │
 │  - Interactive UI artifacts → Tool calls (ui_form, ui_confirm, ...)      │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -93,7 +97,7 @@ In practice, a backend adapter streams these requests over AG-UI so the UI can r
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                        Svelte Frontend                                   │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                    ArtifactRenderer                              │   │
+│  │                    ComponentRenderer                             │   │
 │  │  Routes component type → specific Svelte renderer                │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                    │                                     │
@@ -125,6 +129,7 @@ The registry is the **single source of truth** for all available components. It 
 Implementation note:
 - The registry must be consumable by **both** the backend (prompting + validation) and the frontend (rendering).
 - Avoid diverging “one TS registry + one Python registry”. Prefer a single JSON source-of-truth (or a generated export) that both sides load.
+  - Suggested repo layout: canonical registry data in `penguiflow/rich_output/registry.json` (or similar), with a generated TS wrapper for `penguiflow/cli/playground_ui/src/lib/component_artifacts/registry.ts` if needed.
 
 Security note:
 - Treat all component props as **untrusted** (LLM-controlled). Components like `html` / `embed` must be sandboxed or disabled by default behind an allowlist.
@@ -132,7 +137,7 @@ Security note:
 ### 3.1 Registry Schema
 
 ```typescript
-// src/lib/artifacts/registry.ts
+// penguiflow/cli/playground_ui/src/lib/component_artifacts/registry.ts
 
 import type { JSONSchema7 } from 'json-schema';
 
@@ -171,7 +176,7 @@ export type ComponentRegistry = Record<string, ComponentDefinition>;
 ### 3.2 Complete Registry
 
 ```typescript
-// src/lib/artifacts/registry.ts
+// penguiflow/cli/playground_ui/src/lib/component_artifacts/registry.ts
 
 export const componentRegistry: ComponentRegistry = {
   
@@ -1618,16 +1623,13 @@ def generate_component_system_prompt(registry: dict[str, Any]) -> str:
         "```",
         "",
         "### Collecting User Input",
-        "When you need user input before proceeding, use interactive components:",
+        "When you need user input before proceeding, call an interactive UI tool (example: `ui_form`):",
         "```json",
         '{',
-        '  "component": "form",',
-        '  "props": {',
-        '    "title": "Configure Report",',
-        '    "fields": [',
-        '      {"name": "period", "type": "select", "options": ["Q1", "Q2", "Q3", "Q4"]}',
-        '    ]',
-        '  }',
+        '  "title": "Configure Report",',
+        '  "fields": [',
+        '    {"name": "period", "type": "select", "options": ["Q1", "Q2", "Q3", "Q4"]}',
+        '  ]',
         '}',
         "```",
         "The user's response will be returned to you as the tool result. Continue from there.",
@@ -1649,54 +1651,50 @@ The request payload is exactly the mental model:
 - `props`: the JSON props for that renderer
 
 ```python
-# Backend tool definition (AG-UI Tool schema)
+# PenguiFlow meta-tools (nodes)
+#
+# Note: In PenguiFlow, tools are nodes. Their schemas come from Pydantic models
+# and are surfaced to the LLM through the planner catalog (see `penguiflow/catalog.py`).
+# The Playground does not rely on frontend-supplied AG-UI `RunAgentInput.tools`.
 
-from ag_ui.core import Tool
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+from penguiflow.catalog import tool
+from penguiflow.planner import ToolContext
 
 
-def generate_render_tool(registry: dict) -> Tool:
-    """Generate the render_component tool from the registry."""
+class RenderComponentArgs(BaseModel):
+    component: str = Field(..., description="Registry component name")
+    props: dict[str, Any] = Field(default_factory=dict, description="Component props")
+    id: str | None = Field(default=None, description="Optional stable component id (for updates/dedupe)")
+    title: str | None = None
+    metadata: dict[str, Any] | None = None
 
-    component_names = list(registry.keys())
-    return Tool(
-        name="render_component",
-        description=(
-            "Request a rich UI component render. "
-            "The frontend will render the specified component using the provided props."
-        ),
-        parameters={
-            "type": "object",
-            "required": ["component", "props"],
-            "properties": {
-                "component": {
-                    "type": "string",
-                    "enum": component_names,
-                    "description": "Component type to render",
-                },
-                "props": {
-                    "type": "object",
-                    "description": "Component-specific properties (validated by the registry schema)",
-                },
-            },
+
+class RenderComponentResult(BaseModel):
+    ok: bool = True
+
+
+@tool(desc="Request a rich UI component render (passive).", tags=["rich_output", "ui"], side_effects="pure")
+async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> RenderComponentResult:
+    # Validate args.component/args.props against the registry + allowlist here.
+    await ctx.emit_artifact(
+        "ui",
+        {
+            "id": args.id,
+            "component": args.component,
+            "props": args.props,
+            "title": args.title,
         },
+        done=True,
+        artifact_type="ui_component",
+        meta=args.metadata or {},
     )
-
-
-def generate_interactive_tools(registry: dict) -> list[Tool]:
-    """Generate one tool per interactive component (pauses until user responds)."""
-
-    tools: list[Tool] = []
-    for name, defn in registry.items():
-        if defn.get("interactive"):
-            tools.append(
-                Tool(
-                    name=f"ui_{name}",
-                    description=defn["description"]
-                    + "\n\nThis pauses execution until the user responds.",
-                    parameters=defn["propsSchema"],
-                )
-            )
-    return tools
+    return RenderComponentResult()
 ```
 
 Notes:
@@ -1793,7 +1791,10 @@ FEW_SHOT_EXAMPLES = """
 
 ### 5.1 Passive Artifacts via CUSTOM Events
 
-Non-interactive components are emitted as **CUSTOM** events in the AG-UI stream:
+Non-interactive components are emitted as `artifact_chunk` events with `artifact_type: ui_component`.
+
+- Legacy Playground SSE: emits an `artifact_chunk` SSE event.
+- AG-UI streaming: emits a `CUSTOM name="artifact_chunk"` event (same payload shape).
 
 ```python
 # Backend adapter
@@ -1801,25 +1802,31 @@ Non-interactive components are emitted as **CUSTOM** events in the AG-UI stream:
 from ag_ui.core import CustomEvent, EventType
 
 
-def emit_artifact(
+def emit_ui_component_artifact(
     component: str,
     props: dict,
-    artifact_id: str | None = None,
+    component_id: str | None = None,
 ) -> CustomEvent:
-    """Emit a passive UI artifact via AG-UI CUSTOM event."""
+    """Emit a passive UI component artifact via AG-UI CUSTOM event."""
     return CustomEvent(
         type=EventType.CUSTOM,
-        name="artifact",
+        name="artifact_chunk",
         value={
-            "id": artifact_id,
-            "component": component,
-            "props": props,
+            "stream_id": "ui",
+            "seq": 0,
+            "done": True,
+            "artifact_type": "ui_component",
+            "chunk": {
+                "id": component_id,
+                "component": component,
+                "props": props,
+            },
         },
     )
 ```
 
 Notes:
-- `artifact_id` is optional, but recommended for stable identity (dedupe, updates, linking to messages).
+- `component_id` is optional, but recommended for stable identity (dedupe, updates, linking to messages).
 - Keep payloads small; large datasets should be referenced by URL or stored as a binary artifact.
 
 ### 5.2 Interactive Artifacts via Tool Calls
@@ -1848,6 +1855,10 @@ yield ToolCallEndEvent(tool_call_id=tool_id)
 # Agent continues with that result
 ```
 
+Implementation note (PenguiFlow):
+- Phase 2 can start by rendering the interactive UI from the tool call, pausing via HITL (`PlannerPause.resume_token`), then resuming with the user payload.
+- Later phases can upgrade to a true tool-result channel (e.g., `POST /agui/tool_result`) so the resumed execution emits `TOOL_CALL_RESULT` with the user response.
+
 ### 5.3 Event Flow Diagram
 
 ```
@@ -1862,7 +1873,7 @@ Agent                    Backend                    Frontend
   │                         │                          │
   │  render_component(...)  │                          │
   │ ───────────────────────►│                          │
-  │                         │  CUSTOM name=artifact    │
+  │                         │  CUSTOM name=artifact_chunk (ui_component) │
   │                         │ ─────────────────────────► Render ECharts
   │                         │                          │
   │                         │  RUN_FINISHED            │
@@ -1908,8 +1919,11 @@ planner:
     include_prompt_examples: false
 ```
 
+Interactive note:
+- If you enable interactive components (e.g., `form`, `confirm`, `select_option`), also enable HITL/pause-resume in your project (`agent.flags.hitl: true`) so the backend can pause and resume when the user responds.
+
 Template generator requirement (example):
-- `penguiflow new --with-ui-artifacts` (name TBD) sets `planner.rich_output.enabled: true` and includes the recommended allowlist and prompt catalog.
+- `penguiflow new --with-rich-output` sets `planner.rich_output.enabled: true` and includes the recommended allowlist and prompt catalog.
 
 ### 6.1 Component Registry as a Backend Contract
 
@@ -1928,7 +1942,7 @@ Operational requirements:
 - Version the registry (`registry_version`) so you can evolve schemas without breaking old runs.
 - Cap prompt size: the LLM does not need the full JSON schema for every component on every run. Prefer:
   - a short “catalog” summary in the system prompt, plus
-  - “schema-on-demand” via a helper tool (optional phase).
+  - “schema-on-demand” via a helper tool (fully implement a searchable catalog meta-tool).
 
 ### 6.2 Meta-tools (Backend Surface Area)
 
@@ -1946,12 +1960,12 @@ Tool shape (baseline):
 - Each `ui_*` tool accepts component-specific props and **must** result in a user response that returns to the LLM as the tool result.
 
 Backend implementation requirements:
-- Provide these tools to the agent runtime (e.g., in the AG-UI `RunAgentInput.tools` list, or via your agent framework’s tool registry).
+- Provide these tools to the agent runtime via the PenguiFlow tool catalog (nodes) when rich output is enabled. Do not rely on frontend-supplied AG-UI `RunAgentInput.tools` (the Playground sends `tools: []` today).
 - Enforce allowlists (e.g., disable `html`/`embed` by default).
 
 ### 6.3 Validation, Safety, and Size Limits
 
-Before emitting an artifact event:
+Before emitting an `artifact_chunk` (`artifact_type=ui_component`):
 - Validate `component` exists in registry.
 - Validate `props` against `propsSchema`.
 - Enforce max size limits (bytes) for:
@@ -1969,31 +1983,45 @@ Security requirements (non-negotiable):
 - Sandbox / disable any renderer that can execute arbitrary code (HTML, embeds, iframes).
 - Sanitize markdown (or render with a safe subset).
 
-### 6.4 Emitting Passive Artifacts (AG-UI CUSTOM)
+### 6.4 Emitting Passive UI Component Artifacts (`artifact_chunk`)
 
-Backend must translate a `render_component` tool call into a `CUSTOM name="artifact"` event:
+Backend must translate a `render_component` tool call into an `artifact_chunk` event with `artifact_type: ui_component`.
+
+- Legacy Playground SSE: emit an `artifact_chunk` SSE event.
+- AG-UI streaming: emit a `CUSTOM name="artifact_chunk"` event with the same payload shape.
+
+Recommended PenguiFlow-native mechanism:
+- Implement `render_component` as a PenguiFlow tool that calls `ToolContext.emit_artifact(...)` with `artifact_type="ui_component"` and `chunk={id, component, props, ...}`.
 
 ```json
 {
   "type": "CUSTOM",
-  "name": "artifact",
+  "name": "artifact_chunk",
   "value": {
-    "id": "artifact_123",
-    "component": "echarts",
-    "props": { "...": "..." },
+    "stream_id": "ui",
+    "seq": 0,
+    "done": true,
+    "artifact_type": "ui_component",
+    "chunk": {
+      "id": "ui_123",
+      "component": "echarts",
+      "props": { "...": "..." }
+    },
     "meta": {
       "registry_version": "2025-12-24",
-      "source_tool": "render_component"
+      "source_tool": "render_component",
+      "message_id": "msg_123"
     }
   }
 }
 ```
 
 Recommended additions:
-- `message_id` (attach the artifact to a specific assistant message).
-- `sequence` (ordering when multiple artifacts are emitted).
+- `meta.message_id` (attach the artifact to a specific assistant message).
+- `seq` (ordering when multiple artifacts are emitted).
 - `replace` / `update` semantics for incremental improvement:
-  - `CUSTOM name="artifact_update"` with `{id, patch}` (optional later phase).
+  - Option A (preferred): `STATE_DELTA` updates if your UI artifacts are derived from state.
+  - Option B: `CUSTOM name="artifact_update"` with `{id, patch}`.
 
 ### 6.5 Interactive Artifact Runtime (Tool Result Channel)
 
@@ -2003,6 +2031,8 @@ Backend must support:
 - Streaming `TOOL_CALL_START/ARGS/END` for `ui_*` tools.
 - Pausing the agent execution until a user result arrives.
 - Resuming execution by delivering the user result back to the agent as `TOOL_CALL_RESULT`.
+
+PenguiFlow already has pause/resume primitives (`PlannerPause.resume_token`, `ReactPlanner.resume(...)`). Option B below can be implemented by reusing those primitives first, then upgraded to Option A if desired.
 
 Implementation options (choose one; both are valid):
 
@@ -2041,9 +2071,9 @@ Either way, the RFC requirement is the same: the LLM experiences interactive com
 
 To serve as a “Component Lab”, the Playground backend needs:
 - `/agui/agent` that supports:
-  - tool definitions (so the UI and agent share the same tool contract)
-  - custom artifact events
-  - interactive tool result flow (Option A or B above)
+  - `CUSTOM name="artifact_chunk"` with `artifact_type=ui_component`
+  - `TOOL_CALL_*` events for `ui_*` interactive components
+  - interactive result flow (Option A) or pause/resume (Option B)
 - `/ui/components` (or similar) to return:
   - registry metadata (version, list of components, schemas, examples)
   - allowlist configuration (what components are enabled)
@@ -2065,8 +2095,8 @@ penguiflow/rich_output/
 ├── __init__.py          # public exports
 ├── registry.py          # load/validate registry + versioning
 ├── prompting.py         # prompt text generator (catalog summary)
-├── tools.py             # AG-UI Tool schema generator (render_component + ui_*)
-├── nodes.py             # PenguiFlow @tool nodes implementing these capabilities (optional)
+├── tools.py             # tool metadata + schema helpers (render_component + ui_*)
+├── nodes.py             # PenguiFlow @tool nodes implementing the meta-tools (opt-in)
 ├── validate.py          # jsonschema validation helpers + size checks
 └── runtime.py           # interactive tool-call coordination (Option A/B)
 ```
@@ -2074,8 +2104,9 @@ penguiflow/rich_output/
 If using `ReactPlanner`:
 - Add the nodes from `penguiflow/rich_output/nodes.py` to the planner’s catalog when UI artifacts are enabled.
 - Ensure the AG-UI adapter maps the resulting planner/tool events into:
-  - `CUSTOM name="artifact"` for passive UI artifacts
+  - `CUSTOM name="artifact_chunk"` with `artifact_type=ui_component` for passive UI artifacts
   - `TOOL_CALL_*` and `TOOL_CALL_RESULT` for interactive UI artifacts
+- Implementation note: this mapping lives in `penguiflow/agui_adapter/penguiflow.py` (add handling for `event.event_type == "artifact_chunk"`).
 
 ### 6.8 Observability
 
@@ -2088,76 +2119,86 @@ Log/trace at minimum:
 
 ## 7. Frontend Implementation
 
-### 7.1 Artifact Store Extension
+### 7.1 Component Artifact Store
+
+In this repo, the Playground UI lives in `penguiflow/cli/playground_ui/`.
+
+This store is **not** the same as the existing downloadable `artifactsStore` (binary artifacts). It stores renderable UI component payloads emitted as `artifact_chunk` with `artifact_type=ui_component`.
 
 ```typescript
-// src/lib/artifacts/store.ts
+// penguiflow/cli/playground_ui/src/lib/stores/component_artifacts.svelte.ts
 
-import { writable, derived, get } from 'svelte/store';
-import type { AGUIStore } from '$lib/agui';
-
-export interface Artifact {
+export type ComponentArtifact = {
   id: string;
   component: string;
   props: Record<string, unknown>;
-  timestamp: Date;
-  messageId?: string;
-}
+  title?: string;
+  message_id?: string;
+  seq: number;
+  ts: number;
+  meta?: Record<string, unknown>;
+};
 
-export interface PendingInteraction {
-  toolCallId: string;
-  component: string;
+export type ArtifactChunkPayload = {
+  stream_id?: string;
+  seq?: number;
+  done?: boolean;
+  artifact_type?: string;
+  chunk?: unknown;
+  meta?: Record<string, unknown>;
+  ts?: number;
+};
+
+export type PendingInteraction = {
+  tool_call_id: string;
+  tool_name: string; // ui_form, ui_confirm, ...
   props: Record<string, unknown>;
-}
+  message_id?: string;
+};
 
-export interface ArtifactStoreState {
-  artifacts: Artifact[];
-  pendingInteraction: PendingInteraction | null;
-}
+function createComponentArtifactsStore() {
+  let artifacts = $state<ComponentArtifact[]>([]);
+  let pendingInteraction = $state<PendingInteraction | null>(null);
 
-export function createArtifactStore(aguiStore: AGUIStore) {
-  const state = writable<ArtifactStoreState>({
-    artifacts: [],
-    pendingInteraction: null,
-  });
-  
-  function handleArtifactEvent(value: { id: string; component: string; props: Record<string, unknown> }) {
-    state.update(s => ({
-      ...s,
-      artifacts: [...s.artifacts, {
-        ...value,
-        timestamp: new Date(),
-      }],
-    }));
+  function addArtifactChunk(payload: ArtifactChunkPayload, *, message_id: string | undefined = undefined): void {
+    if (payload.artifact_type !== 'ui_component') return;
+    if (!payload.chunk || typeof payload.chunk !== 'object') return;
+    const chunk = payload.chunk as Record<string, unknown>;
+    const component = chunk.component as string | undefined;
+    const props = (chunk.props as Record<string, unknown>) || {};
+    if (!component) return;
+
+    artifacts = [
+      ...artifacts,
+      {
+        id: (chunk.id as string) || `ui_${Date.now()}`,
+        component,
+        props,
+        title: chunk.title as string | undefined,
+        message_id: message_id ?? (payload.meta?.message_id as string | undefined),
+        seq: payload.seq ?? 0,
+        ts: payload.ts ?? Date.now(),
+        meta: payload.meta ?? {}
+      }
+    ];
   }
-  
-  function setPendingInteraction(interaction: PendingInteraction | null) {
-    state.update(s => ({ ...s, pendingInteraction: interaction }));
-  }
-  
-  async function submitInteractionResult(result: unknown) {
-    const pending = get(state).pendingInteraction;
-    if (!pending) return;
-    
-    setPendingInteraction(null);
-    await aguiStore.sendToolResult(pending.toolCallId, result);
-  }
-  
+
   return {
-    state,
-    artifacts: derived(state, s => s.artifacts),
-    pendingInteraction: derived(state, s => s.pendingInteraction),
-    handleArtifactEvent,
-    setPendingInteraction,
-    submitInteractionResult,
+    get artifacts() { return artifacts; },
+    get pendingInteraction() { return pendingInteraction; },
+    addArtifactChunk,
+    setPendingInteraction(value: PendingInteraction | null) { pendingInteraction = value; },
+    clear() { artifacts = []; pendingInteraction = null; }
   };
 }
+
+export const componentArtifactsStore = createComponentArtifactsStore();
 ```
 
-### 7.2 Artifact Renderer
+### 7.2 Component Renderer
 
 ```svelte
-<!-- src/lib/artifacts/ArtifactRenderer.svelte -->
+<!-- penguiflow/cli/playground_ui/src/lib/component_artifacts/ComponentRenderer.svelte -->
 <script lang="ts">
   import { componentRegistry } from './registry';
   
@@ -2272,7 +2313,7 @@ export function createArtifactStore(aguiStore: AGUIStore) {
 #### ECharts Renderer
 
 ```svelte
-<!-- src/lib/artifacts/renderers/ECharts.svelte -->
+<!-- penguiflow/cli/playground_ui/src/lib/component_artifacts/renderers/ECharts.svelte -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import * as echarts from 'echarts';
@@ -2333,7 +2374,7 @@ export function createArtifactStore(aguiStore: AGUIStore) {
 #### Form Renderer (Interactive)
 
 ```svelte
-<!-- src/lib/artifacts/renderers/Form.svelte -->
+<!-- penguiflow/cli/playground_ui/src/lib/component_artifacts/renderers/Form.svelte -->
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   
@@ -2760,9 +2801,9 @@ export function createArtifactStore(aguiStore: AGUIStore) {
 #### Report Renderer (Recursive Layout)
 
 ```svelte
-<!-- src/lib/artifacts/renderers/Report.svelte -->
+<!-- penguiflow/cli/playground_ui/src/lib/component_artifacts/renderers/Report.svelte -->
 <script lang="ts">
-  import ArtifactRenderer from '../ArtifactRenderer.svelte';
+  import ComponentRenderer from '../ComponentRenderer.svelte';
   import Markdown from './Markdown.svelte';
   
   interface Section {
@@ -2861,7 +2902,7 @@ export function createArtifactStore(aguiStore: AGUIStore) {
         {#if section.components}
           {#each section.components as comp}
             <figure class="component-figure">
-              <ArtifactRenderer component={comp.component} props={comp.props} />
+              <ComponentRenderer component={comp.component} props={comp.props} />
               {#if comp.caption}
                 <figcaption>{comp.caption}</figcaption>
               {/if}
@@ -2881,7 +2922,7 @@ export function createArtifactStore(aguiStore: AGUIStore) {
               {#if subsection.components}
                 {#each subsection.components as comp}
                   <figure class="component-figure">
-                    <ArtifactRenderer component={comp.component} props={comp.props} />
+                    <ComponentRenderer component={comp.component} props={comp.props} />
                     {#if comp.caption}
                       <figcaption>{comp.caption}</figcaption>
                     {/if}
@@ -3011,8 +3052,9 @@ export function createArtifactStore(aguiStore: AGUIStore) {
 ### 7.4 Playground Component Lab (Development workflow)
 
 The Playground UI is the test bench for this RFC. Add a “Component Lab” panel (opt-in) that:
+- Lives as a third tab in `penguiflow/cli/playground_ui/src/lib/components/center/chat/ChatCard.svelte` (only when rich output is enabled).
 - Lists the registry (`componentRegistry`) and shows the JSON schema + examples for each component.
-- Lets developers paste/edit a `{component, props}` payload and preview it using `ArtifactRenderer`.
+- Lets developers paste/edit a `{component, props}` payload and preview it using `ComponentRenderer`.
 - Lets developers capture the last emitted artifact payload and iterate quickly (copy/paste into the editor).
 
 This keeps component development tight-loop and avoids requiring the full agent run for every renderer tweak.
@@ -3021,41 +3063,39 @@ This keeps component development tight-loop and avoids requiring the full agent 
 
 ## 8. Integration with Message Display
 
-Artifacts should appear inline with messages. Modify the AG-UI Message component:
+Component artifacts should appear inline under the assistant message bubble.
+
+Playground UI wiring:
+- **Ingest events**: update `penguiflow/cli/playground_ui/src/lib/services/chat-stream.ts` to route `artifact_chunk` events with `artifact_type === "ui_component"` into `componentArtifactsStore.addArtifactChunk(...)` (for both SSE and AG-UI `CUSTOM name="artifact_chunk"`).
+- **Render inline**: update `penguiflow/cli/playground_ui/src/lib/components/center/chat/Message.svelte` to render the artifacts for that message.
+
+Example (Message rendering):
 
 ```svelte
-<!-- Extended Message.svelte -->
+<!-- penguiflow/cli/playground_ui/src/lib/components/center/chat/Message.svelte -->
 <script lang="ts">
-  import type { StreamingMessage } from '$lib/agui';
-  import ArtifactRenderer from '$lib/artifacts/ArtifactRenderer.svelte';
-  import { getArtifactStore } from '$lib/artifacts/store';
-  
-  export let message: StreamingMessage;
-  
-  const { artifacts } = getArtifactStore();
-  
-  // Get artifacts associated with this message
-  $: messageArtifacts = $artifacts.filter(a => a.messageId === message.id);
+  import type { ChatMessage } from '$lib/types';
+  import { componentArtifactsStore } from '$lib/stores/component_artifacts.svelte';
+  import ComponentRenderer from '$lib/component_artifacts/ComponentRenderer.svelte';
+
+  interface Props {
+    message: ChatMessage;
+  }
+
+  let { message }: Props = $props();
+
+  const componentArtifacts = $derived(
+    componentArtifactsStore.artifacts.filter(a => a.message_id === message.id)
+  );
 </script>
 
-<div class="message" class:user={message.role === 'user'}>
-  <!-- Regular message content -->
-  <div class="content">
-    {message.content}
+{#if message.role === 'agent' && componentArtifacts.length > 0}
+  <div class="component-artifacts">
+    {#each componentArtifacts as artifact (artifact.id)}
+      <ComponentRenderer component={artifact.component} props={artifact.props} />
+    {/each}
   </div>
-  
-  <!-- Artifacts -->
-  {#if messageArtifacts.length > 0}
-    <div class="artifacts">
-      {#each messageArtifacts as artifact (artifact.id)}
-        <ArtifactRenderer 
-          component={artifact.component} 
-          props={artifact.props} 
-        />
-      {/each}
-    </div>
-  {/if}
-</div>
+{/if}
 ```
 
 ---
@@ -3069,22 +3109,26 @@ Each phase is designed to be shippable and to build on the previous one.
 Goal: the LLM can request passive UI artifacts and the frontend renders them.
 
 Backend:
+- Add opt-in config to the spec (`planner.rich_output`, default disabled).
+- Add template generator flag (example): `penguiflow new --with-rich-output` to set `planner.rich_output.enabled: true` and include the prompt catalog.
 - Define registry format and versioning (even if stored as TS initially).
-- Add backend scaffolding (`penguiflow/rich_output/`: registry loading, validation helpers, tool schema generation).
-- Implement `render_component` tool schema generated from registry.
+- Add backend scaffolding (`penguiflow/rich_output/`: registry loading, validation helpers, tool/node helpers).
+- Implement `render_component` as a PenguiFlow tool that validates `{component, props}` and calls `ctx.emit_artifact(..., artifact_type="ui_component")`.
 - Validate `{component, props}` (component exists + schema validation + size caps).
-- Emit `CUSTOM name="artifact"` events with stable IDs.
+- Emit `artifact_chunk` with `artifact_type=ui_component` (SSE) / `CUSTOM name="artifact_chunk"` (AG-UI), with stable IDs in `chunk.id`.
+- Update `penguiflow/agui_adapter/penguiflow.py` to map planner `artifact_chunk` events into `CUSTOM name="artifact_chunk"` (currently only `artifact_stored` is mapped).
 - Add `/ui/components` endpoint for registry introspection (Playground).
 
 Frontend:
-- Implement/ship `componentRegistry` + `ArtifactRenderer`.
+- Implement/ship `componentRegistry` + `ComponentRenderer`.
 - Implement at least 3 baseline renderers: `markdown`, `json`, `echarts` (or `datagrid`).
-- Render `CUSTOM name="artifact"` inline under the assistant message.
+- Render `artifact_chunk` with `artifact_type=ui_component` inline under the assistant message (for both SSE and AG-UI).
 
 Acceptance tests:
 - Unit test: invalid component rejected (backend).
 - Unit test: invalid props rejected (backend).
 - UI test: artifact renders for each baseline renderer.
+- Config test: when `planner.rich_output.enabled` is false, meta-tools are not advertised/injected and no component artifacts are emitted.
 
 ### Phase 2 — Interactive Components MVP (Tool Call → User → Result)
 
@@ -3092,6 +3136,7 @@ Goal: the LLM can pause for user input via UI components and continue reliably.
 
 Backend:
 - Define interactive tools: `ui_form`, `ui_confirm`, `ui_select_option` (schemas from registry).
+- Require a resume mechanism (HITL): if interactive UI tools are enabled, enforce `agent.flags.hitl: true` (or fail fast at startup/spec validation).
 - Implement interactive tool result channel (start with Option B: resume-as-new-run).
 - Emit correct tool call lifecycle events (`TOOL_CALL_START/ARGS/END/RESULT`).
 - Enforce timeouts/cancellation semantics (user never responds).
@@ -3127,7 +3172,7 @@ Goal: make the system self-documenting and easy to iterate.
 
 Backend:
 - Generate a compact “component catalog” prompt section from the registry (with examples).
-- (Optional) Add schema-on-demand tool: `describe_component(name)` to reduce prompt bloat.
+- Add schema-on-demand tool: `describe_component(name)` to reduce prompt bloat.
 - Add registry diagnostics to `/ui/components` (version, enabled components, counts).
 
 Frontend:
@@ -3163,11 +3208,11 @@ Frontend:
 
 | Component | Purpose | Lines (approx) |
 |-----------|---------|----------------|
-| `src/lib/artifacts/registry.ts` | Component definitions + schemas | ~800 |
+| `penguiflow/cli/playground_ui/src/lib/component_artifacts/registry.ts` | Component definitions + schemas | ~800 |
 | `penguiflow/rich_output/prompting.py` | System prompt generator | ~200 |
-| `penguiflow/rich_output/tools.py` | Tool definitions from registry | ~50 |
-| `src/lib/artifacts/ArtifactRenderer.svelte` | Component router | ~100 |
-| `src/lib/artifacts/store.ts` | Artifact state management | ~150 |
+| `penguiflow/rich_output/tools.py` | Tool metadata from registry | ~50 |
+| `penguiflow/cli/playground_ui/src/lib/component_artifacts/ComponentRenderer.svelte` | Component router | ~100 |
+| `penguiflow/cli/playground_ui/src/lib/stores/component_artifacts.svelte.ts` | Component artifact state management | ~150 |
 | Renderers (15-20) | Individual component implementations | ~2000 total |
 
 ### Component Categories
@@ -3189,9 +3234,9 @@ Frontend:
 
 ### Integration with AG-UI
 
-- **Passive artifacts** → CUSTOM events `{"name": "artifact", "value": {...}}`
+- **Passive artifacts** → `CUSTOM name="artifact_chunk"` with `artifact_type="ui_component"` (legacy Playground SSE uses `artifact_chunk`)
 - **Interactive artifacts** → Tool calls with pause-and-wait semantics
-- **State sync (optional)** → Can use `STATE_DELTA` to update component props reactively (advanced)
+- **State sync** → Can use `STATE_DELTA` to update component props reactively (advanced)
 
 ---
 
