@@ -6,11 +6,11 @@ import logging
 import secrets
 
 _LOGGER = logging.getLogger(__name__)
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from typing import Any, Protocol
+from collections.abc import Callable, Mapping  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
+from typing import Any, Protocol  # noqa: E402
 
-from penguiflow.planner import (
+from penguiflow.planner import (  # noqa: E402
     PlannerEvent,
     PlannerEventCallback,
     PlannerFinish,
@@ -19,7 +19,7 @@ from penguiflow.planner import (
     Trajectory,
 )
 
-from .playground_state import PlaygroundStateStore
+from .playground_state import PlaygroundStateStore  # noqa: E402
 
 
 @dataclass
@@ -46,6 +46,17 @@ class AgentWrapper(Protocol):
         *,
         session_id: str,
         llm_context: Mapping[str, Any] | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+        event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
+        trace_id_hint: str | None = None,
+    ) -> ChatResult: ...
+
+    async def resume(
+        self,
+        resume_token: str,
+        *,
+        session_id: str,
+        user_input: str | None = None,
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
@@ -299,6 +310,75 @@ class PlannerAgentWrapper:
     async def shutdown(self) -> None:
         """Planner wrappers do not own additional resources."""
 
+    async def resume(
+        self,
+        resume_token: str,
+        *,
+        session_id: str,
+        user_input: str | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+        event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
+        trace_id_hint: str | None = None,
+    ) -> ChatResult:
+        trace_id = trace_id_hint or secrets.token_hex(8)
+
+        def _trace_id_supplier() -> str:
+            return trace_id
+
+        callback = self._event_recorder.callback(
+            trace_id_supplier=_trace_id_supplier,
+            event_consumer=event_consumer,
+        )
+        original_callback = getattr(self._planner, "_event_callback", None)
+        if callback is not None:
+            self._planner._event_callback = _combine_callbacks(original_callback, callback)
+
+        try:
+            merged_tool_context = {
+                **self._tool_context_defaults,
+                **dict(tool_context or {}),
+                "session_id": session_id,
+                "trace_id": trace_id,
+            }
+            result = await self._planner.resume(
+                resume_token,
+                user_input=user_input,
+                tool_context=merged_tool_context,
+            )
+        finally:
+            if callback is not None:
+                self._planner._event_callback = original_callback
+
+        await self._event_recorder.persist(trace_id)
+
+        if isinstance(result, PlannerPause):
+            pause_payload = {
+                "reason": result.reason,
+                "payload": result.payload,
+                "resume_token": result.resume_token,
+            }
+            return ChatResult(
+                answer=None,
+                trace_id=trace_id,
+                session_id=session_id,
+                metadata={"pause": pause_payload},
+                pause=pause_payload,
+            )
+        if not isinstance(result, PlannerFinish):
+            raise RuntimeError("Planner did not finish execution")
+
+        metadata = _normalise_metadata(getattr(result, "metadata", None))
+        answer = _normalise_answer(result.payload)
+        if answer is None and metadata is not None:
+            answer = metadata.get("thought")
+
+        return ChatResult(
+            answer=answer,
+            trace_id=trace_id,
+            session_id=session_id,
+            metadata=metadata,
+        )
+
 
 class OrchestratorAgentWrapper:
     """Adapter for orchestrators exposing an execute coroutine."""
@@ -405,6 +485,19 @@ class OrchestratorAgentWrapper:
         stop_fn = getattr(self._orchestrator, "stop", None)
         if stop_fn is not None:
             await stop_fn()
+
+    async def resume(
+        self,
+        resume_token: str,
+        *,
+        session_id: str,
+        user_input: str | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+        event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
+        trace_id_hint: str | None = None,
+    ) -> ChatResult:
+        del resume_token, session_id, user_input, tool_context, event_consumer, trace_id_hint
+        raise RuntimeError("Resume is not supported for orchestrator-backed agents.")
 
 
 def _get_attr(obj: Any, name: str) -> Any:

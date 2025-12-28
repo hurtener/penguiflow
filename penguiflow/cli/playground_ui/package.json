@@ -27,7 +27,12 @@
   "dependencies": {
     "@ag-ui/client": "^0.0.42",
     "@ag-ui/core": "^0.0.42",
+    "dompurify": "^3.1.7",
+    "echarts": "^5.5.1",
     "fast-json-patch": "^3.1.1",
-    "marked": "^17.0.1"
+    "katex": "^0.16.11",
+    "marked": "^17.0.1",
+    "mermaid": "^11.4.1",
+    "plotly.js-dist-min": "^2.33.0"
   }
 }

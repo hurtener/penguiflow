@@ -25,6 +25,18 @@ class FakeAgentWrapper(AgentWrapper):
     async def shutdown(self) -> None:
         pass
 
+    async def resume(
+        self,
+        resume_token: str,
+        *,
+        session_id: str,
+        user_input: str | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+        event_consumer: Any = None,
+        trace_id_hint: str | None = None,
+    ) -> ChatResult:
+        raise RuntimeError("resume not supported in FakeAgentWrapper")
+
     async def chat(
         self,
         query: str,
@@ -106,6 +118,19 @@ async def test_penguiflow_adapter_maps_events() -> None:
             },
         ),
         PlannerEvent(
+            event_type="artifact_chunk",
+            ts=0.065,
+            trajectory_step=0,
+            extra={
+                "stream_id": "ui",
+                "seq": 0,
+                "chunk": {"component": "markdown", "props": {"content": "Hello"}},
+                "done": True,
+                "artifact_type": "ui_component",
+                "meta": {"source_tool": "render_component"},
+            },
+        ),
+        PlannerEvent(
             event_type="resource_updated",
             ts=0.07,
             trajectory_step=0,
@@ -150,6 +175,7 @@ async def test_penguiflow_adapter_maps_events() -> None:
 
     custom_events = [event for event in output_events if event.type == EventType.CUSTOM]
     assert any(event.name == "artifact_stored" for event in custom_events)
+    assert any(event.name == "artifact_chunk" for event in custom_events)
     assert any(event.name == "resource_updated" for event in custom_events)
 
     message_chunks = [event for event in output_events if event.type == EventType.TEXT_MESSAGE_CONTENT]
@@ -195,6 +221,18 @@ async def test_penguiflow_adapter_emits_pause_custom_event() -> None:
 
         async def shutdown(self) -> None:
             pass
+
+        async def resume(
+            self,
+            resume_token: str,
+            *,
+            session_id: str,
+            user_input: str | None = None,
+            tool_context: Mapping[str, Any] | None = None,
+            event_consumer: Any = None,
+            trace_id_hint: str | None = None,
+        ) -> ChatResult:
+            raise RuntimeError("resume not supported in PauseAgentWrapper")
 
         async def chat(
             self,
@@ -248,6 +286,18 @@ async def test_penguiflow_adapter_emits_run_error() -> None:
 
         async def shutdown(self) -> None:
             pass
+
+        async def resume(
+            self,
+            resume_token: str,
+            *,
+            session_id: str,
+            user_input: str | None = None,
+            tool_context: Mapping[str, Any] | None = None,
+            event_consumer: Any = None,
+            trace_id_hint: str | None = None,
+        ) -> ChatResult:
+            raise RuntimeError("resume not supported in ErrorAgentWrapper")
 
         async def chat(
             self,

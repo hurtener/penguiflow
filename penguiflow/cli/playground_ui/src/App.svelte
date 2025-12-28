@@ -7,16 +7,20 @@
     agentStore,
     specStore,
     setupStore,
+    componentRegistryStore,
+    componentArtifactsStore,
   } from "$lib/stores";
   import {
     loadMeta,
     loadSpec,
+    loadComponentRegistry,
     fetchTrajectory,
     chatStreamManager,
     eventStreamManager,
   } from "$lib/services";
   import { Page } from "$lib/components/layout";
-  import { LeftSidebar, ProjectCard, SpecCard, GeneratorCard } from "$lib/components/sidebar-left";
+  import { LeftSidebar, ProjectCard, SpecCard } from "$lib/components/sidebar-left";
+  // GeneratorCard intentionally disabled - validate/generate not active
   import { CenterColumn } from "$lib/components/center";
   import { TrajectoryCard } from "$lib/components/center/trajectory";
   import { RightSidebar } from "$lib/components/sidebar-right";
@@ -25,6 +29,7 @@
   import { ArtifactsCard } from "$lib/components/sidebar-right/artifacts";
   import { MobileHeader, MobileBottomPanel } from "$lib/components/mobile";
   import { ChatCard } from "$lib/components/center/chat";
+  import type { PendingInteraction } from '$lib/stores/component_artifacts.svelte';
 
   // Reference to chat body for auto-scrolling
   let chatBodyEl = $state<HTMLDivElement | null>(null);
@@ -65,12 +70,19 @@
   });
 
   const initializeApp = async () => {
-    const [metaData, specData] = await Promise.all([loadMeta(), loadSpec()]);
+    const [metaData, specData, componentData] = await Promise.all([
+      loadMeta(),
+      loadSpec(),
+      loadComponentRegistry()
+    ]);
     if (metaData) {
       agentStore.setFromResponse(metaData);
     }
     if (specData) {
       specStore.setFromSpecData(specData);
+    }
+    if (componentData) {
+      componentRegistryStore.setFromPayload(componentData);
     }
   };
 
@@ -93,6 +105,7 @@
 
     sessionStore.isSending = true;
     timelineStore.clearArtifacts();
+    componentArtifactsStore.clearPendingInteraction();
     chatStore.addUserMessage(query);
     chatStore.clearInput();
 
@@ -120,6 +133,51 @@
       setupStore.useAgui ? 'agui' : 'sse'
     );
   };
+
+  const resumeInteraction = (interaction: PendingInteraction, result: unknown) => {
+    if (!setupStore.useAgui) {
+      setupStore.error = 'Interactive components require AG-UI streaming.';
+      return;
+    }
+
+    const contexts = setupStore.parseContexts();
+    if (!contexts) {
+      if (isMobile) {
+        chatCardRef?.switchToSetup();
+      } else {
+        centerColumnRef?.switchToSetup();
+      }
+      return;
+    }
+    const { toolContext } = contexts;
+
+    sessionStore.isSending = true;
+    timelineStore.clearArtifacts();
+    componentArtifactsStore.clearPendingInteraction();
+
+    chatStreamManager.resumeAgui(
+      interaction,
+      result,
+      sessionStore.sessionId,
+      toolContext,
+      {
+        onDone: async (traceId) => {
+          sessionStore.activeTraceId = traceId;
+          if (traceId) {
+            const payload = await fetchTrajectory(traceId, sessionStore.sessionId);
+            if (payload && sessionStore.activeTraceId === traceId) {
+              timelineStore.setFromPayload(payload);
+            }
+            eventStreamManager.start(traceId, sessionStore.sessionId);
+          }
+          sessionStore.isSending = false;
+        },
+        onError: () => {
+          sessionStore.isSending = false;
+        }
+      }
+    );
+  };
 </script>
 
 {#if isMobile}
@@ -138,7 +196,12 @@
     </MobileHeader>
 
     <main class="mobile-main">
-      <ChatCard bind:this={chatCardRef} onSendChat={sendChat} bind:chatBodyEl />
+      <ChatCard
+        bind:this={chatCardRef}
+        onSendChat={sendChat}
+        onInteractionResult={resumeInteraction}
+        bind:chatBodyEl
+      />
     </main>
 
     <MobileBottomPanel>
@@ -159,13 +222,14 @@
     <LeftSidebar>
       <ProjectCard />
       <SpecCard />
-      <GeneratorCard />
+      <!-- GeneratorCard disabled -->
       <ConfigCard />
     </LeftSidebar>
 
     <CenterColumn
       bind:this={centerColumnRef}
       onSendChat={sendChat}
+      onInteractionResult={resumeInteraction}
       bind:chatBodyEl
     />
 

@@ -5,21 +5,31 @@
   import ChatBody from './ChatBody.svelte';
   import ChatInput from './ChatInput.svelte';
   import SetupTab from '../setup/SetupTab.svelte';
+  import { ComponentLab } from '$lib/component_artifacts';
+  import { componentRegistryStore } from '$lib/stores';
+  import type { PendingInteraction } from '$lib/stores/component_artifacts.svelte';
 
   interface Props {
     onSendChat: () => void;
     chatBodyEl?: HTMLDivElement | null;
+    onInteractionResult?: (interaction: PendingInteraction, result: unknown) => void;
   }
 
-  let { onSendChat, chatBodyEl = $bindable(null) }: Props = $props();
+  let { onSendChat, chatBodyEl = $bindable(null), onInteractionResult }: Props = $props();
 
-  type CenterTab = 'chat' | 'setup';
+  type CenterTab = 'chat' | 'setup' | 'components';
   let activeTab = $state<CenterTab>('chat');
 
-  const tabs = [
-    { id: 'chat', label: 'Chat' },
-    { id: 'setup', label: 'Setup' }
-  ];
+  const tabs = $derived.by(() => {
+    const base: Array<{ id: string; label: string }> = [
+      { id: 'chat', label: 'Chat' },
+      { id: 'setup', label: 'Setup' }
+    ];
+    if (componentRegistryStore.enabled) {
+      base.push({ id: 'components', label: 'Components' });
+    }
+    return base;
+  });
 
   export const switchToSetup = () => {
     activeTab = 'setup';
@@ -36,8 +46,10 @@
 
   {#if activeTab === 'setup'}
     <SetupTab />
+  {:else if activeTab === 'components'}
+    <ComponentLab />
   {:else}
-    <ChatBody bind:chatBodyEl />
+    <ChatBody bind:chatBodyEl {onInteractionResult} />
     <ChatInput onsubmit={onSendChat} />
   {/if}
 </Card>

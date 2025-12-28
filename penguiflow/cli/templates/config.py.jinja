@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -30,6 +30,15 @@ def _env_str(name: str, default: str) -> str:
     """Parse string from environment variable."""
     raw = os.getenv(name)
     return raw if raw is not None else default
+
+
+def _env_csv(name: str, default: list[str]) -> list[str]:
+    """Parse comma-separated list from environment variable."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    items = [item.strip() for item in raw.split(",") if item.strip()]
+    return items
 
 
 def _env_optional_str(name: str, default: str | None) -> str | None:
@@ -84,6 +93,14 @@ class Config:
     artifact_store_max_artifacts_per_trace: int = {{ artifact_store_max_artifacts_per_trace }}
     artifact_store_max_artifacts_per_session: int = {{ artifact_store_max_artifacts_per_session }}
     artifact_store_cleanup_strategy: str = "{{ artifact_store_cleanup_strategy }}"
+
+    # Rich Output (Component Artifacts)
+    rich_output_enabled: bool = {{ rich_output_enabled }}
+    rich_output_allowlist: list[str] = field(default_factory=lambda: {{ rich_output_allowlist }})
+    rich_output_include_prompt_catalog: bool = {{ rich_output_include_prompt_catalog }}
+    rich_output_include_prompt_examples: bool = {{ rich_output_include_prompt_examples }}
+    rich_output_max_payload_bytes: int = {{ rich_output_max_payload_bytes }}
+    rich_output_max_total_bytes: int = {{ rich_output_max_total_bytes }}
 
     # Built-in Short-Term Memory (ReactPlanner)
     short_term_memory_strategy: str = {{ short_term_memory_strategy }}
@@ -158,6 +175,29 @@ class Config:
             artifact_store_cleanup_strategy=_env_str(
                 "ARTIFACT_STORE_CLEANUP_STRATEGY",
                 "{{ artifact_store_cleanup_strategy }}",
+            ),
+
+            # Rich Output (Component Artifacts)
+            rich_output_enabled=_env_flag("RICH_OUTPUT_ENABLED", {{ rich_output_enabled }}),
+            rich_output_allowlist=_env_csv(
+                "RICH_OUTPUT_ALLOWLIST",
+                {{ rich_output_allowlist }},
+            ),
+            rich_output_include_prompt_catalog=_env_flag(
+                "RICH_OUTPUT_INCLUDE_PROMPT_CATALOG",
+                {{ rich_output_include_prompt_catalog }},
+            ),
+            rich_output_include_prompt_examples=_env_flag(
+                "RICH_OUTPUT_INCLUDE_PROMPT_EXAMPLES",
+                {{ rich_output_include_prompt_examples }},
+            ),
+            rich_output_max_payload_bytes=_env_int(
+                "RICH_OUTPUT_MAX_PAYLOAD_BYTES",
+                {{ rich_output_max_payload_bytes }},
+            ),
+            rich_output_max_total_bytes=_env_int(
+                "RICH_OUTPUT_MAX_TOTAL_BYTES",
+                {{ rich_output_max_total_bytes }},
             ),
 
             # Built-in Short-Term Memory

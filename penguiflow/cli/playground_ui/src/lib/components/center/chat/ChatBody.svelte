@@ -2,12 +2,14 @@
   import { Empty } from '$lib/components/ui';
   import { chatStore } from '$lib/stores';
   import Message from './Message.svelte';
+  import type { PendingInteraction } from '$lib/stores/component_artifacts.svelte';
 
   interface Props {
     chatBodyEl?: HTMLDivElement | null;
+    onInteractionResult?: (interaction: PendingInteraction, result: unknown) => void;
   }
 
-  let { chatBodyEl = $bindable(null) }: Props = $props();
+  let { chatBodyEl = $bindable(null), onInteractionResult }: Props = $props();
 </script>
 
 <div class="chat-body" bind:this={chatBodyEl}>
@@ -19,7 +21,7 @@
     />
   {:else}
     {#each chatStore.messages as msg (msg.id)}
-      <Message message={msg} />
+      <Message message={msg} {onInteractionResult} />
     {/each}
   {/if}
 </div>

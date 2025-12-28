@@ -285,6 +285,25 @@ planner:
     ordering: [search, filter, summarize]
 ```
 
+### Rich Output Components (Playground UI)
+
+```yaml
+planner:
+  rich_output:
+    enabled: true
+    allowlist: ["markdown", "json", "echarts", "datagrid", "report", "grid", "form", "confirm", "select_option"]
+    include_prompt_catalog: true
+    include_prompt_examples: false
+```
+
+If you enable interactive components (`form`, `confirm`, `select_option`), also set:
+
+```yaml
+agent:
+  flags:
+    hitl: true
+```
+
 ### Error Handling in Tools
 
 ```python

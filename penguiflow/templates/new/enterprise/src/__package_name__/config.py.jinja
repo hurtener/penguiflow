@@ -3,8 +3,31 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Parse boolean from environment variable."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    """Parse integer from environment variable."""
+    raw = os.getenv(name)
+    return int(raw) if raw is not None else default
+
+
+def _env_csv(name: str, default: list[str]) -> list[str]:
+    """Parse comma-separated list from environment variable."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    items = [item.strip() for item in raw.split(",") if item.strip()]
+    return items
 
 
 @dataclass
@@ -42,6 +65,14 @@ class Config:
     telemetry_enabled: bool = True
     metrics_window_size: int = 1000
 
+    # Rich output components
+    rich_output_enabled: bool = {{ "True" if with_rich_output else "False" }}
+    rich_output_allowlist: list[str] = field(default_factory=lambda: {{ '["markdown", "json", "echarts", "mermaid", "plotly", "datagrid", "metric", "report", "grid", "tabs", "accordion", "code", "latex", "callout", "image", "video", "form", "confirm", "select_option"]' if with_rich_output else "[]" }})
+    rich_output_include_prompt_catalog: bool = True
+    rich_output_include_prompt_examples: bool = False
+    rich_output_max_payload_bytes: int = 250000
+    rich_output_max_total_bytes: int = 2000000
+
     @classmethod
     def from_env(cls) -> "Config":
         """Load configuration from environment variables."""
@@ -70,4 +101,14 @@ class Config:
             # Telemetry
             telemetry_enabled=os.getenv("TELEMETRY_ENABLED", "true").lower() == "true",
             metrics_window_size=int(os.getenv("METRICS_WINDOW_SIZE", "1000")),
+            # Rich output components
+            rich_output_enabled=_env_flag("RICH_OUTPUT_ENABLED", {{ "True" if with_rich_output else "False" }}),
+            rich_output_allowlist=_env_csv(
+                "RICH_OUTPUT_ALLOWLIST",
+                {{ '["markdown", "json", "echarts", "mermaid", "plotly", "datagrid", "metric", "report", "grid", "tabs", "accordion", "code", "latex", "callout", "image", "video", "form", "confirm", "select_option"]' if with_rich_output else "[]" }},
+            ),
+            rich_output_include_prompt_catalog=_env_flag("RICH_OUTPUT_INCLUDE_PROMPT_CATALOG", True),
+            rich_output_include_prompt_examples=_env_flag("RICH_OUTPUT_INCLUDE_PROMPT_EXAMPLES", False),
+            rich_output_max_payload_bytes=_env_int("RICH_OUTPUT_MAX_PAYLOAD_BYTES", 250000),
+            rich_output_max_total_bytes=_env_int("RICH_OUTPUT_MAX_TOTAL_BYTES", 2000000),
         )

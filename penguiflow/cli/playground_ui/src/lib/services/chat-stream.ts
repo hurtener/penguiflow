@@ -1,7 +1,7 @@
 import type { ChatMessage, ArtifactStoredEvent } from '$lib/types';
 import { safeParse } from '$lib/utils';
 import { ANSWER_GATE_SENTINEL } from '$lib/utils/constants';
-import { chatStore, eventsStore, timelineStore, artifactsStore } from '$lib/stores';
+import { chatStore, eventsStore, timelineStore, artifactsStore, componentArtifactsStore } from '$lib/stores';
 import { HttpAgent } from '@ag-ui/client';
 import type { BaseEvent, Message as AguiMessage, RunAgentInput } from '@ag-ui/core';
 
@@ -22,6 +22,7 @@ class ChatStreamManager {
   private aguiRunId: string | null = null;
   private aguiSessionId: string | null = null;
   private aguiCompleted = false;
+  private aguiToolCalls: Map<string, { name: string; args: string; messageId?: string }> = new Map();
 
   /**
    * Start a new chat stream
@@ -95,6 +96,7 @@ class ChatStreamManager {
     this.aguiRunId = null;
     this.aguiSessionId = null;
     this.aguiCompleted = false;
+    this.aguiToolCalls.clear();
   }
 
   private findAgentMsg(): ChatMessage | undefined {
@@ -226,6 +228,11 @@ class ChatStreamManager {
   }
 
   private handleArtifactChunk(data: Record<string, unknown>): void {
+    if ((data.artifact_type as string) === 'ui_component') {
+      componentArtifactsStore.addArtifactChunk(data as any, { message_id: this.agentMsgId ?? undefined });
+      eventsStore.addEvent(data, 'artifact_chunk');
+      return;
+    }
     const streamId = (data.stream_id as string) ?? 'artifact';
     timelineStore.addArtifactChunk(streamId, data.chunk);
     eventsStore.addEvent(data, 'artifact_chunk');
@@ -259,6 +266,15 @@ class ChatStreamManager {
       chatStore.updateMessage(msg.id, {
         answerActionSeq: typeof seq === 'number' ? seq : ANSWER_GATE_SENTINEL
       });
+    }
+
+    if (eventType === 'tool_call_start') {
+      const toolCallId = data.tool_call_id as string | undefined;
+      const toolName = data.tool_name as string | undefined;
+      const argsJson = data.args_json as string | undefined;
+      if (toolCallId && toolName) {
+        this.handleInteractiveToolCall(toolCallId, toolName, argsJson ?? '', this.agentMsgId ?? undefined);
+      }
     }
 
     eventsStore.addEvent(data, eventName);
@@ -309,6 +325,12 @@ class ChatStreamManager {
     const provider = (payload.provider as string) || '';
     const reason = (pause.reason as string) || 'pause';
 
+    if (pause.resume_token) {
+      componentArtifactsStore.updatePendingInteraction({
+        resume_token: pause.resume_token as string
+      });
+    }
+
     let body = `Planner paused (${reason})`;
     if (provider) body += ` for ${provider}`;
     if (authUrl) body += `\n[Open auth link](${authUrl})`;
@@ -339,6 +361,44 @@ class ChatStreamManager {
     });
     callbacks.onError(error);
     this.close();
+  }
+
+  private handleInteractiveToolCall(
+    toolCallId: string,
+    toolName: string,
+    argsText: string,
+    messageId?: string
+  ): void {
+    const component = this.mapInteractiveComponent(toolName);
+    if (!component) return;
+
+    let props: Record<string, unknown> = {};
+    if (argsText) {
+      try {
+        const parsed = JSON.parse(argsText) as Record<string, unknown>;
+        if (parsed && typeof parsed === 'object') {
+          props = parsed;
+        }
+      } catch {
+        props = {};
+      }
+    }
+
+    componentArtifactsStore.setPendingInteraction({
+      tool_call_id: toolCallId,
+      tool_name: toolName,
+      component,
+      props,
+      message_id: messageId,
+      created_at: Date.now()
+    });
+  }
+
+  private mapInteractiveComponent(toolName: string): string | null {
+    if (toolName === 'ui_form') return 'form';
+    if (toolName === 'ui_confirm') return 'confirm';
+    if (toolName === 'ui_select_option') return 'select_option';
+    return null;
   }
 
   private startAgui(
@@ -386,6 +446,66 @@ class ChatStreamManager {
     const agent = new HttpAgent({ url: url.toString() });
     // Use run() not runAgent() - run() returns Observable<BaseEvent>
     const observable = agent.run(input);
+
+    this.aguiSubscription = observable.subscribe({
+      next: (event: BaseEvent) => this.handleAguiEvent(event, callbacks),
+      error: (err: Error) => {
+        const msg = this.findAgentMsg();
+        if (msg) {
+          chatStore.updateMessage(msg.id, { isStreaming: false });
+        }
+        callbacks.onError(err.message);
+        this.close();
+      },
+      complete: () => {
+        if (!this.aguiCompleted && this.aguiRunId) {
+          callbacks.onDone(this.aguiRunId);
+        }
+      }
+    });
+  }
+
+  resumeAgui(
+    interaction: {
+      resume_token?: string;
+      tool_call_id: string;
+      tool_name: string;
+      component: string;
+    },
+    result: unknown,
+    sessionId: string,
+    toolContext: Record<string, unknown>,
+    callbacks: ChatStreamCallbacks
+  ): void {
+    if (!interaction.resume_token) {
+      callbacks.onError('Resume token missing');
+      return;
+    }
+
+    this.close();
+
+    const agentMsg = chatStore.addAgentMessage();
+    this.agentMsgId = agentMsg.id;
+    this.aguiMessageMap.clear();
+    this.aguiMappedPlaceholder = false;
+    this.aguiCompleted = false;
+
+    const url = new URL('/agui/resume', window.location.origin);
+    const input = {
+      resume_token: interaction.resume_token,
+      thread_id: sessionId,
+      run_id: `run_${Date.now()}`,
+      tool_name: interaction.tool_name,
+      component: interaction.component,
+      result,
+      tool_context: toolContext
+    };
+
+    this.aguiRunId = input.run_id;
+    this.aguiSessionId = sessionId;
+
+    const agent = new HttpAgent({ url: url.toString() });
+    const observable = agent.run(input as any);
 
     this.aguiSubscription = observable.subscribe({
       next: (event: BaseEvent) => this.handleAguiEvent(event, callbacks),
@@ -460,11 +580,53 @@ class ChatStreamManager {
         return;
       }
 
-      case 'TOOL_CALL_START':
-      case 'TOOL_CALL_ARGS':
-      case 'TOOL_CALL_END':
+      case 'TOOL_CALL_START': {
+        const e = event as any;
+        const toolCallId = e.toolCallId as string;
+        const toolCallName = e.toolCallName as string;
+        const parentMessageId = e.parentMessageId as string | undefined;
+        const messageId = parentMessageId ? this.ensureAguiMessage(parentMessageId) : this.agentMsgId ?? undefined;
+        this.aguiToolCalls.set(toolCallId, { name: toolCallName, args: '', messageId });
+        eventsStore.addEvent(
+          { tool_call_id: toolCallId, tool_call_name: toolCallName } as any,
+          'tool_call_start'
+        );
+        return;
+      }
+
+      case 'TOOL_CALL_ARGS': {
+        const e = event as any;
+        const toolCallId = e.toolCallId as string;
+        const entry = this.aguiToolCalls.get(toolCallId);
+        if (entry) {
+          entry.args += (e.delta as string) ?? '';
+        }
+        eventsStore.addEvent(
+          { tool_call_id: toolCallId, delta: e.delta as string } as any,
+          'tool_call_args'
+        );
+        return;
+      }
+
+      case 'TOOL_CALL_END': {
+        const e = event as any;
+        const toolCallId = e.toolCallId as string;
+        const entry = this.aguiToolCalls.get(toolCallId);
+        if (entry) {
+          this.handleInteractiveToolCall(toolCallId, entry.name, entry.args, entry.messageId);
+          this.aguiToolCalls.delete(toolCallId);
+        }
+        eventsStore.addEvent({ tool_call_id: toolCallId } as any, 'tool_call_end');
+        return;
+      }
+
       case 'TOOL_CALL_RESULT': {
-        eventsStore.addEvent(event as any, event.type.toLowerCase());
+        const e = event as any;
+        const toolCallId = e.toolCallId as string;
+        eventsStore.addEvent(
+          { tool_call_id: toolCallId, content: e.content as string } as any,
+          'tool_call_result'
+        );
         return;
       }
 
@@ -484,6 +646,16 @@ class ChatStreamManager {
             session_id: this.aguiSessionId ?? '',
             ts: Date.now()
           } as ArtifactStoredEvent);
+        }
+
+        if (name === 'artifact_chunk' && value && typeof value === 'object') {
+          const payload = value as Record<string, unknown>;
+          if ((payload.artifact_type as string) === 'ui_component') {
+            componentArtifactsStore.addArtifactChunk(payload as any, { message_id: this.agentMsgId ?? undefined });
+          } else {
+            const streamId = (payload.stream_id as string) ?? 'artifact';
+            timelineStore.addArtifactChunk(streamId, payload.chunk);
+          }
         }
 
         // Handle thinking events - show in observations panel
@@ -531,6 +703,22 @@ class ChatStreamManager {
           const msg = this.findAgentMsg();
           if (msg) {
             this.handlePause(msg, {}, value as Record<string, unknown>, this.aguiRunId, callbacks);
+          }
+          const payload = (value as any).payload as Record<string, unknown> | undefined;
+          if (payload?.component && payload?.props && !componentArtifactsStore.pendingInteraction) {
+            componentArtifactsStore.setPendingInteraction({
+              tool_call_id: `pause_${Date.now()}`,
+              tool_name: (payload.tool as string) ?? 'ui_pause',
+              component: payload.component as string,
+              props: (payload.props as Record<string, unknown>) ?? {},
+              message_id: this.agentMsgId ?? undefined,
+              resume_token: (value as any).resume_token as string | undefined,
+              created_at: Date.now()
+            });
+          } else if ((value as any).resume_token) {
+            componentArtifactsStore.updatePendingInteraction({
+              resume_token: (value as any).resume_token as string
+            });
           }
           this.aguiCompleted = true;
         }

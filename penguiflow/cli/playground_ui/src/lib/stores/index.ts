@@ -6,3 +6,5 @@ export { agentStore } from './agent.svelte';
 export { specStore } from './spec.svelte';
 export { setupStore, type SetupContext } from './setup.svelte';
 export { artifactsStore } from './artifacts.svelte';
+export { componentArtifactsStore } from './component_artifacts.svelte';
+export { componentRegistryStore } from './component_registry.svelte';

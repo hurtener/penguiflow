@@ -1,7 +1,7 @@
 <script lang="ts">
   import { readable } from 'svelte/store';
   import { ErrorList } from '$lib/components/ui';
-  import { sessionStore, setupStore, timelineStore, eventsStore } from '$lib/stores';
+  import { sessionStore, setupStore, timelineStore, eventsStore, componentArtifactsStore } from '$lib/stores';
   import { setAGUIContext } from '$lib/agui/stores';
   import { MessageList, StateDebugger } from '$lib/agui/components';
   import SetupField from './SetupField.svelte';
@@ -52,6 +52,7 @@
             sessionStore.newSession();
             timelineStore.clear();
             eventsStore.clear();
+            componentArtifactsStore.clear();
           }}
         >
           New

@@ -2,13 +2,15 @@
   import { Column } from '$lib/components/layout';
   import { ChatCard } from './chat';
   import { TrajectoryCard } from './trajectory';
+  import type { PendingInteraction } from '$lib/stores/component_artifacts.svelte';
 
   interface Props {
     onSendChat: () => void;
     chatBodyEl?: HTMLDivElement | null;
+    onInteractionResult?: (interaction: PendingInteraction, result: unknown) => void;
   }
 
-  let { onSendChat, chatBodyEl = $bindable(null) }: Props = $props();
+  let { onSendChat, chatBodyEl = $bindable(null), onInteractionResult }: Props = $props();
 
   let chatCardRef: ChatCard;
 
@@ -18,6 +20,6 @@
 </script>
 
 <Column position="center">
-  <ChatCard bind:this={chatCardRef} {onSendChat} bind:chatBodyEl />
+  <ChatCard bind:this={chatCardRef} {onSendChat} {onInteractionResult} bind:chatBodyEl />
   <TrajectoryCard />
 </Column>

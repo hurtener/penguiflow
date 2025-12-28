@@ -35,6 +35,21 @@ class MockAgentWrapper(AgentWrapper):
     async def shutdown(self) -> None:
         pass
 
+    async def resume(
+        self,
+        resume_token: str,
+        *,
+        session_id: str,
+        user_input: str | None = None,
+        tool_context: dict[str, Any] | None = None,
+        event_consumer: Any = None,
+        trace_id_hint: str | None = None,
+    ) -> ChatResult:
+        del resume_token, session_id, user_input, tool_context, event_consumer, trace_id_hint
+        if self._raise_on_chat:
+            raise self._raise_on_chat
+        return self._chat_result
+
     async def chat(
         self,
         query: str,
@@ -140,6 +155,45 @@ class TestUIMetaEndpoint:
         assert "planner" in data
         assert "services" in data
         assert "tools" in data
+
+
+class TestUIComponentsEndpoint:
+    """Tests for /ui/components endpoint."""
+
+    def test_ui_components_returns_allowlisted_registry(self, tmp_path: Path) -> None:
+        spec_content = """\
+agent:
+  name: test-agent
+  description: Test
+  template: react
+  flags:
+    memory: false
+    hitl: true
+tools:
+  - name: fetch
+    description: Fetch data
+llm:
+  primary:
+    model: gpt-4o
+planner:
+  system_prompt_extra: Test
+  rich_output:
+    enabled: true
+    allowlist: ["markdown"]
+"""
+        (tmp_path / "agent.yaml").write_text(spec_content, encoding="utf-8")
+
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/ui/components")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["enabled"] is True
+        assert set(data["allowlist"]) == {"markdown"}
+        assert "markdown" in data["components"]
+        assert "echarts" not in data["components"]
 
 
 class TestUIValidateEndpoint:
@@ -404,6 +458,58 @@ class TestEventsEndpoint:
         )
         assert response.status_code == 404
         assert "Trace not found" in response.json()["detail"]
+
+
+class TestAguiResumeEndpoint:
+    """Tests for /agui/resume endpoint."""
+
+    def test_agui_resume_requires_token(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post("/agui/resume", json={"thread_id": "thread-1", "run_id": "run-1"})
+        # 422 = FastAPI validation error when resume_token is missing
+        assert response.status_code == 422
+
+    def test_agui_resume_rejects_invalid_result(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/agui/resume",
+            headers={"accept": "text/event-stream"},
+            json={
+                "resume_token": "resume-123",
+                "thread_id": "thread-1",
+                "run_id": "run-1",
+                "tool_name": "ui_confirm",
+                "component": "confirm",
+                "result": "nope",
+            },
+        )
+        assert response.status_code == 400
+
+    def test_agui_resume_streams_events(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/agui/resume",
+            headers={"accept": "text/event-stream"},
+            json={
+                "resume_token": "resume-123",
+                "thread_id": "thread-1",
+                "run_id": "run-1",
+                "tool_name": "ui_confirm",
+                "component": "confirm",
+                "result": True,
+            },
+        )
+        assert response.status_code == 200
+        assert response.text
 
 
 class TestTrajectoryEndpoint:

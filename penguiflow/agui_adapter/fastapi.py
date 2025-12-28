@@ -5,11 +5,10 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
-
 from ag_ui.core import RunAgentInput
 from ag_ui.encoder import EventEncoder
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
 
 
 def create_agui_endpoint(
@@ -35,7 +34,7 @@ def create_agui_endpoint(
             },
         )
 
-    return endpoint
+    return endpoint  # type: ignore[return-value]
 
 
 def add_agui_route(
@@ -49,4 +48,4 @@ def add_agui_route(
 
     @app.post(path, **route_kwargs)
     async def agui_route(input: RunAgentInput, request: Request) -> StreamingResponse:
-        return await endpoint(input, request)
+        return await endpoint(input, request)  # type: ignore[misc]

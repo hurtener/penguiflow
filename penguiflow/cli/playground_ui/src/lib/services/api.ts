@@ -1,4 +1,4 @@
-import type { MetaResponse, SpecData, ValidationResult, TrajectoryPayload, ArtifactRef } from '$lib/types';
+import type { MetaResponse, SpecData, ValidationResult, TrajectoryPayload, ArtifactRef, ComponentRegistryPayload } from '$lib/types';
 
 const BASE_URL = '';  // Same origin
 
@@ -27,6 +27,20 @@ export async function loadMeta(): Promise<MetaResponse | null> {
     return await resp.json();
   } catch (err) {
     console.error('meta load failed', err);
+    return null;
+  }
+}
+
+/**
+ * Load component registry for rich output lab
+ */
+export async function loadComponentRegistry(): Promise<ComponentRegistryPayload | null> {
+  try {
+    const resp = await fetch(`${BASE_URL}/ui/components`);
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch (err) {
+    console.error('component registry load failed', err);
     return null;
   }
 }

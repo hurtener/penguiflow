@@ -30,6 +30,7 @@ dev = [
     "hypothesis>=6.103",
     "ruff>=0.2",
     "ag-ui-protocol>=0.0.42",
+    "jsonschema>=4.23",
     "fastapi>=0.118",
     "httpx>=0.27",
     "jinja2>=3.1",
@@ -55,6 +56,7 @@ planner = [
     "utcp-http>=1.0.0",
     "tenacity>=9.0.0",
     "aiohttp>=3.9.0",
+    "jsonschema>=4.23",
 ]
 tools-cli = ["utcp-cli>=1.0.0"]
 tools-websocket = ["utcp-websocket>=1.0.0"]
@@ -78,6 +80,7 @@ exclude-package-data = { "penguiflow" = ["cli/playground_ui/src/*", "cli/playgro
     "templates/*.yaml",
     "cli/templates/*",
     "cli/templates/**/*",
+    "rich_output/registry.json",
     "cli/playground_ui/dist/*",
     "cli/playground_ui/dist/**/*",
 ]
@@ -97,6 +100,7 @@ dev = [
     "hypothesis>=6.103",
     "ruff>=0.2",
     "ag-ui-protocol>=0.0.42",
+    "jsonschema>=4.23",
     "fastapi>=0.118",
     "httpx>=0.27",
     "jinja2>=3.1",

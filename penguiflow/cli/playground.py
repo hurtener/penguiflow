@@ -22,18 +22,30 @@ from pydantic import BaseModel, ConfigDict, Field
 
 try:
     from ag_ui.core import RunAgentInput
+    from ag_ui.encoder import EventEncoder
 except Exception:  # pragma: no cover - optional dependency
-    RunAgentInput = None  # type: ignore[assignment]
+    RunAgentInput = None  # type: ignore[assignment,misc]
+    EventEncoder = None  # type: ignore[assignment,misc]
 
 from penguiflow.cli.generate import run_generate
 from penguiflow.cli.spec import Spec, load_spec
 from penguiflow.cli.spec_errors import SpecValidationError
 from penguiflow.planner import PlannerEvent
+
 try:
     from penguiflow.agui_adapter import PenguiFlowAdapter, create_agui_endpoint
 except Exception:  # pragma: no cover - optional dependency
-    PenguiFlowAdapter = None  # type: ignore[assignment]
+    PenguiFlowAdapter = None  # type: ignore[assignment,misc]
     create_agui_endpoint = None  # type: ignore[assignment]
+try:
+    from penguiflow.rich_output import DEFAULT_ALLOWLIST, RichOutputConfig, configure_rich_output
+    from penguiflow.rich_output.validate import RichOutputValidationError, validate_interaction_result
+except Exception:  # pragma: no cover - optional dependency
+    DEFAULT_ALLOWLIST = ()  # type: ignore[assignment]
+    RichOutputConfig = None  # type: ignore[assignment,misc]
+    configure_rich_output = None  # type: ignore[assignment]
+    RichOutputValidationError = None  # type: ignore[assignment,misc]
+    validate_interaction_result = None  # type: ignore[assignment]
 
 from .playground_sse import EventBroker, SSESentinel, format_sse, stream_queue
 from .playground_state import InMemoryStateStore, PlaygroundStateStore
@@ -106,6 +118,24 @@ class MetaPayload(BaseModel):
     tools: list[dict[str, Any]]
 
 
+class ComponentRegistryPayload(BaseModel):
+    version: str
+    enabled: bool
+    allowlist: list[str]
+    components: dict[str, Any]
+
+
+class AguiResumeRequest(BaseModel):
+    resume_token: str
+    thread_id: str
+    run_id: str
+    tool_name: str | None = None
+    component: str | None = None
+    result: Any | None = None
+    tool_context: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = ConfigDict(extra="ignore")
+
 def _parse_context_arg(raw: str | None) -> dict[str, Any]:
     if raw is None:
         return {}
@@ -122,6 +152,22 @@ def _merge_contexts(primary: dict[str, Any], secondary: dict[str, Any] | None) -
     merged = dict(primary)
     merged.update(secondary)
     return merged
+
+
+def _format_resume_input(input: AguiResumeRequest) -> str | None:
+    payload: dict[str, Any] = {}
+    if input.tool_name:
+        payload["tool"] = input.tool_name
+    if input.component:
+        payload["component"] = input.component
+    if input.result is not None:
+        payload["result"] = input.result
+    if not payload:
+        return None
+    try:
+        return json.dumps(payload, ensure_ascii=False)
+    except TypeError:
+        return str(payload)
 
 
 def _discover_spec_path(project_root: Path) -> Path | None:
@@ -187,6 +233,10 @@ def _meta_from_spec(spec: Spec | None) -> MetaPayload:
         "hop_budget": spec.planner.hop_budget if spec else None,
         "absolute_max_parallel": spec.planner.absolute_max_parallel if spec else None,
         "reflection": spec.planner.memory_prompt is not None if spec else False,
+        "rich_output_enabled": spec.planner.rich_output.enabled if spec else None,
+        "rich_output_allowlist": (
+            ", ".join(spec.planner.rich_output.allowlist) if spec and spec.planner.rich_output.allowlist else None
+        ),
     }
     services = []
     if spec:
@@ -632,6 +682,22 @@ def create_playground_app(
             return None
         return store
 
+    def _rich_output_config_from_spec(spec: Spec | None) -> Any | None:
+        if configure_rich_output is None or RichOutputConfig is None:
+            return None
+        if spec is None:
+            return RichOutputConfig(enabled=False)
+        rich = spec.planner.rich_output
+        allowlist = rich.allowlist if rich.allowlist else list(DEFAULT_ALLOWLIST)
+        return RichOutputConfig(
+            enabled=rich.enabled,
+            allowlist=allowlist,
+            include_prompt_catalog=rich.include_prompt_catalog,
+            include_prompt_examples=rich.include_prompt_examples,
+            max_payload_bytes=rich.max_payload_bytes,
+            max_total_bytes=rich.max_total_bytes,
+        )
+
     class _ScopedArtifactStore:
         """ArtifactStore wrapper that injects a default scope when missing."""
 
@@ -761,6 +827,15 @@ def create_playground_app(
     @app.get("/ui/meta", response_model=MetaPayload)
     async def ui_meta() -> MetaPayload:
         return meta_payload
+
+    @app.get("/ui/components", response_model=ComponentRegistryPayload)
+    async def ui_components() -> ComponentRegistryPayload:
+        config = _rich_output_config_from_spec(parsed_spec)
+        if configure_rich_output is None or config is None:
+            raise HTTPException(status_code=501, detail="Rich output support requires jsonschema dependency.")
+        runtime = configure_rich_output(config)
+        payload = runtime.registry_payload()
+        return ComponentRegistryPayload(**payload)
 
     @app.post("/ui/generate")
     async def ui_generate(payload: dict[str, Any]) -> Mapping[str, Any]:
@@ -895,7 +970,43 @@ def create_playground_app(
 
         @app.post("/agui/agent")
         async def agui_agent(input: RunAgentInput, request: Request) -> StreamingResponse:
-            return await create_agui_endpoint(agui_adapter.run)(input, request)
+            return await create_agui_endpoint(agui_adapter.run)(input, request)  # type: ignore[misc]
+
+        @app.post("/agui/resume")
+        async def agui_resume(input: AguiResumeRequest, request: Request) -> StreamingResponse:
+            if EventEncoder is None:
+                raise HTTPException(status_code=501, detail="AG-UI support requires ag-ui-protocol.")
+            if not input.resume_token:
+                raise HTTPException(status_code=400, detail="resume_token is required")
+
+            user_input = _format_resume_input(input)
+            if validate_interaction_result is not None and input.component:
+                try:
+                    validate_interaction_result(input.component, input.result)
+                except RichOutputValidationError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            encoder = EventEncoder(accept=request.headers.get("accept", "text/event-stream"))
+
+            async def stream():
+                async for event in agui_adapter.resume(
+                    resume_token=input.resume_token,
+                    thread_id=input.thread_id,
+                    run_id=input.run_id,
+                    user_input=user_input,
+                    tool_context=input.tool_context,
+                ):
+                    yield encoder.encode(event)
+
+            return StreamingResponse(
+                stream(),
+                media_type=encoder.get_content_type(),
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
 
     else:  # pragma: no cover - optional dependency guard
         @app.post("/agui/agent")

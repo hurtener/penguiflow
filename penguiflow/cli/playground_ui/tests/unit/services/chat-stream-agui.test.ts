@@ -6,7 +6,7 @@ const runAgentMock = vi.fn();
 
 vi.mock('@ag-ui/client', () => {
   class HttpAgentMock {
-    runAgent = runAgentMock;
+    run = runAgentMock;
   }
   return { HttpAgent: HttpAgentMock };
 });

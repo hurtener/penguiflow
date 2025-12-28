@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 from uuid import uuid4
 
 from ag_ui.core import (
@@ -137,7 +138,7 @@ class AGUIAdapter(ABC):
         return TextMessageStartEvent(
             type=EventType.TEXT_MESSAGE_START,
             message_id=self._current_message_id,
-            role=role,
+            role=role,  # type: ignore[arg-type]
         )
 
     def text_content(self, delta: str) -> TextMessageContentEvent:
@@ -146,7 +147,7 @@ class AGUIAdapter(ABC):
             raise RuntimeError("Call text_start() before text_content().")
         return TextMessageContentEvent(
             type=EventType.TEXT_MESSAGE_CONTENT,
-            message_id=self._current_message_id,
+            message_id=self._current_message_id,  # type: ignore[arg-type]
             delta=delta,
         )
 
@@ -157,7 +158,7 @@ class AGUIAdapter(ABC):
         self._message_started = False
         return TextMessageEndEvent(
             type=EventType.TEXT_MESSAGE_END,
-            message_id=self._current_message_id,
+            message_id=self._current_message_id,  # type: ignore[arg-type]
         )
 
     def tool_start(
@@ -234,7 +235,7 @@ class AGUIAdapter(ABC):
         return StepStartedEvent(
             type=EventType.STEP_STARTED,
             step_name=name,
-            metadata=metadata if metadata else None,
+            metadata=metadata if metadata else None,  # type: ignore[call-arg]
         )
 
     def step_end(self, name: str, **metadata: Any) -> StepFinishedEvent:
@@ -244,7 +245,7 @@ class AGUIAdapter(ABC):
         return StepFinishedEvent(
             type=EventType.STEP_FINISHED,
             step_name=name,
-            metadata=metadata if metadata else None,
+            metadata=metadata if metadata else None,  # type: ignore[call-arg]
         )
 
     def custom(self, name: str, value: Any) -> CustomEvent:

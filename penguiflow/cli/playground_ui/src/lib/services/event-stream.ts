@@ -1,5 +1,5 @@
 import { safeParse } from '$lib/utils';
-import { eventsStore, timelineStore, artifactsStore } from '$lib/stores';
+import { eventsStore, timelineStore, artifactsStore, componentArtifactsStore } from '$lib/stores';
 import type { ArtifactStoredEvent } from '$lib/types';
 
 /**
@@ -32,8 +32,12 @@ class EventStreamManager {
 
       // Handle artifact chunks
       if (incomingEvent === 'artifact_chunk') {
-        const streamId = (data.stream_id as string) ?? 'artifact';
-        timelineStore.addArtifactChunk(streamId, data.chunk);
+        if ((data.artifact_type as string) === 'ui_component') {
+          componentArtifactsStore.addArtifactChunk(data as any, {});
+        } else {
+          const streamId = (data.stream_id as string) ?? 'artifact';
+          timelineStore.addArtifactChunk(streamId, data.chunk);
+        }
       }
 
       // Handle artifact_stored - add to artifacts store for download
