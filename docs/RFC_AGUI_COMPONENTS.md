@@ -70,6 +70,13 @@ To avoid collisions in naming and event handling:
 - **UI component artifacts**: `artifact_chunk` with `artifact_type: ui_component` (legacy SSE uses the `artifact_chunk` event; AG-UI uses `CUSTOM name="artifact_chunk"`).
 - **Binary artifacts**: `artifact_stored` (legacy SSE uses the `artifact_stored` event; AG-UI uses `CUSTOM name="artifact_stored"`).
 
+### 1.6 Artifact Registry (Meta-Tool)
+
+Some tools emit large artifacts that should NOT enter LLM context (charts, PDFs, images).
+Provide an on-demand meta-tool (`list_artifacts`) so the model can fetch compact metadata
+only when needed. Artifacts can then be referenced inside rich components using
+`artifact_ref` placeholders, which the backend resolves before rendering.
+
 ---
 
 ## 2. Architecture Overview

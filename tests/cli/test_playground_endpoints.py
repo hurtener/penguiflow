@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
-from fastapi.testclient import TestClient
 from ag_ui.core import RunAgentInput
+from fastapi.testclient import TestClient
 
 from penguiflow.cli.playground import create_playground_app
 from penguiflow.cli.playground_state import InMemoryStateStore

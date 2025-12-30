@@ -28,6 +28,7 @@ from ..catalog import NodeSpec, build_catalog
 from ..node import Node
 from ..registry import ModelRegistry
 from . import prompts
+from .artifact_registry import ArtifactRegistry
 from .constraints import _ConstraintTracker, _CostTracker
 from .context import PlannerPauseReason, ToolContext
 from .hints import _PlanningHints
@@ -96,7 +97,7 @@ class _EventEmittingArtifactStoreProxy:
     are stored (e.g., PDFs from MCP tools).
     """
 
-    __slots__ = ("_store", "_emit_event", "_time_source", "_trajectory", "_namespace")
+    __slots__ = ("_store", "_emit_event", "_time_source", "_trajectory", "_namespace", "_registry")
 
     def __init__(
         self,
@@ -105,12 +106,14 @@ class _EventEmittingArtifactStoreProxy:
         time_source: Callable[[], float],
         trajectory: Trajectory,
         namespace: str | None = None,
+        registry: ArtifactRegistry | None = None,
     ) -> None:
         self._store = store
         self._emit_event = emit_event
         self._time_source = time_source
         self._trajectory = trajectory
         self._namespace = namespace
+        self._registry = registry
 
     def _resolve_scope(self, scope: ArtifactScope | None) -> ArtifactScope | None:
         """Inject session_id from trajectory if scope is missing."""
@@ -177,6 +180,15 @@ class _EventEmittingArtifactStoreProxy:
         namespace: str | None,
     ) -> None:
         """Emit artifact_stored event for real-time UI updates."""
+        if self._registry is not None:
+            source_tool = namespace or self._namespace
+            self._registry.register_binary_artifact(
+                ref,
+                source_tool=source_tool,
+                step_index=len(self._trajectory.steps),
+            )
+            if isinstance(self._trajectory.metadata, MutableMapping):
+                self._registry.write_snapshot(self._trajectory.metadata)
         self._emit_event(
             PlannerEvent(
                 event_type="artifact_stored",
@@ -923,6 +935,7 @@ class _PlannerContext(ToolContext):
             emit_event=planner._emit_event,
             time_source=planner._time_source,
             trajectory=trajectory,
+            registry=planner._artifact_registry,
         )
         self._meta_warned = False
 
@@ -1308,6 +1321,8 @@ class ReactPlanner:
         else:
             self._artifact_store = NoOpArtifactStore()
 
+        self._artifact_registry = ArtifactRegistry()
+
         # Observation guardrail (enabled by default)
         self._observation_guardrail = observation_guardrail or ObservationGuardrailConfig()
 
@@ -1522,6 +1537,8 @@ class ReactPlanner:
             llm_context=normalised_llm_context,
             tool_context=normalised_tool_context,
         )
+        self._artifact_registry = ArtifactRegistry.from_snapshot(trajectory.metadata.get("artifact_registry"))
+        self._artifact_registry.write_snapshot(trajectory.metadata)
         result = await self._run_loop(trajectory, tracker=None)
         await self._maybe_record_memory_turn(query, result, trajectory, resolved_key)
         return result
@@ -1576,6 +1593,9 @@ class ReactPlanner:
             trajectory.tool_context = trajectory.tool_context or {}
         if user_input is not None:
             trajectory.resume_user_input = user_input
+
+        self._artifact_registry = ArtifactRegistry.from_snapshot(trajectory.metadata.get("artifact_registry"))
+        self._artifact_registry.write_snapshot(trajectory.metadata)
 
         resolved_key = self._resolve_memory_key(memory_key, trajectory.tool_context or {})
         merged_llm_context = await self._apply_memory_context(
@@ -2627,6 +2647,15 @@ class ReactPlanner:
 
                 observation_json = observation.model_dump(mode="json")
 
+                self._artifact_registry.register_tool_artifacts(
+                    spec.name,
+                    spec.out_model,
+                    observation_json,
+                    step_index=len(trajectory.steps),
+                )
+                if isinstance(trajectory.metadata, MutableMapping):
+                    self._artifact_registry.write_snapshot(trajectory.metadata)
+
                 # Apply observation size guardrails
                 observation_json, was_clamped = await self._clamp_observation(
                     observation_json,
@@ -3154,6 +3183,15 @@ class ReactPlanner:
                     serialized,
                     namespace=f"observation.{spec_name}",
                 )
+                self._artifact_registry.register_binary_artifact(
+                    ref,
+                    source_tool=f"observation.{spec_name}",
+                    step_index=trajectory_step,
+                )
+                if isinstance(self._active_trajectory, Trajectory) and isinstance(
+                    self._active_trajectory.metadata, MutableMapping
+                ):
+                    self._artifact_registry.write_snapshot(self._active_trajectory.metadata)
                 preview = (
                     serialized[: config.preview_length] + "..."
                     if len(serialized) > config.preview_length

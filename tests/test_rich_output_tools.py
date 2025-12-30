@@ -3,6 +3,7 @@ from __future__ import annotations
 from penguiflow.rich_output.tools import (
     FormField,
     FormFieldValidation,
+    ListArtifactsArgs,
     RenderComponentArgs,
     SelectOptionItem,
     UIConfirmArgs,
@@ -15,6 +16,12 @@ def test_render_component_args_defaults() -> None:
     args = RenderComponentArgs(component="markdown")
     assert args.props == {}
     assert args.model_dump(by_alias=True)["props"] == {}
+
+
+def test_list_artifacts_args_defaults() -> None:
+    args = ListArtifactsArgs()
+    assert args.kind == "all"
+    assert args.limit == 25
 
 
 def test_form_field_validation_aliases() -> None:

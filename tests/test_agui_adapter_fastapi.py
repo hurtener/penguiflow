@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+from ag_ui.core import RunAgentInput
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
-from ag_ui.core import RunAgentInput
 
 from penguiflow.agui_adapter import AGUIAdapter, AGUIEvent, add_agui_route, create_agui_endpoint
 

@@ -4,7 +4,6 @@ from collections.abc import Mapping
 from typing import Any
 
 import pytest
-
 from ag_ui.core import EventType, RunAgentInput
 
 from penguiflow.agui_adapter.penguiflow import PenguiFlowAdapter

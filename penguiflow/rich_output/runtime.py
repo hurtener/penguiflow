@@ -15,6 +15,8 @@ from .registry import ComponentDefinition, ComponentRegistry, RegistryError, get
 from .tools import (
     DescribeComponentArgs,
     DescribeComponentResult,
+    ListArtifactsArgs,
+    ListArtifactsResult,
     RenderComponentArgs,
     RenderComponentResult,
     UIConfirmArgs,
@@ -176,6 +178,7 @@ def attach_rich_output_nodes(registry: ModelRegistry, *, config: RichOutputConfi
         return []
 
     registry.register("render_component", RenderComponentArgs, RenderComponentResult)
+    registry.register("list_artifacts", ListArtifactsArgs, ListArtifactsResult)
     registry.register("ui_form", UIFormArgs, UIInteractionResult)
     registry.register("ui_confirm", UIConfirmArgs, UIInteractionResult)
     registry.register("ui_select_option", UISelectOptionArgs, UIInteractionResult)
@@ -183,6 +186,7 @@ def attach_rich_output_nodes(registry: ModelRegistry, *, config: RichOutputConfi
 
     from .nodes import (
         describe_component,
+        list_artifacts,
         render_component,
         ui_confirm,
         ui_form,
@@ -191,6 +195,7 @@ def attach_rich_output_nodes(registry: ModelRegistry, *, config: RichOutputConfi
 
     nodes = [
         Node(render_component, name="render_component"),
+        Node(list_artifacts, name="list_artifacts"),
         Node(ui_form, name="ui_form"),
         Node(ui_confirm, name="ui_confirm"),
         Node(ui_select_option, name="ui_select_option"),

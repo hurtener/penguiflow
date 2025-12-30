@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 import pytest
-
 from ag_ui.core import EventType, RunAgentInput
 
 from penguiflow.agui_adapter.base import AGUIAdapter, AGUIEvent

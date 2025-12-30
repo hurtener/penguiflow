@@ -7,11 +7,19 @@ from typing import Any
 
 from penguiflow.catalog import tool
 from penguiflow.planner import ToolContext
+from penguiflow.planner.artifact_registry import (
+    get_artifact_registry,
+    has_artifact_refs,
+    resolve_artifact_refs,
+)
 
 from .runtime import get_runtime
 from .tools import (
+    ArtifactSummary,
     DescribeComponentArgs,
     DescribeComponentResult,
+    ListArtifactsArgs,
+    ListArtifactsResult,
     RenderComponentArgs,
     RenderComponentResult,
     UIConfirmArgs,
@@ -49,6 +57,20 @@ async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> Rende
     if not isinstance(props, Mapping):
         raise RuntimeError("render_component props must be an object")
 
+    registry = get_artifact_registry(ctx)
+    if has_artifact_refs(props):
+        if registry is None:
+            raise RuntimeError("artifact_ref usage requires an active planner run")
+        session_id = ctx.tool_context.get("session_id")
+        props = resolve_artifact_refs(
+            props,
+            registry=registry,
+            trajectory=getattr(ctx, "_trajectory", None),
+            session_id=str(session_id) if session_id is not None else None,
+        )
+        if not isinstance(props, Mapping):
+            raise RuntimeError("artifact_ref resolution returned invalid props")
+
     runtime.validate_component(component, props, tool_context=ctx.tool_context)
 
     meta = _emit_metadata(args.metadata)
@@ -67,6 +89,21 @@ async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> Rende
         meta=meta,
     )
     return RenderComponentResult()
+
+
+@tool(
+    desc="List available artifacts for reuse in UI components.",
+    tags=["rich_output", "artifacts"],
+    side_effects="read",
+)
+async def list_artifacts(args: ListArtifactsArgs, ctx: ToolContext) -> ListArtifactsResult:
+    _ensure_enabled()
+    registry = get_artifact_registry(ctx)
+    if registry is None:
+        return ListArtifactsResult(artifacts=[])
+    kind = None if args.kind == "all" else args.kind
+    items = registry.list_records(kind=kind, source_tool=args.source_tool, limit=args.limit)
+    return ListArtifactsResult(artifacts=[ArtifactSummary.model_validate(item) for item in items])
 
 
 @tool(desc="Collect structured input via a UI form (pauses for user).", tags=["rich_output", "ui"], side_effects="pure")
@@ -140,6 +177,7 @@ async def describe_component(args: DescribeComponentArgs, ctx: ToolContext) -> D
 
 __all__ = [
     "render_component",
+    "list_artifacts",
     "ui_form",
     "ui_confirm",
     "ui_select_option",

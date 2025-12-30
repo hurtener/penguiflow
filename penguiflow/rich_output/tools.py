@@ -21,6 +21,40 @@ class RenderComponentResult(BaseModel):
     ok: bool = True
 
 
+ArtifactKind = Literal["ui_component", "binary", "tool_artifact"]
+ArtifactKindFilter = Literal["all", "ui_component", "binary", "tool_artifact"]
+
+
+class ArtifactSummary(BaseModel):
+    ref: str
+    kind: ArtifactKind
+    source_tool: str | None = Field(default=None, alias="sourceTool")
+    component: str | None = None
+    title: str | None = None
+    summary: str | None = None
+    artifact_id: str | None = Field(default=None, alias="artifactId")
+    mime_type: str | None = Field(default=None, alias="mimeType")
+    size_bytes: int | None = Field(default=None, alias="sizeBytes")
+    created_step: int | None = Field(default=None, alias="createdStep")
+    renderable: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
+class ListArtifactsArgs(BaseModel):
+    kind: ArtifactKindFilter = "all"
+    source_tool: str | None = Field(default=None, alias="sourceTool")
+    limit: int = 25
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
+class ListArtifactsResult(BaseModel):
+    ok: bool = True
+    artifacts: list[ArtifactSummary] = Field(default_factory=list)
+
+
 class DescribeComponentArgs(BaseModel):
     name: str = Field(..., description="Component name")
 
@@ -140,6 +174,9 @@ class UIInteractionResult(BaseModel):
 __all__ = [
     "RenderComponentArgs",
     "RenderComponentResult",
+    "ArtifactSummary",
+    "ListArtifactsArgs",
+    "ListArtifactsResult",
     "DescribeComponentArgs",
     "DescribeComponentResult",
     "FormField",

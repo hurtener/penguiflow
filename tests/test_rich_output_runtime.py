@@ -29,6 +29,7 @@ def test_attach_rich_output_nodes_enabled() -> None:
     )
     assert nodes
     assert registry.has("render_component")
+    assert registry.has("list_artifacts")
 
 
 def test_runtime_prompt_section() -> None:
