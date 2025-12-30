@@ -1963,6 +1963,17 @@ Backend implementation requirements:
 - Provide these tools to the agent runtime via the PenguiFlow tool catalog (nodes) when rich output is enabled. Do not rely on frontend-supplied AG-UI `RunAgentInput.tools` (the Playground sends `tools: []` today).
 - Enforce allowlists (e.g., disable `html`/`embed` by default).
 
+### 6.2.1 Extension Hooks (Custom Registries + Tools)
+
+Downstream teams may ship their own UI components and meta-tools. The backend should allow extensions without forking core:
+- **Registry patching:** register additional component definitions (or overrides) that merge into the base registry before validation/prompting.
+- **Prompt append:** inject extra prompt guidance for custom components/tools.
+- **Tool/node registration:** register additional meta-tools alongside `render_component`/`ui_*`.
+
+Implementation note:
+- Provide a runtime hook to register extensions (e.g., `register_rich_output_extension(...)`) and apply them during `configure_rich_output(...)`.
+- Keep the Playground focused on the default registry, but allow custom registries via `registry_path` or extension patches.
+
 ### 6.3 Validation, Safety, and Size Limits
 
 Before emitting an `artifact_chunk` (`artifact_type=ui_component`):

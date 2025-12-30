@@ -474,6 +474,27 @@ class OrchestratorAgentWrapper:
         elif trajectory is None:
             _LOGGER.warning("trajectory not saved: trajectory is None (metadata=%s)", metadata is not None)
 
+        # Check if orchestrator returned a pause (HITL flow)
+        pause_token = _get_attr(response, "pause_token")
+        if pause_token:
+            pause_reason = None
+            pause_payload = {}
+            if metadata:
+                pause_reason = metadata.get("reason")
+                pause_payload = metadata.get("payload", {})
+            pause_dict = {
+                "reason": pause_reason or "await_input",
+                "payload": pause_payload,
+                "resume_token": pause_token,
+            }
+            return ChatResult(
+                answer=None,
+                trace_id=trace_id,
+                session_id=session_id,
+                metadata=metadata,
+                pause=pause_dict,
+            )
+
         return ChatResult(
             answer=_normalise_answer(_get_attr(response, "answer")),
             trace_id=trace_id,
@@ -496,8 +517,77 @@ class OrchestratorAgentWrapper:
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
     ) -> ChatResult:
-        del resume_token, session_id, user_input, tool_context, event_consumer, trace_id_hint
-        raise RuntimeError("Resume is not supported for orchestrator-backed agents.")
+        # Check if orchestrator has a resume method (HITL support)
+        resume_fn = getattr(self._orchestrator, "resume", None)
+        if resume_fn is None or not callable(resume_fn):
+            raise RuntimeError(
+                "Resume is not supported for this orchestrator. "
+                "Ensure your agent was created with --with-hitl flag."
+            )
+
+        tool_ctx = dict(tool_context or {})
+        planner = getattr(self._orchestrator, "_planner", None)
+        trace_holder: dict[str, str | None] = {"id": trace_id_hint}
+
+        def _trace_id_supplier() -> str | None:
+            if trace_holder["id"]:
+                return trace_holder["id"]
+            return _planner_trace_id(planner)
+
+        callback = self._event_recorder.callback(
+            trace_id_supplier=_trace_id_supplier,
+            event_consumer=event_consumer,
+        )
+        original_callback = None
+        if planner is not None and callback is not None:
+            original_callback = getattr(planner, "_event_callback", None)
+            planner._event_callback = _combine_callbacks(original_callback, callback)
+
+        try:
+            response = await resume_fn(
+                resume_token,
+                tenant_id=tool_ctx.get("tenant_id", self._tenant_id),
+                user_id=tool_ctx.get("user_id", self._user_id),
+                session_id=session_id,
+                user_input=user_input,
+            )
+        finally:
+            if planner is not None and callback is not None:
+                planner._event_callback = original_callback
+
+        trace_id = trace_id_hint or _get_attr(response, "trace_id") or _trace_id_supplier() or secrets.token_hex(8)
+        trace_holder["id"] = trace_id
+        await self._event_recorder.persist(trace_id)
+
+        metadata = _normalise_metadata(_get_attr(response, "metadata"))
+
+        # Check if orchestrator returned another pause
+        pause_token = _get_attr(response, "pause_token")
+        if pause_token:
+            pause_reason = None
+            pause_payload = {}
+            if metadata:
+                pause_reason = metadata.get("reason")
+                pause_payload = metadata.get("payload", {})
+            pause_dict = {
+                "reason": pause_reason or "await_input",
+                "payload": pause_payload,
+                "resume_token": pause_token,
+            }
+            return ChatResult(
+                answer=None,
+                trace_id=trace_id,
+                session_id=session_id,
+                metadata=metadata,
+                pause=pause_dict,
+            )
+
+        return ChatResult(
+            answer=_normalise_answer(_get_attr(response, "answer")),
+            trace_id=trace_id,
+            session_id=session_id,
+            metadata=metadata,
+        )
 
 
 def _get_attr(obj: Any, name: str) -> Any:

@@ -14,6 +14,16 @@ from .config import Config
 from .tools import build_catalog_bundle
 
 
+SYSTEM_PROMPT_EXTRA = ""
+
+
+def _build_system_prompt(rich_output_prompt: str) -> str:
+    prompt = SYSTEM_PROMPT_EXTRA
+    if rich_output_prompt:
+        prompt = f"{prompt}\n\n{rich_output_prompt}" if prompt else rich_output_prompt
+    return prompt
+
+
 @dataclass
 class PlannerBundle:
     """Container for planner and LLM client."""
@@ -95,7 +105,7 @@ def build_planner(
         llm_client=llm_client,
         nodes=nodes,
         registry=registry,
-        system_prompt_extra=rich_output_prompt,
+        system_prompt_extra=_build_system_prompt(rich_output_prompt),
         event_callback=event_callback,
     )
     return PlannerBundle(planner=planner, llm_client=llm_client)

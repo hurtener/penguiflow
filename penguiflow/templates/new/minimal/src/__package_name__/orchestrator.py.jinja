@@ -24,6 +24,14 @@ from .telemetry import AgentTelemetry
 from .tools import Answer, build_catalog_bundle
 
 _LOGGER = logging.getLogger(__name__)
+SYSTEM_PROMPT_EXTRA = ""
+
+
+def _build_system_prompt(rich_output_prompt: str) -> str:
+    prompt = SYSTEM_PROMPT_EXTRA
+    if rich_output_prompt:
+        prompt = f"{prompt}\n\n{rich_output_prompt}" if prompt else rich_output_prompt
+    return prompt
 
 
 class {{ class_name }}FlowError(RuntimeError):
@@ -152,7 +160,7 @@ class {{ class_name }}Orchestrator:
             llm_client=self._llm,
             nodes=nodes,
             registry=registry,
-            system_prompt_extra=rich_output_prompt,
+            system_prompt_extra=_build_system_prompt(rich_output_prompt),
             event_callback=self._telemetry.record_planner_event,
         )
         # To use a real LLM instead of ScriptedLLM:

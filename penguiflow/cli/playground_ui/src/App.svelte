@@ -140,6 +140,13 @@
       return;
     }
 
+    // Check resume_token BEFORE clearing state
+    if (!interaction.resume_token) {
+      setupStore.error = 'Cannot submit: session expired or interrupted. Please resend your message.';
+      componentArtifactsStore.clearPendingInteraction();
+      return;
+    }
+
     const contexts = setupStore.parseContexts();
     if (!contexts) {
       if (isMobile) {
@@ -172,7 +179,8 @@
           }
           sessionStore.isSending = false;
         },
-        onError: () => {
+        onError: (error) => {
+          setupStore.error = error || 'Failed to submit response. Please try again.';
           sessionStore.isSending = false;
         }
       }
