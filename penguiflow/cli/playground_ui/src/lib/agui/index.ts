@@ -1,4 +1,4 @@
-export type { BaseEvent, RunAgentInput, Message, Tool } from '@ag-ui/core';
+export type { BaseEvent, RunAgentInput, Message as AguiMessage, Tool } from '@ag-ui/core';
 export { HttpAgent } from '@ag-ui/client';
 
 export {
@@ -10,9 +10,9 @@ export {
   type StreamingMessage,
   type StreamingToolCall,
   type RunStatus
-} from './stores';
+} from '$lib/stores/features/agui.svelte';
 
-export { applyJsonPatch } from './patch';
+export { applyJsonPatch } from '$lib/utils/json-patch';
 
 export {
   AGUIProvider,
@@ -20,4 +20,4 @@ export {
   Message,
   ToolCall,
   StateDebugger
-} from './components';
+} from '$lib/components/features/agui';

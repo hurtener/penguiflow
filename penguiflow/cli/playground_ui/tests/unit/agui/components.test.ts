@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { render } from '@testing-library/svelte';
 import { readable } from 'svelte/store';
+import type { AGUIStore, StreamingMessage, StreamingToolCall } from '$lib/agui';
 
 import AguiComponentHost from './AguiComponentHost.svelte';
 
 describe('AGUI components', () => {
   it('renders message list, debugger, message, and tool call', () => {
-    const store = {
+    const store: AGUIStore = {
       messages: readable([]),
       state: readable({
         status: 'idle',
@@ -19,10 +20,15 @@ describe('AGUI components', () => {
       }),
       status: readable('idle'),
       agentState: readable({ ready: true }),
-      activeSteps: readable([])
+      activeSteps: readable([]),
+      isRunning: readable(false),
+      error: readable(null),
+      sendMessage: async () => {},
+      cancel: () => {},
+      reset: () => {}
     };
 
-    const message = {
+    const message: StreamingMessage = {
       id: 'msg-2',
       role: 'assistant',
       content: 'Rendered content',
@@ -30,7 +36,7 @@ describe('AGUI components', () => {
       toolCalls: []
     };
 
-    const toolCall = {
+    const toolCall: StreamingToolCall = {
       id: 'call-1',
       name: 'search',
       arguments: '{"query":"test"}',

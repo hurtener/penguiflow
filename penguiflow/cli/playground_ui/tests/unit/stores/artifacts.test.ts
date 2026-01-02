@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { artifactsStore } from '$lib/stores/artifacts.svelte';
+import { createArtifactsStore } from '$lib/stores';
 import type { ArtifactStoredEvent } from '$lib/types';
+
+const artifactsStore = createArtifactsStore();
 
 describe('artifactsStore', () => {
   beforeEach(() => {
@@ -94,11 +96,11 @@ describe('artifactsStore', () => {
       artifactsStore.addArtifact(createMockEvent({ artifact_id: 'a1', filename: 'file1.pdf' }));
       artifactsStore.addArtifact(createMockEvent({ artifact_id: 'a2', filename: 'file2.pdf' }));
 
-      const list = artifactsStore.list;
+      const list = artifactsStore.list as Array<{ id: string }>;
       expect(Array.isArray(list)).toBe(true);
       expect(list.length).toBe(2);
-      expect(list.map(a => a.id)).toContain('a1');
-      expect(list.map(a => a.id)).toContain('a2');
+      expect(list.map((artifact) => artifact.id)).toContain('a1');
+      expect(list.map((artifact) => artifact.id)).toContain('a2');
     });
 
     it('returns empty array when no artifacts', () => {

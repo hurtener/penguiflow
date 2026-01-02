@@ -1,8 +1,8 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import Confirm from '$lib/component_artifacts/renderers/Confirm.svelte';
-import Form from '$lib/component_artifacts/renderers/Form.svelte';
-import SelectOption from '$lib/component_artifacts/renderers/SelectOption.svelte';
+import Confirm from '$lib/renderers/Confirm.svelte';
+import Form from '$lib/renderers/Form.svelte';
+import SelectOption from '$lib/renderers/internal/SelectOption.svelte';
 
 describe('Interactive Component Flows', () => {
   describe('Confirm component', () => {

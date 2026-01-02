@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { setupStore } from '$lib/stores/setup.svelte';
+import { createSetupStore } from '$lib/stores';
+
+const setupStore = createSetupStore();
 
 describe('setupStore', () => {
   beforeEach(() => {

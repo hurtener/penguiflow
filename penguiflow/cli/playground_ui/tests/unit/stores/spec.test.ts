@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { specStore } from '$lib/stores/spec.svelte';
+import { createSpecStore } from '$lib/stores';
 import type { SpecData, ValidationResult } from '$lib/types';
+
+const specStore = createSpecStore();
 
 describe('specStore', () => {
   beforeEach(() => {
@@ -58,8 +60,9 @@ describe('specStore', () => {
       expect(specStore.isValid).toBe(false);
       expect(specStore.hasErrors).toBe(true);
       expect(specStore.errors).toHaveLength(2);
-      expect(specStore.errors[0].message).toBe('Missing required field: name');
-      expect(specStore.errors[0].line).toBe(1);
+      const [first] = specStore.errors;
+      expect(first?.message).toBe('Missing required field: name');
+      expect(first?.line).toBe(1);
     });
   });
 
@@ -84,7 +87,8 @@ describe('specStore', () => {
 
       expect(specStore.status).toBe('error');
       expect(specStore.errors).toHaveLength(1);
-      expect(specStore.errors[0].id).toBe('val-err-0');
+      const [first] = specStore.errors;
+      expect(first?.id).toBe('val-err-0');
     });
   });
 
@@ -97,8 +101,9 @@ describe('specStore', () => {
 
       expect(specStore.status).toBe('error');
       expect(specStore.errors).toHaveLength(2);
-      expect(specStore.errors[0].id).toBe('gen-err-0');
-      expect(specStore.errors[1].line).toBe(10);
+      const [first, second] = specStore.errors;
+      expect(first?.id).toBe('gen-err-0');
+      expect(second?.line).toBe(10);
     });
   });
 

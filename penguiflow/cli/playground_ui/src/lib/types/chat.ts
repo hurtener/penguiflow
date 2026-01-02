@@ -36,6 +36,9 @@ export type PlannerEventPayload = {
   ts?: number;
   chunk?: unknown;
   artifact_type?: string;
+  artifact_id?: string;
+  mime_type?: string;
+  filename?: string;
   meta?: Record<string, unknown>;
   // Tool call aggregation fields
   tool_call_id?: string;

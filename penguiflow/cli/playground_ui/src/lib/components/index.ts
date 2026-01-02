@@ -1,14 +1,18 @@
-// UI Primitives
-export * from './ui';
-
-// Layout
-export * from './layout';
-
-// Sidebar Left
-export * from './sidebar-left';
-
-// Center Column
-export * from './center';
-
-// Sidebar Right
-export * from './sidebar-right';
+export * from './primitives';
+export * from './composites';
+export * from './containers';
+export * from './features/chat';
+export * from './features/center';
+export * from './features/setup';
+export * from './features/trajectory';
+export * from './features/sidebar-left';
+export * from './features/sidebar-right';
+export * from './features/mobile';
+export * from './features/component-lab';
+export {
+  AGUIProvider,
+  MessageList as AGUIMessageList,
+  Message as AGUIMessage,
+  ToolCall as AGUIToolCall,
+  StateDebugger as AGUIStateDebugger
+} from './features/agui';

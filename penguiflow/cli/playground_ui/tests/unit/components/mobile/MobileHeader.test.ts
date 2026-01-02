@@ -1,13 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import MobileHeader from '$lib/components/mobile/MobileHeader.svelte';
-
-// Mock the agentStore
-vi.mock('$lib/stores', () => ({
-  agentStore: {
-    meta: { name: 'Test Agent' }
-  }
-}));
+import MobileHeaderHost from './MobileHeaderHost.svelte';
 
 describe('MobileHeader component', () => {
   beforeEach(() => {
@@ -15,31 +8,31 @@ describe('MobileHeader component', () => {
   });
 
   it('renders header with agent name', () => {
-    render(MobileHeader);
+    render(MobileHeaderHost);
     expect(screen.getByText('Test Agent')).toBeTruthy();
   });
 
   it('renders hamburger menu button', () => {
-    render(MobileHeader);
+    render(MobileHeaderHost);
     const menuBtn = screen.getByLabelText('Toggle menu');
     expect(menuBtn).toBeTruthy();
     expect(menuBtn.getAttribute('type')).toBe('button');
   });
 
   it('hamburger button has correct type attribute', () => {
-    render(MobileHeader);
+    render(MobileHeaderHost);
     const menuBtn = screen.getByLabelText('Toggle menu');
     expect(menuBtn.getAttribute('type')).toBe('button');
   });
 
   it('drawer is hidden by default', () => {
-    render(MobileHeader);
+    render(MobileHeaderHost);
     const drawer = document.querySelector('.drawer');
     expect(drawer).toBeNull();
   });
 
   it('opens drawer when hamburger clicked', async () => {
-    render(MobileHeader);
+    render(MobileHeaderHost);
     const menuBtn = screen.getByLabelText('Toggle menu');
 
     await fireEvent.click(menuBtn);
@@ -49,7 +42,7 @@ describe('MobileHeader component', () => {
   });
 
   it('shows backdrop when drawer is open', async () => {
-    render(MobileHeader);
+    render(MobileHeaderHost);
     const menuBtn = screen.getByLabelText('Toggle menu');
 
     await fireEvent.click(menuBtn);
@@ -59,18 +52,17 @@ describe('MobileHeader component', () => {
   });
 
   it('renders three tabs in drawer', async () => {
-    render(MobileHeader);
+    render(MobileHeaderHost);
     const menuBtn = screen.getByLabelText('Toggle menu');
 
     await fireEvent.click(menuBtn);
 
-    expect(screen.getByText('Info')).toBeTruthy();
-    expect(screen.getByText('Spec')).toBeTruthy();
-    expect(screen.getByText('Config')).toBeTruthy();
+    const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('.drawer-tab'));
+    expect(tabs.map(tab => tab.textContent?.trim())).toEqual(['Info', 'Spec', 'Config']);
   });
 
   it('tab buttons have correct type attribute', async () => {
-    render(MobileHeader);
+    render(MobileHeaderHost);
     const menuBtn = screen.getByLabelText('Toggle menu');
 
     await fireEvent.click(menuBtn);
@@ -82,32 +74,35 @@ describe('MobileHeader component', () => {
   });
 
   it('Info tab is active by default', async () => {
-    render(MobileHeader);
+    render(MobileHeaderHost);
     const menuBtn = screen.getByLabelText('Toggle menu');
 
     await fireEvent.click(menuBtn);
 
-    const infoTab = screen.getByText('Info');
-    expect(infoTab.classList.contains('active')).toBe(true);
+    const infoTab = document.querySelector<HTMLButtonElement>('.drawer-tab.active');
+    expect(infoTab?.textContent?.trim()).toBe('Info');
   });
 
   it('switches active tab on click', async () => {
-    render(MobileHeader);
+    render(MobileHeaderHost);
     const menuBtn = screen.getByLabelText('Toggle menu');
 
     await fireEvent.click(menuBtn);
 
-    const configTab = screen.getByText('Config');
-    await fireEvent.click(configTab);
+    const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('.drawer-tab'));
+    const configTab = tabs.find(tab => tab.textContent?.trim() === 'Config');
+    const infoTab = tabs.find(tab => tab.textContent?.trim() === 'Info');
+    expect(configTab).toBeTruthy();
+    expect(infoTab).toBeTruthy();
 
-    expect(configTab.classList.contains('active')).toBe(true);
+    await fireEvent.click(configTab!);
 
-    const infoTab = screen.getByText('Info');
-    expect(infoTab.classList.contains('active')).toBe(false);
+    expect(configTab?.classList.contains('active')).toBe(true);
+    expect(infoTab?.classList.contains('active')).toBe(false);
   });
 
   it('closes drawer when backdrop clicked', async () => {
-    render(MobileHeader);
+    render(MobileHeaderHost);
     const menuBtn = screen.getByLabelText('Toggle menu');
 
     await fireEvent.click(menuBtn);
@@ -120,7 +115,7 @@ describe('MobileHeader component', () => {
   });
 
   it('toggles drawer closed when hamburger clicked again', async () => {
-    render(MobileHeader);
+    render(MobileHeaderHost);
     const menuBtn = screen.getByLabelText('Toggle menu');
 
     // Open
@@ -133,7 +128,7 @@ describe('MobileHeader component', () => {
   });
 
   it('hamburger icon transforms when open', async () => {
-    render(MobileHeader);
+    render(MobileHeaderHost);
     const menuBtn = screen.getByLabelText('Toggle menu');
 
     const hamburger = document.querySelector('.hamburger');

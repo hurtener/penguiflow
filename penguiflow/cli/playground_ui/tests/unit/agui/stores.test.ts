@@ -11,7 +11,7 @@ vi.mock('@ag-ui/client', () => {
   return { HttpAgent: HttpAgentMock };
 });
 
-import { createAGUIStore } from '$lib/agui/stores';
+import { createAGUIStore } from '$lib/agui';
 
 describe('createAGUIStore', () => {
   it('updates state from streamed events', async () => {
@@ -33,8 +33,8 @@ describe('createAGUIStore', () => {
     const snapshot = get(store.state);
     expect(snapshot.status).toBe('finished');
     expect(snapshot.messages.length).toBe(2);
-    expect(snapshot.messages[0].role).toBe('user');
-    expect(snapshot.messages[1].content).toBe('Hello');
+    expect(snapshot.messages[0]?.role).toBe('user');
+    expect(snapshot.messages[1]?.content).toBe('Hello');
   });
 
   it('handles run errors', async () => {

@@ -1,27 +1,26 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import {
-  componentArtifactsStore,
-  type ArtifactChunkPayload,
-  type PendingInteraction
-} from '$lib/stores/component_artifacts.svelte';
+import { createInteractionsStore } from '$lib/stores';
+import type { ArtifactChunkPayload, PendingInteraction } from '$lib/types';
 
-describe('componentArtifactsStore', () => {
+const interactionsStore = createInteractionsStore();
+
+describe('interactionsStore', () => {
   beforeEach(() => {
-    componentArtifactsStore.clear();
+    interactionsStore.clear();
     vi.useFakeTimers();
   });
 
   describe('initial state', () => {
     it('starts with empty artifacts', () => {
-      expect(componentArtifactsStore.artifacts).toEqual([]);
+      expect(interactionsStore.artifacts).toEqual([]);
     });
 
     it('starts with no pending interaction', () => {
-      expect(componentArtifactsStore.pendingInteraction).toBeNull();
+      expect(interactionsStore.pendingInteraction).toBeNull();
     });
 
     it('starts with no last artifact', () => {
-      expect(componentArtifactsStore.lastArtifact).toBeNull();
+      expect(interactionsStore.lastArtifact).toBeNull();
     });
   });
 
@@ -41,10 +40,12 @@ describe('componentArtifactsStore', () => {
         }
       };
 
-      componentArtifactsStore.addArtifactChunk(payload);
+      interactionsStore.addArtifactChunk(payload);
 
-      expect(componentArtifactsStore.artifacts).toHaveLength(1);
-      expect(componentArtifactsStore.artifacts[0]).toMatchObject({
+      expect(interactionsStore.artifacts).toHaveLength(1);
+      const [artifact] = interactionsStore.artifacts;
+      expect(artifact).toBeDefined();
+      expect(artifact).toMatchObject({
         id: 'artifact-1',
         component: 'markdown',
         props: { content: '# Hello' },
@@ -59,9 +60,9 @@ describe('componentArtifactsStore', () => {
         chunk: { content: 'hello' }
       };
 
-      componentArtifactsStore.addArtifactChunk(payload);
+      interactionsStore.addArtifactChunk(payload);
 
-      expect(componentArtifactsStore.artifacts).toHaveLength(0);
+      expect(interactionsStore.artifacts).toHaveLength(0);
     });
 
     it('ignores chunks without component field', () => {
@@ -70,28 +71,28 @@ describe('componentArtifactsStore', () => {
         chunk: { props: { value: 1 } }
       };
 
-      componentArtifactsStore.addArtifactChunk(payload);
+      interactionsStore.addArtifactChunk(payload);
 
-      expect(componentArtifactsStore.artifacts).toHaveLength(0);
+      expect(interactionsStore.artifacts).toHaveLength(0);
     });
 
     it('ignores null or non-object chunks', () => {
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         chunk: null
       });
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         chunk: 'string'
       });
 
-      expect(componentArtifactsStore.artifacts).toHaveLength(0);
+      expect(interactionsStore.artifacts).toHaveLength(0);
     });
 
     it('generates id when not provided', () => {
       vi.setSystemTime(new Date('2024-01-01T12:00:00Z'));
 
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         chunk: {
           component: 'metric',
@@ -99,11 +100,12 @@ describe('componentArtifactsStore', () => {
         }
       });
 
-      expect(componentArtifactsStore.artifacts[0].id).toMatch(/^ui_\d+$/);
+      const artifact = interactionsStore.artifacts[0]!;
+      expect(artifact.id).toMatch(/^ui_\d+$/);
     });
 
     it('uses message_id from options', () => {
-      componentArtifactsStore.addArtifactChunk(
+      interactionsStore.addArtifactChunk(
         {
           artifact_type: 'ui_component',
           chunk: { component: 'markdown', props: {} }
@@ -111,30 +113,33 @@ describe('componentArtifactsStore', () => {
         { message_id: 'msg-123' }
       );
 
-      expect(componentArtifactsStore.artifacts[0].message_id).toBe('msg-123');
+      const artifact = interactionsStore.artifacts[0]!;
+      expect(artifact.message_id).toBe('msg-123');
     });
 
     it('uses message_id from meta if not in options', () => {
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         chunk: { component: 'markdown', props: {} },
         meta: { message_id: 'meta-msg-456' }
       });
 
-      expect(componentArtifactsStore.artifacts[0].message_id).toBe('meta-msg-456');
+      const artifact = interactionsStore.artifacts[0]!;
+      expect(artifact.message_id).toBe('meta-msg-456');
     });
 
     it('defaults seq to 0', () => {
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         chunk: { component: 'json', props: {} }
       });
 
-      expect(componentArtifactsStore.artifacts[0].seq).toBe(0);
+      const artifact = interactionsStore.artifacts[0]!;
+      expect(artifact.seq).toBe(0);
     });
 
     it('updates lastArtifact', () => {
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         chunk: {
           id: 'first',
@@ -142,7 +147,7 @@ describe('componentArtifactsStore', () => {
           props: {}
         }
       });
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         chunk: {
           id: 'second',
@@ -151,26 +156,28 @@ describe('componentArtifactsStore', () => {
         }
       });
 
-      expect(componentArtifactsStore.lastArtifact?.id).toBe('second');
+      expect(interactionsStore.lastArtifact?.id).toBe('second');
     });
 
     it('handles empty props', () => {
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         chunk: { component: 'callout' }
       });
 
-      expect(componentArtifactsStore.artifacts[0].props).toEqual({});
+      const artifact = interactionsStore.artifacts[0]!;
+      expect(artifact.props).toEqual({});
     });
 
     it('preserves meta data', () => {
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         chunk: { component: 'code', props: { code: 'x = 1' } },
         meta: { source: 'llm', model: 'gpt-4' }
       });
 
-      expect(componentArtifactsStore.artifacts[0].meta).toEqual({
+      const artifact = interactionsStore.artifacts[0]!;
+      expect(artifact.meta).toEqual({
         source: 'llm',
         model: 'gpt-4'
       });
@@ -193,64 +200,64 @@ describe('componentArtifactsStore', () => {
     };
 
     it('sets pending interaction', () => {
-      componentArtifactsStore.setPendingInteraction(mockInteraction);
+      interactionsStore.setPendingInteraction(mockInteraction);
 
-      expect(componentArtifactsStore.pendingInteraction).toEqual(mockInteraction);
+      expect(interactionsStore.pendingInteraction).toEqual(mockInteraction);
     });
 
     it('clears pending interaction with null', () => {
-      componentArtifactsStore.setPendingInteraction(mockInteraction);
-      componentArtifactsStore.setPendingInteraction(null);
+      interactionsStore.setPendingInteraction(mockInteraction);
+      interactionsStore.setPendingInteraction(null);
 
-      expect(componentArtifactsStore.pendingInteraction).toBeNull();
+      expect(interactionsStore.pendingInteraction).toBeNull();
     });
 
     it('clears pending interaction with clearPendingInteraction', () => {
-      componentArtifactsStore.setPendingInteraction(mockInteraction);
-      componentArtifactsStore.clearPendingInteraction();
+      interactionsStore.setPendingInteraction(mockInteraction);
+      interactionsStore.clearPendingInteraction();
 
-      expect(componentArtifactsStore.pendingInteraction).toBeNull();
+      expect(interactionsStore.pendingInteraction).toBeNull();
     });
 
     it('updates pending interaction partially', () => {
-      componentArtifactsStore.setPendingInteraction(mockInteraction);
-      componentArtifactsStore.updatePendingInteraction({
+      interactionsStore.setPendingInteraction(mockInteraction);
+      interactionsStore.updatePendingInteraction({
         props: { message: 'Updated message' }
       });
 
-      expect(componentArtifactsStore.pendingInteraction?.props).toEqual({
+      expect(interactionsStore.pendingInteraction?.props).toEqual({
         message: 'Updated message'
       });
-      expect(componentArtifactsStore.pendingInteraction?.tool_call_id).toBe('tc-001');
+      expect(interactionsStore.pendingInteraction?.tool_call_id).toBe('tc-001');
     });
 
     it('does nothing when updating without pending interaction', () => {
-      componentArtifactsStore.updatePendingInteraction({
+      interactionsStore.updatePendingInteraction({
         props: { message: 'No-op' }
       });
 
-      expect(componentArtifactsStore.pendingInteraction).toBeNull();
+      expect(interactionsStore.pendingInteraction).toBeNull();
     });
   });
 
   describe('clear', () => {
     it('clears all artifacts', () => {
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         chunk: { component: 'markdown', props: {} }
       });
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         chunk: { component: 'json', props: {} }
       });
 
-      componentArtifactsStore.clear();
+      interactionsStore.clear();
 
-      expect(componentArtifactsStore.artifacts).toEqual([]);
+      expect(interactionsStore.artifacts).toEqual([]);
     });
 
     it('clears pending interaction', () => {
-      componentArtifactsStore.setPendingInteraction({
+      interactionsStore.setPendingInteraction({
         tool_call_id: 'tc-001',
         tool_name: 'confirm',
         component: 'confirm',
@@ -258,20 +265,20 @@ describe('componentArtifactsStore', () => {
         created_at: Date.now()
       });
 
-      componentArtifactsStore.clear();
+      interactionsStore.clear();
 
-      expect(componentArtifactsStore.pendingInteraction).toBeNull();
+      expect(interactionsStore.pendingInteraction).toBeNull();
     });
 
     it('clears last artifact', () => {
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         chunk: { component: 'markdown', props: {} }
       });
 
-      componentArtifactsStore.clear();
+      interactionsStore.clear();
 
-      expect(componentArtifactsStore.lastArtifact).toBeNull();
+      expect(interactionsStore.lastArtifact).toBeNull();
     });
   });
 
@@ -284,33 +291,35 @@ describe('componentArtifactsStore', () => {
       ];
 
       artifacts.forEach((chunk, idx) => {
-        componentArtifactsStore.addArtifactChunk({
+        interactionsStore.addArtifactChunk({
           artifact_type: 'ui_component',
           seq: idx,
           chunk
         });
       });
 
-      expect(componentArtifactsStore.artifacts).toHaveLength(3);
-      expect(componentArtifactsStore.artifacts[0].component).toBe('markdown');
-      expect(componentArtifactsStore.artifacts[1].component).toBe('code');
-      expect(componentArtifactsStore.artifacts[2].component).toBe('json');
+      expect(interactionsStore.artifacts).toHaveLength(3);
+      const [first, second, third] = interactionsStore.artifacts;
+      expect(first?.component).toBe('markdown');
+      expect(second?.component).toBe('code');
+      expect(third?.component).toBe('json');
     });
 
     it('tracks sequence numbers correctly', () => {
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         seq: 5,
         chunk: { component: 'a', props: {} }
       });
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         seq: 10,
         chunk: { component: 'b', props: {} }
       });
 
-      expect(componentArtifactsStore.artifacts[0].seq).toBe(5);
-      expect(componentArtifactsStore.artifacts[1].seq).toBe(10);
+      const [first, second] = interactionsStore.artifacts;
+      expect(first?.seq).toBe(5);
+      expect(second?.seq).toBe(10);
     });
   });
 
@@ -331,14 +340,14 @@ describe('componentArtifactsStore', () => {
         created_at: Date.now()
       };
 
-      componentArtifactsStore.setPendingInteraction(interaction);
+      interactionsStore.setPendingInteraction(interaction);
 
       // 2. User submits form - clear pending
-      expect(componentArtifactsStore.pendingInteraction).not.toBeNull();
-      componentArtifactsStore.clearPendingInteraction();
+      expect(interactionsStore.pendingInteraction).not.toBeNull();
+      interactionsStore.clearPendingInteraction();
 
       // 3. Server responds with result artifact
-      componentArtifactsStore.addArtifactChunk({
+      interactionsStore.addArtifactChunk({
         artifact_type: 'ui_component',
         chunk: {
           component: 'markdown',
@@ -346,8 +355,8 @@ describe('componentArtifactsStore', () => {
         }
       });
 
-      expect(componentArtifactsStore.pendingInteraction).toBeNull();
-      expect(componentArtifactsStore.artifacts).toHaveLength(1);
+      expect(interactionsStore.pendingInteraction).toBeNull();
+      expect(interactionsStore.artifacts).toHaveLength(1);
     });
   });
 });

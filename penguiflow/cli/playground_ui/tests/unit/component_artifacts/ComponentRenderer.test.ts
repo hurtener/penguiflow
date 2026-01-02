@@ -1,80 +1,92 @@
-import { render, screen } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import ComponentRenderer from '$lib/component_artifacts/ComponentRenderer.svelte';
-import { componentRegistryStore } from '$lib/stores/component_registry.svelte';
+import { render, screen, waitFor } from '@testing-library/svelte';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import ComponentRendererHost from './ComponentRendererHost.svelte';
+import { createComponentRegistryStore } from '$lib/stores';
 
-// Mock the registry store
-vi.mock('$lib/stores/component_registry.svelte', () => ({
-  componentRegistryStore: {
-    getComponent: vi.fn(),
-    enabled: true,
-    components: {}
-  }
-}));
+const componentRegistryStore = createComponentRegistryStore();
+
+const basePayload = {
+  version: '1.0.0',
+  enabled: true,
+  allowlist: [],
+  components: {}
+};
 
 describe('ComponentRenderer', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    componentRegistryStore.reset();
   });
 
   describe('rendering', () => {
-    it('renders markdown component', () => {
-      vi.mocked(componentRegistryStore.getComponent).mockReturnValue({
-        name: 'markdown',
-        interactive: false
+    it('renders markdown component', async () => {
+      componentRegistryStore.setFromPayload({
+        ...basePayload,
+        components: {
+          markdown: { name: 'markdown', interactive: false, description: '', propsSchema: {}, category: 'display' }
+        }
       });
 
-      render(ComponentRenderer, {
+      render(ComponentRendererHost, {
         props: {
+          componentRegistryStore,
           component: 'markdown',
           props: { content: '# Hello World' }
         }
       });
 
-      expect(screen.getByText('Hello World')).toBeInTheDocument();
+      expect(await screen.findByText('Hello World')).toBeInTheDocument();
     });
 
-    it('renders json component with data', () => {
-      vi.mocked(componentRegistryStore.getComponent).mockReturnValue({
-        name: 'json',
-        interactive: false
+    it('renders json component with data', async () => {
+      componentRegistryStore.setFromPayload({
+        ...basePayload,
+        components: {
+          json: { name: 'json', interactive: false, description: '', propsSchema: {}, category: 'display' }
+        }
       });
 
-      render(ComponentRenderer, {
+      render(ComponentRendererHost, {
         props: {
+          componentRegistryStore,
           component: 'json',
           props: { data: { key: 'value' } }
         }
       });
 
-      expect(screen.getByText('key')).toBeInTheDocument();
+      expect(await screen.findByText('key')).toBeInTheDocument();
     });
 
-    it('renders metric component', () => {
-      vi.mocked(componentRegistryStore.getComponent).mockReturnValue({
-        name: 'metric',
-        interactive: false
+    it('renders metric component', async () => {
+      componentRegistryStore.setFromPayload({
+        ...basePayload,
+        components: {
+          metric: { name: 'metric', interactive: false, description: '', propsSchema: {}, category: 'display' }
+        }
       });
 
-      render(ComponentRenderer, {
+      render(ComponentRendererHost, {
         props: {
+          componentRegistryStore,
           component: 'metric',
           props: { value: 42, label: 'Users' }
         }
       });
 
-      expect(screen.getByText('42')).toBeInTheDocument();
-      expect(screen.getByText('Users')).toBeInTheDocument();
+      expect(await screen.findByText('42')).toBeInTheDocument();
+      expect(await screen.findByText('Users')).toBeInTheDocument();
     });
 
-    it('renders code component with syntax', () => {
-      vi.mocked(componentRegistryStore.getComponent).mockReturnValue({
-        name: 'code',
-        interactive: false
+    it('renders code component with syntax', async () => {
+      componentRegistryStore.setFromPayload({
+        ...basePayload,
+        components: {
+          code: { name: 'code', interactive: false, description: '', propsSchema: {}, category: 'display' }
+        }
       });
 
-      render(ComponentRenderer, {
+      render(ComponentRendererHost, {
         props: {
+          componentRegistryStore,
           component: 'code',
           props: {
             code: 'const x = 1;',
@@ -84,18 +96,21 @@ describe('ComponentRenderer', () => {
         }
       });
 
-      expect(screen.getByText('const x = 1;')).toBeInTheDocument();
-      expect(screen.getByText('test.js')).toBeInTheDocument();
+      expect(await screen.findByText('const x = 1;')).toBeInTheDocument();
+      expect(await screen.findByText('test.js')).toBeInTheDocument();
     });
 
-    it('renders callout component', () => {
-      vi.mocked(componentRegistryStore.getComponent).mockReturnValue({
-        name: 'callout',
-        interactive: false
+    it('renders callout component', async () => {
+      componentRegistryStore.setFromPayload({
+        ...basePayload,
+        components: {
+          callout: { name: 'callout', interactive: false, description: '', propsSchema: {}, category: 'display' }
+        }
       });
 
-      render(ComponentRenderer, {
+      render(ComponentRendererHost, {
         props: {
+          componentRegistryStore,
           component: 'callout',
           props: {
             type: 'warning',
@@ -105,53 +120,60 @@ describe('ComponentRenderer', () => {
         }
       });
 
-      expect(screen.getByText('Warning')).toBeInTheDocument();
+      expect(await screen.findByText('Warning')).toBeInTheDocument();
     });
   });
 
   describe('unknown components', () => {
-    it('shows error for unknown component', () => {
-      vi.mocked(componentRegistryStore.getComponent).mockReturnValue(undefined);
-
-      render(ComponentRenderer, {
+    it('shows error for unknown component', async () => {
+      render(ComponentRendererHost, {
         props: {
+          componentRegistryStore,
           component: 'nonexistent',
           props: {}
         }
       });
 
-      expect(screen.getByText(/Unknown component/)).toBeInTheDocument();
-      expect(screen.getByText('nonexistent')).toBeInTheDocument();
+      expect(await screen.findByText(/Failed to render/)).toBeInTheDocument();
+      expect(await screen.findByText(/Renderer not found: nonexistent/)).toBeInTheDocument();
     });
   });
 
   describe('interactive components', () => {
-    it('marks interactive components with special styling', () => {
-      vi.mocked(componentRegistryStore.getComponent).mockReturnValue({
-        name: 'form',
-        interactive: true
+    it('marks interactive components with special styling', async () => {
+      componentRegistryStore.setFromPayload({
+        ...basePayload,
+        components: {
+          form: { name: 'form', interactive: true, description: '', propsSchema: {}, category: 'input' }
+        }
       });
 
-      const { container } = render(ComponentRenderer, {
+      const { container } = render(ComponentRendererHost, {
         props: {
+          componentRegistryStore,
           component: 'form',
           props: { fields: [] }
         }
       });
 
-      expect(container.querySelector('.interactive')).toBeInTheDocument();
+      await waitFor(() => {
+        expect(container.querySelector('.interactive')).toBeInTheDocument();
+      });
     });
 
     it('calls onResult when interactive component submits', async () => {
-      vi.mocked(componentRegistryStore.getComponent).mockReturnValue({
-        name: 'confirm',
-        interactive: true
+      componentRegistryStore.setFromPayload({
+        ...basePayload,
+        components: {
+          confirm: { name: 'confirm', interactive: true, description: '', propsSchema: {}, category: 'input' }
+        }
       });
 
       const onResult = vi.fn();
 
-      render(ComponentRenderer, {
+      render(ComponentRendererHost, {
         props: {
+          componentRegistryStore,
           component: 'confirm',
           props: {
             message: 'Are you sure?',
@@ -162,7 +184,7 @@ describe('ComponentRenderer', () => {
         }
       });
 
-      // Find and click confirm button
+      await screen.findByText('Yes');
       const confirmBtn = screen.getByText('Yes');
       await confirmBtn.click();
 
@@ -173,20 +195,25 @@ describe('ComponentRenderer', () => {
   });
 
   describe('data-attributes', () => {
-    it('sets data-component attribute', () => {
-      vi.mocked(componentRegistryStore.getComponent).mockReturnValue({
-        name: 'markdown',
-        interactive: false
+    it('sets data-component attribute', async () => {
+      componentRegistryStore.setFromPayload({
+        ...basePayload,
+        components: {
+          markdown: { name: 'markdown', interactive: false, description: '', propsSchema: {}, category: 'display' }
+        }
       });
 
-      const { container } = render(ComponentRenderer, {
+      const { container } = render(ComponentRendererHost, {
         props: {
+          componentRegistryStore,
           component: 'markdown',
           props: { content: 'test' }
         }
       });
 
-      expect(container.querySelector('[data-component="markdown"]')).toBeInTheDocument();
+      await waitFor(() => {
+        expect(container.querySelector('[data-component="markdown"]')).toBeInTheDocument();
+      });
     });
   });
 });

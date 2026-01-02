@@ -1,0 +1,17 @@
+{
+  "extends": "./jsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "noUncheckedIndexedAccess": true
+  },
+  "include": [
+    "src/**/*.d.ts",
+    "src/**/*.ts",
+    "src/**/*.js",
+    "src/**/*.svelte",
+    "tests/**/*.ts",
+    "tests/**/*.svelte"
+  ]
+}

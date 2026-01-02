@@ -1,19 +1,11 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import ComponentLab from '$lib/component_artifacts/ComponentLab.svelte';
-import { componentRegistryStore, componentArtifactsStore } from '$lib/stores';
-import type { ComponentRegistryPayload } from '$lib/stores/component_registry.svelte';
+import ComponentLabHost from './ComponentLabHost.svelte';
+import { createComponentRegistryStore, createInteractionsStore } from '$lib/stores';
+import type { ComponentRegistryPayload } from '$lib/types';
 
-// Mock the stores
-vi.mock('$lib/stores', () => ({
-  componentRegistryStore: {
-    components: {},
-    getComponent: vi.fn()
-  },
-  componentArtifactsStore: {
-    lastArtifact: null
-  }
-}));
+const registryStore = createComponentRegistryStore();
+const interactionsStore = createInteractionsStore();
 
 describe('ComponentLab', () => {
   const mockRegistryPayload: ComponentRegistryPayload = {
@@ -54,23 +46,20 @@ describe('ComponentLab', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    // Reset mock store
-    (componentRegistryStore as any).components = mockRegistryPayload.components;
-    (componentRegistryStore.getComponent as any).mockImplementation(
-      (name: string) => mockRegistryPayload.components[name]
-    );
-    (componentArtifactsStore as any).lastArtifact = null;
+    registryStore.reset();
+    registryStore.setFromPayload(mockRegistryPayload);
+    interactionsStore.clear();
   });
 
   describe('component list', () => {
     it('renders component list heading', () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       expect(screen.getByRole('heading', { name: 'Components' })).toBeInTheDocument();
     });
 
     it('displays all registered components', () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       // Use getAllByText since component name appears in list AND detail header
       expect(screen.getAllByText('markdown').length).toBeGreaterThan(0);
@@ -79,7 +68,7 @@ describe('ComponentLab', () => {
     });
 
     it('shows category and interactive flag', () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       // Check for category labels
       const displayLabels = screen.getAllByText(/display/);
@@ -90,7 +79,7 @@ describe('ComponentLab', () => {
     });
 
     it('sorts components by category and name', () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const buttons = screen.getAllByRole('button').filter(
         btn => btn.classList.contains('component-item')
@@ -106,7 +95,7 @@ describe('ComponentLab', () => {
 
   describe('component selection', () => {
     it('selects first component by default', () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       // First sorted component should be selected
       const selectedBtn = screen.getAllByRole('button').find(
@@ -116,7 +105,7 @@ describe('ComponentLab', () => {
     });
 
     it('shows component description when selected', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -125,7 +114,7 @@ describe('ComponentLab', () => {
     });
 
     it('updates active state on selection', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const jsonBtn = screen.getByRole('button', { name: /json/i });
       await fireEvent.click(jsonBtn);
@@ -136,7 +125,7 @@ describe('ComponentLab', () => {
 
   describe('props schema display', () => {
     it('shows props schema section', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -145,7 +134,7 @@ describe('ComponentLab', () => {
     });
 
     it('displays schema as JSON', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -158,7 +147,7 @@ describe('ComponentLab', () => {
 
   describe('example section', () => {
     it('shows example heading', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -167,7 +156,7 @@ describe('ComponentLab', () => {
     });
 
     it('displays example props', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -181,7 +170,7 @@ describe('ComponentLab', () => {
 
   describe('payload editor', () => {
     it('shows payload editor', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -191,7 +180,7 @@ describe('ComponentLab', () => {
     });
 
     it('shows error for invalid JSON', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -203,7 +192,7 @@ describe('ComponentLab', () => {
     });
 
     it('shows error for missing component key', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -217,7 +206,7 @@ describe('ComponentLab', () => {
 
   describe('action buttons', () => {
     it('shows Use Example button', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -226,7 +215,7 @@ describe('ComponentLab', () => {
     });
 
     it('shows Use Last Artifact button', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -235,7 +224,7 @@ describe('ComponentLab', () => {
     });
 
     it('shows Reset button', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -244,7 +233,7 @@ describe('ComponentLab', () => {
     });
 
     it('disables Use Last Artifact when no artifact', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -254,13 +243,16 @@ describe('ComponentLab', () => {
     });
 
     it('enables Use Last Artifact when artifact exists', async () => {
-      (componentArtifactsStore as any).lastArtifact = {
-        id: 'test-1',
-        component: 'markdown',
-        props: { content: 'Last content' }
-      };
+      interactionsStore.addArtifactChunk({
+        artifact_type: 'ui_component',
+        chunk: {
+          id: 'test-1',
+          component: 'markdown',
+          props: { content: 'Last content' }
+        }
+      });
 
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -272,7 +264,7 @@ describe('ComponentLab', () => {
 
   describe('preview section', () => {
     it('shows preview heading', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -281,7 +273,7 @@ describe('ComponentLab', () => {
     });
 
     it('shows fix payload message when invalid', async () => {
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       const markdownBtn = screen.getByRole('button', { name: /markdown/i });
       await fireEvent.click(markdownBtn);
@@ -295,9 +287,9 @@ describe('ComponentLab', () => {
 
   describe('empty state', () => {
     it('shows empty message when no registry', () => {
-      (componentRegistryStore as any).components = {};
+      registryStore.reset();
 
-      render(ComponentLab);
+      render(ComponentLabHost, { props: { componentRegistryStore: registryStore, interactionsStore } });
 
       expect(screen.getByText('No registry loaded.')).toBeInTheDocument();
     });

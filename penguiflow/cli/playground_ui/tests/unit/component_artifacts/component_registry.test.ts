@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { componentRegistryStore, type ComponentRegistryPayload } from '$lib/stores/component_registry.svelte';
+import { createComponentRegistryStore } from '$lib/stores';
+import type { ComponentRegistryPayload } from '$lib/types';
+
+const componentRegistryStore = createComponentRegistryStore();
 
 describe('componentRegistryStore', () => {
   beforeEach(() => {

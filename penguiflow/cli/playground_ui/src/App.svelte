@@ -1,35 +1,42 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    sessionStore,
-    chatStore,
-    timelineStore,
-    agentStore,
-    specStore,
-    setupStore,
-    componentRegistryStore,
-    componentArtifactsStore,
+    initStores,
   } from "$lib/stores";
   import {
     loadMeta,
     loadSpec,
     loadComponentRegistry,
     fetchTrajectory,
-    chatStreamManager,
-    eventStreamManager,
+    createChatStreamManager,
+    createEventStreamManager,
   } from "$lib/services";
-  import { Page } from "$lib/components/layout";
-  import { LeftSidebar, ProjectCard, SpecCard } from "$lib/components/sidebar-left";
+  import { Page } from "$lib/components/containers";
+  import { LeftSidebar, ProjectCard, SpecCard } from "$lib/components/features/sidebar-left";
   // GeneratorCard intentionally disabled - validate/generate not active
-  import { CenterColumn } from "$lib/components/center";
-  import { TrajectoryCard } from "$lib/components/center/trajectory";
-  import { RightSidebar } from "$lib/components/sidebar-right";
-  import { EventsCard } from "$lib/components/sidebar-right/events";
-  import { ConfigCard } from "$lib/components/sidebar-right/config";
-  import { ArtifactsCard } from "$lib/components/sidebar-right/artifacts";
-  import { MobileHeader, MobileBottomPanel } from "$lib/components/mobile";
-  import { ChatCard } from "$lib/components/center/chat";
-  import type { PendingInteraction } from '$lib/stores/component_artifacts.svelte';
+  import { CenterColumn } from "$lib/components/features/center";
+  import { TrajectoryCard } from "$lib/components/features/trajectory";
+  import { RightSidebar } from "$lib/components/features/sidebar-right";
+  import { EventsCard } from "$lib/components/features/sidebar-right/events";
+  import { ConfigCard } from "$lib/components/features/sidebar-right/config";
+  import { ArtifactsCard } from "$lib/components/features/sidebar-right/artifacts";
+  import { MobileHeader, MobileBottomPanel } from "$lib/components/features/mobile";
+  import { ChatCard } from "$lib/components/features/chat";
+  import type { ChatMessage, PendingInteraction } from '$lib/types';
+
+  const stores = initStores();
+  const {
+    sessionStore,
+    chatStore,
+    trajectoryStore,
+    agentStore,
+    specStore,
+    setupStore,
+    componentRegistryStore,
+    interactionsStore,
+  } = stores;
+  const chatStreamManager = createChatStreamManager(stores);
+  const eventStreamManager = createEventStreamManager(stores);
 
   // Reference to chat body for auto-scrolling
   let chatBodyEl = $state<HTMLDivElement | null>(null);
@@ -46,7 +53,7 @@
   // Auto-scroll to bottom when new messages arrive
   $effect(() => {
     const _msgCount = chatStore.messages.length;
-    const streamingMsg = chatStore.messages.find((m) => m.isStreaming);
+    const streamingMsg = chatStore.messages.find((m: ChatMessage) => m.isStreaming);
     const _streamingText = streamingMsg ? `${streamingMsg.text}${streamingMsg.observations ?? ""}` : "";
 
     if (chatBodyEl) {
@@ -104,8 +111,8 @@
     const { toolContext, llmContext } = contexts;
 
     sessionStore.isSending = true;
-    timelineStore.clearArtifacts();
-    componentArtifactsStore.clearPendingInteraction();
+    trajectoryStore.clearArtifacts();
+    interactionsStore.clearPendingInteraction();
     chatStore.addUserMessage(query);
     chatStore.clearInput();
 
@@ -120,7 +127,7 @@
           if (traceId) {
             const payload = await fetchTrajectory(traceId, sessionStore.sessionId);
             if (payload && sessionStore.activeTraceId === traceId) {
-              timelineStore.setFromPayload(payload);
+              trajectoryStore.setFromPayload(payload);
             }
             eventStreamManager.start(traceId, sessionStore.sessionId);
           }
@@ -143,7 +150,7 @@
     // Check resume_token BEFORE clearing state
     if (!interaction.resume_token) {
       setupStore.error = 'Cannot submit: session expired or interrupted. Please resend your message.';
-      componentArtifactsStore.clearPendingInteraction();
+      interactionsStore.clearPendingInteraction();
       return;
     }
 
@@ -159,8 +166,8 @@
     const { toolContext } = contexts;
 
     sessionStore.isSending = true;
-    timelineStore.clearArtifacts();
-    componentArtifactsStore.clearPendingInteraction();
+    trajectoryStore.clearArtifacts();
+    interactionsStore.clearPendingInteraction();
 
     chatStreamManager.resumeAgui(
       interaction,
@@ -173,7 +180,7 @@
           if (traceId) {
             const payload = await fetchTrajectory(traceId, sessionStore.sessionId);
             if (payload && sessionStore.activeTraceId === traceId) {
-              timelineStore.setFromPayload(payload);
+              trajectoryStore.setFromPayload(payload);
             }
             eventStreamManager.start(traceId, sessionStore.sessionId);
           }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { applyJsonPatch } from '$lib/agui/patch';
+import { applyJsonPatch } from '$lib/utils/json-patch';
 
 describe('applyJsonPatch', () => {
   it('applies JSON Patch operations', () => {

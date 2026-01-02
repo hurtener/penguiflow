@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { BaseEvent } from '@ag-ui/core';
-import { artifactsStore, chatStore } from '$lib/stores';
+import {
+  createArtifactsStore,
+  createChatStore,
+  createEventsStore,
+  createTrajectoryStore,
+  createInteractionsStore
+} from '$lib/stores';
 
 const runAgentMock = vi.fn();
 
@@ -11,12 +17,28 @@ vi.mock('@ag-ui/client', () => {
   return { HttpAgent: HttpAgentMock };
 });
 
-import { chatStreamManager } from '$lib/services/chat-stream';
+import { createChatStreamManager } from '$lib/services/chat-stream';
 
 describe('chatStreamManager (AG-UI)', () => {
+  const chatStore = createChatStore();
+  const artifactsStore = createArtifactsStore();
+  const eventsStore = createEventsStore();
+  const trajectoryStore = createTrajectoryStore();
+  const interactionsStore = createInteractionsStore();
+  const chatStreamManager = createChatStreamManager({
+    chatStore,
+    eventsStore,
+    trajectoryStore,
+    artifactsStore,
+    interactionsStore
+  });
+
   beforeEach(() => {
     chatStore.clear();
     artifactsStore.clear();
+    eventsStore.clear();
+    trajectoryStore.clear();
+    interactionsStore.clear();
     runAgentMock.mockReset();
   });
 
