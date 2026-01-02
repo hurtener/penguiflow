@@ -11,6 +11,7 @@ from penguiflow.catalog import build_catalog
 from penguiflow.artifacts import ArtifactRetentionConfig, InMemoryArtifactStore
 from penguiflow.planner import ReactPlanner{% if reflection_enabled %}, ReflectionConfig{% if reflection_criteria %}, ReflectionCriteria{% endif %}{% endif %} 
 from penguiflow.planner.memory import MemoryBudget, MemoryIsolation, ShortTermMemoryConfig
+from penguiflow.rich_output import DEFAULT_ALLOWLIST, RichOutputConfig, attach_rich_output_nodes, get_runtime
 
 from .config import Config
 from .tools import build_catalog_bundle
@@ -33,14 +34,29 @@ class PlannerBundle:
     registry: Any
 
 
-def _build_system_prompt(config: Config) -> str:
-    """Build the system prompt, optionally including memory context."""
+def _build_system_prompt(config: Config, rich_output_prompt: str = "") -> str:
+    """Build the system prompt, optionally including memory and rich output context."""
     prompt = SYSTEM_PROMPT_EXTRA
 {% if include_memory_prompt %}
     if config.memory_enabled:
         prompt = prompt + "\n\n" + MEMORY_PROMPT
 {% endif %}
+    if rich_output_prompt:
+        prompt = prompt + "\n\n" + rich_output_prompt
     return prompt
+
+
+def _build_rich_output_config(config: Config) -> RichOutputConfig:
+    """Build rich output config for component rendering."""
+    allowlist = config.rich_output_allowlist or list(DEFAULT_ALLOWLIST)
+    return RichOutputConfig(
+        enabled=config.rich_output_enabled,
+        allowlist=allowlist,
+        include_prompt_catalog=config.rich_output_include_prompt_catalog,
+        include_prompt_examples=config.rich_output_include_prompt_examples,
+        max_payload_bytes=config.rich_output_max_payload_bytes,
+        max_total_bytes=config.rich_output_max_total_bytes,
+    )
 
 
 def _build_short_term_memory(config: Config) -> ShortTermMemoryConfig | None:
@@ -99,6 +115,8 @@ def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
     """Build ReactPlanner with generated tool catalog."""
 
     nodes, registry = build_catalog_bundle()
+    rich_output_config = _build_rich_output_config(config)
+    nodes.extend(attach_rich_output_nodes(registry, config=rich_output_config))
     catalog = build_catalog(nodes, registry)
 {% if has_external_tools %}
     # Connect external tool sources and merge their specs using the current event loop
@@ -141,10 +159,12 @@ def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
 
     artifact_store = _build_artifact_store(config)
 
+    rich_output_prompt = get_runtime().prompt_section()
+
     planner = ReactPlanner(
         llm=config.llm_model,
         catalog=catalog,
-        system_prompt_extra=_build_system_prompt(config),
+        system_prompt_extra=_build_system_prompt(config, rich_output_prompt),
         max_iters=config.planner_max_iters,
         hop_budget=config.planner_hop_budget,
         absolute_max_parallel=config.planner_absolute_max_parallel,

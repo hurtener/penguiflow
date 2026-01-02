@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { agentStore } from '$lib/stores/agent.svelte';
+import { createAgentStore } from '$lib/stores';
 import type { MetaResponse } from '$lib/types';
+
+const agentStore = createAgentStore();
 
 describe('agentStore', () => {
   beforeEach(() => {
@@ -62,8 +64,9 @@ describe('agentStore', () => {
       agentStore.setFromResponse(response);
 
       expect(agentStore.plannerConfig).toHaveLength(3);
-      expect(agentStore.plannerConfig.find(c => c.label === 'max_hops')?.value).toBe(10);
-      expect(agentStore.plannerConfig.find(c => c.label === 'model')?.value).toBe('gpt-4');
+      const config = agentStore.plannerConfig as Array<{ label: string; value: unknown }>;
+      expect(config.find((c) => c.label === 'max_hops')?.value).toBe(10);
+      expect(config.find((c) => c.label === 'model')?.value).toBe('gpt-4');
     });
 
     it('sets services', () => {
@@ -107,7 +110,8 @@ describe('agentStore', () => {
         desc: 'Web search',
         tags: ['retrieval']
       });
-      expect(agentStore.catalog[1].tags).toEqual([]);
+      const second = agentStore.catalog[1]!;
+      expect(second.tags).toEqual([]);
     });
 
     it('handles empty response', () => {

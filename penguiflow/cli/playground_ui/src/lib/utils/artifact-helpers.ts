@@ -30,5 +30,5 @@ export function getMimeIcon(mime: string | null): string {
 export function getMimeLabel(mime: string | null): string {
   if (!mime) return 'file';
   const parts = mime.split('/');
-  return parts[1] || parts[0];
+  return parts[1] ?? parts[0] ?? 'file';
 }

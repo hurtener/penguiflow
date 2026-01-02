@@ -16,6 +16,28 @@ from .new import _normalise_package_name, run_new
 from .spec import Spec, TypeExpression, load_spec
 from .spec_errors import SpecValidationError
 
+_DEFAULT_RICH_OUTPUT_ALLOWLIST = [
+    "markdown",
+    "json",
+    "echarts",
+    "mermaid",
+    "plotly",
+    "datagrid",
+    "metric",
+    "report",
+    "grid",
+    "tabs",
+    "accordion",
+    "code",
+    "latex",
+    "callout",
+    "image",
+    "video",
+    "form",
+    "confirm",
+    "select_option",
+]
+
 
 class GenerateResult(NamedTuple):
     """Result of running `penguiflow generate`."""
@@ -161,7 +183,21 @@ def _sample_value(expr: TypeExpression) -> str:
 
 
 def _slugify_name(value: str) -> str:
-    return value.replace("-", "_")
+    """Convert a name to a valid Python identifier (snake_case)."""
+    if not value:
+        return "unnamed"
+    # Convert CamelCase to snake_case
+    result = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", value)
+    result = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", result)
+    result = result.lower()
+    # Replace non-alphanumeric with underscores
+    result = re.sub(r"[^a-z0-9]+", "_", result)
+    # Remove leading/trailing underscores and collapse multiples
+    result = re.sub(r"_+", "_", result).strip("_")
+    # Ensure starts with letter (valid Python identifier)
+    if result and not result[0].isalpha():
+        result = "node_" + result
+    return result if result else "unnamed"
 
 
 def _planning_hints(spec: Spec) -> dict[str, Any] | None:
@@ -247,7 +283,7 @@ def _flow_renders(spec: Spec) -> list[FlowRender]:
             node_renders.append(
                 FlowNodeRender(
                     name=name,
-                    var_name=name,
+                    var_name=_slugify_name(name),
                     policy_kwargs=_render_policy_kwargs(getattr(node, "policy", None)),
                     input_type=input_type,
                     output_type=output_type,
@@ -770,6 +806,8 @@ def _generate_config(
     stm_isolation = stm.isolation if stm else None
     artifact_cfg = spec.planner.artifact_store
     artifact_retention = artifact_cfg.retention
+    rich_output = spec.planner.rich_output
+    rich_allowlist = rich_output.allowlist or _DEFAULT_RICH_OUTPUT_ALLOWLIST
 
     content = _render_template(
         "config.py.jinja",
@@ -796,6 +834,12 @@ def _generate_config(
             "artifact_store_max_artifacts_per_trace": artifact_retention.max_artifacts_per_trace,
             "artifact_store_max_artifacts_per_session": artifact_retention.max_artifacts_per_session,
             "artifact_store_cleanup_strategy": artifact_retention.cleanup_strategy,
+            "rich_output_enabled": bool(rich_output.enabled),
+            "rich_output_allowlist": repr(list(rich_allowlist)),
+            "rich_output_include_prompt_catalog": bool(rich_output.include_prompt_catalog),
+            "rich_output_include_prompt_examples": bool(rich_output.include_prompt_examples),
+            "rich_output_max_payload_bytes": rich_output.max_payload_bytes,
+            "rich_output_max_total_bytes": rich_output.max_total_bytes,
             "short_term_memory_enabled": bool(stm and stm.enabled),
             "short_term_memory_strategy": repr(stm.strategy if stm else "none"),
             "short_term_memory_full_zone_turns": stm_budget.full_zone_turns if stm_budget else 5,
@@ -848,6 +892,9 @@ def _generate_env_example(
     stm_budget = stm.budget if stm else None
     artifact_cfg = spec.planner.artifact_store
     artifact_retention = artifact_cfg.retention
+    rich_output = spec.planner.rich_output
+    rich_allowlist = rich_output.allowlist or _DEFAULT_RICH_OUTPUT_ALLOWLIST
+    rich_allowlist_csv = ",".join(rich_allowlist)
 
     content = _render_template(
         "env.example.jinja",
@@ -872,6 +919,12 @@ def _generate_env_example(
             "artifact_store_max_artifacts_per_trace": artifact_retention.max_artifacts_per_trace,
             "artifact_store_max_artifacts_per_session": artifact_retention.max_artifacts_per_session,
             "artifact_store_cleanup_strategy": artifact_retention.cleanup_strategy,
+            "rich_output_enabled": str(bool(rich_output.enabled)).lower(),
+            "rich_output_allowlist": rich_allowlist_csv,
+            "rich_output_include_prompt_catalog": str(bool(rich_output.include_prompt_catalog)).lower(),
+            "rich_output_include_prompt_examples": str(bool(rich_output.include_prompt_examples)).lower(),
+            "rich_output_max_payload_bytes": rich_output.max_payload_bytes,
+            "rich_output_max_total_bytes": rich_output.max_total_bytes,
             "short_term_memory_enabled": str(bool(stm and stm.enabled)).lower(),
             "short_term_memory_strategy": stm.strategy if stm else "none",
             "short_term_memory_full_zone_turns": stm_budget.full_zone_turns if stm_budget else 5,
@@ -966,6 +1019,7 @@ def _scaffold_project(
         with_streaming=flags.streaming,
         with_hitl=flags.hitl,
         with_a2a=flags.a2a,
+        with_rich_output=bool(spec.planner.rich_output.enabled),
         no_memory=not flags.memory,
     )
     project_dir = (output_dir or Path.cwd()) / spec.agent.name

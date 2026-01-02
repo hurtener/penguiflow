@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import MobileBottomPanel from '$lib/components/mobile/MobileBottomPanel.svelte';
+import MobileBottomPanel from '$lib/components/features/mobile/MobileBottomPanel.svelte';
 
 describe('MobileBottomPanel component', () => {
   beforeEach(() => {

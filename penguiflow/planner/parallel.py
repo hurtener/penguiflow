@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -106,7 +106,7 @@ async def execute_parallel_plan(
     failure_entries: list[dict[str, Any]] = []
     pause_result: PlannerPause | None = None
 
-    for (_, spec, parsed_args), outcome in zip(entries, results, strict=False):
+    for branch_index, ((_, spec, parsed_args), outcome) in enumerate(zip(entries, results, strict=False)):
         tracker.record_hop()
         payload: dict[str, Any] = {
             "node": spec.name,
@@ -125,6 +125,17 @@ async def execute_parallel_plan(
             payload["observation"] = obs_json
             success_payloads.append(obs_json)
             llm_payload["observation"] = _redact_artifacts(spec.out_model, obs_json)
+            registry = getattr(planner, "_artifact_registry", None)
+            if registry is not None:
+                registry.register_tool_artifacts(
+                    spec.name,
+                    spec.out_model,
+                    obs_json,
+                    step_index=len(trajectory.steps),
+                    metadata_extra={"parallel_branch": branch_index},
+                )
+                if isinstance(trajectory.metadata, MutableMapping):
+                    registry.write_snapshot(trajectory.metadata)
             if artifact_collector is not None:
                 artifact_collector.collect(spec.name, spec.out_model, obs_json)
             if source_collector is not None:

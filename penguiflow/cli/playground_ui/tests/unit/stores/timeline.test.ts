@@ -1,21 +1,23 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { timelineStore } from '$lib/stores/timeline.svelte';
+import { createTrajectoryStore } from '$lib/stores';
 import type { TrajectoryPayload } from '$lib/types';
 
-describe('timelineStore', () => {
+const trajectoryStore = createTrajectoryStore();
+
+describe('trajectoryStore', () => {
   beforeEach(() => {
-    timelineStore.clear();
+    trajectoryStore.clear();
   });
 
   describe('initial state', () => {
     it('starts empty', () => {
-      expect(timelineStore.isEmpty).toBe(true);
-      expect(timelineStore.steps).toEqual([]);
+      expect(trajectoryStore.isEmpty).toBe(true);
+      expect(trajectoryStore.steps).toEqual([]);
     });
 
     it('has no artifacts', () => {
-      expect(timelineStore.hasArtifacts).toBe(false);
-      expect(timelineStore.artifactStreams).toEqual({});
+      expect(trajectoryStore.hasArtifacts).toBe(false);
+      expect(trajectoryStore.artifactStreams).toEqual({});
     });
   });
 
@@ -25,32 +27,33 @@ describe('timelineStore', () => {
         steps: [
           {
             action: { next_node: 'search', thought: 'Looking up info' },
-            observation: 'Found results',
+            observation: { text: 'Found results' },
             latency_ms: 100
           },
           {
             action: { plan: [{ node: 'answer' }], thought: 'Responding' },
-            observation: 'Done'
+            observation: { text: 'Done' }
           }
         ]
       };
 
-      timelineStore.setFromPayload(payload);
+      trajectoryStore.setFromPayload(payload);
 
-      expect(timelineStore.isEmpty).toBe(false);
-      expect(timelineStore.steps).toHaveLength(2);
+      expect(trajectoryStore.isEmpty).toBe(false);
+      expect(trajectoryStore.steps).toHaveLength(2);
 
-      expect(timelineStore.steps[0].name).toBe('search');
-      expect(timelineStore.steps[0].thought).toBe('Looking up info');
-      expect(timelineStore.steps[0].result).toBe('Found results');
-      expect(timelineStore.steps[0].latencyMs).toBe(100);
+      const [first, second] = trajectoryStore.steps;
+      expect(first?.name).toBe('search');
+      expect(first?.thought).toBe('Looking up info');
+      expect(first?.result).toEqual({ text: 'Found results' });
+      expect(first?.latencyMs).toBe(100);
 
-      expect(timelineStore.steps[1].name).toBe('answer');
+      expect(second?.name).toBe('answer');
     });
 
     it('handles empty payload', () => {
-      timelineStore.setFromPayload({} as TrajectoryPayload);
-      expect(timelineStore.steps).toEqual([]);
+      trajectoryStore.setFromPayload({} as TrajectoryPayload);
+      expect(trajectoryStore.steps).toEqual([]);
     });
 
     it('sets error status for failed steps', () => {
@@ -58,14 +61,15 @@ describe('timelineStore', () => {
         steps: [
           {
             action: { next_node: 'tool' },
-            error: 'Tool failed'
+            error: true
           }
         ]
       };
 
-      timelineStore.setFromPayload(payload);
+      trajectoryStore.setFromPayload(payload);
 
-      expect(timelineStore.steps[0].status).toBe('error');
+      const [first] = trajectoryStore.steps;
+      expect(first?.status).toBe('error');
     });
 
     it('extracts reflection score from metadata', () => {
@@ -78,34 +82,35 @@ describe('timelineStore', () => {
         ]
       };
 
-      timelineStore.setFromPayload(payload);
+      trajectoryStore.setFromPayload(payload);
 
-      expect(timelineStore.steps[0].reflectionScore).toBe(0.85);
+      const [first] = trajectoryStore.steps;
+      expect(first?.reflectionScore).toBe(0.85);
     });
   });
 
   describe('artifact streams', () => {
     it('adds artifact chunks', () => {
-      timelineStore.addArtifactChunk('stream-1', { data: 'chunk1' });
-      timelineStore.addArtifactChunk('stream-1', { data: 'chunk2' });
+      trajectoryStore.addArtifactChunk('stream-1', { data: 'chunk1' });
+      trajectoryStore.addArtifactChunk('stream-1', { data: 'chunk2' });
 
-      expect(timelineStore.hasArtifacts).toBe(true);
-      expect(timelineStore.artifactStreams['stream-1']).toHaveLength(2);
+      expect(trajectoryStore.hasArtifacts).toBe(true);
+      expect(trajectoryStore.artifactStreams['stream-1']).toHaveLength(2);
     });
 
     it('handles multiple streams', () => {
-      timelineStore.addArtifactChunk('stream-a', { a: 1 });
-      timelineStore.addArtifactChunk('stream-b', { b: 2 });
+      trajectoryStore.addArtifactChunk('stream-a', { a: 1 });
+      trajectoryStore.addArtifactChunk('stream-b', { b: 2 });
 
-      expect(Object.keys(timelineStore.artifactStreams)).toHaveLength(2);
+      expect(Object.keys(trajectoryStore.artifactStreams)).toHaveLength(2);
     });
 
     it('clears artifacts', () => {
-      timelineStore.addArtifactChunk('stream-1', { data: 'test' });
-      timelineStore.clearArtifacts();
+      trajectoryStore.addArtifactChunk('stream-1', { data: 'test' });
+      trajectoryStore.clearArtifacts();
 
-      expect(timelineStore.hasArtifacts).toBe(false);
-      expect(timelineStore.artifactStreams).toEqual({});
+      expect(trajectoryStore.hasArtifacts).toBe(false);
+      expect(trajectoryStore.artifactStreams).toEqual({});
     });
   });
 
@@ -115,13 +120,13 @@ describe('timelineStore', () => {
         steps: [{ action: { next_node: 'test' } }]
       };
 
-      timelineStore.setFromPayload(payload);
-      timelineStore.addArtifactChunk('stream', { data: 'test' });
+      trajectoryStore.setFromPayload(payload);
+      trajectoryStore.addArtifactChunk('stream', { data: 'test' });
 
-      timelineStore.clear();
+      trajectoryStore.clear();
 
-      expect(timelineStore.isEmpty).toBe(true);
-      expect(timelineStore.hasArtifacts).toBe(false);
+      expect(trajectoryStore.isEmpty).toBe(true);
+      expect(trajectoryStore.hasArtifacts).toBe(false);
     });
   });
 });

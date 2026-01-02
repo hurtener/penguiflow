@@ -774,3 +774,67 @@ def test_memory_prompt_can_be_omitted_when_disabled() -> None:
 
 def test_memory_prompt_validator_allows_none() -> None:
     assert PlannerSpec._non_empty_memory_prompt(None) is None
+
+
+def test_rich_output_requires_hitl_for_interactive_allowlist(tmp_path: Path) -> None:
+    content = dedent(
+        """\
+        agent:
+          name: rich-output-agent
+          description: Demo
+          template: react
+          flags:
+            memory: false
+            hitl: false
+        tools:
+          - name: fetch
+            description: Fetch data
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: Hello
+          rich_output:
+            enabled: true
+            allowlist: ["form"]
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    with pytest.raises(SpecValidationError) as excinfo:
+        load_spec(path)
+
+    assert "Interactive rich output components require agent.flags.hitl" in str(excinfo.value)
+
+
+def test_rich_output_allows_passive_components_without_hitl(tmp_path: Path) -> None:
+    content = dedent(
+        """\
+        agent:
+          name: rich-output-agent
+          description: Demo
+          template: react
+          flags:
+            memory: false
+            hitl: false
+        tools:
+          - name: fetch
+            description: Fetch data
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: Hello
+          rich_output:
+            enabled: true
+            allowlist: ["markdown", "json"]
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    spec = load_spec(path)
+    assert spec.planner.rich_output.enabled is True

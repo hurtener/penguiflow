@@ -95,7 +95,7 @@ def test_generated_project_tests_pass(tmp_path: Path, template: str) -> None:
     ("template", "flags"),
     [
         ("minimal", {"with_streaming": True, "with_hitl": True}),
-        ("react", {"with_streaming": True, "with_a2a": True}),
+        ("react", {"with_streaming": True, "with_a2a": True, "with_rich_output": True}),
         ("parallel", {"no_memory": True}),
         ("flow", {"with_streaming": True, "with_a2a": True}),
         ("controller", {"with_streaming": True, "no_memory": True}),

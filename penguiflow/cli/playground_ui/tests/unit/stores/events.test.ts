@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { eventsStore } from '$lib/stores/events.svelte';
+import { createEventsStore } from '$lib/stores';
+
+const eventsStore = createEventsStore();
 
 describe('eventsStore', () => {
   beforeEach(() => {
@@ -29,15 +31,17 @@ describe('eventsStore', () => {
 
       expect(eventsStore.isEmpty).toBe(false);
       expect(eventsStore.events).toHaveLength(1);
-      expect(eventsStore.events[0].event).toBe('STEP_START');
+      const first = eventsStore.events[0]!;
+      expect(first.event).toBe('STEP_START');
     });
 
     it('prepends new events', () => {
       eventsStore.addEvent({ step: 1 }, 'STEP_START');
       eventsStore.addEvent({ step: 2 }, 'STEP_END');
 
-      expect(eventsStore.events[0].event).toBe('STEP_END');
-      expect(eventsStore.events[1].event).toBe('STEP_START');
+      const [first, second] = eventsStore.events;
+      expect(first?.event).toBe('STEP_END');
+      expect(second?.event).toBe('STEP_START');
     });
 
     it('prevents duplicate events', () => {
@@ -53,7 +57,7 @@ describe('eventsStore', () => {
       eventsStore.addEvent({ step: 1, ts: 1 }, 'STEP_START');
       eventsStore.addEvent({ step: 2, ts: 2 }, 'STEP_END');
 
-      const ids = eventsStore.events.map(e => e.id);
+      const ids = (eventsStore.events as Array<{ id: string }>).map((evt) => evt.id);
       expect(new Set(ids).size).toBe(ids.length);
     });
 

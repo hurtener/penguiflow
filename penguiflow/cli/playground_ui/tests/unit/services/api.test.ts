@@ -22,7 +22,7 @@ describe('api service', () => {
         tools: [{ name: 'tool1' }]
       };
 
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: () => Promise.resolve(mockData)
       });
@@ -34,7 +34,7 @@ describe('api service', () => {
     });
 
     it('returns null on error', async () => {
-      global.fetch = vi.fn().mockResolvedValue({ ok: false });
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: false });
 
       const result = await loadMeta();
 
@@ -42,7 +42,7 @@ describe('api service', () => {
     });
 
     it('returns null on network failure', async () => {
-      global.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
+      globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
 
       const result = await loadMeta();
 
@@ -57,7 +57,7 @@ describe('api service', () => {
         valid: true
       };
 
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: () => Promise.resolve(mockData)
       });
@@ -69,7 +69,7 @@ describe('api service', () => {
     });
 
     it('returns null on error', async () => {
-      global.fetch = vi.fn().mockResolvedValue({ ok: false });
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: false });
 
       const result = await loadSpec();
 
@@ -81,7 +81,7 @@ describe('api service', () => {
     it('validates spec successfully', async () => {
       const mockResult = { valid: true };
 
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: () => Promise.resolve(mockResult)
       });
@@ -102,7 +102,7 @@ describe('api service', () => {
         errors: [{ message: 'Invalid', line: 1 }]
       };
 
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: () => Promise.resolve(mockResult)
       });
@@ -114,7 +114,7 @@ describe('api service', () => {
     });
 
     it('returns null on exception', async () => {
-      global.fetch = vi.fn().mockRejectedValue(new Error('Failed'));
+      globalThis.fetch = vi.fn().mockRejectedValue(new Error('Failed'));
 
       const result = await validateSpec('test');
 
@@ -124,7 +124,7 @@ describe('api service', () => {
 
   describe('generateProject', () => {
     it('returns true on success', async () => {
-      global.fetch = vi.fn().mockResolvedValue({ ok: true });
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: true });
 
       const result = await generateProject('name: test');
 
@@ -139,7 +139,7 @@ describe('api service', () => {
     it('returns errors on failure', async () => {
       const errors = [{ message: 'Generation failed', line: 5 }];
 
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: false,
         json: () => Promise.resolve(errors)
       });
@@ -150,7 +150,7 @@ describe('api service', () => {
     });
 
     it('returns null on exception', async () => {
-      global.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
+      globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
 
       const result = await generateProject('test');
 
@@ -164,7 +164,7 @@ describe('api service', () => {
         steps: [{ action: { next_node: 'test' } }]
       };
 
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: () => Promise.resolve(mockData)
       });
@@ -178,7 +178,7 @@ describe('api service', () => {
     });
 
     it('encodes session id in URL', async () => {
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: () => Promise.resolve({})
       });
@@ -191,7 +191,7 @@ describe('api service', () => {
     });
 
     it('returns null on error', async () => {
-      global.fetch = vi.fn().mockResolvedValue({ ok: false });
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: false });
 
       const result = await fetchTrajectory('trace', 'session');
 
@@ -253,16 +253,16 @@ describe('api service', () => {
       mockRevokeObjectURL = vi.fn();
 
       // Mock DOM APIs
-      global.document.createElement = mockCreateElement;
-      global.document.body.appendChild = mockAppendChild;
-      global.document.body.removeChild = mockRemoveChild;
-      global.URL.createObjectURL = mockCreateObjectURL;
-      global.URL.revokeObjectURL = mockRevokeObjectURL;
+      globalThis.document.createElement = mockCreateElement as typeof document.createElement;
+      globalThis.document.body.appendChild = mockAppendChild as typeof document.body.appendChild;
+      globalThis.document.body.removeChild = mockRemoveChild as typeof document.body.removeChild;
+      globalThis.URL.createObjectURL = mockCreateObjectURL as typeof URL.createObjectURL;
+      globalThis.URL.revokeObjectURL = mockRevokeObjectURL as typeof URL.revokeObjectURL;
     });
 
     it('fetches artifact with correct headers', async () => {
       const mockBlob = new Blob(['test content'], { type: 'application/pdf' });
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         blob: () => Promise.resolve(mockBlob),
         headers: new Headers({ 'Content-Disposition': 'attachment; filename="test.pdf"' })
@@ -277,7 +277,7 @@ describe('api service', () => {
 
     it('triggers download with Content-Disposition filename', async () => {
       const mockBlob = new Blob(['test content'], { type: 'application/pdf' });
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         blob: () => Promise.resolve(mockBlob),
         headers: new Headers({ 'Content-Disposition': 'attachment; filename="report.pdf"' })
@@ -291,7 +291,7 @@ describe('api service', () => {
 
     it('uses provided filename over Content-Disposition', async () => {
       const mockBlob = new Blob(['test content'], { type: 'application/pdf' });
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         blob: () => Promise.resolve(mockBlob),
         headers: new Headers({ 'Content-Disposition': 'attachment; filename="server.pdf"' })
@@ -304,7 +304,7 @@ describe('api service', () => {
 
     it('falls back to artifact ID when no filename available', async () => {
       const mockBlob = new Blob(['test content'], { type: 'application/pdf' });
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         blob: () => Promise.resolve(mockBlob),
         headers: new Headers()
@@ -316,7 +316,7 @@ describe('api service', () => {
     });
 
     it('throws error on failed response', async () => {
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: false,
         status: 404,
         statusText: 'Not Found'
@@ -329,7 +329,7 @@ describe('api service', () => {
 
     it('cleans up object URL after download', async () => {
       const mockBlob = new Blob(['test content'], { type: 'application/pdf' });
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         blob: () => Promise.resolve(mockBlob),
         headers: new Headers()
@@ -342,7 +342,7 @@ describe('api service', () => {
 
     it('removes anchor element after download', async () => {
       const mockBlob = new Blob(['test content'], { type: 'application/pdf' });
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         blob: () => Promise.resolve(mockBlob),
         headers: new Headers()
@@ -366,7 +366,7 @@ describe('api service', () => {
         source: { tool: 'pdf_generator' }
       };
 
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: () => Promise.resolve(mockMeta)
       });
@@ -380,7 +380,7 @@ describe('api service', () => {
     });
 
     it('returns null on error response', async () => {
-      global.fetch = vi.fn().mockResolvedValue({
+      globalThis.fetch = vi.fn().mockResolvedValue({
         ok: false,
         status: 404
       });
@@ -391,7 +391,7 @@ describe('api service', () => {
     });
 
     it('returns null on network failure', async () => {
-      global.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
+      globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
 
       const result = await getArtifactMeta('artifact-123', 'session-456');
 

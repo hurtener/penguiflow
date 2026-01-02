@@ -8,9 +8,20 @@ from dataclasses import dataclass
 from typing import Any
 
 from penguiflow.planner import PlannerEventCallback, ReactPlanner
+from penguiflow.rich_output import DEFAULT_ALLOWLIST, RichOutputConfig, attach_rich_output_nodes, get_runtime
 
 from .config import Config
 from .tools import build_catalog_bundle
+
+
+SYSTEM_PROMPT_EXTRA = ""
+
+
+def _build_system_prompt(rich_output_prompt: str) -> str:
+    prompt = SYSTEM_PROMPT_EXTRA
+    if rich_output_prompt:
+        prompt = f"{prompt}\n\n{rich_output_prompt}" if prompt else rich_output_prompt
+    return prompt
 
 
 @dataclass
@@ -73,6 +84,18 @@ class ScriptedLLM:
         return self._scripted.pop(0)
 
 
+def _build_rich_output_config(config: Config) -> RichOutputConfig:
+    allowlist = config.rich_output_allowlist or list(DEFAULT_ALLOWLIST)
+    return RichOutputConfig(
+        enabled=config.rich_output_enabled,
+        allowlist=allowlist,
+        include_prompt_catalog=config.rich_output_include_prompt_catalog,
+        include_prompt_examples=config.rich_output_include_prompt_examples,
+        max_payload_bytes=config.rich_output_max_payload_bytes,
+        max_total_bytes=config.rich_output_max_total_bytes,
+    )
+
+
 def build_planner(
     config: Config,
     *,
@@ -88,13 +111,16 @@ def build_planner(
     Prompt tweaks: pass system_prompt_extra (string) or planning_hints (mapping) to ReactPlanner to append
     guidance without editing penguiflow.planner.prompts.
     """
-    del config  # kept for future expansion
     nodes, registry = build_catalog_bundle()
+    rich_output_config = _build_rich_output_config(config)
+    nodes.extend(attach_rich_output_nodes(registry, config=rich_output_config))
+    rich_output_prompt = get_runtime().prompt_section()
     llm_client = ScriptedLLM()
     planner = ReactPlanner(
         llm_client=llm_client,
         nodes=nodes,
         registry=registry,
+        system_prompt_extra=_build_system_prompt(rich_output_prompt),
         event_callback=event_callback,
     )
     return PlannerBundle(planner=planner, llm_client=llm_client)

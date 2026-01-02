@@ -1,19 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, fireEvent, waitFor } from '@testing-library/svelte';
-import ArtifactItem from '$lib/components/sidebar-right/artifacts/ArtifactItem.svelte';
+import ArtifactItemHost from './ArtifactItemHost.svelte';
 import type { ArtifactRef } from '$lib/types';
 import * as api from '$lib/services/api';
 
 // Mock the api module
 vi.mock('$lib/services/api', () => ({
   downloadArtifact: vi.fn()
-}));
-
-// Mock sessionStore
-vi.mock('$lib/stores', () => ({
-  sessionStore: {
-    sessionId: 'test-session-123'
-  }
 }));
 
 describe('ArtifactItem component', () => {
@@ -32,7 +25,7 @@ describe('ArtifactItem component', () => {
 
   describe('rendering', () => {
     it('renders artifact filename', () => {
-      render(ArtifactItem, { props: { artifact: mockArtifact } });
+      render(ArtifactItemHost, { props: { artifact: mockArtifact } });
 
       const name = document.querySelector('.artifact-name');
       expect(name?.textContent).toBe('report.pdf');
@@ -44,28 +37,28 @@ describe('ArtifactItem component', () => {
         filename: null
       };
 
-      render(ArtifactItem, { props: { artifact: artifactWithoutFilename } });
+      render(ArtifactItemHost, { props: { artifact: artifactWithoutFilename } });
 
       const name = document.querySelector('.artifact-name');
       expect(name?.textContent).toBe('artifact-123');
     });
 
     it('displays formatted file size', () => {
-      render(ArtifactItem, { props: { artifact: mockArtifact } });
+      render(ArtifactItemHost, { props: { artifact: mockArtifact } });
 
       const meta = document.querySelector('.artifact-meta');
       expect(meta?.textContent).toContain('1.0 KB');
     });
 
     it('displays mime type pill', () => {
-      render(ArtifactItem, { props: { artifact: mockArtifact } });
+      render(ArtifactItemHost, { props: { artifact: mockArtifact } });
 
       const pill = document.querySelector('.pill');
       expect(pill?.textContent).toBe('pdf');
     });
 
     it('renders download button', () => {
-      render(ArtifactItem, { props: { artifact: mockArtifact } });
+      render(ArtifactItemHost, { props: { artifact: mockArtifact } });
 
       const button = document.querySelector('.download-btn');
       expect(button).toBeTruthy();
@@ -75,7 +68,7 @@ describe('ArtifactItem component', () => {
 
   describe('file icons by mime type', () => {
     it('shows pdf icon for PDF files', () => {
-      render(ArtifactItem, { props: { artifact: mockArtifact } });
+      render(ArtifactItemHost, { props: { artifact: mockArtifact } });
 
       const icon = document.querySelector('.artifact-icon');
       expect(icon?.getAttribute('data-type')).toBe('pdf');
@@ -87,7 +80,7 @@ describe('ArtifactItem component', () => {
         mime_type: 'image/png'
       };
 
-      render(ArtifactItem, { props: { artifact: imageArtifact } });
+      render(ArtifactItemHost, { props: { artifact: imageArtifact } });
 
       const icon = document.querySelector('.artifact-icon');
       expect(icon?.getAttribute('data-type')).toBe('image');
@@ -99,7 +92,7 @@ describe('ArtifactItem component', () => {
         mime_type: 'application/vnd.ms-excel'
       };
 
-      render(ArtifactItem, { props: { artifact: excelArtifact } });
+      render(ArtifactItemHost, { props: { artifact: excelArtifact } });
 
       const icon = document.querySelector('.artifact-icon');
       expect(icon?.getAttribute('data-type')).toBe('spreadsheet');
@@ -111,7 +104,7 @@ describe('ArtifactItem component', () => {
         mime_type: 'application/octet-stream'
       };
 
-      render(ArtifactItem, { props: { artifact: unknownArtifact } });
+      render(ArtifactItemHost, { props: { artifact: unknownArtifact } });
 
       const icon = document.querySelector('.artifact-icon');
       expect(icon?.getAttribute('data-type')).toBe('file');
@@ -122,7 +115,7 @@ describe('ArtifactItem component', () => {
     it('calls downloadArtifact on click', async () => {
       const mockDownload = vi.mocked(api.downloadArtifact).mockResolvedValue();
 
-      render(ArtifactItem, { props: { artifact: mockArtifact } });
+      render(ArtifactItemHost, { props: { artifact: mockArtifact } });
 
       const button = document.querySelector('.download-btn') as HTMLButtonElement;
       await fireEvent.click(button);
@@ -139,7 +132,7 @@ describe('ArtifactItem component', () => {
         () => new Promise(resolve => setTimeout(resolve, 100))
       );
 
-      render(ArtifactItem, { props: { artifact: mockArtifact } });
+      render(ArtifactItemHost, { props: { artifact: mockArtifact } });
 
       const button = document.querySelector('.download-btn') as HTMLButtonElement;
       await fireEvent.click(button);
@@ -152,7 +145,7 @@ describe('ArtifactItem component', () => {
         () => new Promise(resolve => setTimeout(resolve, 100))
       );
 
-      render(ArtifactItem, { props: { artifact: mockArtifact } });
+      render(ArtifactItemHost, { props: { artifact: mockArtifact } });
 
       const button = document.querySelector('.download-btn') as HTMLButtonElement;
       await fireEvent.click(button);
@@ -164,7 +157,7 @@ describe('ArtifactItem component', () => {
     it('shows error message on download failure', async () => {
       vi.mocked(api.downloadArtifact).mockRejectedValue(new Error('Network error'));
 
-      render(ArtifactItem, { props: { artifact: mockArtifact } });
+      render(ArtifactItemHost, { props: { artifact: mockArtifact } });
 
       const button = document.querySelector('.download-btn') as HTMLButtonElement;
       await fireEvent.click(button);
@@ -178,7 +171,7 @@ describe('ArtifactItem component', () => {
     it('re-enables button after download completes', async () => {
       vi.mocked(api.downloadArtifact).mockResolvedValue();
 
-      render(ArtifactItem, { props: { artifact: mockArtifact } });
+      render(ArtifactItemHost, { props: { artifact: mockArtifact } });
 
       const button = document.querySelector('.download-btn') as HTMLButtonElement;
       await fireEvent.click(button);
@@ -196,7 +189,7 @@ describe('ArtifactItem component', () => {
         mime_type: null
       };
 
-      render(ArtifactItem, { props: { artifact: noMimeArtifact } });
+      render(ArtifactItemHost, { props: { artifact: noMimeArtifact } });
 
       const icon = document.querySelector('.artifact-icon');
       expect(icon?.getAttribute('data-type')).toBe('file');
@@ -208,7 +201,7 @@ describe('ArtifactItem component', () => {
         size_bytes: null
       };
 
-      render(ArtifactItem, { props: { artifact: noSizeArtifact } });
+      render(ArtifactItemHost, { props: { artifact: noSizeArtifact } });
 
       const meta = document.querySelector('.artifact-meta');
       expect(meta?.textContent).toContain('Unknown size');
@@ -222,7 +215,7 @@ describe('ArtifactItem component', () => {
         filename: null
       };
 
-      render(ArtifactItem, { props: { artifact: noFilenameArtifact } });
+      render(ArtifactItemHost, { props: { artifact: noFilenameArtifact } });
 
       const button = document.querySelector('.download-btn') as HTMLButtonElement;
       await fireEvent.click(button);

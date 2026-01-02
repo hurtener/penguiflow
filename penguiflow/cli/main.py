@@ -186,6 +186,11 @@ def dev(project_root: str, host: str, port: int, no_browser: bool) -> None:
     help="Include A2A server/client stubs.",
 )
 @click.option(
+    "--with-rich-output",
+    is_flag=True,
+    help="Include rich output component tooling (UI artifacts).",
+)
+@click.option(
     "--no-memory",
     is_flag=True,
     help="Skip memory integration stubs.",
@@ -200,6 +205,7 @@ def new(
     with_streaming: bool,
     with_hitl: bool,
     with_a2a: bool,
+    with_rich_output: bool,
     no_memory: bool,
 ) -> None:
     """Create a new PenguiFlow agent project."""
@@ -219,6 +225,7 @@ def new(
             with_streaming=with_streaming,
             with_hitl=with_hitl,
             with_a2a=with_a2a,
+            with_rich_output=with_rich_output,
             no_memory=no_memory,
         )
         if not result.success:

@@ -637,6 +637,26 @@ class PlannerArtifactStoreSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PlannerRichOutputSpec(BaseModel):
+    """Rich output component configuration for ReactPlanner."""
+
+    enabled: bool = False
+    allowlist: list[str] = Field(default_factory=list)
+    include_prompt_catalog: bool = True
+    include_prompt_examples: bool = False
+    max_payload_bytes: int = 250_000
+    max_total_bytes: int = 2_000_000
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("max_payload_bytes", "max_total_bytes")
+    @classmethod
+    def _non_negative_int(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("must be >= 0.")
+        return value
+
+
 class PlannerSpec(BaseModel):
     max_iters: int = 12
     hop_budget: int = 8
@@ -645,6 +665,7 @@ class PlannerSpec(BaseModel):
     memory_prompt: str | None = None
     short_term_memory: PlannerShortTermMemorySpec | None = None
     artifact_store: PlannerArtifactStoreSpec = Field(default_factory=PlannerArtifactStoreSpec)
+    rich_output: PlannerRichOutputSpec = Field(default_factory=PlannerRichOutputSpec)
     hints: PlannerHintsSpec | None = None
     stream_final_response: bool = False
 
@@ -918,6 +939,23 @@ def _validate_cross_fields(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail
                 suggestion="Add memory_prompt to planner, or set agent.flags.memory: false",
             )
         )
+    if spec.planner.rich_output.enabled:
+        allowlist = set(spec.planner.rich_output.allowlist)
+        interactive = {"form", "confirm", "select_option"}
+        interactive_enabled = not allowlist or bool(allowlist & interactive)
+        if interactive_enabled and not spec.agent.flags.hitl:
+            path = ("agent", "flags", "hitl")
+            errors.append(
+                SpecErrorDetail(
+                    message="Interactive rich output components require agent.flags.hitl: true.",
+                    path=path,
+                    line=lines.line_for(path),
+                    suggestion=(
+                        "Enable agent.flags.hitl or remove interactive components "
+                        "from planner.rich_output.allowlist."
+                    ),
+                )
+            )
     return errors
 
 

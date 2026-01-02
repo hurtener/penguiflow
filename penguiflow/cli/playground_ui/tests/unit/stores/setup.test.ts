@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { setupStore } from '$lib/stores/setup.svelte';
+import { createSetupStore } from '$lib/stores';
+
+const setupStore = createSetupStore();
 
 describe('setupStore', () => {
   beforeEach(() => {
@@ -26,6 +28,10 @@ describe('setupStore', () => {
     it('has no error', () => {
       expect(setupStore.error).toBeNull();
     });
+
+    it('defaults to SSE protocol', () => {
+      expect(setupStore.useAgui).toBe(false);
+    });
   });
 
   describe('setters', () => {
@@ -47,6 +53,11 @@ describe('setupStore', () => {
     it('sets llm context raw', () => {
       setupStore.llmContextRaw = '{"model": "gpt-4"}';
       expect(setupStore.llmContextRaw).toBe('{"model": "gpt-4"}');
+    });
+
+    it('sets AG-UI toggle', () => {
+      setupStore.useAgui = true;
+      expect(setupStore.useAgui).toBe(true);
     });
   });
 
@@ -114,6 +125,7 @@ describe('setupStore', () => {
       setupStore.toolContextRaw = '{"key": "value"}';
       setupStore.llmContextRaw = '{"model": "test"}';
       setupStore.error = 'Some error';
+      setupStore.useAgui = true;
       
       setupStore.reset();
       
@@ -122,6 +134,7 @@ describe('setupStore', () => {
       expect(setupStore.toolContextRaw).toBe('{}');
       expect(setupStore.llmContextRaw).toBe('{}');
       expect(setupStore.error).toBeNull();
+      expect(setupStore.useAgui).toBe(false);
     });
   });
 });

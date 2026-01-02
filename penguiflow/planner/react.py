@@ -28,6 +28,7 @@ from ..catalog import NodeSpec, build_catalog
 from ..node import Node
 from ..registry import ModelRegistry
 from . import prompts
+from .artifact_registry import ArtifactRegistry
 from .constraints import _ConstraintTracker, _CostTracker
 from .context import PlannerPauseReason, ToolContext
 from .hints import _PlanningHints
@@ -82,6 +83,13 @@ _STM_SUMMARY_SCHEMA_NAME = "short_term_memory_summary"
 AUTO_STR_SENTINEL = "<auto>"
 
 
+def _safe_json_dumps(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 class _EventEmittingArtifactStoreProxy:
     """Proxy that wraps an ArtifactStore and emits artifact_stored events.
 
@@ -89,7 +97,7 @@ class _EventEmittingArtifactStoreProxy:
     are stored (e.g., PDFs from MCP tools).
     """
 
-    __slots__ = ("_store", "_emit_event", "_time_source", "_trajectory", "_namespace")
+    __slots__ = ("_store", "_emit_event", "_time_source", "_trajectory", "_namespace", "_registry")
 
     def __init__(
         self,
@@ -98,12 +106,14 @@ class _EventEmittingArtifactStoreProxy:
         time_source: Callable[[], float],
         trajectory: Trajectory,
         namespace: str | None = None,
+        registry: ArtifactRegistry | None = None,
     ) -> None:
         self._store = store
         self._emit_event = emit_event
         self._time_source = time_source
         self._trajectory = trajectory
         self._namespace = namespace
+        self._registry = registry
 
     def _resolve_scope(self, scope: ArtifactScope | None) -> ArtifactScope | None:
         """Inject session_id from trajectory if scope is missing."""
@@ -170,6 +180,15 @@ class _EventEmittingArtifactStoreProxy:
         namespace: str | None,
     ) -> None:
         """Emit artifact_stored event for real-time UI updates."""
+        if self._registry is not None:
+            source_tool = namespace or self._namespace
+            self._registry.register_binary_artifact(
+                ref,
+                source_tool=source_tool,
+                step_index=len(self._trajectory.steps),
+            )
+            if isinstance(self._trajectory.metadata, MutableMapping):
+                self._registry.write_snapshot(self._trajectory.metadata)
         self._emit_event(
             PlannerEvent(
                 event_type="artifact_stored",
@@ -916,6 +935,7 @@ class _PlannerContext(ToolContext):
             emit_event=planner._emit_event,
             time_source=planner._time_source,
             trajectory=trajectory,
+            registry=planner._artifact_registry,
         )
         self._meta_warned = False
 
@@ -1266,6 +1286,7 @@ class ReactPlanner:
         self._specs = specs
         self._spec_by_name = {spec.name: spec for spec in self._specs}
         self._catalog_records = [spec.to_tool_record() for spec in self._specs]
+        self._register_resource_callbacks()
         self._planning_hints = _PlanningHints.from_mapping(planning_hints)
         hints_payload = self._planning_hints.to_prompt_payload() if not self._planning_hints.empty() else None
         self._system_prompt = prompts.build_system_prompt(
@@ -1299,6 +1320,8 @@ class ReactPlanner:
                 self._artifact_store = NoOpArtifactStore()
         else:
             self._artifact_store = NoOpArtifactStore()
+
+        self._artifact_registry = ArtifactRegistry()
 
         # Observation guardrail (enabled by default)
         self._observation_guardrail = observation_guardrail or ObservationGuardrailConfig()
@@ -1514,6 +1537,8 @@ class ReactPlanner:
             llm_context=normalised_llm_context,
             tool_context=normalised_tool_context,
         )
+        self._artifact_registry = ArtifactRegistry.from_snapshot(trajectory.metadata.get("artifact_registry"))
+        self._artifact_registry.write_snapshot(trajectory.metadata)
         result = await self._run_loop(trajectory, tracker=None)
         await self._maybe_record_memory_turn(query, result, trajectory, resolved_key)
         return result
@@ -1568,6 +1593,9 @@ class ReactPlanner:
             trajectory.tool_context = trajectory.tool_context or {}
         if user_input is not None:
             trajectory.resume_user_input = user_input
+
+        self._artifact_registry = ArtifactRegistry.from_snapshot(trajectory.metadata.get("artifact_registry"))
+        self._artifact_registry.write_snapshot(trajectory.metadata)
 
         resolved_key = self._resolve_memory_key(memory_key, trajectory.tool_context or {})
         merged_llm_context = await self._apply_memory_context(
@@ -2486,6 +2514,39 @@ class ReactPlanner:
                         trajectory.summary = None
                         continue
 
+                tool_call_id = f"call_{current_action_seq}_{len(trajectory.steps)}"
+                try:
+                    args_payload = parsed_args.model_dump(mode="json")
+                except Exception:  # pragma: no cover - defensive
+                    args_payload = parsed_args.model_dump()
+                args_json = _safe_json_dumps(args_payload)
+
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="tool_call_start",
+                        ts=self._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        extra={
+                            "tool_call_id": tool_call_id,
+                            "tool_name": spec.name,
+                            "args_json": args_json,
+                            "action_seq": current_action_seq,
+                        },
+                    )
+                )
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="tool_call_end",
+                        ts=self._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        extra={
+                            "tool_call_id": tool_call_id,
+                            "tool_name": spec.name,
+                            "action_seq": current_action_seq,
+                        },
+                    )
+                )
+
                 ctx = _PlannerContext(self, trajectory)
                 try:
                     result = await spec.node.func(parsed_args, ctx)
@@ -2504,6 +2565,21 @@ class ReactPlanner:
                     )
                     trajectory.summary = None
                     await self._record_pause(signal.pause, trajectory, tracker)
+                    self._emit_event(
+                        PlannerEvent(
+                            event_type="tool_call_result",
+                            ts=self._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={
+                                "tool_call_id": tool_call_id,
+                                "tool_name": spec.name,
+                                "result_json": _safe_json_dumps(
+                                    {"pause": signal.pause.reason, "payload": dict(signal.pause.payload)}
+                                ),
+                                "action_seq": current_action_seq,
+                            },
+                        )
+                    )
                     return signal.pause
                 except Exception as exc:
                     failure_payload = self._build_failure_payload(spec, parsed_args, exc)
@@ -2520,6 +2596,19 @@ class ReactPlanner:
                     tracker.record_hop()
                     trajectory.summary = None
                     last_observation = None
+                    self._emit_event(
+                        PlannerEvent(
+                            event_type="tool_call_result",
+                            ts=self._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={
+                                "tool_call_id": tool_call_id,
+                                "tool_name": spec.name,
+                                "result_json": _safe_json_dumps({"error": error, "failure": failure_payload}),
+                                "action_seq": current_action_seq,
+                            },
+                        )
+                    )
                     continue
 
                 step_chunks = ctx._collect_chunks()
@@ -2541,9 +2630,31 @@ class ReactPlanner:
                     )
                     trajectory.summary = None
                     last_observation = None
+                    self._emit_event(
+                        PlannerEvent(
+                            event_type="tool_call_result",
+                            ts=self._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={
+                                "tool_call_id": tool_call_id,
+                                "tool_name": spec.name,
+                                "result_json": _safe_json_dumps({"error": error}),
+                                "action_seq": current_action_seq,
+                            },
+                        )
+                    )
                     continue
 
                 observation_json = observation.model_dump(mode="json")
+
+                self._artifact_registry.register_tool_artifacts(
+                    spec.name,
+                    spec.out_model,
+                    observation_json,
+                    step_index=len(trajectory.steps),
+                )
+                if isinstance(trajectory.metadata, MutableMapping):
+                    self._artifact_registry.write_snapshot(trajectory.metadata)
 
                 # Apply observation size guardrails
                 observation_json, was_clamped = await self._clamp_observation(
@@ -2560,6 +2671,20 @@ class ReactPlanner:
                     observation_json
                     if was_clamped
                     else _redact_artifacts(spec.out_model, observation_json)
+                )
+                result_json = _safe_json_dumps(llm_obs)
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="tool_call_result",
+                        ts=self._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        extra={
+                            "tool_call_id": tool_call_id,
+                            "tool_name": spec.name,
+                            "result_json": result_json,
+                            "action_seq": current_action_seq,
+                        },
+                    )
                 )
                 trajectory.steps.append(
                     TrajectoryStep(
@@ -3058,6 +3183,15 @@ class ReactPlanner:
                     serialized,
                     namespace=f"observation.{spec_name}",
                 )
+                self._artifact_registry.register_binary_artifact(
+                    ref,
+                    source_tool=f"observation.{spec_name}",
+                    step_index=trajectory_step,
+                )
+                if isinstance(self._active_trajectory, Trajectory) and isinstance(
+                    self._active_trajectory.metadata, MutableMapping
+                ):
+                    self._artifact_registry.write_snapshot(self._active_trajectory.metadata)
                 preview = (
                     serialized[: config.preview_length] + "..."
                     if len(serialized) > config.preview_length
@@ -3438,6 +3572,42 @@ class ReactPlanner:
                     },
                 )
         self._last_event = event
+
+    def _register_resource_callbacks(self) -> None:
+        """Wire ToolNode resource update callbacks into planner events."""
+        seen: set[int] = set()
+        for spec in self._specs:
+            extra = spec.extra
+            if not isinstance(extra, Mapping):
+                continue
+            tool_node = extra.get("tool_node")
+            if tool_node is None:
+                continue
+            tool_node_id = id(tool_node)
+            if tool_node_id in seen:
+                continue
+            seen.add(tool_node_id)
+
+            set_callback = getattr(tool_node, "set_resource_updated_callback", None)
+            if not callable(set_callback):
+                continue
+
+            namespace = extra.get("namespace")
+            if not namespace:
+                namespace = getattr(getattr(tool_node, "config", None), "name", "unknown")
+
+            def _emit_resource_update(uri: str, *, _namespace: str = str(namespace)) -> None:
+                step = len(self._active_trajectory.steps) if self._active_trajectory else 0
+                self._emit_event(
+                    PlannerEvent(
+                        event_type="resource_updated",
+                        ts=self._time_source(),
+                        trajectory_step=step,
+                        extra={"uri": uri, "namespace": _namespace},
+                    )
+                )
+
+            set_callback(_emit_resource_update)
 
     def _record_arg_event(
         self,
@@ -4175,6 +4345,20 @@ class ReactPlanner:
         error: str | None = None,
         metadata_extra: Mapping[str, Any] | None = None,
     ) -> PlannerFinish:
+        # Safely serialize contexts - they may contain non-JSON-serializable objects
+        llm_context_safe: dict[str, Any] | None = None
+        if trajectory.llm_context is not None:
+            try:
+                llm_context_safe = json.loads(json.dumps(dict(trajectory.llm_context), ensure_ascii=False))
+            except (TypeError, ValueError):
+                llm_context_safe = None
+        tool_context_safe: dict[str, Any] | None = None
+        if trajectory.tool_context is not None:
+            try:
+                tool_context_safe = json.loads(json.dumps(dict(trajectory.tool_context), ensure_ascii=False))
+            except (TypeError, ValueError):
+                tool_context_safe = None
+
         metadata = {
             "reason": reason,
             "thought": thought,
@@ -4182,6 +4366,8 @@ class ReactPlanner:
             "step_count": len(trajectory.steps),
             "artifacts": dict(trajectory.artifacts),
             "sources": list(trajectory.sources),
+            "llm_context": llm_context_safe or {},
+            "tool_context": tool_context_safe or {},
         }
         metadata["cost"] = self._cost_tracker.snapshot()
         if constraints is not None:

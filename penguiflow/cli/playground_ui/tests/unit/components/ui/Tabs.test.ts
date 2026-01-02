@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import Tabs from '$lib/components/ui/Tabs.svelte';
+import Tabs from '$lib/components/composites/Tabs.svelte';
 
 describe('Tabs component', () => {
   const defaultTabs = [

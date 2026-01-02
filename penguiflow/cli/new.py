@@ -46,6 +46,7 @@ class TemplateContext:
     with_streaming: bool = False
     with_hitl: bool = False
     with_a2a: bool = False
+    with_rich_output: bool = False
     no_memory: bool = False
 
 
@@ -108,6 +109,7 @@ def _render_content(raw: str, ctx: TemplateContext) -> str:
             with_streaming=ctx.with_streaming,
             with_hitl=ctx.with_hitl,
             with_a2a=ctx.with_a2a,
+            with_rich_output=ctx.with_rich_output,
             no_memory=ctx.no_memory,
             memory_enabled=not ctx.no_memory,
         )
@@ -137,6 +139,7 @@ def run_new(
     with_streaming: bool = False,
     with_hitl: bool = False,
     with_a2a: bool = False,
+    with_rich_output: bool = False,
     no_memory: bool = False,
 ) -> NewResult:
     """Create a new PenguiFlow agent project from templates.
@@ -163,6 +166,7 @@ def run_new(
         with_streaming=with_streaming,
         with_hitl=with_hitl,
         with_a2a=with_a2a,
+        with_rich_output=with_rich_output,
         no_memory=no_memory,
     )
     base_dir = output_dir or Path.cwd()

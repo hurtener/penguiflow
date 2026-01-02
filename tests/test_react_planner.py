@@ -1791,6 +1791,97 @@ async def test_react_planner_event_callback_receives_events() -> None:
 
 
 @pytest.mark.asyncio()
+async def test_react_planner_emits_tool_call_events() -> None:
+    """Tool execution should emit tool_call_start/end/result events."""
+    events: list[PlannerEvent] = []
+
+    def callback(event: PlannerEvent) -> None:
+        events.append(event)
+
+    client = StubClient(
+        [
+            {
+                "thought": "triage",
+                "next_node": "triage",
+                "args": {"question": "Test"},
+            },
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("triage", Query, Intent)
+
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog([Node(triage, name="triage")], registry),
+        event_callback=callback,
+    )
+
+    await planner.run("Test events")
+
+    tool_events = [e for e in events if e.event_type.startswith("tool_call")]
+    assert {e.event_type for e in tool_events} == {"tool_call_start", "tool_call_end", "tool_call_result"}
+
+    start_event = next(e for e in tool_events if e.event_type == "tool_call_start")
+    end_event = next(e for e in tool_events if e.event_type == "tool_call_end")
+    result_event = next(e for e in tool_events if e.event_type == "tool_call_result")
+
+    assert start_event.extra["tool_name"] == "triage"
+    assert start_event.extra["tool_call_id"] == end_event.extra["tool_call_id"] == result_event.extra["tool_call_id"]
+    assert "args_json" in start_event.extra
+    assert "result_json" in result_event.extra
+
+
+def test_react_planner_registers_resource_callbacks() -> None:
+    """ToolNode resource updates should emit resource_updated events."""
+    events: list[PlannerEvent] = []
+
+    def callback(event: PlannerEvent) -> None:
+        events.append(event)
+
+    class FakeToolNode:
+        def __init__(self) -> None:
+            self.callback = None
+
+        def set_resource_updated_callback(self, cb):  # type: ignore[no-untyped-def]
+            self.callback = cb
+
+    fake_node = FakeToolNode()
+
+    registry = ModelRegistry()
+    registry.register("triage", Query, Intent)
+    spec = build_catalog([Node(triage, name="triage")], registry)[0]
+    spec = spec.__class__(  # type: ignore[misc]
+        node=spec.node,
+        name=spec.name,
+        desc=spec.desc,
+        args_model=spec.args_model,
+        out_model=spec.out_model,
+        side_effects=spec.side_effects,
+        tags=spec.tags,
+        auth_scopes=spec.auth_scopes,
+        cost_hint=spec.cost_hint,
+        latency_hint_ms=spec.latency_hint_ms,
+        safety_notes=spec.safety_notes,
+        extra={"tool_node": fake_node, "namespace": "fake"},
+    )
+
+    ReactPlanner(
+        llm_client=StubClient(
+            [{"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}}]
+        ),
+        catalog=[spec],
+        event_callback=callback,
+    )
+
+    assert fake_node.callback is not None
+    fake_node.callback("file:///test.txt")
+
+    assert any(event.event_type == "resource_updated" for event in events)
+
+
+@pytest.mark.asyncio()
 async def test_react_planner_captures_stream_chunks() -> None:
     """Streaming chunks should be emitted as events and persisted."""
 

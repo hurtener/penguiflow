@@ -183,12 +183,17 @@ async def test_retry_on_failure_logs_and_succeeds(
 async def test_timeout_retries_and_drops_after_max(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Test that node timeouts trigger retries and eventually fail.
+
+    Timing margins are generous to avoid flakiness on slow CI machines.
+    """
     attempts = 0
 
     async def sleepy(msg: str, ctx) -> str:
         nonlocal attempts
         attempts += 1
-        await asyncio.sleep(0.1)
+        # Sleep longer than timeout to guarantee timeout
+        await asyncio.sleep(0.5)
         return msg
 
     node = Node(
@@ -196,9 +201,9 @@ async def test_timeout_retries_and_drops_after_max(
         name="sleepy",
         policy=NodePolicy(
             validate="none",
-            timeout_s=0.05,
+            timeout_s=0.1,  # 100ms timeout (handler sleeps 500ms)
             max_retries=1,
-            backoff_base=0.01,
+            backoff_base=0.05,
             backoff_mult=1.0,
         ),
     )
@@ -209,8 +214,10 @@ async def test_timeout_retries_and_drops_after_max(
 
     await flow.emit("payload")
 
+    # Wait long enough for 2 attempts + backoff + event emission
+    # Expected: ~100ms timeout + ~50ms backoff + ~100ms timeout + overhead
     with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(flow.fetch(), timeout=0.2)
+        await asyncio.wait_for(flow.fetch(), timeout=1.0)
 
     assert attempts == 2
 

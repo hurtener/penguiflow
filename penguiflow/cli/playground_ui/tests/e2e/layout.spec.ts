@@ -18,8 +18,7 @@ test.describe('Layout', () => {
     await page.setViewportSize({ width: 375, height: 667 });
     
     // Page should switch to single column
-    const page_element = page.locator('.page');
-    await expect(page_element).toBeVisible();
+    await expect(page.locator('.mobile-layout')).toBeVisible();
   });
 
   test('displays project card', async ({ page }) => {

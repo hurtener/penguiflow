@@ -11,6 +11,7 @@ from typing import Any
 
 from penguiflow.errors import FlowError
 from penguiflow.planner import PlannerFinish, PlannerPause, ReactPlanner
+from penguiflow.rich_output import DEFAULT_ALLOWLIST, RichOutputConfig, attach_rich_output_nodes, get_runtime
 
 {% if with_a2a %}
 from .a2a import A2AServer
@@ -23,6 +24,14 @@ from .telemetry import AgentTelemetry
 from .tools import Answer, build_catalog_bundle
 
 _LOGGER = logging.getLogger(__name__)
+SYSTEM_PROMPT_EXTRA = ""
+
+
+def _build_system_prompt(rich_output_prompt: str) -> str:
+    prompt = SYSTEM_PROMPT_EXTRA
+    if rich_output_prompt:
+        prompt = f"{prompt}\n\n{rich_output_prompt}" if prompt else rich_output_prompt
+    return prompt
 
 
 class {{ class_name }}FlowError(RuntimeError):
@@ -136,11 +145,22 @@ class {{ class_name }}Orchestrator:
         )
 
         nodes, registry = build_catalog_bundle()
+        rich_output_config = RichOutputConfig(
+            enabled=config.rich_output_enabled,
+            allowlist=config.rich_output_allowlist or list(DEFAULT_ALLOWLIST),
+            include_prompt_catalog=config.rich_output_include_prompt_catalog,
+            include_prompt_examples=config.rich_output_include_prompt_examples,
+            max_payload_bytes=config.rich_output_max_payload_bytes,
+            max_total_bytes=config.rich_output_max_total_bytes,
+        )
+        nodes.extend(attach_rich_output_nodes(registry, config=rich_output_config))
+        rich_output_prompt = get_runtime().prompt_section()
         self._llm = ScriptedLLM()
         self._planner = ReactPlanner(
             llm_client=self._llm,
             nodes=nodes,
             registry=registry,
+            system_prompt_extra=_build_system_prompt(rich_output_prompt),
             event_callback=self._telemetry.record_planner_event,
         )
         # To use a real LLM instead of ScriptedLLM:
