@@ -10,27 +10,24 @@
 
   let { expression = '', displayMode = true }: Props = $props();
 
-  let error = $state<Error | null>(null);
-
-  const html = $derived.by(() => {
+  // Return result object instead of mutating state inside derived
+  const result = $derived.by(() => {
     try {
-      const rendered = katex.renderToString(expression || '', {
+      const html = katex.renderToString(expression || '', {
         displayMode,
         throwOnError: false
       });
-      error = null;
-      return rendered;
+      return { ok: true as const, html };
     } catch (err) {
-      error = toError(err, 'LaTeX render failed.');
-      return '';
+      return { ok: false as const, error: toError(err, 'LaTeX render failed.') };
     }
   });
 </script>
 
-{#if error}
-  <div class="renderer-error">{error.message}</div>
+{#if !result.ok}
+  <div class="renderer-error">{result.error.message}</div>
 {:else}
-  <div class="latex">{@html html}</div>
+  <div class="latex">{@html result.html}</div>
 {/if}
 
 <style>

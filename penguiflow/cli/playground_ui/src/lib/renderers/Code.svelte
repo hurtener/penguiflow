@@ -71,6 +71,7 @@
     color: #e2e8f0;
     border-radius: 0.75rem;
     overflow: auto;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
 
   .code-header {
@@ -97,21 +98,32 @@
   pre {
     margin: 0;
     padding: 0.75rem 0.5rem;
-    font-family: var(--font-mono, ui-monospace);
-    font-size: 0.8rem;
-    line-height: 1.5;
+    font-family: inherit;
+    font-size: 0.85rem;
+    line-height: 1.4;
   }
 
   .code-line {
     display: flex;
     gap: 0.75rem;
+    min-height: 1.4em;
+    padding: 0;
+    margin: 0;
   }
 
   .line-number {
     color: #64748b;
-    width: 2rem;
+    min-width: 2rem;
     text-align: right;
     user-select: none;
+    flex-shrink: 0;
+  }
+
+  code {
+    display: block;
+    white-space: pre;
+    margin: 0;
+    padding: 0;
   }
 
   .code-line.highlight {

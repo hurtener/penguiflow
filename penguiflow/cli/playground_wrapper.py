@@ -180,11 +180,15 @@ def _build_trajectory(
     steps = metadata.get("steps")
     if not isinstance(steps, list):
         return None
+    # Prefer llm_context/tool_context from metadata (contains actual injected values
+    # including conversation_memory) over the input parameters
+    actual_llm_context = metadata.get("llm_context") or llm_context or {}
+    actual_tool_context = metadata.get("tool_context") or tool_context or {}
     payload: dict[str, Any] = {
         "query": query,
-        "llm_context": dict(llm_context or {}),
+        "llm_context": dict(actual_llm_context),
         "tool_context": {
-            **(dict(tool_context or {})),
+            **(dict(actual_tool_context)),
             "session_id": session_id,
             "trace_id": trace_id,
         },
@@ -368,6 +372,22 @@ class PlannerAgentWrapper:
             raise RuntimeError("Planner did not finish execution")
 
         metadata = _normalise_metadata(getattr(result, "metadata", None))
+        _LOGGER.info(
+            "resume complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s, has_store=%s",
+            trace_id, session_id,
+            list(metadata.keys()) if metadata else None,
+            bool(metadata and isinstance(metadata.get("steps"), list)),
+            self._state_store is not None,
+        )
+
+        # Save trajectory (same as chat method)
+        trajectory = _build_trajectory(user_input or "", session_id, trace_id, metadata, {}, merged_tool_context)
+        if trajectory is not None and self._state_store is not None:
+            await self._state_store.save_trajectory(trace_id, session_id, trajectory)
+            _LOGGER.info("trajectory saved: trace_id=%s, session_id=%s", trace_id, session_id)
+        elif trajectory is None:
+            _LOGGER.warning("trajectory not saved: trajectory is None (metadata=%s)", metadata is not None)
+
         answer = _normalise_answer(result.payload)
         if answer is None and metadata is not None:
             answer = metadata.get("thought")

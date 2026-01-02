@@ -20,15 +20,20 @@
   const renderDiagram = async () => {
     if (!container || !code) return;
     try {
+      // Use htmlLabels: false to force native SVG <text> elements instead of
+      // foreignObject/HTML divs. This prevents text truncation caused by the
+      // hardcoded max-width: 200px constraint in foreignObject child divs.
+      // See: https://github.com/mermaid-js/mermaid/issues/4918
       mermaid.initialize({
         startOnLoad: false,
         theme,
-        flowchart: {
-          useMaxWidth: false,
-          htmlLabels: true,
-          curve: 'basis',
-        },
         securityLevel: 'loose',
+        flowchart: {
+          htmlLabels: false,
+        },
+        sequence: {
+          useMaxWidth: true,
+        },
       });
       const { svg } = await mermaid.render(renderId, code);
       container.innerHTML = svg;
@@ -65,28 +70,33 @@
     min-width: 0;
   }
 
-  /* Ensure SVG scales and text is visible */
   .mermaid :global(svg) {
     max-width: 100%;
     height: auto;
   }
 
-  /* Ensure node text isn't clipped */
-  .mermaid :global(.node rect),
-  .mermaid :global(.node circle),
-  .mermaid :global(.node ellipse),
-  .mermaid :global(.node polygon),
-  .mermaid :global(.node path) {
-    stroke-width: 1px;
+  /*
+   * Fix text truncation in Mermaid diagrams.
+   * Mermaid v9.2+ uses foreignObject with HTML divs that have a hardcoded
+   * max-width: 200px constraint, causing text to be clipped.
+   * See: https://github.com/mermaid-js/mermaid/issues/4918
+   */
+  .mermaid :global(foreignObject > div) {
+    max-width: none !important;
+    overflow: visible !important;
   }
 
-  .mermaid :global(.nodeLabel) {
+  /* Ensure text in labels doesn't wrap unexpectedly */
+  .mermaid :global(.nodeLabel),
+  .mermaid :global(.edgeLabel),
+  .mermaid :global(.label) {
     white-space: nowrap;
+    overflow: visible;
   }
 
-  .mermaid :global(.edgeLabel) {
-    background-color: white;
-    padding: 2px 4px;
+  /* ER diagram entity boxes */
+  .mermaid :global(.er.entityBox) {
+    overflow: visible;
   }
 
   .renderer-error {

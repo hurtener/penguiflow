@@ -4,6 +4,7 @@
   import ChatBody from './ChatBody.svelte';
   import ChatInput from './ChatInput.svelte';
   import SetupTab from '../setup/SetupTab.svelte';
+  import { ContextTab } from '$lib/components/features/context';
   import { ComponentLab } from '$lib/components/features/component-lab';
   import { getComponentRegistryStore } from '$lib/stores';
   import type { PendingInteraction } from '$lib/types';
@@ -16,14 +17,15 @@
 
   let { onSendChat, chatBodyEl = $bindable(null), onInteractionResult }: Props = $props();
 
-  type CenterTab = 'chat' | 'setup' | 'components';
+  type CenterTab = 'chat' | 'setup' | 'context' | 'components';
   let activeTab = $state<CenterTab>('chat');
 
   const componentRegistryStore = getComponentRegistryStore();
   const tabs = $derived.by(() => {
     const base: Array<{ id: string; label: string }> = [
       { id: 'chat', label: 'Chat' },
-      { id: 'setup', label: 'Setup' }
+      { id: 'setup', label: 'Setup' },
+      { id: 'context', label: 'Context' }
     ];
     if (componentRegistryStore.enabled) {
       base.push({ id: 'components', label: 'Components' });
@@ -46,6 +48,8 @@
 
   {#if activeTab === 'setup'}
     <SetupTab />
+  {:else if activeTab === 'context'}
+    <ContextTab />
   {:else if activeTab === 'components'}
     <ComponentLab />
   {:else}

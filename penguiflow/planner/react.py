@@ -4345,6 +4345,20 @@ class ReactPlanner:
         error: str | None = None,
         metadata_extra: Mapping[str, Any] | None = None,
     ) -> PlannerFinish:
+        # Safely serialize contexts - they may contain non-JSON-serializable objects
+        llm_context_safe: dict[str, Any] | None = None
+        if trajectory.llm_context is not None:
+            try:
+                llm_context_safe = json.loads(json.dumps(dict(trajectory.llm_context), ensure_ascii=False))
+            except (TypeError, ValueError):
+                llm_context_safe = None
+        tool_context_safe: dict[str, Any] | None = None
+        if trajectory.tool_context is not None:
+            try:
+                tool_context_safe = json.loads(json.dumps(dict(trajectory.tool_context), ensure_ascii=False))
+            except (TypeError, ValueError):
+                tool_context_safe = None
+
         metadata = {
             "reason": reason,
             "thought": thought,
@@ -4352,6 +4366,8 @@ class ReactPlanner:
             "step_count": len(trajectory.steps),
             "artifacts": dict(trajectory.artifacts),
             "sources": list(trajectory.sources),
+            "llm_context": llm_context_safe or {},
+            "tool_context": tool_context_safe or {},
         }
         metadata["cost"] = self._cost_tracker.snapshot()
         if constraints is not None:
