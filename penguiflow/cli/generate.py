@@ -183,7 +183,21 @@ def _sample_value(expr: TypeExpression) -> str:
 
 
 def _slugify_name(value: str) -> str:
-    return value.replace("-", "_")
+    """Convert a name to a valid Python identifier (snake_case)."""
+    if not value:
+        return "unnamed"
+    # Convert CamelCase to snake_case
+    result = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", value)
+    result = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", result)
+    result = result.lower()
+    # Replace non-alphanumeric with underscores
+    result = re.sub(r"[^a-z0-9]+", "_", result)
+    # Remove leading/trailing underscores and collapse multiples
+    result = re.sub(r"_+", "_", result).strip("_")
+    # Ensure starts with letter (valid Python identifier)
+    if result and not result[0].isalpha():
+        result = "node_" + result
+    return result if result else "unnamed"
 
 
 def _planning_hints(spec: Spec) -> dict[str, Any] | None:
@@ -269,7 +283,7 @@ def _flow_renders(spec: Spec) -> list[FlowRender]:
             node_renders.append(
                 FlowNodeRender(
                     name=name,
-                    var_name=name,
+                    var_name=_slugify_name(name),
                     policy_kwargs=_render_policy_kwargs(getattr(node, "policy", None)),
                     input_type=input_type,
                     output_type=output_type,
