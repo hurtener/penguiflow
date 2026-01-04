@@ -174,6 +174,7 @@ def init_react_planner(
     planner._memory_ephemeral_key = None
     planner._memory_summarizer_client = None
     planner._memory_summarizer = None
+    planner._steering = None
     if isinstance(short_term_memory, ShortTermMemoryConfig):
         planner._memory_config = short_term_memory
         if short_term_memory.strategy != "none":

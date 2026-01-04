@@ -1,4 +1,10 @@
-import type { ArtifactChunkPayload, ArtifactStoredEvent, ChatMessage, PendingInteraction } from '$lib/types';
+import type {
+  ArtifactChunkPayload,
+  ArtifactStoredEvent,
+  ChatMessage,
+  PendingInteraction,
+  StateUpdate
+} from '$lib/types';
 import { safeParse } from '$lib/utils';
 import { ANSWER_GATE_SENTINEL } from '$lib/utils/constants';
 import type { AppStores } from '$lib/stores';
@@ -23,7 +29,13 @@ import {
 
 type ChatStreamStores = Pick<
   AppStores,
-  'chatStore' | 'eventsStore' | 'trajectoryStore' | 'artifactsStore' | 'interactionsStore'
+  'chatStore'
+  | 'eventsStore'
+  | 'trajectoryStore'
+  | 'artifactsStore'
+  | 'interactionsStore'
+  | 'tasksStore'
+  | 'notificationsStore'
 >;
 
 type AguiStreamEvent =
@@ -96,7 +108,17 @@ class ChatStreamManager {
     this.eventSource = new EventSource(url.toString());
 
     // Register event handlers
-    const events = ['chunk', 'artifact_chunk', 'artifact_stored', 'llm_stream_chunk', 'step', 'event', 'done', 'error'];
+    const events = [
+      'chunk',
+      'artifact_chunk',
+      'artifact_stored',
+      'llm_stream_chunk',
+      'step',
+      'event',
+      'state_update',
+      'done',
+      'error'
+    ];
     events.forEach(eventName => {
       this.eventSource!.addEventListener(eventName, (evt: MessageEvent) => {
         this.handleEvent(eventName, evt, callbacks);
@@ -168,6 +190,10 @@ class ChatStreamManager {
         this.handleStepEvent(msg, data, eventName);
         break;
 
+      case 'state_update':
+        this.handleStateUpdate(data);
+        break;
+
       case 'done':
         this.handleDone(msg, data, callbacks);
         break;
@@ -175,6 +201,30 @@ class ChatStreamManager {
       case 'error':
         this.handleError(msg, data, callbacks);
         break;
+    }
+  }
+
+  private handleStateUpdate(data: Record<string, unknown>): void {
+    this.stores.tasksStore.applyUpdate(data as StateUpdate);
+    const updateType = data.update_type as string | undefined;
+    if (updateType === 'NOTIFICATION') {
+      const content = data.content as Record<string, unknown> | undefined;
+      const severity = String(content?.severity ?? 'info');
+      const body = String(content?.body ?? '');
+      const title = String(content?.title ?? '');
+      const message = title ? `${title}: ${body}` : body;
+      const actionsRaw = content?.actions;
+      const actions = Array.isArray(actionsRaw)
+        ? actionsRaw
+            .filter(item => item && typeof item === 'object')
+            .map(item => ({
+              id: String((item as Record<string, unknown>).id ?? ''),
+              label: String((item as Record<string, unknown>).label ?? 'Action'),
+              payload: (item as Record<string, unknown>).payload as Record<string, unknown> | undefined
+            }))
+            .filter(item => item.id)
+        : undefined;
+      this.stores.notificationsStore.add(message || 'Notification', severity as any, actions);
     }
   }
 

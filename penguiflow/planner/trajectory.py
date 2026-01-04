@@ -78,6 +78,7 @@ class Trajectory:
     summary: TrajectorySummary | None = None
     hint_state: dict[str, Any] = field(default_factory=dict)
     resume_user_input: str | None = None
+    steering_inputs: list[str] = field(default_factory=list)
 
     def to_history(self) -> list[dict[str, Any]]:
         return [step.dump() for step in self.steps]
@@ -100,6 +101,7 @@ class Trajectory:
             "summary": self.summary.model_dump(mode="json") if self.summary else None,
             "hint_state": dict(self.hint_state),
             "resume_user_input": self.resume_user_input,
+            "steering_inputs": list(self.steering_inputs),
         }
 
     @classmethod
@@ -144,6 +146,7 @@ class Trajectory:
             trajectory.summary = TrajectorySummary.model_validate(summary_data)
         trajectory.hint_state.update(payload.get("hint_state", {}))
         trajectory.resume_user_input = payload.get("resume_user_input")
+        trajectory.steering_inputs = list(payload.get("steering_inputs") or [])
         trajectory.artifacts.update(payload.get("artifacts") or {})
         for src in payload.get("sources") or []:
             if isinstance(src, Mapping):

@@ -10,6 +10,7 @@
     fetchTrajectory,
     createChatStreamManager,
     createEventStreamManager,
+    createSessionStreamManager,
   } from "$lib/services";
   import { Page } from "$lib/components/containers";
   import { LeftSidebar, ProjectCard, SpecCard } from "$lib/components/features/sidebar-left";
@@ -37,6 +38,7 @@
   } = stores;
   const chatStreamManager = createChatStreamManager(stores);
   const eventStreamManager = createEventStreamManager(stores);
+  const sessionStreamManager = createSessionStreamManager(stores);
 
   // Reference to chat body for auto-scrolling
   let chatBodyEl = $state<HTMLDivElement | null>(null);
@@ -73,7 +75,15 @@
       window.removeEventListener('resize', checkMobile);
       chatStreamManager.close();
       eventStreamManager.close();
+      sessionStreamManager.close();
     };
+  });
+
+  $effect(() => {
+    const sessionId = sessionStore.sessionId;
+    if (sessionId) {
+      sessionStreamManager.start(sessionId);
+    }
   });
 
   const initializeApp = async () => {

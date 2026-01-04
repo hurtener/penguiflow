@@ -172,6 +172,7 @@ from .validation_repair import (
 )
 
 if TYPE_CHECKING:
+    from ..steering import SteeringInbox
     from .artifact_registry import ArtifactRegistry
     from .constraints import _CostTracker
     from .hints import _PlanningHints
@@ -422,6 +423,7 @@ class ReactPlanner:
         context_meta: Mapping[str, Any] | None = None,  # Deprecated
         tool_context: Mapping[str, Any] | None = None,
         memory_key: MemoryKey | None = None,
+        steering: SteeringInbox | None = None,
     ) -> PlannerFinish | PlannerPause:
         """Execute planner on a query until completion or pause.
 
@@ -455,14 +457,19 @@ class ReactPlanner:
         RuntimeError
             If LLM client fails after all retries.
         """
-        return await _run_impl(
-            self,
-            query,
-            llm_context=llm_context,
-            context_meta=context_meta,
-            tool_context=tool_context,
-            memory_key=memory_key,
-        )
+        previous = getattr(self, "_steering", None)
+        self._steering = steering
+        try:
+            return await _run_impl(
+                self,
+                query,
+                llm_context=llm_context,
+                context_meta=context_meta,
+                tool_context=tool_context,
+                memory_key=memory_key,
+            )
+        finally:
+            self._steering = previous
 
     async def resume(
         self,
@@ -471,6 +478,7 @@ class ReactPlanner:
         *,
         tool_context: Mapping[str, Any] | None = None,
         memory_key: MemoryKey | None = None,
+        steering: SteeringInbox | None = None,
     ) -> PlannerFinish | PlannerPause:
         """Resume a paused planning session.
 
@@ -501,13 +509,18 @@ class ReactPlanner:
         KeyError
             If resume token is invalid or expired.
         """
-        return await _resume_impl(
-            self,
-            token,
-            user_input=user_input,
-            tool_context=tool_context,
-            memory_key=memory_key,
-        )
+        previous = getattr(self, "_steering", None)
+        self._steering = steering
+        try:
+            return await _resume_impl(
+                self,
+                token,
+                user_input=user_input,
+                tool_context=tool_context,
+                memory_key=memory_key,
+            )
+        finally:
+            self._steering = previous
 
     def _resolve_memory_key(
         self,

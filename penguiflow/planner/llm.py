@@ -669,6 +669,15 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
             }
         )
 
+    if trajectory.steering_inputs:
+        for payload in trajectory.steering_inputs:
+            history_messages.append(
+                {
+                    "role": "user",
+                    "content": prompts.render_steering_input(payload),
+                }
+            )
+
     if trajectory.resume_user_input:
         history_messages.append(
             {
@@ -722,6 +731,14 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
                 ),
             }
         )
+    if trajectory.steering_inputs:
+        for payload in trajectory.steering_inputs:
+            condensed.append(
+                {
+                    "role": "user",
+                    "content": prompts.render_steering_input(payload),
+                }
+            )
     if trajectory.resume_user_input:
         condensed.append(
             {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import secrets
 
@@ -18,6 +19,7 @@ from penguiflow.planner import (  # noqa: E402
     ReactPlanner,
     Trajectory,
 )
+from penguiflow.steering import SteeringInbox  # noqa: E402
 
 from .playground_state import PlaygroundStateStore  # noqa: E402
 
@@ -49,6 +51,7 @@ class AgentWrapper(Protocol):
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult: ...
 
     async def resume(
@@ -60,6 +63,7 @@ class AgentWrapper(Protocol):
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult: ...
 
     async def shutdown(self) -> None: ...
@@ -235,6 +239,7 @@ class PlannerAgentWrapper:
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult:
         llm_context = dict(llm_context or {})
         trace_id = trace_id_hint or secrets.token_hex(8)
@@ -257,11 +262,19 @@ class PlannerAgentWrapper:
                 "session_id": session_id,
                 "trace_id": trace_id,
             }
-            result = await self._planner.run(
-                query=query,
-                llm_context=llm_context,
-                tool_context=merged_tool_context,
-            )
+            if "steering" in inspect.signature(self._planner.run).parameters:
+                result = await self._planner.run(
+                    query=query,
+                    llm_context=llm_context,
+                    tool_context=merged_tool_context,
+                    steering=steering,
+                )
+            else:
+                result = await self._planner.run(
+                    query=query,
+                    llm_context=llm_context,
+                    tool_context=merged_tool_context,
+                )
         finally:
             if callback is not None:
                 self._planner._event_callback = original_callback
@@ -323,6 +336,7 @@ class PlannerAgentWrapper:
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult:
         trace_id = trace_id_hint or secrets.token_hex(8)
 
@@ -344,11 +358,19 @@ class PlannerAgentWrapper:
                 "session_id": session_id,
                 "trace_id": trace_id,
             }
-            result = await self._planner.resume(
-                resume_token,
-                user_input=user_input,
-                tool_context=merged_tool_context,
-            )
+            if "steering" in inspect.signature(self._planner.resume).parameters:
+                result = await self._planner.resume(
+                    resume_token,
+                    user_input=user_input,
+                    tool_context=merged_tool_context,
+                    steering=steering,
+                )
+            else:
+                result = await self._planner.resume(
+                    resume_token,
+                    user_input=user_input,
+                    tool_context=merged_tool_context,
+                )
         finally:
             if callback is not None:
                 self._planner._event_callback = original_callback
@@ -442,11 +464,13 @@ class OrchestratorAgentWrapper:
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult:
         ctx = dict(llm_context or {})
         tool_ctx = dict(tool_context or {})
         planner = getattr(self._orchestrator, "_planner", None)
         trace_holder: dict[str, str | None] = {"id": trace_id_hint}
+        _ = steering
 
         def _trace_id_supplier() -> str | None:
             if trace_holder["id"]:
@@ -536,6 +560,7 @@ class OrchestratorAgentWrapper:
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult:
         # Check if orchestrator has a resume method (HITL support)
         resume_fn = getattr(self._orchestrator, "resume", None)
@@ -548,6 +573,7 @@ class OrchestratorAgentWrapper:
         tool_ctx = dict(tool_context or {})
         planner = getattr(self._orchestrator, "_planner", None)
         trace_holder: dict[str, str | None] = {"id": trace_id_hint}
+        _ = steering
 
         def _trace_id_supplier() -> str | None:
             if trace_holder["id"]:

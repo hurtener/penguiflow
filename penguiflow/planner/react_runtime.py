@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import warnings
@@ -10,6 +11,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from ..steering import SteeringCancelled, SteeringEventType, SteeringInbox
 from . import prompts
 from .artifact_handling import _ArtifactCollector, _SourceCollector
 from .artifact_registry import ArtifactRegistry
@@ -24,6 +26,45 @@ from .trajectory import Trajectory, TrajectoryStep
 from .validation_repair import _autofill_missing_args, _coerce_tool_context, _validate_llm_context
 
 logger = logging.getLogger("penguiflow.planner")
+
+
+def _apply_steering(planner: Any, trajectory: Trajectory) -> None:
+    steering: SteeringInbox | None = getattr(planner, "_steering", None)
+    if steering is None:
+        return
+
+    if steering.cancelled:
+        raise SteeringCancelled(steering.cancel_reason)
+
+    events = steering.drain()
+    if not events:
+        return
+
+    for event in events:
+        planner._emit_event(
+            PlannerEvent(
+                event_type="steering_received",
+                ts=planner._time_source(),
+                trajectory_step=len(trajectory.steps),
+                extra={
+                    "event_id": event.event_id,
+                    "event_type": event.event_type.value,
+                    "source": event.source,
+                },
+            )
+        )
+        if event.event_type == SteeringEventType.CANCEL:
+            raise SteeringCancelled(str(event.payload.get("reason") or "cancelled"))
+        if event.event_type in {SteeringEventType.INJECT_CONTEXT, SteeringEventType.REDIRECT}:
+            if event.event_type == SteeringEventType.REDIRECT:
+                new_goal = (
+                    event.payload.get("instruction")
+                    or event.payload.get("goal")
+                    or event.payload.get("query")
+                )
+                if isinstance(new_goal, str) and new_goal.strip():
+                    trajectory.query = new_goal.strip()
+            trajectory.steering_inputs.append(event.to_injection())
 
 
 async def run(
@@ -527,6 +568,10 @@ async def run_loop(
     planner._active_tracker = tracker
     try:
         while len(trajectory.steps) < planner._max_iters:
+            steering: SteeringInbox | None = getattr(planner, "_steering", None)
+            if steering is not None:
+                await steering.wait_if_paused()
+            _apply_steering(planner, trajectory)
             finish = _check_deadline(
                 planner,
                 trajectory,
@@ -858,7 +903,22 @@ async def run_loop(
 
             ctx = _PlannerContext(planner, trajectory)
             try:
-                result = await spec.node.func(parsed_args, ctx)
+                if steering is not None:
+                    tool_task = asyncio.create_task(spec.node.func(parsed_args, ctx))
+                    cancel_task = asyncio.create_task(steering.cancel_event.wait())
+                    done, _pending = await asyncio.wait(
+                        {tool_task, cancel_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if cancel_task in done and steering.cancelled:
+                        tool_task.cancel()
+                        await asyncio.gather(tool_task, return_exceptions=True)
+                        raise SteeringCancelled(steering.cancel_reason)
+                    cancel_task.cancel()
+                    await asyncio.gather(cancel_task, return_exceptions=True)
+                    result = await tool_task
+                else:
+                    result = await spec.node.func(parsed_args, ctx)
             except _PlannerPauseSignal as signal:
                 tracker.record_hop()
                 pause_chunks = ctx._collect_chunks()

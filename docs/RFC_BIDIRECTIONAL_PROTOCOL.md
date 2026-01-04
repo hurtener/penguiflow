@@ -747,7 +747,7 @@ class StreamingSession:
 3. Dead letter handling for failed tasks
 4. Task timeout and automatic cleanup
 
-### 7.6 Phase 6 (Optional): Scheduled Jobs
+### 7.6 Phase 6: Scheduled Jobs
 
 **Duration:** 2–4 weeks (product-dependent)
 

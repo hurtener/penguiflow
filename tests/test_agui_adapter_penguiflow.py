@@ -33,7 +33,9 @@ class FakeAgentWrapper(AgentWrapper):
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Any = None,
         trace_id_hint: str | None = None,
+        steering: Any = None,
     ) -> ChatResult:
+        del steering
         raise RuntimeError("resume not supported in FakeAgentWrapper")
 
     async def chat(
@@ -45,7 +47,9 @@ class FakeAgentWrapper(AgentWrapper):
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Any = None,
         trace_id_hint: str | None = None,
+        steering: Any = None,
     ) -> ChatResult:
+        del steering
         self.last_query = query
         self.last_llm_context = dict(llm_context or {})
         self.last_tool_context = dict(tool_context or {})
@@ -230,7 +234,9 @@ async def test_penguiflow_adapter_emits_pause_custom_event() -> None:
             tool_context: Mapping[str, Any] | None = None,
             event_consumer: Any = None,
             trace_id_hint: str | None = None,
+            steering: Any = None,
         ) -> ChatResult:
+            del steering
             raise RuntimeError("resume not supported in PauseAgentWrapper")
 
         async def chat(
@@ -242,7 +248,9 @@ async def test_penguiflow_adapter_emits_pause_custom_event() -> None:
             tool_context: Mapping[str, Any] | None = None,
             event_consumer: Any = None,
             trace_id_hint: str | None = None,
+            steering: Any = None,
         ) -> ChatResult:
+            del steering
             return ChatResult(
                 answer=None,
                 trace_id=trace_id_hint or "trace-2",
@@ -295,7 +303,9 @@ async def test_penguiflow_adapter_emits_run_error() -> None:
             tool_context: Mapping[str, Any] | None = None,
             event_consumer: Any = None,
             trace_id_hint: str | None = None,
+            steering: Any = None,
         ) -> ChatResult:
+            del steering
             raise RuntimeError("resume not supported in ErrorAgentWrapper")
 
         async def chat(
@@ -307,7 +317,9 @@ async def test_penguiflow_adapter_emits_run_error() -> None:
             tool_context: Mapping[str, Any] | None = None,
             event_consumer: Any = None,
             trace_id_hint: str | None = None,
+            steering: Any = None,
         ) -> ChatResult:
+            del steering
             raise RuntimeError("boom")
 
     adapter = PenguiFlowAdapter(ErrorAgentWrapper())

@@ -15,6 +15,10 @@ def render_resume_user_input(user_input: str) -> str:
     return f"Resume input: {user_input}"
 
 
+def render_steering_input(payload: str) -> str:
+    return f"Steering input: {payload}"
+
+
 def render_planning_hints(hints: Mapping[str, Any]) -> str:
     lines: list[str] = []
     constraints = hints.get("constraints")
