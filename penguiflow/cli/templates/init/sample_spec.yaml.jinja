@@ -14,6 +14,7 @@ agent:
     # streaming: false # Enable streaming responses
     # hitl: false      # Human-in-the-loop (enterprise template)
     # a2a: false       # Agent-to-agent communication (enterprise template)
+    # background_tasks: false  # Enable background task orchestration
 
 # ============================================================================
 # LLM CONFIGURATION
@@ -51,6 +52,11 @@ tools:
     result:
       documents: list[str]
       scores: list[float]
+    # background:                       # Optional: Enable background execution
+    #   enabled: false
+    #   mode: job                       # job | subagent
+    #   default_merge_strategy: HUMAN_GATED  # APPEND | REPLACE | HUMAN_GATED
+    #   notify_on_complete: true
 
   # Example: A write tool
   # - name: save_note
@@ -177,3 +183,17 @@ planner:
   #   parallel_groups: [[fetch_a, fetch_b]]          # Tools that can run in parallel
   #   sequential_only: [save_note]                   # Tools that must run alone
   #   disallow: [dangerous_tool]                     # Never use these tools
+
+  # Background task orchestration (requires agent.flags.background_tasks: true)
+  # background_tasks:
+  #   enabled: false
+  #   allow_tool_background: false       # Allow tool-declared background execution
+  #   default_mode: subagent             # subagent | job
+  #   default_merge_strategy: HUMAN_GATED  # APPEND | REPLACE | HUMAN_GATED (HUMAN_GATED requires hitl)
+  #   context_depth: full                # full | summary | none
+  #   propagate_on_cancel: cascade       # cascade | isolate
+  #   spawn_requires_confirmation: false # Requires hitl flag
+  #   include_prompt_guidance: true
+  #   max_concurrent_tasks: 5            # 1-20
+  #   max_tasks_per_session: 50          # 1-200
+  #   task_timeout_s: 3600               # Minimum 60

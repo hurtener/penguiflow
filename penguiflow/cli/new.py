@@ -48,6 +48,7 @@ class TemplateContext:
     with_a2a: bool = False
     with_rich_output: bool = False
     no_memory: bool = False
+    with_background_tasks: bool = False
 
 
 def _normalise_package_name(name: str) -> str:
@@ -112,6 +113,8 @@ def _render_content(raw: str, ctx: TemplateContext) -> str:
             with_rich_output=ctx.with_rich_output,
             no_memory=ctx.no_memory,
             memory_enabled=not ctx.no_memory,
+            with_background_tasks=ctx.with_background_tasks,
+            background_tasks_enabled=ctx.with_background_tasks,
         )
     except Exception as exc:  # pragma: no cover - defensive, covered indirectly via tests
         raise TemplateRenderError(f"Failed to render template: {exc}") from exc
@@ -141,6 +144,7 @@ def run_new(
     with_a2a: bool = False,
     with_rich_output: bool = False,
     no_memory: bool = False,
+    with_background_tasks: bool = False,
 ) -> NewResult:
     """Create a new PenguiFlow agent project from templates.
 
@@ -168,6 +172,7 @@ def run_new(
         with_a2a=with_a2a,
         with_rich_output=with_rich_output,
         no_memory=no_memory,
+        with_background_tasks=with_background_tasks,
     )
     base_dir = output_dir or Path.cwd()
     project_dir = base_dir / name

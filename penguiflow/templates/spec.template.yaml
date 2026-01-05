@@ -9,6 +9,7 @@ agent:
     hitl: false
     a2a: false
     memory: true
+    background_tasks: false  # Enable background task orchestration
 
 tools:
   - name: fetch_data
@@ -21,6 +22,11 @@ tools:
       limit: Optional[int]
     result:
       items: list[str]
+    # background:  # Optional: Enable background execution for this tool
+    #   enabled: false
+    #   mode: job  # job|subagent
+    #   default_merge_strategy: HUMAN_GATED  # APPEND|REPLACE|HUMAN_GATED
+    #   notify_on_complete: true
 
 flows:
   - name: pipeline
@@ -74,3 +80,15 @@ planner:
     parallel_groups: []
     sequential_only: []
     disallow: []
+  # background_tasks:  # Optional: Background task orchestration config
+  #   enabled: false
+  #   allow_tool_background: false  # Allow tool-declared background execution
+  #   default_mode: subagent  # subagent|job
+  #   default_merge_strategy: HUMAN_GATED  # APPEND|REPLACE|HUMAN_GATED
+  #   context_depth: full  # full|summary|none
+  #   propagate_on_cancel: cascade  # cascade|isolate
+  #   spawn_requires_confirmation: false  # Requires hitl flag
+  #   include_prompt_guidance: true
+  #   max_concurrent_tasks: 5
+  #   max_tasks_per_session: 50
+  #   task_timeout_s: 3600

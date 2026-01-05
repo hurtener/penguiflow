@@ -6,12 +6,40 @@ import os
 from dataclasses import dataclass, field
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    """Parse boolean from environment variable."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    """Parse integer from environment variable."""
+    raw = os.getenv(name)
+    return int(raw) if raw is not None else default
+
+
 @dataclass
 class Config:
     """Environment-driven configuration."""
 
 {% if memory_enabled %}
     memory_base_url: str = "http://localhost:8000"
+{% endif %}
+{% if with_background_tasks %}
+    # Background tasks configuration
+    background_tasks_enabled: bool = True
+    background_tasks_allow_tool_background: bool = True
+    background_tasks_default_mode: str = "subagent"
+    background_tasks_default_merge_strategy: str = "HUMAN_GATED"
+    background_tasks_context_depth: str = "full"
+    background_tasks_propagate_on_cancel: str = "cascade"
+    background_tasks_spawn_requires_confirmation: bool = False
+    background_tasks_include_prompt_guidance: bool = True
+    background_tasks_max_concurrent_tasks: int = 5
+    background_tasks_max_tasks_per_session: int = 50
+    background_tasks_task_timeout_s: int = 3600
 {% endif %}
 
     @classmethod
@@ -20,5 +48,19 @@ class Config:
         return cls(
 {% if memory_enabled %}
             memory_base_url=os.getenv("MEMORY_BASE_URL", "http://localhost:8000"),
+{% endif %}
+{% if with_background_tasks %}
+            # Background tasks configuration
+            background_tasks_enabled=_env_flag("BACKGROUND_TASKS_ENABLED", True),
+            background_tasks_allow_tool_background=_env_flag("BACKGROUND_TASKS_ALLOW_TOOL_BACKGROUND", True),
+            background_tasks_default_mode=os.getenv("BACKGROUND_TASKS_DEFAULT_MODE", "subagent"),
+            background_tasks_default_merge_strategy=os.getenv("BACKGROUND_TASKS_DEFAULT_MERGE_STRATEGY", "HUMAN_GATED"),
+            background_tasks_context_depth=os.getenv("BACKGROUND_TASKS_CONTEXT_DEPTH", "full"),
+            background_tasks_propagate_on_cancel=os.getenv("BACKGROUND_TASKS_PROPAGATE_ON_CANCEL", "cascade"),
+            background_tasks_spawn_requires_confirmation=_env_flag("BACKGROUND_TASKS_SPAWN_REQUIRES_CONFIRMATION", False),
+            background_tasks_include_prompt_guidance=_env_flag("BACKGROUND_TASKS_INCLUDE_PROMPT_GUIDANCE", True),
+            background_tasks_max_concurrent_tasks=_env_int("BACKGROUND_TASKS_MAX_CONCURRENT_TASKS", 5),
+            background_tasks_max_tasks_per_session=_env_int("BACKGROUND_TASKS_MAX_TASKS_PER_SESSION", 50),
+            background_tasks_task_timeout_s=_env_int("BACKGROUND_TASKS_TASK_TIMEOUT_S", 3600),
 {% endif %}
         )

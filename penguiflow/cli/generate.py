@@ -808,6 +808,7 @@ def _generate_config(
     artifact_retention = artifact_cfg.retention
     rich_output = spec.planner.rich_output
     rich_allowlist = rich_output.allowlist or _DEFAULT_RICH_OUTPUT_ALLOWLIST
+    bg = spec.planner.background_tasks
 
     content = _render_template(
         "config.py.jinja",
@@ -860,6 +861,18 @@ def _generate_config(
             "short_term_memory_retry_attempts": stm.retry_attempts if stm else 3,
             "short_term_memory_retry_backoff_base_s": stm.retry_backoff_base_s if stm else 2.0,
             "short_term_memory_degraded_retry_interval_s": stm.degraded_retry_interval_s if stm else 30.0,
+            # Background tasks configuration
+            "background_tasks_enabled": bg.enabled,
+            "background_tasks_allow_tool_background": bg.allow_tool_background,
+            "background_tasks_default_mode": bg.default_mode,
+            "background_tasks_default_merge_strategy": bg.default_merge_strategy,
+            "background_tasks_context_depth": bg.context_depth,
+            "background_tasks_propagate_on_cancel": bg.propagate_on_cancel,
+            "background_tasks_spawn_requires_confirmation": bg.spawn_requires_confirmation,
+            "background_tasks_include_prompt_guidance": bg.include_prompt_guidance,
+            "background_tasks_max_concurrent_tasks": bg.max_concurrent_tasks,
+            "background_tasks_max_tasks_per_session": bg.max_tasks_per_session,
+            "background_tasks_task_timeout_s": bg.task_timeout_s,
         },
     )
 
@@ -895,6 +908,7 @@ def _generate_env_example(
     rich_output = spec.planner.rich_output
     rich_allowlist = rich_output.allowlist or _DEFAULT_RICH_OUTPUT_ALLOWLIST
     rich_allowlist_csv = ",".join(rich_allowlist)
+    bg = spec.planner.background_tasks
 
     content = _render_template(
         "env.example.jinja",
@@ -939,6 +953,18 @@ def _generate_env_example(
             "short_term_memory_retry_backoff_base_s": stm.retry_backoff_base_s if stm else 2.0,
             "short_term_memory_degraded_retry_interval_s": stm.degraded_retry_interval_s if stm else 30.0,
             "external_env_vars": external_env_vars,
+            # Background tasks configuration
+            "background_tasks_enabled": str(bg.enabled).lower(),
+            "background_tasks_allow_tool_background": str(bg.allow_tool_background).lower(),
+            "background_tasks_default_mode": bg.default_mode,
+            "background_tasks_default_merge_strategy": bg.default_merge_strategy,
+            "background_tasks_context_depth": bg.context_depth,
+            "background_tasks_propagate_on_cancel": bg.propagate_on_cancel,
+            "background_tasks_spawn_requires_confirmation": str(bg.spawn_requires_confirmation).lower(),
+            "background_tasks_include_prompt_guidance": str(bg.include_prompt_guidance).lower(),
+            "background_tasks_max_concurrent_tasks": bg.max_concurrent_tasks,
+            "background_tasks_max_tasks_per_session": bg.max_tasks_per_session,
+            "background_tasks_task_timeout_s": bg.task_timeout_s,
         },
     )
 
@@ -1009,6 +1035,7 @@ def _scaffold_project(
     quiet: bool,
 ) -> tuple[Path, list[str], list[str], list[str]]:
     flags = spec.agent.flags
+    bg = spec.planner.background_tasks
     result = run_new(
         name=spec.agent.name,
         template=spec.agent.template,
@@ -1021,6 +1048,7 @@ def _scaffold_project(
         with_a2a=flags.a2a,
         with_rich_output=bool(spec.planner.rich_output.enabled),
         no_memory=not flags.memory,
+        with_background_tasks=flags.background_tasks or bg.enabled,
     )
     project_dir = (output_dir or Path.cwd()) / spec.agent.name
     return project_dir, list(result.created), list(result.skipped), list(result.errors)
