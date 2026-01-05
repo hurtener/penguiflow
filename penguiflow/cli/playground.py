@@ -757,6 +757,66 @@ def create_playground_app(
 
     app = FastAPI(title="PenguiFlow Playground", version="0.1.0", lifespan=_lifespan)
 
+    # Optional: enable platform task-management meta-tools when a planner factory is available.
+    # This is a Playground convenience to make background tasks discoverable without requiring
+    # downstream project code changes.
+    if planner_factory is not None:
+        try:
+            from penguiflow.planner import ReactPlanner
+            from penguiflow.planner import prompts as planner_prompts
+            from penguiflow.planner.catalog_extension import extend_tool_catalog
+            from penguiflow.planner.models import BackgroundTasksConfig
+            from penguiflow.sessions.task_service import InProcessTaskService
+            from penguiflow.sessions.task_tools import SUBAGENT_FLAG_KEY, TASK_SERVICE_KEY, build_task_tool_specs
+            from penguiflow.sessions.tool_jobs import build_tool_job_pipeline
+
+            planner = None
+            try:
+                planner = getattr(agent_wrapper, "_planner", None)
+            except Exception:
+                planner = None
+            tool_job_factory = None
+            if isinstance(planner, ReactPlanner):
+                spec_by_name = getattr(planner, "_spec_by_name", {}) or {}
+                artifact_store = getattr(planner, "artifact_store", None)
+
+                def _tool_job_factory(tool_name: str, tool_args: Any):
+                    spec = spec_by_name.get(tool_name)
+                    if spec is None:
+                        raise RuntimeError(f"tool_not_found:{tool_name}")
+                    return build_tool_job_pipeline(
+                        spec=spec,
+                        args_payload=dict(tool_args or {}),
+                        artifacts=artifact_store,
+                    )
+
+                tool_job_factory = _tool_job_factory
+
+            task_service = InProcessTaskService(
+                sessions=session_manager,
+                planner_factory=planner_factory,
+                tool_job_factory=tool_job_factory,
+            )
+            if isinstance(planner, ReactPlanner):
+                existing_extra = getattr(planner, "_system_prompt_extra", None)
+                planner._system_prompt_extra = planner_prompts.merge_prompt_extras(
+                    existing_extra,
+                    planner_prompts.render_background_task_guidance(),
+                )
+                existing_cfg = getattr(planner, "_background_tasks", None)
+                if isinstance(existing_cfg, BackgroundTasksConfig):
+                    planner._background_tasks = existing_cfg.model_copy(
+                        update={"enabled": True, "allow_tool_background": True}
+                    )
+                extend_tool_catalog(planner, build_task_tool_specs())
+            # Inject TaskService into PlannerAgentWrapper tool_context defaults if available.
+            defaults = getattr(agent_wrapper, "_tool_context_defaults", None)
+            if isinstance(defaults, dict):
+                defaults.setdefault(TASK_SERVICE_KEY, task_service)
+                defaults.setdefault(SUBAGENT_FLAG_KEY, False)
+        except Exception as exc:  # pragma: no cover - optional wiring
+            _LOGGER.debug("task_tools_unavailable", extra={"error": str(exc)})
+
     def _discover_planner() -> Any | None:
         """Discover the underlying planner instance from the agent wrapper."""
         planner = getattr(agent_wrapper, "_planner", None)
@@ -1041,7 +1101,11 @@ def create_playground_app(
                 "query": request.query,
                 "session_id": session_id,
                 "llm_context": llm_context,
-                "tool_context": dict(request.tool_context or {}),
+                "tool_context": {
+                    **dict(request.tool_context or {}),
+                    "task_id": task_id,
+                    "is_subagent": False,
+                },
                 "event_consumer": _event_consumer,
                 "trace_id_hint": trace_holder["id"],
             }
@@ -1199,7 +1263,11 @@ def create_playground_app(
                     "query": query,
                     "session_id": session_value,
                     "llm_context": llm_payload,
-                    "tool_context": tool_payload,
+                    "tool_context": {
+                        **dict(tool_payload or {}),
+                        "task_id": task_id,
+                        "is_subagent": False,
+                    },
                     "event_consumer": _event_consumer,
                     "trace_id_hint": trace_holder["id"],
                 }

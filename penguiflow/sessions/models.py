@@ -64,6 +64,8 @@ class TaskContextSnapshot(BaseModel):
     spawned_at: datetime = Field(default_factory=_utc_now)
     spawn_reason: str | None = None
     query: str | None = None
+    propagate_on_cancel: Literal["cascade", "isolate"] = "cascade"
+    notify_on_complete: bool = True
     context_version: int | None = None
     context_hash: str | None = None
     llm_context: dict[str, Any] = Field(default_factory=dict)

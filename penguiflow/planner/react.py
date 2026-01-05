@@ -55,6 +55,7 @@ from .memory_integration import (
     _resolve_memory_key,
 )
 from .models import (
+    BackgroundTasksConfig,
     FinalPayload,
     JoinInjection,
     JSONLLMClient,
@@ -339,6 +340,7 @@ class ReactPlanner:
     _time_source: Callable[[], float]
     _token_budget: int | None
     _tool_policy: ToolPolicy | None
+    _background_tasks: BackgroundTasksConfig
 
     def __init__(
         self,
@@ -374,6 +376,7 @@ class ReactPlanner:
         tool_policy: ToolPolicy | None = None,
         stream_final_response: bool = False,
         short_term_memory: ShortTermMemory | ShortTermMemoryConfig | None = None,
+        background_tasks: BackgroundTasksConfig | None = None,
     ) -> None:
         _init_react_planner(
             self,
@@ -408,6 +411,7 @@ class ReactPlanner:
             tool_policy=tool_policy,
             stream_final_response=stream_final_response,
             short_term_memory=short_term_memory,
+            background_tasks=background_tasks,
         )
 
     @property

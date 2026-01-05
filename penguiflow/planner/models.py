@@ -207,6 +207,22 @@ class ToolPolicy(BaseModel):
         return True
 
 
+class BackgroundTasksConfig(BaseModel):
+    """Optional configuration enabling background tasks/subagent orchestration."""
+
+    enabled: bool = False
+    include_prompt_guidance: bool = True
+    allow_tool_background: bool = False
+
+
+class BackgroundTaskHandle(BaseModel):
+    """Return type for tools that run asynchronously in the background."""
+
+    task_id: str
+    status: str = "PENDING"
+    message: str | None = None
+
+
 class ReflectionCriteria(BaseModel):
     """Quality criteria used when critiquing an answer."""
 

@@ -19,6 +19,7 @@ from .llm import _LiteLLMJSONClient
 from .memory import ShortTermMemory, ShortTermMemoryConfig
 from .memory_integration import _ShortTermMemorySummary
 from .models import (
+    BackgroundTasksConfig,
     ClarificationResponse,
     JSONLLMClient,
     ObservationGuardrailConfig,
@@ -66,6 +67,7 @@ def init_react_planner(
     tool_policy: ToolPolicy | None = None,
     stream_final_response: bool = False,
     short_term_memory: ShortTermMemory | ShortTermMemoryConfig | None = None,
+    background_tasks: BackgroundTasksConfig | None = None,
 ) -> None:
     if catalog is None:
         if nodes is None or registry is None:
@@ -106,6 +108,12 @@ def init_react_planner(
     planner._register_resource_callbacks()
     planner._planning_hints = _PlanningHints.from_mapping(planning_hints)
     hints_payload = planner._planning_hints.to_prompt_payload() if not planner._planning_hints.empty() else None
+    planner._background_tasks = background_tasks or BackgroundTasksConfig()
+    if planner._background_tasks.enabled and planner._background_tasks.include_prompt_guidance:
+        system_prompt_extra = prompts.merge_prompt_extras(
+            system_prompt_extra,
+            prompts.render_background_task_guidance(),
+        )
     planner._system_prompt = prompts.build_system_prompt(
         planner._catalog_records,
         extra=system_prompt_extra,

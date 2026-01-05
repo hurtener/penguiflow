@@ -222,14 +222,153 @@ def _compact_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, sort_keys=True)
 
 
+def merge_prompt_extras(*parts: str | None) -> str | None:
+    """Join optional system prompt fragments with spacing."""
+    cleaned = [part.strip() for part in parts if part and part.strip()]
+    if not cleaned:
+        return None
+    return "\n\n".join(cleaned)
+
+
+def render_background_task_guidance() -> str:
+    """Render comprehensive background task guidance for the planner.
+
+    This prompt fragment is injected when BackgroundTasksConfig.enabled=True
+    and BackgroundTasksConfig.include_prompt_guidance=True.
+
+    Covers all RFC_AGENT_BACKGROUND_TASKS prompt policy hooks:
+    - Async tool behavior
+    - Meta-tools for task management
+    - Artifact handling
+    - Merge rules and human-gated approval
+    - Steering proxy capabilities
+    - Context divergence awareness
+    """
+    return """<background_tasks>
+You have access to background task orchestration. Background tasks are independent
+subagents that run asynchronously, allowing you to parallelize long-running work
+while continuing to respond to the user.
+
+<async_tools>
+Some tools in your catalog may be marked as background tools. When you call these:
+- The tool spawns a background task and returns immediately with a task handle
+- Results arrive asynchronously - you will NOT receive them inline
+- Use task management tools to check status and retrieve results when ready
+- Do NOT wait for background tools to complete before responding to the user
+</async_tools>
+
+<task_meta_tools>
+If task management tools are available (tasks.*), use them as follows:
+
+Spawning:
+- tasks.spawn: Create a new background task for long-running or independent work
+  - Use mode="subagent" for complex tasks requiring reasoning (default)
+  - Use mode="job" for simple, single-tool executions
+  - Returns immediately with task_id; execution is async
+
+Monitoring:
+- tasks.list: Query active/completed/failed tasks in the current session
+- tasks.get: Retrieve status, progress, and result digest for a specific task
+
+Control:
+- tasks.cancel: Terminate a running task (cascades to child tasks by default)
+- tasks.prioritize: Adjust execution priority of pending/running tasks
+
+Results:
+- tasks.apply_patch: Apply or reject background results to the conversation context
+  - Required for HUMAN_GATED merge strategy (the default for safety)
+  - User must approve before results are merged
+
+When to spawn background tasks:
+- Research or analysis that would take multiple tool calls
+- Work that is independent of the current conversation flow
+- Tasks the user explicitly asks to run "in the background"
+- Long-running operations that should not block your response
+</task_meta_tools>
+
+<artifact_handling>
+Background tasks may produce artifacts (files, data, visualizations).
+
+Rules:
+- You receive artifact METADATA only (name, type, size, summary) - never raw content
+- Do NOT inline large or binary content in your answers
+- If you need full artifact content, fetch it explicitly using artifact tools
+- Reference artifacts by their ID or name when discussing them with the user
+</artifact_handling>
+
+<merge_rules>
+Background task results require explicit integration into the conversation context.
+
+Merge strategies:
+- HUMAN_GATED (default): Results are held until the user approves via tasks.apply_patch
+- APPEND: Results are automatically appended to context (less common)
+- REPLACE: Results overwrite a specific context key (least common)
+
+When a background task completes:
+1. A notification appears to the user
+2. For HUMAN_GATED, prompt the user or wait for their decision
+3. Only after approval will results be visible in your context
+4. You can check pending results via tasks.get before they are merged
+</merge_rules>
+
+<steering_proxy>
+You can act as a steering proxy for background tasks. If the user requests task control
+through natural language, translate their intent into the appropriate action:
+
+User intent → Your action:
+- "Cancel that research" → tasks.cancel with the relevant task_id
+- "Speed up the analysis" → tasks.prioritize to increase priority
+- "What's the status?" → tasks.list or tasks.get to query and report
+- "Apply those results" → tasks.apply_patch with action="apply"
+- "Ignore that output" → tasks.apply_patch with action="reject"
+- "Pause everything" → tasks.cancel for relevant tasks (explain limitations)
+
+Always confirm the action taken and report the outcome to the user.
+</steering_proxy>
+
+<context_divergence>
+Background tasks run on a frozen snapshot of context from when they were spawned.
+If the foreground conversation advances significantly, background results may be stale.
+
+When applying results:
+- Check if context_diverged is flagged in the task or patch
+- If diverged, inform the user that results are from an older context
+- Prefer HUMAN_GATED merge for diverged results so the user can review
+- Consider whether the results are still relevant before recommending apply
+</context_divergence>
+
+</background_tasks>"""
+
+
 def render_tool(record: Mapping[str, Any]) -> str:
     args_schema = _compact_json(record["args_schema"])
     out_schema = _compact_json(record["out_schema"])
     tags = ", ".join(record.get("tags", ()))
     scopes = ", ".join(record.get("auth_scopes", ()))
+    desc = str(record.get("desc") or "")
+    extra = record.get("extra")
+    background_cfg = None
+    if isinstance(extra, Mapping):
+        background_cfg = extra.get("background")
+    if isinstance(background_cfg, Mapping) and background_cfg.get("enabled") is True:
+        from .models import BackgroundTaskHandle
+
+        mode = background_cfg.get("mode")
+        merge = background_cfg.get("default_merge_strategy")
+        notify = background_cfg.get("notify_on_complete")
+        details: list[str] = []
+        if mode is not None:
+            details.append(f"mode={mode}")
+        if merge is not None:
+            details.append(f"default_merge_strategy={merge}")
+        if notify is not None:
+            details.append(f"notify_on_complete={notify}")
+        suffix = f": {', '.join(details)}" if details else ""
+        desc = f"{desc} (runs in background{suffix}; returns task handle)"
+        out_schema = _compact_json(BackgroundTaskHandle.model_json_schema())
     parts = [
         f"- name: {record['name']}",
-        f"  desc: {record['desc']}",
+        f"  desc: {desc}",
         f"  side_effects: {record['side_effects']}",
         f"  args_schema: {args_schema}",
         f"  out_schema: {out_schema}",

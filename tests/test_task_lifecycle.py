@@ -162,3 +162,70 @@ async def test_background_context_snapshot_isolated() -> None:
     task = await session.get_task(task_id)
     assert task is not None
     assert task.context_snapshot.llm_context["nested"]["value"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_cascades_to_child_tasks_by_default() -> None:
+    session = StreamingSession("session-cascade")
+
+    async def pipeline(_runtime):
+        await asyncio.sleep(10.0)
+        return TaskResult(payload={"answer": "late"})
+
+    parent_id = await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="parent")
+    child_id = await session.spawn_task(
+        pipeline,
+        task_type=TaskType.BACKGROUND,
+        query="child",
+        parent_task_id=parent_id,
+    )
+    await asyncio.sleep(0.05)
+    await session.cancel_task(parent_id, reason="stop")
+    await asyncio.sleep(0.05)
+    child = await session.get_task(child_id)
+    assert child is not None
+    assert child.status == TaskStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_cancel_isolate_does_not_cancel_child() -> None:
+    session = StreamingSession("session-isolate")
+
+    async def pipeline(_runtime):
+        await asyncio.sleep(10.0)
+        return TaskResult(payload={"answer": "late"})
+
+    parent_id = await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="parent")
+    child_id = await session.spawn_task(
+        pipeline,
+        task_type=TaskType.BACKGROUND,
+        query="child",
+        parent_task_id=parent_id,
+        propagate_on_cancel="isolate",
+    )
+    await asyncio.sleep(0.05)
+    await session.cancel_task(parent_id, reason="stop")
+    await asyncio.sleep(0.05)
+    child = await session.get_task(child_id)
+    assert child is not None
+    assert child.status in {TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.PAUSED}
+    await session.cancel_task(child_id, reason="cleanup")
+
+
+@pytest.mark.asyncio
+async def test_broadcast_steer_applies_to_active_tasks() -> None:
+    session = StreamingSession("session-broadcast")
+
+    async def pipeline(_runtime):
+        await asyncio.sleep(10.0)
+        return TaskResult(payload={"answer": "late"})
+
+    t1 = await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="a")
+    t2 = await session.spawn_task(pipeline, task_type=TaskType.BACKGROUND, query="b")
+    await asyncio.sleep(0.05)
+    count = await session.broadcast_steer(event_type=SteeringEventType.PAUSE, payload={"reason": "pause"})
+    assert count == 2
+    task1 = await session.get_task(t1)
+    task2 = await session.get_task(t2)
+    assert task1 is not None and task1.status == TaskStatus.PAUSED
+    assert task2 is not None and task2.status == TaskStatus.PAUSED

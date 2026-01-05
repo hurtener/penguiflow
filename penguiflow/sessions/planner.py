@@ -103,8 +103,10 @@ class PlannerTaskPipeline:
         if runtime.state.task_type == TaskType.BACKGROUND:
             tool_context["session_id"] = f"{runtime.state.session_id}:{runtime.state.task_id}"
             tool_context["parent_session_id"] = runtime.state.session_id
+            tool_context["is_subagent"] = True
         else:
             tool_context["session_id"] = runtime.state.session_id
+            tool_context["is_subagent"] = False
         tool_context["trace_id"] = trace_id
         tool_context["task_id"] = runtime.state.task_id
 

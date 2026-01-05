@@ -27,6 +27,8 @@ from .validation_repair import _autofill_missing_args, _coerce_tool_context, _va
 
 logger = logging.getLogger("penguiflow.planner")
 
+_TASK_SERVICE_KEY = "task_service"
+
 
 def _apply_steering(planner: Any, trajectory: Trajectory) -> None:
     steering: SteeringInbox | None = getattr(planner, "_steering", None)
@@ -903,6 +905,112 @@ async def run_loop(
 
             ctx = _PlannerContext(planner, trajectory)
             try:
+                extra = spec.extra if isinstance(spec.extra, Mapping) else {}
+                background_cfg = extra.get("background") if isinstance(extra, Mapping) else None
+                background_allowed = bool(
+                    getattr(
+                        getattr(planner, "_background_tasks", None),
+                        "allow_tool_background",
+                        False,
+                    )
+                )
+                if (
+                    background_allowed
+                    and isinstance(background_cfg, Mapping)
+                    and background_cfg.get("enabled") is True
+                ):
+                    service = ctx.tool_context.get(_TASK_SERVICE_KEY)
+                    if service is not None:
+                        session_id = ctx.tool_context.get("session_id")
+                        parent_task_id = ctx.tool_context.get("task_id")
+                        if isinstance(session_id, str):
+                            from penguiflow.sessions.models import MergeStrategy
+
+                            mode = background_cfg.get("mode") if isinstance(background_cfg, Mapping) else None
+                            mode_value = str(mode).lower().strip() if mode is not None else "job"
+                            merge_raw = background_cfg.get("default_merge_strategy")
+                            merge_value = (
+                                str(merge_raw).lower().strip()
+                                if merge_raw is not None
+                                else MergeStrategy.HUMAN_GATED.value
+                            )
+                            merge_strategy = {
+                                "append": MergeStrategy.APPEND,
+                                "replace": MergeStrategy.REPLACE,
+                                "human_gated": MergeStrategy.HUMAN_GATED,
+                                "human-gated": MergeStrategy.HUMAN_GATED,
+                                "human": MergeStrategy.HUMAN_GATED,
+                            }.get(merge_value, MergeStrategy.HUMAN_GATED)
+                            notify_on_complete = background_cfg.get("notify_on_complete", True) is not False
+
+                            if mode_value == "subagent":
+                                tool_query = (
+                                    f"Run tool {spec.name} with args {args_json}. "
+                                    "Return the tool output and a brief digest."
+                                )
+                                spawned = await service.spawn(
+                                    session_id=session_id,
+                                    query=tool_query,
+                                    parent_task_id=parent_task_id
+                                    if isinstance(parent_task_id, str)
+                                    else None,
+                                    priority=0,
+                                    merge_strategy=merge_strategy,
+                                    propagate_on_cancel="cascade",
+                                    notify_on_complete=notify_on_complete,
+                                    context_depth="full",
+                                )
+                            else:
+                                spawned = await service.spawn_tool_job(
+                                    session_id=session_id,
+                                    tool_name=spec.name,
+                                    tool_args=args_payload,
+                                    parent_task_id=parent_task_id
+                                    if isinstance(parent_task_id, str)
+                                    else None,
+                                    priority=0,
+                                    merge_strategy=merge_strategy,
+                                    propagate_on_cancel="cascade",
+                                    notify_on_complete=notify_on_complete,
+                                )
+                            from .models import BackgroundTaskHandle
+
+                            status_obj = getattr(spawned, "status", None)
+                            status_value = getattr(status_obj, "value", None)
+                            status = status_value if status_value is not None else status_obj
+                            handle = BackgroundTaskHandle(
+                                task_id=str(getattr(spawned, "task_id", "")),
+                                status=str(status or "PENDING"),
+                                message=f"spawned:{mode_value}",
+                            )
+                            observation_json = handle.model_dump(mode="json")
+                            result_json = _safe_json_dumps(observation_json)
+                            planner._emit_event(
+                                PlannerEvent(
+                                    event_type="tool_call_result",
+                                    ts=planner._time_source(),
+                                    trajectory_step=len(trajectory.steps),
+                                    extra={
+                                        "tool_call_id": tool_call_id,
+                                        "tool_name": spec.name,
+                                        "result_json": result_json,
+                                        "action_seq": current_action_seq,
+                                    },
+                                )
+                            )
+                            trajectory.steps.append(
+                                TrajectoryStep(
+                                    action=action,
+                                    observation=observation_json,
+                                    llm_observation=observation_json,
+                                )
+                            )
+                            tracker.record_hop()
+                            trajectory.summary = None
+                            last_observation = observation_json
+                            trajectory.resume_user_input = None
+                            continue
+
                 if steering is not None:
                     tool_task = asyncio.create_task(spec.node.func(parsed_args, ctx))
                     cancel_task = asyncio.create_task(steering.cancel_event.wait())

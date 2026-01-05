@@ -20,6 +20,8 @@ class TaskRegistry:
     ) -> None:
         self._tasks: dict[str, TaskState] = {}
         self._by_session: dict[str, list[str]] = {}
+        self._children: dict[str, list[str]] = {}
+        self._parent: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._persist_task = persist_task
 
@@ -48,6 +50,12 @@ class TaskRegistry:
         async with self._lock:
             self._tasks[task_id] = state
             self._by_session.setdefault(session_id, []).append(task_id)
+            parent_id = context_snapshot.spawned_from_task_id if context_snapshot else None
+            if parent_id and parent_id != task_id:
+                self._parent[task_id] = parent_id
+                children = self._children.setdefault(parent_id, [])
+                if task_id not in children:
+                    children.append(task_id)
         if self._persist_task is not None:
             await self._persist_task(state)
         return state
@@ -119,6 +127,11 @@ class TaskRegistry:
             ids = self._by_session.get(task.session_id)
             if ids is not None:
                 self._by_session[task.session_id] = [tid for tid in ids if tid != task_id]
+            parent = self._parent.pop(task_id, None)
+            if parent is not None:
+                children = self._children.get(parent)
+                if children is not None:
+                    self._children[parent] = [tid for tid in children if tid != task_id]
 
     async def update_priority(self, task_id: str, priority: int) -> TaskState | None:
         async with self._lock:
@@ -144,6 +157,20 @@ class TaskRegistry:
             for task in tasks:
                 self._tasks[task.task_id] = task
                 self._by_session.setdefault(task.session_id, []).append(task.task_id)
+                parent_id = task.context_snapshot.spawned_from_task_id if task.context_snapshot else None
+                if parent_id and parent_id != task.task_id:
+                    self._parent[task.task_id] = parent_id
+                    children = self._children.setdefault(parent_id, [])
+                    if task.task_id not in children:
+                        children.append(task.task_id)
+
+    async def get_parent(self, task_id: str) -> str | None:
+        async with self._lock:
+            return self._parent.get(task_id)
+
+    async def list_children(self, task_id: str) -> list[str]:
+        async with self._lock:
+            return list(self._children.get(task_id, []))
 
 
 __all__ = ["TaskRegistry"]

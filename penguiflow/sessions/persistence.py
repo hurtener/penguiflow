@@ -62,10 +62,17 @@ def _clone_task(state: TaskState) -> TaskState:
 class InMemorySessionStateStore(SessionStateStore):
     """In-memory state store for session/task persistence and replay."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        max_updates_per_session: int = 10_000,
+        max_steering_events_per_session: int = 10_000,
+    ) -> None:
         self._tasks: dict[str, dict[str, TaskState]] = {}
         self._updates: dict[str, list[StateUpdate]] = {}
         self._steering: dict[str, list[SteeringEvent]] = {}
+        self._max_updates = max_updates_per_session
+        self._max_steering = max_steering_events_per_session
         self._lock = asyncio.Lock()
 
     async def save_task(self, state: TaskState) -> None:
@@ -74,11 +81,17 @@ class InMemorySessionStateStore(SessionStateStore):
 
     async def save_update(self, update: StateUpdate) -> None:
         async with self._lock:
-            self._updates.setdefault(update.session_id, []).append(update)
+            updates = self._updates.setdefault(update.session_id, [])
+            updates.append(update)
+            if self._max_updates and len(updates) > self._max_updates:
+                self._updates[update.session_id] = updates[-self._max_updates :]
 
     async def save_steering(self, event: SteeringEvent) -> None:
         async with self._lock:
-            self._steering.setdefault(event.session_id, []).append(event)
+            events = self._steering.setdefault(event.session_id, [])
+            events.append(event)
+            if self._max_steering and len(events) > self._max_steering:
+                self._steering[event.session_id] = events[-self._max_steering :]
 
     async def list_tasks(self, session_id: str) -> Sequence[TaskState]:
         async with self._lock:

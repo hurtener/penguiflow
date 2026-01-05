@@ -35,6 +35,20 @@ from .session import (
     TaskResult,
     TaskRuntime,
 )
+from .task_service import (
+    ContextDepth,
+    InProcessTaskService,
+    NoOpSpawnGuard,
+    SpawnDecision,
+    SpawnGuard,
+    SpawnRequest,
+    TaskDetails,
+    TaskService,
+    TaskSpawnResult,
+    TaskSummary,
+)
+from .task_tools import build_task_tool_specs
+from .telemetry import NoOpTaskTelemetrySink, TaskTelemetryEvent, TaskTelemetrySink
 from .transport import SessionConnection, Transport
 
 __all__ = [
@@ -67,6 +81,20 @@ __all__ = [
     "TaskStateModel",
     "TaskStatus",
     "TaskType",
+    "TaskDetails",
+    "TaskService",
+    "TaskSpawnResult",
+    "TaskSummary",
+    "InProcessTaskService",
+    "ContextDepth",
+    "SpawnDecision",
+    "SpawnGuard",
+    "SpawnRequest",
+    "NoOpSpawnGuard",
+    "TaskTelemetryEvent",
+    "TaskTelemetrySink",
+    "NoOpTaskTelemetrySink",
+    "build_task_tool_specs",
     "UpdateBroker",
     "UpdateType",
     "InMemorySessionStateStore",

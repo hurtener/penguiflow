@@ -11,7 +11,7 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from penguiflow.steering import (
     MAX_STEERING_PAYLOAD_BYTES,
@@ -41,6 +41,7 @@ from .models import (
 from .persistence import InMemorySessionStateStore, SessionStateStore, StateStoreSessionAdapter
 from .policy import ControlPolicy
 from .registry import TaskRegistry
+from .telemetry import NoOpTaskTelemetrySink, TaskTelemetryEvent, TaskTelemetrySink
 from .transport import SessionConnection, Transport
 
 
@@ -174,6 +175,7 @@ class StreamingSession:
         control_policy: ControlPolicy | None = None,
         limits: SessionLimits | None = None,
         state_store: SessionStateStore | None = None,
+        telemetry_sink: TaskTelemetrySink | None = None,
     ) -> None:
         self.session_id = session_id
         self._limits = limits or SessionLimits()
@@ -197,6 +199,7 @@ class StreamingSession:
             else None
         )
         self._control_policy = control_policy or ControlPolicy()
+        self._telemetry = telemetry_sink or NoOpTaskTelemetrySink()
         self._context = SessionContext()
         self._foreground_task_id: str | None = None
         self._hydrated = False
@@ -282,6 +285,8 @@ class StreamingSession:
         task_id: str | None = None,
         trace_id: str | None = None,
         merge_strategy: MergeStrategy = MergeStrategy.APPEND,
+        propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
+        notify_on_complete: bool = True,
     ) -> str:
         await self._ensure_limits(task_type)
         task_id = task_id or secrets.token_hex(8)
@@ -293,7 +298,18 @@ class StreamingSession:
             query=query,
             parent_task_id=parent_task_id,
             spawned_from_event_id=spawned_from_event_id,
+            propagate_on_cancel=propagate_on_cancel,
+            notify_on_complete=notify_on_complete,
         )
+        if context_snapshot is not None:
+            snapshot = context_snapshot.model_copy(
+                update={
+                    "session_id": self.session_id,
+                    "task_id": task_id,
+                    "propagate_on_cancel": propagate_on_cancel,
+                    "notify_on_complete": notify_on_complete,
+                }
+            )
         state = await self._registry.create_task(
             session_id=self.session_id,
             task_type=task_type,
@@ -304,6 +320,22 @@ class StreamingSession:
             task_id=task_id,
         )
         self._emit_status_change(state, reason="created")
+        asyncio.create_task(
+            self._telemetry.emit(
+                TaskTelemetryEvent(
+                    event_type="task_spawned",
+                    outcome="spawned",
+                    session_id=self.session_id,
+                    task_id=state.task_id,
+                    parent_task_id=state.context_snapshot.spawned_from_task_id,
+                    trace_id=state.trace_id,
+                    task_type=state.task_type,
+                    status=state.status,
+                    mode="subagent" if state.task_type == TaskType.BACKGROUND else "foreground",
+                    spawn_reason=state.context_snapshot.spawn_reason,
+                )
+            )
+        )
         if task_type == TaskType.FOREGROUND:
             self._foreground_task_id = task_id
         steering = SteeringInbox(maxsize=self._limits.steering_queue_size)
@@ -335,6 +367,8 @@ class StreamingSession:
         task_id: str | None = None,
         trace_id: str | None = None,
         merge_strategy: MergeStrategy = MergeStrategy.APPEND,
+        propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
+        notify_on_complete: bool = True,
     ) -> TaskResult:
         await self._ensure_limits(task_type)
         task_id = task_id or secrets.token_hex(8)
@@ -346,7 +380,18 @@ class StreamingSession:
             query=query,
             parent_task_id=parent_task_id,
             spawned_from_event_id=spawned_from_event_id,
+            propagate_on_cancel=propagate_on_cancel,
+            notify_on_complete=notify_on_complete,
         )
+        if context_snapshot is not None:
+            snapshot = context_snapshot.model_copy(
+                update={
+                    "session_id": self.session_id,
+                    "task_id": task_id,
+                    "propagate_on_cancel": propagate_on_cancel,
+                    "notify_on_complete": notify_on_complete,
+                }
+            )
         state = await self._registry.create_task(
             session_id=self.session_id,
             task_type=task_type,
@@ -357,6 +402,22 @@ class StreamingSession:
             task_id=task_id,
         )
         self._emit_status_change(state, reason="created")
+        asyncio.create_task(
+            self._telemetry.emit(
+                TaskTelemetryEvent(
+                    event_type="task_spawned",
+                    outcome="spawned",
+                    session_id=self.session_id,
+                    task_id=state.task_id,
+                    parent_task_id=state.context_snapshot.spawned_from_task_id,
+                    trace_id=state.trace_id,
+                    task_type=state.task_type,
+                    status=state.status,
+                    mode="subagent" if state.task_type == TaskType.BACKGROUND else "foreground",
+                    spawn_reason=state.context_snapshot.spawn_reason,
+                )
+            )
+        )
         if task_type == TaskType.FOREGROUND:
             self._foreground_task_id = task_id
         steering = SteeringInbox(maxsize=self._limits.steering_queue_size)
@@ -397,27 +458,26 @@ class StreamingSession:
             if not isinstance(token, str):
                 return False
             pending = self._pending_controls.pop(token, None)
-            if pending is None:
-                return False
-            if event.event_type == SteeringEventType.REJECT:
-                self._publish(
-                    StateUpdate(
-                        session_id=self.session_id,
-                        task_id=pending.task_id,
-                        trace_id=pending.trace_id,
-                        update_type=UpdateType.NOTIFICATION,
-                        content={
-                            "severity": "warning",
-                            "title": "Action rejected",
-                            "body": f"Rejected {pending.event_type.value.lower()} request.",
-                        },
+            if pending is not None:
+                if event.event_type == SteeringEventType.REJECT:
+                    self._publish(
+                        StateUpdate(
+                            session_id=self.session_id,
+                            task_id=pending.task_id,
+                            trace_id=pending.trace_id,
+                            update_type=UpdateType.NOTIFICATION,
+                            content={
+                                "severity": "warning",
+                                "title": "Action rejected",
+                                "body": f"Rejected {pending.event_type.value.lower()} request.",
+                            },
+                        )
                     )
-                )
-                return False
-            confirmed_payload = dict(pending.payload)
-            confirmed_payload["confirmed"] = True
-            pending = pending.model_copy(update={"payload": confirmed_payload, "source": "user"})
-            return await self.steer(pending)
+                    return False
+                confirmed_payload = dict(pending.payload)
+                confirmed_payload["confirmed"] = True
+                pending = pending.model_copy(update={"payload": confirmed_payload, "source": "user"})
+                return await self.steer(pending)
 
         if self._control_policy.requires_confirmation(event):
             self._pending_controls[event.event_id] = event
@@ -464,6 +524,10 @@ class StreamingSession:
             handle = self._task_handles.get(event.task_id)
             if handle is not None and not handle.done():
                 handle.cancel()
+            await self._cascade_cancel_children(
+                parent_task_id=event.task_id,
+                reason=str(event.payload.get("reason") or "parent_cancelled"),
+            )
             handled = True
 
         inbox = self._steering_inboxes.get(event.task_id)
@@ -502,6 +566,29 @@ class StreamingSession:
                 source="user",
             )
         )
+
+    async def broadcast_steer(
+        self,
+        *,
+        event_type: SteeringEventType,
+        payload: dict[str, Any] | None = None,
+        source: str = "user",
+    ) -> int:
+        tasks = await self._registry.list_active(self.session_id)
+        count = 0
+        for task in tasks:
+            ok = await self.steer(
+                SteeringEvent(
+                    session_id=self.session_id,
+                    task_id=task.task_id,
+                    event_type=event_type,
+                    payload=dict(payload or {}),
+                    source=source,
+                )
+            )
+            if ok:
+                count += 1
+        return count
 
     async def list_updates(
         self,
@@ -700,6 +787,23 @@ class StreamingSession:
         except asyncio.CancelledError:
             await self._registry.update_task(state.task_id, status=TaskStatus.CANCELLED, error="cancelled")
             self._emit_status_change(state, reason="cancelled")
+            asyncio.create_task(
+                self._telemetry.emit(
+                    TaskTelemetryEvent(
+                        event_type="task_cancelled",
+                        outcome="cancelled",
+                        session_id=self.session_id,
+                        task_id=state.task_id,
+                        parent_task_id=state.context_snapshot.spawned_from_task_id,
+                        trace_id=state.trace_id,
+                        task_type=state.task_type,
+                        status=TaskStatus.CANCELLED,
+                        mode="job" if (state.context_snapshot.spawn_reason or "").startswith("tool:") else "subagent",
+                        spawn_reason=state.context_snapshot.spawn_reason,
+                        extra={"reason": "cancelled"},
+                    )
+                )
+            )
             raise
         finally:
             self._steering_inboxes.pop(state.task_id, None)
@@ -731,6 +835,7 @@ class StreamingSession:
             await semaphore.acquire()
         await self._registry.update_status(state.task_id, TaskStatus.RUNNING)
         self._emit_status_change(state, reason="running")
+        start_ts = time.monotonic()
         runtime = TaskRuntime(
             session=self,
             state=state,
@@ -787,7 +892,11 @@ class StreamingSession:
                     )
                 runtime.notify(task_result.notification)
             self._emit_status_change(state, reason="complete")
-            if state.task_type == TaskType.BACKGROUND:
+            if (
+                state.task_type == TaskType.BACKGROUND
+                and state.context_snapshot.notify_on_complete
+                and task_result.notification is None
+            ):
                 runtime.notify(
                     NotificationPayload(
                         severity="info",
@@ -795,10 +904,45 @@ class StreamingSession:
                         body=f"Task {state.task_id} completed.",
                     )
                 )
+            asyncio.create_task(
+                self._telemetry.emit(
+                    TaskTelemetryEvent(
+                        event_type="task_completed",
+                        outcome="completed",
+                        session_id=self.session_id,
+                        task_id=state.task_id,
+                        parent_task_id=state.context_snapshot.spawned_from_task_id,
+                        trace_id=state.trace_id,
+                        task_type=state.task_type,
+                        status=TaskStatus.COMPLETE,
+                        mode="job" if (state.context_snapshot.spawn_reason or "").startswith("tool:") else "subagent",
+                        spawn_reason=state.context_snapshot.spawn_reason,
+                        duration_ms=(time.monotonic() - start_ts) * 1000,
+                    )
+                )
+            )
             return task_result
         except SteeringCancelled as exc:
             await self._registry.update_task(state.task_id, status=TaskStatus.CANCELLED, error=exc.reason)
             self._emit_status_change(state, reason="cancelled")
+            asyncio.create_task(
+                self._telemetry.emit(
+                    TaskTelemetryEvent(
+                        event_type="task_cancelled",
+                        outcome="cancelled",
+                        session_id=self.session_id,
+                        task_id=state.task_id,
+                        parent_task_id=state.context_snapshot.spawned_from_task_id,
+                        trace_id=state.trace_id,
+                        task_type=state.task_type,
+                        status=TaskStatus.CANCELLED,
+                        mode="job" if (state.context_snapshot.spawn_reason or "").startswith("tool:") else "subagent",
+                        spawn_reason=state.context_snapshot.spawn_reason,
+                        duration_ms=(time.monotonic() - start_ts) * 1000,
+                        extra={"reason": exc.reason},
+                    )
+                )
+            )
             if state.task_type == TaskType.BACKGROUND:
                 runtime.notify(
                     NotificationPayload(
@@ -811,6 +955,24 @@ class StreamingSession:
         except TimeoutError:
             await self._registry.update_task(state.task_id, status=TaskStatus.FAILED, error="timeout")
             self._emit_status_change(state, reason="timeout")
+            asyncio.create_task(
+                self._telemetry.emit(
+                    TaskTelemetryEvent(
+                        event_type="task_failed",
+                        outcome="failed",
+                        session_id=self.session_id,
+                        task_id=state.task_id,
+                        parent_task_id=state.context_snapshot.spawned_from_task_id,
+                        trace_id=state.trace_id,
+                        task_type=state.task_type,
+                        status=TaskStatus.FAILED,
+                        mode="job" if (state.context_snapshot.spawn_reason or "").startswith("tool:") else "subagent",
+                        spawn_reason=state.context_snapshot.spawn_reason,
+                        duration_ms=(time.monotonic() - start_ts) * 1000,
+                        extra={"error": "timeout"},
+                    )
+                )
+            )
             raise
         except Exception as exc:
             await self._registry.update_task(state.task_id, status=TaskStatus.FAILED, error=str(exc))
@@ -824,6 +986,24 @@ class StreamingSession:
                 )
             )
             self._emit_status_change(state, reason="failed")
+            asyncio.create_task(
+                self._telemetry.emit(
+                    TaskTelemetryEvent(
+                        event_type="task_failed",
+                        outcome="failed",
+                        session_id=self.session_id,
+                        task_id=state.task_id,
+                        parent_task_id=state.context_snapshot.spawned_from_task_id,
+                        trace_id=state.trace_id,
+                        task_type=state.task_type,
+                        status=TaskStatus.FAILED,
+                        mode="job" if (state.context_snapshot.spawn_reason or "").startswith("tool:") else "subagent",
+                        spawn_reason=state.context_snapshot.spawn_reason,
+                        duration_ms=(time.monotonic() - start_ts) * 1000,
+                        extra={"error": str(exc), "error_type": exc.__class__.__name__},
+                    )
+                )
+            )
             if state.task_type == TaskType.BACKGROUND:
                 runtime.notify(
                     NotificationPayload(
@@ -864,6 +1044,8 @@ class StreamingSession:
         query: str | None,
         parent_task_id: str | None,
         spawned_from_event_id: str | None,
+        propagate_on_cancel: Literal["cascade", "isolate"],
+        notify_on_complete: bool,
     ) -> TaskContextSnapshot:
         if task_type == TaskType.BACKGROUND:
             llm_context = _deepcopy_dict(self._context.llm_context)
@@ -884,6 +1066,8 @@ class StreamingSession:
             spawned_from_event_id=spawned_from_event_id,
             spawn_reason=spawn_reason,
             query=query,
+            propagate_on_cancel=propagate_on_cancel,
+            notify_on_complete=notify_on_complete,
             context_version=self._context.version,
             context_hash=self._context.context_hash,
             llm_context=llm_context,
@@ -891,6 +1075,59 @@ class StreamingSession:
             memory=memory,
             artifacts=artifacts,
         )
+
+    async def _cascade_cancel_children(self, *, parent_task_id: str, reason: str) -> None:
+        visited = {parent_task_id}
+        queue = [parent_task_id]
+        while queue:
+            current = queue.pop()
+            children = await self._registry.list_children(current)
+            for child_id in children:
+                if child_id in visited:
+                    continue
+                visited.add(child_id)
+                child = await self._registry.get_task(child_id)
+                if child is None:
+                    continue
+                snapshot = child.context_snapshot
+                if snapshot and snapshot.propagate_on_cancel == "isolate":
+                    continue
+                if child.status in {TaskStatus.COMPLETE, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+                    continue
+
+                propagated = sanitize_steering_event(
+                    SteeringEvent(
+                        session_id=self.session_id,
+                        task_id=child_id,
+                        event_type=SteeringEventType.CANCEL,
+                        payload={
+                            "reason": reason,
+                            "confirmed": True,
+                            "propagated_from": parent_task_id,
+                        },
+                        source="system",
+                    ),
+                    max_payload_bytes=self._limits.max_steering_payload_bytes,
+                )
+                await self._state_store.save_steering(propagated)
+
+                inbox = self._steering_inboxes.get(child_id)
+                if inbox is not None:
+                    await inbox.push(propagated)
+
+                updated = await self._registry.update_task(
+                    child_id,
+                    status=TaskStatus.CANCELLED,
+                    error="cancelled",
+                )
+                if updated is not None:
+                    self._emit_status_change(updated, reason="parent_cancelled")
+
+                handle = self._task_handles.get(child_id)
+                if handle is not None and not handle.done():
+                    handle.cancel()
+
+                queue.append(child_id)
 
 
 class SessionManager:
@@ -902,12 +1139,14 @@ class SessionManager:
         limits: SessionLimits | None = None,
         state_store: SessionStateStore | None = None,
         control_policy: ControlPolicy | None = None,
+        telemetry_sink: TaskTelemetrySink | None = None,
     ) -> None:
         self._sessions: dict[str, StreamingSession] = {}
         self._lock = asyncio.Lock()
         self._limits = limits
         self._state_store = state_store
         self._control_policy = control_policy
+        self._telemetry_sink = telemetry_sink
 
     async def get_or_create(self, session_id: str) -> StreamingSession:
         async with self._lock:
@@ -918,6 +1157,7 @@ class SessionManager:
                     control_policy=self._control_policy,
                     limits=self._limits,
                     state_store=self._state_store,
+                    telemetry_sink=self._telemetry_sink,
                 )
                 self._sessions[session_id] = session
         await session.hydrate()
