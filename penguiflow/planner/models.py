@@ -208,11 +208,56 @@ class ToolPolicy(BaseModel):
 
 
 class BackgroundTasksConfig(BaseModel):
-    """Optional configuration enabling background tasks/subagent orchestration."""
+    """Configuration for background tasks/subagent orchestration.
 
+    This is the single source of truth for background task settings, consumed by:
+    - ReactPlanner (prompt guidance, tool validation)
+    - SessionManager/TaskService (runtime enforcement)
+    - Spec generation engine (agent.yaml generation)
+    - Template engine (scaffolding new agents)
+
+    Downstream teams configure these values in their agent's Config class,
+    which builds this model before passing to ReactPlanner.
+    """
+
+    # Core enablement
     enabled: bool = False
+    """Master switch for background task capabilities."""
+
     include_prompt_guidance: bool = True
+    """Whether to inject background task guidance into the system prompt."""
+
     allow_tool_background: bool = False
+    """Whether tools marked with background=True can spawn async tasks."""
+
+    # Task execution mode
+    default_mode: str = "subagent"
+    """Default execution mode: 'subagent' (full reasoning) or 'job' (single tool)."""
+
+    default_merge_strategy: str = "HUMAN_GATED"
+    """How task results merge into context: HUMAN_GATED, APPEND, or REPLACE."""
+
+    context_depth: str = "full"
+    """Context snapshot depth for spawned tasks: 'full', 'summary', or 'minimal'."""
+
+    propagate_on_cancel: str = "cascade"
+    """Cancel propagation: 'cascade' (cancel children), 'orphan' (leave running)."""
+
+    spawn_requires_confirmation: bool = False
+    """Whether spawning a task requires explicit user confirmation."""
+
+    # Resource limits
+    max_concurrent_tasks: int = 5
+    """Maximum number of tasks running concurrently per session."""
+
+    max_tasks_per_session: int = 50
+    """Maximum total tasks (active + completed) per session."""
+
+    task_timeout_s: int = 3600
+    """Task timeout in seconds (default: 1 hour)."""
+
+    max_pending_steering: int = 2
+    """Maximum steering messages queued per task before backpressure."""
 
 
 class BackgroundTaskHandle(BaseModel):

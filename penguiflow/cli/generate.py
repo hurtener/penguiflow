@@ -873,6 +873,7 @@ def _generate_config(
             "background_tasks_max_concurrent_tasks": bg.max_concurrent_tasks,
             "background_tasks_max_tasks_per_session": bg.max_tasks_per_session,
             "background_tasks_task_timeout_s": bg.task_timeout_s,
+            "background_tasks_max_pending_steering": bg.max_pending_steering,
         },
     )
 
@@ -965,6 +966,7 @@ def _generate_env_example(
             "background_tasks_max_concurrent_tasks": bg.max_concurrent_tasks,
             "background_tasks_max_tasks_per_session": bg.max_tasks_per_session,
             "background_tasks_task_timeout_s": bg.task_timeout_s,
+            "background_tasks_max_pending_steering": bg.max_pending_steering,
         },
     )
 

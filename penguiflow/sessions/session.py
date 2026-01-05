@@ -11,8 +11,9 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
+from penguiflow.state import StateStore
 from penguiflow.steering import (
     MAX_STEERING_PAYLOAD_BYTES,
     SteeringCancelled,
@@ -174,7 +175,7 @@ class StreamingSession:
         *,
         control_policy: ControlPolicy | None = None,
         limits: SessionLimits | None = None,
-        state_store: SessionStateStore | None = None,
+        state_store: SessionStateStore | StateStore | None = None,
         telemetry_sink: TaskTelemetrySink | None = None,
     ) -> None:
         self.session_id = session_id
@@ -183,9 +184,11 @@ class StreamingSession:
         if state_store is None:
             self._state_store = InMemorySessionStateStore()
         elif hasattr(state_store, "save_task"):
-            self._state_store = state_store
-        else:
-            self._state_store = StateStoreSessionAdapter(state_store)  # type: ignore[arg-type]
+            self._state_store = cast(SessionStateStore, state_store)
+        elif hasattr(state_store, "save_event") and hasattr(state_store, "load_history"):
+            self._state_store = StateStoreSessionAdapter(cast(StateStore, state_store))
+        else:  # pragma: no cover - defensive
+            raise TypeError("state_store must implement SessionStateStore or StateStore")
         self._registry = TaskRegistry(persist_task=self._state_store.save_task)
         self._broker = UpdateBroker(max_queue_size=self._limits.update_queue_size)
         self._steering_inboxes: dict[str, SteeringInbox] = {}
@@ -1137,7 +1140,7 @@ class SessionManager:
         self,
         *,
         limits: SessionLimits | None = None,
-        state_store: SessionStateStore | None = None,
+        state_store: SessionStateStore | StateStore | None = None,
         control_policy: ControlPolicy | None = None,
         telemetry_sink: TaskTelemetrySink | None = None,
     ) -> None:

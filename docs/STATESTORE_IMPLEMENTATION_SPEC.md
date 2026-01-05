@@ -59,7 +59,7 @@ This document provides a complete specification for implementing a StateStore ba
 
 ## Protocol Definition
 
-**Location:** `penguiflow/state.py`
+**Location:** `penguiflow/state/protocol.py` (import path remains `penguiflow.state`)
 
 ```python
 from typing import Protocol, Sequence, Any, Mapping
@@ -466,6 +466,107 @@ async def load_memory_state(self, key: str) -> dict[str, Any] | None:
 
 ---
 
+### 8. Task Persistence (`save_task`, `list_tasks`, `save_update`, `list_updates`)
+
+**Purpose:** Persist background/foreground task lifecycle state and streaming updates.
+
+**Location (integration):** `penguiflow/sessions/session.py`
+
+**Contracts:**
+- `save_task()` MUST be idempotent or upsert-safe (same task is updated many times).
+- `list_tasks()` MUST return all tasks for the session (order not important).
+- `save_update()` SHOULD be append-only, idempotent via `update_id` if possible.
+- `list_updates()` SHOULD return updates in stable order and treat `since_id` as an *exclusive* cursor.
+- Reads MUST return an empty sequence on “not found” (do not raise).
+
+**Signature:**
+```python
+async def save_task(self, state: TaskState) -> None: ...
+async def list_tasks(self, session_id: str) -> Sequence[TaskState]: ...
+async def save_update(self, update: StateUpdate) -> None: ...
+async def list_updates(
+    self,
+    session_id: str,
+    *,
+    task_id: str | None = None,
+    since_id: str | None = None,
+    limit: int = 500,
+) -> Sequence[StateUpdate]: ...
+```
+
+**Notes:**
+- `StateUpdate.update_id` is generated client-side; use it as the natural idempotency key.
+- If `since_id` is unknown, treat it as “no cursor”.
+- To preserve cursor semantics, avoid filtering after applying limit.
+
+### 9. Steering Persistence (`save_steering`, `list_steering`)
+
+**Purpose:** Persist bidirectional steering/intervention events (USER_MESSAGE, CANCEL, APPROVE, etc.).
+
+**Location (integration):** `penguiflow/sessions/session.py`
+
+**Contracts:**
+- Steering payloads are untrusted; persist the sanitized form (see `penguiflow/steering.py`).
+- `list_steering()` SHOULD return events in stable order and treat `since_id` as an *exclusive* cursor.
+
+**Signature:**
+```python
+async def save_steering(self, event: SteeringEvent) -> None: ...
+async def list_steering(
+    self,
+    session_id: str,
+    *,
+    task_id: str | None = None,
+    since_id: str | None = None,
+    limit: int = 500,
+) -> Sequence[SteeringEvent]: ...
+```
+
+### 10. Trajectory Persistence (`save_trajectory`, `get_trajectory`, `list_traces`)
+
+**Purpose:** Persist planner trajectories for replay, debugging, and UI inspection.
+
+**Location (integration):** `penguiflow/cli/playground.py`
+
+**Contracts:**
+- `get_trajectory()` MUST return `None` when not found or when session_id does not match.
+- `list_traces()` MUST return trace IDs for the session, most recent first.
+
+**Signature:**
+```python
+async def save_trajectory(self, trace_id: str, session_id: str, trajectory: Trajectory) -> None: ...
+async def get_trajectory(self, trace_id: str, session_id: str) -> Trajectory | None: ...
+async def list_traces(self, session_id: str, limit: int = 50) -> list[str]: ...
+```
+
+### 11. Planner Event Persistence (`save_planner_event`, `list_planner_events`)
+
+**Purpose:** Persist structured planner/tool execution events for UI streaming and auditing.
+
+**Contract:**
+- Planner events are append-only.
+- If your backend supports it, store an insertion sequence to preserve stable ordering.
+
+**Signature:**
+```python
+async def save_planner_event(self, trace_id: str, event: PlannerEvent) -> None: ...
+async def list_planner_events(self, trace_id: str) -> list[PlannerEvent]: ...
+```
+
+### 12. Artifact Storage (`artifact_store` property)
+
+**Purpose:** Provide binary/large-text storage for rich tool outputs without polluting LLM context.
+
+**Contract:**
+- Return an `ArtifactStore` instance, or `None` if artifacts are not supported.
+- Prefer session-scoped access patterns for HTTP retrieval (see `ArtifactScope.session_id`).
+
+**Signature:**
+```python
+@property
+def artifact_store(self) -> ArtifactStore | None: ...
+```
+
 ## Integration Points
 
 ### 1. PenguiFlow Core Runtime
@@ -506,6 +607,17 @@ planner = ReactPlanner(
 - `load_memory_state()` called at start of each run (if memory configured)
 - Methods detected via `getattr()` - missing methods are silently skipped
 
+### 3. StreamingSession / SessionManager
+
+**Location:** `penguiflow/sessions/session.py`
+
+**Integration Behavior:**
+- `save_task()` called on task lifecycle transitions
+- `save_update()` called for streaming updates emitted by tasks
+- `save_steering()` called for inbound steering events
+- `list_tasks()` used to hydrate a session on startup
+- `list_updates()` / `list_steering()` used for polling and UI backfills
+
 ### 3. Admin CLI
 
 **Location:** `penguiflow/admin.py`
@@ -538,18 +650,33 @@ penguiflow-admin replay --state-store mypackage.stores:create_store trace_abc123
 | `load_planner_state` | NO | Should consume/delete token on read |
 | `save_memory_state` | YES | Same key updated repeatedly |
 | `load_memory_state` | YES | Read-only operation |
+| `save_task` | YES | Task state is updated repeatedly |
+| `list_tasks` | YES | Read-only operation |
+| `save_update` | YES | Retries can re-emit the same update_id |
+| `list_updates` | YES | Read-only operation |
+| `save_steering` | YES | Steering events can be retried |
+| `list_steering` | YES | Read-only operation |
+| `save_trajectory` | YES | Trace can be saved multiple times |
+| `get_trajectory` | YES | Read-only operation |
+| `list_traces` | YES | Read-only operation |
+| `save_planner_event` | YES | Retries can duplicate planner events |
+| `list_planner_events` | YES | Read-only operation |
+| `artifact_store` | N/A | Property (capability discovery) |
 
 ### Consistency Model
 
 - **Eventual consistency is acceptable** for event storage
 - **Strong consistency required** for planner state (pause/resume)
 - **Eventual consistency acceptable** for memory state (last-write-wins)
+- **Strong consistency recommended** for task/steering reads in interactive UIs
 
 ### Ordering Guarantees
 
 - `load_history()` MUST return events in `ts` ascending order
 - For same-`ts` events, secondary ordering by insertion ID is recommended
 - No ordering guarantees for remote bindings
+- `list_updates()` / `list_steering()` SHOULD use stable ordering and support cursor semantics via `since_id`
+- `list_planner_events()` SHOULD preserve emission order
 
 ---
 

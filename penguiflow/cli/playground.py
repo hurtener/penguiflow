@@ -32,7 +32,6 @@ from penguiflow.cli.spec import Spec, load_spec
 from penguiflow.cli.spec_errors import SpecValidationError
 from penguiflow.planner import PlannerEvent
 from penguiflow.sessions import (
-    InMemorySessionStateStore,
     MergeStrategy,
     PlannerTaskPipeline,
     SessionLimits,
@@ -726,8 +725,6 @@ def create_playground_app(
     store = state_store
     broker = EventBroker()
     session_limits = SessionLimits()
-    session_state_store = InMemorySessionStateStore()
-    session_manager = SessionManager(limits=session_limits, state_store=session_state_store)
     planner_factory: Callable[[], Any] | None = None
     ui_dir = Path(__file__).resolve().parent / "playground_ui" / "dist"
     spec_payload, parsed_spec = _load_spec_payload(Path(project_root or ".").resolve())
@@ -741,6 +738,14 @@ def create_playground_app(
         if store is None:
             store = getattr(agent_wrapper, "_state_store", None) or InMemoryStateStore()
         planner_factory = None
+    # Share the same store with the SessionManager when it supports task persistence.
+    # Otherwise, keep session/task state in-memory (the Playground can still store trajectories/events).
+    session_store: Any | None = None
+    if store is not None and (
+        hasattr(store, "save_task") or (hasattr(store, "save_event") and hasattr(store, "load_history"))
+    ):
+        session_store = store
+    session_manager = SessionManager(limits=session_limits, state_store=session_store)
     try:
         supports_steering_chat = "steering" in inspect.signature(agent_wrapper.chat).parameters
     except (TypeError, ValueError):
@@ -1674,7 +1679,7 @@ def create_playground_app(
         if follow:
             queue, unsubscribe = await broker.subscribe(trace_id)
 
-        stored_events = await store.get_events(trace_id)
+        stored_events = await store.list_planner_events(trace_id)
         session_payload = session_id or ""
         stored_frames: list[bytes] = []
         for event in stored_events:

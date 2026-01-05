@@ -102,7 +102,7 @@ class _EventRecorder:
         events = list(self._buffer)
         self._buffer.clear()
         for event in events:
-            await self._state_store.save_event(trace_id, event)
+            await self._state_store.save_planner_event(trace_id, event)
 
 
 def _combine_callbacks(

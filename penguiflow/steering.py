@@ -4,59 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
-from datetime import UTC, datetime
-from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from penguiflow.state.models import SteeringEvent, SteeringEventType
 
 MAX_STEERING_PAYLOAD_BYTES = 16_384
 MAX_STEERING_DEPTH = 6
 MAX_STEERING_KEYS = 64
 MAX_STEERING_LIST_ITEMS = 50
 MAX_STEERING_STRING = 4_096
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
-class SteeringEventType(str, Enum):
-    INJECT_CONTEXT = "INJECT_CONTEXT"
-    REDIRECT = "REDIRECT"
-    CANCEL = "CANCEL"
-    PRIORITIZE = "PRIORITIZE"
-    PAUSE = "PAUSE"
-    RESUME = "RESUME"
-    APPROVE = "APPROVE"
-    REJECT = "REJECT"
-    USER_MESSAGE = "USER_MESSAGE"
-
-
-class SteeringEvent(BaseModel):
-    session_id: str
-    task_id: str
-    event_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
-    event_type: SteeringEventType
-    payload: dict[str, Any] = Field(default_factory=dict)
-    trace_id: str | None = None
-    source: str = "user"
-    created_at: datetime = Field(default_factory=_utc_now)
-
-    def to_injection(self) -> str:
-        """Return a JSON payload that can be injected into LLM context."""
-        payload = {
-            "steering": {
-                "event_id": self.event_id,
-                "task_id": self.task_id,
-                "event_type": self.event_type.value,
-                "payload": dict(self.payload),
-                "created_at": self.created_at.isoformat(),
-            }
-        }
-        return json.dumps(payload, ensure_ascii=False)
-
 
 class SteeringValidationError(ValueError):
     """Raised when a steering event payload is invalid."""

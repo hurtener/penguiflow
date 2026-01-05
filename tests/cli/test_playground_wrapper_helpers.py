@@ -27,7 +27,7 @@ class DummyStore:
     saved: list[tuple[str, PlannerEvent]]
     trajectories: list[tuple[str, str, Any]]
 
-    async def save_event(self, trace_id: str, event: PlannerEvent) -> None:
+    async def save_planner_event(self, trace_id: str, event: PlannerEvent) -> None:
         self.saved.append((trace_id, event))
 
     async def save_trajectory(self, trace_id: str, session_id: str, trajectory: Any) -> None:

@@ -12,7 +12,7 @@ When using `ToolNode` with user-level OAuth (`AuthType.OAUTH2_USER`), the planne
 
 ## StateStore Protocol
 
-Penguiflow's `StateStore` protocol (`penguiflow/state.py`) defines three required methods:
+Penguiflow's `StateStore` protocol (`penguiflow/state/protocol.py`, import path `penguiflow.state`) defines three required methods:
 
 ```python
 class StateStore(Protocol):
