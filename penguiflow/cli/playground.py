@@ -451,12 +451,17 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
             channel_llm = "revision"
         else:
             channel_llm = "thinking"
+        # Include message_id for multiplexing (based on action_seq)
+        action_seq = extra.get("action_seq")
+        message_id = f"msg_{action_seq}" if action_seq is not None else None
         payload.update(
             {
                 "text": extra.get("text", ""),
                 "done": extra.get("done", False),
                 "phase": phase_llm,
                 "channel": channel_llm,
+                "action_seq": action_seq,
+                "message_id": message_id,
             }
         )
         return format_sse("llm_stream_chunk", payload)
@@ -475,6 +480,50 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
     if event.event_type in {"step_start", "step_complete"}:
         payload["event"] = event.event_type
         return format_sse("step", payload)
+
+    # Emit dedicated SSE event types for tool calls (enables streaming pattern)
+    if event.event_type == "tool_call_start":
+        tool_call_id = extra.get("tool_call_id")
+        tool_name = extra.get("tool_name")
+        args_json = extra.get("args_json", "")
+        action_seq = extra.get("action_seq")
+        message_id = f"msg_{action_seq}" if action_seq is not None else None
+        # Emit tool_call_start first
+        frames = format_sse(
+            "tool_call_start",
+            {
+                **payload,
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "message_id": message_id,
+            },
+        )
+        # Emit args as a single delta chunk for streaming compatibility
+        if args_json:
+            frames += format_sse(
+                "tool_call_args",
+                {
+                    "tool_call_id": tool_call_id,
+                    "delta": args_json,
+                    "trace_id": trace_id,
+                    "session_id": session_id,
+                    "ts": _ts(),
+                },
+            )
+        return frames
+
+    if event.event_type == "tool_call_end":
+        action_seq = extra.get("action_seq")
+        message_id = f"msg_{action_seq}" if action_seq is not None else None
+        return format_sse(
+            "tool_call_end",
+            {
+                **payload,
+                "tool_call_id": extra.get("tool_call_id"),
+                "tool_name": extra.get("tool_name"),
+                "message_id": message_id,
+            },
+        )
 
     payload["event"] = event.event_type
     return format_sse("event", payload)
