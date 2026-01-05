@@ -31,6 +31,7 @@ class SteeringEventType(str, Enum):
     RESUME = "RESUME"
     APPROVE = "APPROVE"
     REJECT = "REJECT"
+    USER_MESSAGE = "USER_MESSAGE"
 
 
 class SteeringEvent(BaseModel):
@@ -168,6 +169,13 @@ def validate_steering_event(event: SteeringEvent) -> None:
         reason = payload.get("reason")
         if reason is not None and not isinstance(reason, str):
             errors.append("PAUSE/RESUME 'reason' must be a string")
+    elif event_type == SteeringEventType.USER_MESSAGE:
+        text = payload.get("text")
+        if not isinstance(text, str) or not text.strip():
+            errors.append("USER_MESSAGE requires non-empty 'text'")
+        active_tasks = payload.get("active_tasks")
+        if active_tasks is not None and not isinstance(active_tasks, list):
+            errors.append("USER_MESSAGE 'active_tasks' must be a list")
 
     if errors:
         raise SteeringValidationError(errors)
@@ -176,8 +184,10 @@ def validate_steering_event(event: SteeringEvent) -> None:
 class SteeringInbox:
     """Async inbox that buffers steering events and exposes cancellation state."""
 
-    def __init__(self, *, maxsize: int = 100) -> None:
+    def __init__(self, *, maxsize: int = 100, max_pending_user_messages: int = 2) -> None:
         self._queue: asyncio.Queue[SteeringEvent] = asyncio.Queue(maxsize=maxsize)
+        self._max_pending_user_messages = max_pending_user_messages
+        self._pending_user_message_count = 0
         self._cancel_event = asyncio.Event()
         self._pause_event = asyncio.Event()
         self._pause_event.set()
@@ -205,10 +215,18 @@ class SteeringInbox:
         elif event.event_type == SteeringEventType.RESUME:
             self._pause_event.set()
 
+        # Enforce limit on USER_MESSAGE events
+        if event.event_type == SteeringEventType.USER_MESSAGE:
+            if self._pending_user_message_count >= self._max_pending_user_messages:
+                return False
+            self._pending_user_message_count += 1
+
         try:
             self._queue.put_nowait(event)
             return True
         except asyncio.QueueFull:
+            if event.event_type == SteeringEventType.USER_MESSAGE:
+                self._pending_user_message_count -= 1
             return False
 
     def drain(self) -> list[SteeringEvent]:
@@ -216,7 +234,10 @@ class SteeringInbox:
         events: list[SteeringEvent] = []
         while True:
             try:
-                events.append(self._queue.get_nowait())
+                event = self._queue.get_nowait()
+                if event.event_type == SteeringEventType.USER_MESSAGE:
+                    self._pending_user_message_count -= 1
+                events.append(event)
             except asyncio.QueueEmpty:
                 break
         return events

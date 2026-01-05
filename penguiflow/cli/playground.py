@@ -173,6 +173,14 @@ class SessionInfo(BaseModel):
     context_hash: str | None = None
 
 
+class TaskStateResponse(BaseModel):
+    """Response for task state query."""
+
+    foreground_task_id: str | None
+    foreground_status: str | None
+    background_tasks: list[dict[str, Any]]
+
+
 class SessionContextUpdate(BaseModel):
     llm_context: dict[str, Any] | None = None
     tool_context: dict[str, Any] | None = None
@@ -1400,6 +1408,38 @@ def create_playground_app(
             context_hash=session.context_hash,
         )
 
+    @app.get("/session/{session_id}/task-state", response_model=TaskStateResponse)
+    async def get_task_state(session_id: str) -> TaskStateResponse:
+        """Get current foreground/background task state for steering decisions."""
+        session = await session_manager.get_or_create(session_id)
+
+        foreground_id = session._foreground_task_id
+        foreground_status = None
+        if foreground_id:
+            fg_state = await session.registry.get_task(foreground_id)
+            foreground_status = fg_state.status.value if fg_state else None
+
+        # Get active background tasks
+        all_tasks = await session.registry.list_tasks(session_id)
+        active_statuses = {TaskStatus.RUNNING, TaskStatus.PENDING, TaskStatus.PAUSED}
+        background_tasks = [
+            {
+                "task_id": t.task_id,
+                "description": t.description,
+                "status": t.status.value,
+                "task_type": t.task_type.value,
+                "priority": t.priority,
+            }
+            for t in all_tasks
+            if t.task_type == TaskType.BACKGROUND and t.status in active_statuses
+        ]
+
+        return TaskStateResponse(
+            foreground_task_id=foreground_id if foreground_status == "RUNNING" else None,
+            foreground_status=foreground_status,
+            background_tasks=background_tasks,
+        )
+
     @app.delete("/sessions/{session_id}")
     async def session_delete(session_id: str) -> Mapping[str, Any]:
         await session_manager.drop(session_id)
@@ -1926,6 +1966,7 @@ __all__ = [
     "InMemoryStateStore",
     "PlaygroundError",
     "PlaygroundStateStore",
+    "TaskStateResponse",
     "create_playground_app",
     "discover_agent",
     "load_agent",

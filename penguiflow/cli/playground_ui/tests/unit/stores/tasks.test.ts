@@ -27,7 +27,7 @@ describe('tasksStore', () => {
       created_at: new Date().toISOString()
     });
     expect(store.tasks[0].status).toBe('COMPLETE');
-    expect(store.tasks[0].result).toEqual({ payload: { answer: 'done' } });
+    expect(store.tasks[0].result).toEqual({ payload: { answer: 'done' }, patch_id: 'patch-1' });
     expect(store.tasks[0].patch_id).toBe('patch-1');
   });
 

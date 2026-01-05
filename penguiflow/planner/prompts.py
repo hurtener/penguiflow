@@ -230,7 +230,41 @@ def merge_prompt_extras(*parts: str | None) -> str | None:
     return "\n\n".join(cleaned)
 
 
-def render_background_task_guidance() -> str:
+STEERING_INTERPRETATION_PROMPT = '''
+## Real-Time User Steering
+
+During execution, the user may send steering messages. When you receive a
+steering input in your context:
+
+1. **Clarification/Context**: If the user is providing additional information
+   or clarifying their request, incorporate it into your current work and
+   acknowledge briefly.
+
+2. **Direction Change**: If the user wants you to change approach or focus on
+   something different, acknowledge and adjust your plan.
+
+3. **Background Task Control**: If the user mentions a background task
+   (e.g., "cancel the research", "check on the analysis"):
+   - Use `tasks.list()` to see active background tasks
+   - If the reference is ambiguous (multiple matching tasks), use `select_option` to let the user choose:
+     ```
+     select_option(
+       prompt="Which task would you like to cancel?",
+       options=[
+         {"value": "task-123", "label": "Research: Market Analysis"},
+         {"value": "task-456", "label": "Research: Competitor Review"},
+       ]
+     )
+     ```
+   - Then use `tasks.cancel()`, `tasks.prioritize()`, or `tasks.get()` as appropriate
+
+4. **Status Query**: If the user asks about progress, provide a brief summary of current and background work.
+
+Always acknowledge steering messages naturally to confirm you received and understood them.
+'''
+
+
+def render_background_task_guidance(*, include_steering: bool = True) -> str:
     """Render comprehensive background task guidance for the planner.
 
     This prompt fragment is injected when BackgroundTasksConfig.enabled=True
@@ -243,7 +277,20 @@ def render_background_task_guidance() -> str:
     - Merge rules and human-gated approval
     - Steering proxy capabilities
     - Context divergence awareness
+    - Real-time user steering (when include_steering=True)
+
+    Args:
+        include_steering: If True, includes STEERING_INTERPRETATION_PROMPT for
+                         real-time user steering during task execution.
     """
+    steering_section = ""
+    if include_steering:
+        steering_section = f"""
+<user_steering>
+{STEERING_INTERPRETATION_PROMPT.strip()}
+</user_steering>
+"""
+
     return """<background_tasks>
 You have access to background task orchestration. Background tasks are independent
 subagents that run asynchronously, allowing you to parallelize long-running work
@@ -336,7 +383,7 @@ When applying results:
 - Prefer HUMAN_GATED merge for diverged results so the user can review
 - Consider whether the results are still relevant before recommending apply
 </context_divergence>
-
+""" + steering_section + """
 </background_tasks>"""
 
 

@@ -1,9 +1,84 @@
 import { safeParse } from '$lib/utils';
 import { listTasks } from './api';
 import type { AppStores } from '$lib/stores';
+import type { BackgroundTaskInfo } from '$lib/stores/features/tasks.svelte';
 import type { StateUpdate } from '$lib/types';
 
 type SessionStreamStores = Pick<AppStores, 'tasksStore' | 'notificationsStore'>;
+
+/**
+ * Payload for steering message requests.
+ */
+interface SteeringMessagePayload {
+  text: string;
+  active_tasks: BackgroundTaskInfo[];
+}
+
+/**
+ * Request body for the /steer endpoint.
+ */
+interface SteerRequestBody {
+  session_id: string;
+  task_id: string;
+  event_type: string;
+  payload: SteeringMessagePayload;
+  source?: string;
+}
+
+/**
+ * Response from the /steer endpoint.
+ */
+interface SteerResponse {
+  accepted: boolean;
+}
+
+/**
+ * Send a USER_MESSAGE steering event to redirect or provide input to an active task.
+ *
+ * @param sessionId - The current session ID
+ * @param taskId - The task ID to steer (typically the foreground task)
+ * @param text - The user message text
+ * @param activeTasks - Array of currently active background tasks for context
+ * @returns Promise<boolean> - true if the steering event was accepted
+ */
+export async function sendSteeringMessage(
+  sessionId: string,
+  taskId: string,
+  text: string,
+  activeTasks: BackgroundTaskInfo[]
+): Promise<boolean> {
+  try {
+    const body: SteerRequestBody = {
+      session_id: sessionId,
+      task_id: taskId,
+      event_type: 'USER_MESSAGE',
+      payload: {
+        text,
+        active_tasks: activeTasks
+      },
+      source: 'user'
+    };
+
+    const response = await fetch('/steer', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      console.error('Steering message failed:', response.statusText);
+      return false;
+    }
+
+    const data: SteerResponse = await response.json();
+    return data.accepted;
+  } catch (err) {
+    console.error('Failed to send steering message:', err);
+    return false;
+  }
+}
 
 class SessionStreamManager {
   constructor(private stores: SessionStreamStores) {}

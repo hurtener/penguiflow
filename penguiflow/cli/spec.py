@@ -684,6 +684,7 @@ class PlannerBackgroundTasksSpec(BaseModel):
     max_concurrent_tasks: int = Field(default=5, ge=1, le=20)
     max_tasks_per_session: int = Field(default=50, ge=1, le=200)
     task_timeout_s: int = Field(default=3600, ge=60)
+    max_pending_steering: int = Field(default=2, ge=1, le=10)
 
     model_config = ConfigDict(extra="forbid")
 

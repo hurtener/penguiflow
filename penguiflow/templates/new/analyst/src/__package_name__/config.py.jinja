@@ -55,6 +55,7 @@ class Config:
     background_tasks_max_concurrent_tasks: int = 5
     background_tasks_max_tasks_per_session: int = 50
     background_tasks_task_timeout_s: int = 3600
+    background_tasks_max_pending_steering: int = 2
 {% endif %}
 
     @classmethod
@@ -86,5 +87,6 @@ class Config:
             background_tasks_max_concurrent_tasks=_env_int("BACKGROUND_TASKS_MAX_CONCURRENT_TASKS", 5),
             background_tasks_max_tasks_per_session=_env_int("BACKGROUND_TASKS_MAX_TASKS_PER_SESSION", 50),
             background_tasks_task_timeout_s=_env_int("BACKGROUND_TASKS_TASK_TIMEOUT_S", 3600),
+            background_tasks_max_pending_steering=_env_int("BACKGROUND_TASKS_MAX_PENDING_STEERING", 2),
 {% endif %}
         )

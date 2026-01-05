@@ -67,6 +67,27 @@ def _apply_steering(planner: Any, trajectory: Trajectory) -> None:
                 if isinstance(new_goal, str) and new_goal.strip():
                     trajectory.query = new_goal.strip()
             trajectory.steering_inputs.append(event.to_injection())
+        elif event.event_type == SteeringEventType.USER_MESSAGE:
+            # Rich injection with task context and interpretation guidance
+            user_text = event.payload.get("text", "")
+            active_tasks = event.payload.get("active_tasks", [])
+            injection = {
+                "steering": {
+                    "event_id": event.event_id,
+                    "event_type": "USER_MESSAGE",
+                    "user_text": user_text,
+                    "active_background_tasks": active_tasks,
+                    "instructions": (
+                        "The user sent this message while you are working. "
+                        "Interpret their intent: Are they providing clarification, "
+                        "changing direction, asking about status, or controlling "
+                        "a background task? If referencing a background task ambiguously, "
+                        "use select_option to let them choose which one. "
+                        "Acknowledge naturally and act accordingly."
+                    ),
+                }
+            }
+            trajectory.steering_inputs.append(json.dumps(injection, ensure_ascii=False))
 
 
 async def run(
