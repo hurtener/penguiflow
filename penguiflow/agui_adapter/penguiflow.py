@@ -15,6 +15,8 @@ _LOGGER = logging.getLogger(__name__)
 
 from penguiflow.cli.playground_wrapper import AgentWrapper, ChatResult  # noqa: E402
 from penguiflow.planner import PlannerEvent  # noqa: E402
+from penguiflow.sessions.projections import PlannerEventProjector  # noqa: E402
+from penguiflow.state.models import StateUpdate, UpdateType  # noqa: E402
 
 from .base import AGUIAdapter, AGUIEvent  # noqa: E402
 
@@ -42,9 +44,18 @@ class PenguiFlowAdapter(AGUIAdapter):
         self._artifact_url_prefix = artifact_url_prefix.rstrip("/")
         self._resource_url_prefix = resource_url_prefix.rstrip("/")
         self._streamed_answer = False
+        # State tracking for state_update emission
+        self._session_id: str | None = None
+        self._task_id: str | None = None
+        self._trace_id: str | None = None
 
     async def run(self, input: RunAgentInput) -> AsyncIterator[AGUIEvent]:  # type: ignore[override,misc]
         self._streamed_answer = False
+
+        # Initialize state tracking for state_update emission
+        self._session_id = input.thread_id or f"session_{input.run_id}"
+        self._task_id = input.run_id or f"task_{id(self)}"
+        self._trace_id = input.run_id
 
         llm_context, tool_context = _extract_forwarded_contexts(input)
         _LOGGER.info(
@@ -84,6 +95,10 @@ class PenguiFlowAdapter(AGUIAdapter):
         asyncio.create_task(_run_chat())
 
         async def _stream() -> AsyncIterator[AGUIEvent]:
+            # Emit initial state updates: PENDING → RUNNING
+            yield self._make_status_update("PENDING", task_type="foreground")
+            yield self._make_status_update("RUNNING", task_type="foreground")
+
             while True:
                 item = await queue.get()
                 if item is _SENTINEL:
@@ -91,17 +106,21 @@ class PenguiFlowAdapter(AGUIAdapter):
                 yield item  # type: ignore[misc]
 
             if run_result.error is not None:
+                # Emit FAILED state update
+                yield self._make_status_update("FAILED", error=str(run_result.error))
                 raise run_result.error
 
             result = run_result.result
             _LOGGER.info("AG-UI run complete: result=%s", result is not None)
             if result is None:
+                yield self._make_status_update("COMPLETE")
                 return
 
             _LOGGER.info("AG-UI result: answer=%s, pause=%s, streamed=%s",
                         bool(result.answer), bool(result.pause), self._streamed_answer)
 
             if result.pause:
+                yield self._make_status_update("PAUSED", reason=result.pause.get("reason", "pause"))
                 yield self.custom("pause", result.pause)
                 pause_message = _format_pause_message(result.pause)
                 for event in self._emit_text_block(pause_message):
@@ -112,6 +131,9 @@ class PenguiFlowAdapter(AGUIAdapter):
                 _LOGGER.info("AG-UI emitting final answer: %s", result.answer[:200] if result.answer else "(empty)")
                 for event in self._emit_text_block(result.answer):
                     yield event
+
+            # Emit COMPLETE state update
+            yield self._make_status_update("COMPLETE")
 
         initial_state = getattr(input, "state", None)
         if not isinstance(initial_state, Mapping):
@@ -132,6 +154,11 @@ class PenguiFlowAdapter(AGUIAdapter):
         tool_context: Mapping[str, Any] | None = None,
     ) -> AsyncIterator[AGUIEvent]:
         self._streamed_answer = False
+
+        # Initialize state tracking for state_update emission
+        self._session_id = thread_id or f"session_{run_id}"
+        self._task_id = run_id or f"task_{id(self)}"
+        self._trace_id = run_id
 
         queue: asyncio.Queue[AGUIEvent | object] = asyncio.Queue()
         run_result = _RunResult()
@@ -158,6 +185,9 @@ class PenguiFlowAdapter(AGUIAdapter):
         asyncio.create_task(_run_resume())
 
         async def _stream() -> AsyncIterator[AGUIEvent]:
+            # Emit initial state updates: PENDING → RUNNING (resume from pause)
+            yield self._make_status_update("RUNNING", task_type="foreground", resumed=True)
+
             while True:
                 item = await queue.get()
                 if item is _SENTINEL:
@@ -165,13 +195,16 @@ class PenguiFlowAdapter(AGUIAdapter):
                 yield item  # type: ignore[misc]
 
             if run_result.error is not None:
+                yield self._make_status_update("FAILED", error=str(run_result.error))
                 raise run_result.error
 
             result = run_result.result
             if result is None:
+                yield self._make_status_update("COMPLETE")
                 return
 
             if result.pause:
+                yield self._make_status_update("PAUSED", reason=result.pause.get("reason", "pause"))
                 yield self.custom("pause", result.pause)
                 pause_message = _format_pause_message(result.pause)
                 for event in self._emit_text_block(pause_message):
@@ -181,6 +214,9 @@ class PenguiFlowAdapter(AGUIAdapter):
             if result.answer and not self._streamed_answer:
                 for event in self._emit_text_block(result.answer):
                     yield event
+
+            # Emit COMPLETE state update
+            yield self._make_status_update("COMPLETE")
 
         input = RunAgentInput(
             thread_id=thread_id,
@@ -205,9 +241,32 @@ class PenguiFlowAdapter(AGUIAdapter):
         events.append(self.text_end())
         return events
 
+    def _make_status_update(self, status: str, **extra: Any) -> AGUIEvent:
+        """Create a state_update custom event for task status changes."""
+        if not self._session_id or not self._task_id:
+            raise ValueError("session_id and task_id must be set")
+        update = StateUpdate(
+            session_id=self._session_id,
+            task_id=self._task_id,
+            trace_id=self._trace_id,
+            update_type=UpdateType.STATUS_CHANGE,
+            content={"status": status, **extra},
+        )
+        return self.custom("state_update", update.model_dump(mode="json"))
+
     def _convert_planner_event(self, event: PlannerEvent) -> list[AGUIEvent]:
         extra = dict(event.extra or {})
         mapped: list[AGUIEvent] = []
+
+        # Emit state updates for task tracking (parallel to AG-UI events)
+        if self._session_id and self._task_id:
+            projector = PlannerEventProjector(
+                session_id=self._session_id,
+                task_id=self._task_id,
+                trace_id=self._trace_id,
+            )
+            for state_update in projector.project(event):
+                mapped.append(self.custom("state_update", state_update.model_dump(mode="json")))
 
         if event.event_type == "step_start":
             step_name = extra.get("step_name") or event.node_name or f"step_{event.trajectory_step}"

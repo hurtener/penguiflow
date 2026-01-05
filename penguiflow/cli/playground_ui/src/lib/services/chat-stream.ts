@@ -714,6 +714,31 @@ class ChatStreamManager {
         const value = e.value;
         const record = asRecord(value);
 
+        // Handle state_update events for task tracking
+        if (name === 'state_update' && record) {
+          this.stores.tasksStore.applyUpdate(record as StateUpdate);
+          const updateType = record.update_type as string | undefined;
+          if (updateType === 'NOTIFICATION') {
+            const content = record.content as Record<string, unknown> | undefined;
+            const severity = String(content?.severity ?? 'info');
+            const body = String(content?.body ?? '');
+            const title = String(content?.title ?? '');
+            const message = title ? `${title}: ${body}` : body;
+            const actionsRaw = content?.actions;
+            const actions = Array.isArray(actionsRaw)
+              ? actionsRaw
+                  .filter(item => item && typeof item === 'object')
+                  .map(item => ({
+                    id: String((item as Record<string, unknown>).id ?? ''),
+                    label: String((item as Record<string, unknown>).label ?? 'Action'),
+                    payload: (item as Record<string, unknown>).payload as Record<string, unknown> | undefined
+                  }))
+                  .filter(item => item.id)
+              : undefined;
+            this.stores.notificationsStore.add(message || 'Notification', severity as any, actions);
+          }
+        }
+
         if (name === 'artifact_stored' && record) {
           const artifactRecord = asRecord(record.artifact);
           const stored = artifactRecord
