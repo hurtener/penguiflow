@@ -432,13 +432,72 @@ class OrchestratorAgentWrapper:
         state_store: PlaygroundStateStore | None = None,
         tenant_id: str = "playground-tenant",
         user_id: str = "playground-user",
+        tool_context_defaults: Mapping[str, Any] | None = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._state_store = state_store
         self._tenant_id = tenant_id
         self._user_id = user_id
+        self._tool_context_defaults = dict(tool_context_defaults or {})
         self._event_recorder = _EventRecorder(state_store)
         self._initialized = False
+
+    async def _call_execute(self, *, query: str, session_id: str, tool_context: Mapping[str, Any]) -> Any:
+        execute = self._orchestrator.execute
+        try:
+            sig = inspect.signature(execute)
+        except (TypeError, ValueError):
+            sig = None
+
+        kwargs: dict[str, Any] = {
+            "query": query,
+            "tenant_id": tool_context.get("tenant_id", self._tenant_id),
+            "user_id": tool_context.get("user_id", self._user_id),
+            "session_id": session_id,
+        }
+
+        if sig is not None:
+            params = sig.parameters
+            if "tool_context" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                kwargs["tool_context"] = dict(tool_context)
+
+        try:
+            return await execute(**kwargs)
+        except TypeError:
+            kwargs.pop("tool_context", None)
+            return await execute(**kwargs)
+
+    async def _call_resume(
+        self,
+        resume_token: str,
+        *,
+        session_id: str,
+        user_input: str | None,
+        tool_context: Mapping[str, Any],
+    ) -> Any:
+        resume_fn = self._orchestrator.resume
+        try:
+            sig = inspect.signature(resume_fn)
+        except (TypeError, ValueError):
+            sig = None
+
+        kwargs: dict[str, Any] = {
+            "tenant_id": tool_context.get("tenant_id", self._tenant_id),
+            "user_id": tool_context.get("user_id", self._user_id),
+            "session_id": session_id,
+            "user_input": user_input,
+        }
+
+        if sig is not None:
+            params = sig.parameters
+            if "tool_context" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                kwargs["tool_context"] = dict(tool_context)
+
+        try:
+            return await resume_fn(resume_token, **kwargs)
+        except TypeError:
+            kwargs.pop("tool_context", None)
+            return await resume_fn(resume_token, **kwargs)
 
     async def initialize(self) -> None:
         """Eagerly initialize the orchestrator if it supports lazy initialization.
@@ -467,7 +526,10 @@ class OrchestratorAgentWrapper:
         steering: SteeringInbox | None = None,
     ) -> ChatResult:
         ctx = dict(llm_context or {})
-        tool_ctx = dict(tool_context or {})
+        tool_ctx = {
+            **self._tool_context_defaults,
+            **dict(tool_context or {}),
+        }
         planner = getattr(self._orchestrator, "_planner", None)
         trace_holder: dict[str, str | None] = {"id": trace_id_hint}
         _ = steering
@@ -487,12 +549,7 @@ class OrchestratorAgentWrapper:
             planner._event_callback = _combine_callbacks(original_callback, callback)
 
         try:
-            response = await self._orchestrator.execute(
-                query=query,
-                tenant_id=tool_ctx.get("tenant_id", self._tenant_id),
-                user_id=tool_ctx.get("user_id", self._user_id),
-                session_id=session_id,
-            )
+            response = await self._call_execute(query=query, session_id=session_id, tool_context=tool_ctx)
         finally:
             if planner is not None and callback is not None:
                 planner._event_callback = original_callback
@@ -570,7 +627,10 @@ class OrchestratorAgentWrapper:
                 "Ensure your agent was created with --with-hitl flag."
             )
 
-        tool_ctx = dict(tool_context or {})
+        tool_ctx = {
+            **self._tool_context_defaults,
+            **dict(tool_context or {}),
+        }
         planner = getattr(self._orchestrator, "_planner", None)
         trace_holder: dict[str, str | None] = {"id": trace_id_hint}
         _ = steering
@@ -590,12 +650,11 @@ class OrchestratorAgentWrapper:
             planner._event_callback = _combine_callbacks(original_callback, callback)
 
         try:
-            response = await resume_fn(
+            response = await self._call_resume(
                 resume_token,
-                tenant_id=tool_ctx.get("tenant_id", self._tenant_id),
-                user_id=tool_ctx.get("user_id", self._user_id),
                 session_id=session_id,
                 user_input=user_input,
+                tool_context=tool_ctx,
             )
         finally:
             if planner is not None and callback is not None:

@@ -82,6 +82,55 @@ def _write_spec(path: Path) -> None:
     )
 
 
+def _write_spec_with_background_tasks(path: Path) -> None:
+    path.write_text(
+        dedent(
+            """\
+            agent:
+              name: demo-gen-bg
+              description: Demo agent with background tasks
+              template: react
+              flags:
+                streaming: true
+                hitl: true
+                memory: false
+                background_tasks: true
+            tools:
+              - name: fetch_data
+                description: Fetch data from source
+                side_effects: read
+                tags: ["io"]
+                args:
+                  query: str
+                result:
+                  items: list[str]
+            llm:
+              primary:
+                model: gpt-4o
+            planner:
+              max_iters: 3
+              hop_budget: 2
+              absolute_max_parallel: 3
+              system_prompt_extra: |
+                You are helpful.
+              background_tasks:
+                enabled: true
+                allow_tool_background: true
+                default_mode: subagent
+                default_merge_strategy: HUMAN_GATED
+                context_depth: full
+                propagate_on_cancel: cascade
+                spawn_requires_confirmation: false
+                include_prompt_guidance: true
+                max_concurrent_tasks: 3
+                max_tasks_per_session: 10
+                task_timeout_s: 600
+                max_pending_steering: 2
+            """
+        )
+    )
+
+
 def test_run_generate_creates_planner_and_tools(tmp_path: Path) -> None:
     spec_path = tmp_path / "spec.yaml"
     _write_spec(spec_path)
@@ -176,6 +225,49 @@ def test_run_generate_creates_planner_and_tools(tmp_path: Path) -> None:
     assert "OPENAI_API_KEY" in env_setup_content
     assert "ANTHROPIC_API_KEY" in env_setup_content
     assert "demo-gen" in env_setup_content or "demo_gen" in env_setup_content
+
+
+def test_run_generate_includes_background_tasks_wiring(tmp_path: Path) -> None:
+    spec_path = tmp_path / "spec.yaml"
+    _write_spec_with_background_tasks(spec_path)
+
+    result = run_generate(
+        spec_path=spec_path,
+        output_dir=tmp_path,
+        force=True,
+        quiet=True,
+    )
+
+    assert result.success
+    project_dir = tmp_path / "demo-gen-bg"
+    package_dir = project_dir / "src" / "demo_gen_bg"
+
+    planner = package_dir / "planner.py"
+    config_file = package_dir / "config.py"
+    env_example = project_dir / ".env.example"
+    orchestrator = package_dir / "orchestrator.py"
+
+    assert planner.exists()
+    assert config_file.exists()
+    assert env_example.exists()
+    assert orchestrator.exists()
+
+    planner_content = planner.read_text()
+    assert "build_task_tool_specs" in planner_content
+    assert "BackgroundTasksConfig" in planner_content
+    assert "background_tasks=" in planner_content
+
+    config_content = config_file.read_text()
+    assert "background_tasks_enabled" in config_content
+    assert "BACKGROUND_TASKS_ENABLED" in config_content
+
+    env_content = env_example.read_text()
+    assert "BACKGROUND_TASKS_ENABLED" in env_content
+    assert "BACKGROUND_TASKS_MAX_CONCURRENT_TASKS" in env_content
+
+    orchestrator_content = orchestrator.read_text()
+    assert "InProcessTaskService" in orchestrator_content
+    assert "in-process fallback" in orchestrator_content
 
 
 def test_generate_cli_dry_run(tmp_path: Path) -> None:

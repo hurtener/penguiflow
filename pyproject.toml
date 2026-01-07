@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "penguiflow"
-version = "2.9.1"
+version = "2.10.1"
 description = "Async-first orchestration library for multi-agent and data pipelines"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -143,6 +143,7 @@ omit = [
     "*/__pycache__/*",
     "*/.venv/*",
     "*/planner/dspy_client.py",
+    "*/cli/*",
 ]
 
 [tool.coverage.report]

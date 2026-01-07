@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, ValidationError
 
 from ..artifacts import ArtifactStore
-from ..catalog import NodeSpec
+from ..catalog import NodeSpec, build_catalog
 from ..node import Node
 from ..registry import ModelRegistry
 from . import prompts
@@ -26,6 +26,7 @@ from .artifact_handling import (  # noqa: F401
 )
 from .constraints import _ConstraintTracker
 from .context import PlannerPauseReason
+from .error_recovery import ErrorRecoveryConfig
 from .llm import (
     _estimate_size,
     _sanitize_json_schema,
@@ -341,6 +342,7 @@ class ReactPlanner:
     _token_budget: int | None
     _tool_policy: ToolPolicy | None
     _background_tasks: BackgroundTasksConfig
+    _init_kwargs: dict[str, Any] | None
 
     def __init__(
         self,
@@ -377,7 +379,45 @@ class ReactPlanner:
         stream_final_response: bool = False,
         short_term_memory: ShortTermMemory | ShortTermMemoryConfig | None = None,
         background_tasks: BackgroundTasksConfig | None = None,
+        error_recovery: ErrorRecoveryConfig | None = None,
     ) -> None:
+        # Store init kwargs so the planner can be safely forked for background tasks.
+        # This is intentionally best-effort and uses references for non-serialisable objects.
+        self._init_kwargs = {
+            "llm": llm,
+            "nodes": nodes,
+            "catalog": catalog,
+            "registry": registry,
+            "llm_client": llm_client,
+            "max_iters": max_iters,
+            "temperature": temperature,
+            "json_schema_mode": json_schema_mode,
+            "system_prompt_extra": system_prompt_extra,
+            "token_budget": token_budget,
+            "pause_enabled": pause_enabled,
+            "state_store": state_store,
+            "artifact_store": artifact_store,
+            "observation_guardrail": observation_guardrail,
+            "summarizer_llm": summarizer_llm,
+            "planning_hints": dict(planning_hints) if isinstance(planning_hints, Mapping) else planning_hints,
+            "repair_attempts": repair_attempts,
+            "max_consecutive_arg_failures": max_consecutive_arg_failures,
+            "arg_fill_enabled": arg_fill_enabled,
+            "deadline_s": deadline_s,
+            "hop_budget": hop_budget,
+            "time_source": time_source,
+            "event_callback": event_callback,
+            "llm_timeout_s": llm_timeout_s,
+            "llm_max_retries": llm_max_retries,
+            "absolute_max_parallel": absolute_max_parallel,
+            "reflection_config": reflection_config,
+            "reflection_llm": reflection_llm,
+            "tool_policy": tool_policy,
+            "stream_final_response": stream_final_response,
+            "short_term_memory": short_term_memory,
+            "background_tasks": background_tasks,
+            "error_recovery": error_recovery,
+        }
         _init_react_planner(
             self,
             llm,
@@ -412,7 +452,47 @@ class ReactPlanner:
             stream_final_response=stream_final_response,
             short_term_memory=short_term_memory,
             background_tasks=background_tasks,
+            error_recovery=error_recovery,
         )
+
+    def fork(
+        self,
+        *,
+        catalog_filter: Callable[[NodeSpec], bool] | None = None,
+        background_tasks: BackgroundTasksConfig | None | Literal["inherit"] = "inherit",
+    ) -> ReactPlanner:
+        """Create a new planner instance with the same configuration.
+
+        Background task orchestration requires a fresh ReactPlanner per task because
+        the planner maintains mutable per-run state and is not thread-safe.
+        """
+
+        init_kwargs = dict(self._init_kwargs or {})
+        base_catalog = init_kwargs.get("catalog")
+        nodes = init_kwargs.get("nodes")
+        registry = init_kwargs.get("registry")
+
+        specs: list[NodeSpec]
+        if isinstance(base_catalog, Sequence):
+            specs = list(base_catalog)
+        elif isinstance(nodes, Sequence) and isinstance(registry, ModelRegistry):
+            specs = list(build_catalog(nodes, registry))
+        else:
+            # Best-effort fallback for legacy planners constructed before _init_kwargs existed.
+            specs = list(getattr(self, "_specs", []) or [])
+
+        if catalog_filter is not None:
+            specs = [spec for spec in specs if catalog_filter(spec)]
+
+        # Force catalog-based init to avoid depending on registry merging behaviour.
+        init_kwargs["catalog"] = specs
+        init_kwargs["nodes"] = None
+        init_kwargs["registry"] = None
+        init_kwargs["event_callback"] = None
+        if background_tasks != "inherit":
+            init_kwargs["background_tasks"] = background_tasks
+
+        return ReactPlanner(**init_kwargs)
 
     @property
     def artifact_store(self) -> ArtifactStore:

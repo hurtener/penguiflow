@@ -13,6 +13,8 @@ const HIDDEN_EVENTS = new Set([
   'tool_call_end',
   'tool_call_result',
   'llm_stream_chunk',
+  'state_update',  // Task state updates - shown in Tasks card
+  'connected',     // SSE connection event
 ]);
 
 /** Events that indicate step boundaries */

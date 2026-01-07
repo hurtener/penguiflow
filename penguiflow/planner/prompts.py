@@ -383,6 +383,49 @@ When applying results:
 - Prefer HUMAN_GATED merge for diverged results so the user can review
 - Consider whether the results are still relevant before recommending apply
 </context_divergence>
+
+<task_groups>
+You can spawn multiple related tasks as a group for coordinated reporting:
+
+Creating Groups:
+- First spawn creates the group: tasks.spawn(query="...", group="analysis")
+- Add more tasks: tasks.spawn(query="...", group="analysis")
+- Seal when done adding: tasks.spawn(query="...", group="analysis", group_sealed=True)
+
+When all tasks in a sealed group complete, you'll generate ONE synthesized report
+covering all findings together, rather than separate reports for each task.
+
+Groups auto-seal by default when you yield to the user, so you don't always need
+to set group_sealed=True explicitly.
+
+Group Management Tools:
+- tasks.seal_group: Manually seal a group (no more tasks can join)
+- tasks.cancel_group: Cancel all tasks in a group
+- tasks.apply_group: Apply or reject all pending patches for a group at once
+- tasks.list_groups: List all task groups in the session
+- tasks.get_group: Get detailed status of a specific group
+
+Use groups when:
+- Tasks are investigating different aspects of the same question
+- Results should be synthesized together for a cohesive answer
+- The user would benefit from a unified summary rather than fragmented updates
+
+Example - Comprehensive Analysis:
+```
+tasks.spawn(query="Analyze Q4 sales data", group="q4_analysis")
+tasks.spawn(query="Analyze Q4 marketing metrics", group="q4_analysis")
+tasks.spawn(query="Analyze Q4 operations efficiency", group="q4_analysis", group_sealed=True)
+```
+When all three complete, you'll receive a single combined report to synthesize.
+
+For HUMAN_GATED groups:
+- Individual task results are held until group completes
+- Use tasks.apply_group to approve/reject all results together
+- Only synthesize findings AFTER the user approves the group
+
+Use retain_turn=True if you want to wait for results and continue reasoning
+without yielding to the user (requires APPEND or REPLACE merge strategy).
+</task_groups>
 """ + steering_section + """
 </background_tasks>"""
 
@@ -1047,3 +1090,39 @@ def render_arg_fill_clarification(
         f"To use {tool_name}, I need you to provide the following information:\n"
         f"{fields_str}"
     )
+
+
+def render_proactive_report_guidance() -> str:
+    """Render prompt guidance for proactive report-back after background task completion.
+
+    This guidance is injected when `proactive_report` key exists in `llm_context`,
+    indicating the foreground agent should proactively report on completed background work.
+    """
+    return """\
+<proactive_report_guidance>
+A background task has completed and its results have been merged into your context.
+Proactively inform the user about what was discovered/completed.
+
+Context available in llm_context["proactive_report"]:
+- task_id, task_description
+- digest: Summary of key findings
+- facts, artifacts, sources (artifacts from the background task)
+- execution_time_ms, context_diverged
+
+You have FULL agent capabilities for this proactive response:
+
+1. **Render artifacts**: If the background task produced artifacts (charts, tables, code, etc.),
+   use rich output to display them directly — don't just mention their existence.
+
+2. **Produce new artifacts**: Based on the findings, you may generate additional artifacts
+   if they help communicate results (e.g., synthesize a summary table, create a visualization
+   from raw data, generate code snippets that demonstrate findings).
+
+3. **Full response depth**: Provide whatever level of detail is appropriate for the findings.
+   Some tasks warrant a brief acknowledgment; others deserve thorough analysis.
+
+Maintain conversational continuity with the prior exchange. Reference specific results from
+the digest and facts. The user should feel like the agent autonomously completed work and
+is now reporting back with full context.
+</proactive_report_guidance>
+"""

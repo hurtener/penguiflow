@@ -505,6 +505,8 @@ def _generate_planner(
     planning_hints_literal = repr(_planning_hints(spec)).replace("'", '"')
     stm = spec.planner.short_term_memory
     stm_enabled = bool(stm and stm.enabled)
+    bg = spec.planner.background_tasks
+    with_background_tasks = bool(spec.agent.flags.background_tasks or bg.enabled)
 
     content = _render_template(
         "planner.py.jinja",
@@ -526,6 +528,7 @@ def _generate_planner(
             "absolute_max_parallel": spec.planner.absolute_max_parallel,
             "planning_hints_literal": planning_hints_literal if planning_hints_literal != "None" else "None",
             "has_external_tools": bool(spec.external_tools.presets or spec.external_tools.custom),
+            "with_background_tasks": with_background_tasks,
         },
     )
 
@@ -809,6 +812,7 @@ def _generate_config(
     rich_output = spec.planner.rich_output
     rich_allowlist = rich_output.allowlist or _DEFAULT_RICH_OUTPUT_ALLOWLIST
     bg = spec.planner.background_tasks
+    with_background_tasks = bool(spec.agent.flags.background_tasks or bg.enabled)
 
     content = _render_template(
         "config.py.jinja",
@@ -861,6 +865,7 @@ def _generate_config(
             "short_term_memory_retry_attempts": stm.retry_attempts if stm else 3,
             "short_term_memory_retry_backoff_base_s": stm.retry_backoff_base_s if stm else 2.0,
             "short_term_memory_degraded_retry_interval_s": stm.degraded_retry_interval_s if stm else 30.0,
+            "with_background_tasks": with_background_tasks,
             # Background tasks configuration
             "background_tasks_enabled": bg.enabled,
             "background_tasks_allow_tool_background": bg.allow_tool_background,
@@ -910,6 +915,7 @@ def _generate_env_example(
     rich_allowlist = rich_output.allowlist or _DEFAULT_RICH_OUTPUT_ALLOWLIST
     rich_allowlist_csv = ",".join(rich_allowlist)
     bg = spec.planner.background_tasks
+    with_background_tasks = bool(spec.agent.flags.background_tasks or bg.enabled)
 
     content = _render_template(
         "env.example.jinja",
@@ -954,6 +960,7 @@ def _generate_env_example(
             "short_term_memory_retry_backoff_base_s": stm.retry_backoff_base_s if stm else 2.0,
             "short_term_memory_degraded_retry_interval_s": stm.degraded_retry_interval_s if stm else 30.0,
             "external_env_vars": external_env_vars,
+            "with_background_tasks": with_background_tasks,
             # Background tasks configuration
             "background_tasks_enabled": str(bg.enabled).lower(),
             "background_tasks_allow_tool_background": str(bg.allow_tool_background).lower(),

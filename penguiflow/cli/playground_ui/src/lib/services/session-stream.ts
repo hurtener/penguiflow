@@ -107,10 +107,15 @@ class SessionStreamManager {
     const handler = (evt: MessageEvent) => {
       const data = safeParse(evt.data);
       if (!data) return;
-      if (evt.type !== 'state_update' && data.update_type == null) {
+      // Skip events that don't have update_type (e.g., "connected" event)
+      if (data.update_type == null) {
         return;
       }
       const update = data as StateUpdate;
+      // Ensure task_id is present before applying task updates
+      if (!update.task_id) {
+        return;
+      }
       this.lastUpdateId = update.update_id ?? this.lastUpdateId;
       this.stores.tasksStore.applyUpdate(update);
       if (update.update_type === 'NOTIFICATION') {

@@ -360,7 +360,13 @@ def _meta_from_spec(spec: Spec | None) -> MetaPayload:
     return MetaPayload(agent=agent, planner=planner, services=services, tools=tools)
 
 
-def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> bytes | None:
+def _event_frame(
+    event: PlannerEvent,
+    trace_id: str | None,
+    session_id: str,
+    *,
+    default_message_id: str | None = None,
+) -> bytes | None:
     """Convert a planner event into an SSE frame."""
     if trace_id is None:
         return None
@@ -371,6 +377,12 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
         "step": event.trajectory_step,
     }
     extra = dict(event.extra or {})
+    message_id: str | None = None
+    extra_message_id = extra.get("message_id")
+    if isinstance(extra_message_id, str) and extra_message_id.strip():
+        message_id = extra_message_id
+    elif isinstance(default_message_id, str) and default_message_id.strip():
+        message_id = default_message_id
     if event.event_type == "stream_chunk":
         phase = "observation"
         meta = extra.get("meta")
@@ -397,6 +409,8 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
                 "channel": channel,
             }
         )
+        if message_id is not None:
+            payload["message_id"] = message_id
         return format_sse("chunk", payload)
 
     if event.event_type == "artifact_chunk":
@@ -451,9 +465,7 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
             channel_llm = "revision"
         else:
             channel_llm = "thinking"
-        # Include message_id for multiplexing (based on action_seq)
         action_seq = extra.get("action_seq")
-        message_id = f"msg_{action_seq}" if action_seq is not None else None
         payload.update(
             {
                 "text": extra.get("text", ""),
@@ -461,9 +473,10 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
                 "phase": phase_llm,
                 "channel": channel_llm,
                 "action_seq": action_seq,
-                "message_id": message_id,
             }
         )
+        if message_id is not None:
+            payload["message_id"] = message_id
         return format_sse("llm_stream_chunk", payload)
 
     if event.node_name:
@@ -486,8 +499,6 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
         tool_call_id = extra.get("tool_call_id")
         tool_name = extra.get("tool_name")
         args_json = extra.get("args_json", "")
-        action_seq = extra.get("action_seq")
-        message_id = f"msg_{action_seq}" if action_seq is not None else None
         # Emit tool_call_start first
         frames = format_sse(
             "tool_call_start",
@@ -495,7 +506,7 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
                 **payload,
                 "tool_call_id": tool_call_id,
                 "tool_name": tool_name,
-                "message_id": message_id,
+                **({"message_id": message_id} if message_id is not None else {}),
             },
         )
         # Emit args as a single delta chunk for streaming compatibility
@@ -507,21 +518,20 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
                     "delta": args_json,
                     "trace_id": trace_id,
                     "session_id": session_id,
-                    "ts": _ts(),
+                    "ts": event.ts,
+                    **({"message_id": message_id} if message_id is not None else {}),
                 },
             )
         return frames
 
     if event.event_type == "tool_call_end":
-        action_seq = extra.get("action_seq")
-        message_id = f"msg_{action_seq}" if action_seq is not None else None
         return format_sse(
             "tool_call_end",
             {
                 **payload,
                 "tool_call_id": extra.get("tool_call_id"),
                 "tool_name": extra.get("tool_name"),
-                "message_id": message_id,
+                **({"message_id": message_id} if message_id is not None else {}),
             },
         )
 
@@ -679,7 +689,12 @@ def discover_agent(project_root: Path | None = None) -> DiscoveryResult:
     raise PlaygroundError(f"Could not discover agent in {base_dir}: {hint}")
 
 
-def _instantiate_orchestrator(cls: type[Any], config: Any | None) -> Any:
+def _instantiate_orchestrator(
+    cls: type[Any],
+    config: Any | None,
+    *,
+    session_manager: Any | None = None,
+) -> Any:
     signature = inspect.signature(cls)
     params = [param for name, param in signature.parameters.items() if name != "self"]
     if not params:
@@ -687,8 +702,16 @@ def _instantiate_orchestrator(cls: type[Any], config: Any | None) -> Any:
     first = params[0]
     if config is None and first.default is inspect._empty:
         raise PlaygroundError(f"Orchestrator {cls.__name__} requires a config")
+
+    # Build kwargs for optional parameters the orchestrator may accept
+    kwargs: dict[str, Any] = {}
+    if session_manager is not None and "session_manager" in signature.parameters:
+        kwargs["session_manager"] = session_manager
+
     try:
-        return cls(config) if config is not None else cls()
+        if config is not None:
+            return cls(config, **kwargs)
+        return cls(**kwargs) if kwargs else cls()
     except TypeError as exc:
         raise PlaygroundError(f"Failed to instantiate orchestrator {cls.__name__}: {exc}") from exc
 
@@ -725,15 +748,26 @@ def load_agent(
     project_root: Path | None = None,
     *,
     state_store: PlaygroundStateStore | None = None,
+    session_manager: Any | None = None,
 ) -> tuple[AgentWrapper, DiscoveryResult]:
-    """Discover and wrap the first available agent entry point."""
+    """Discover and wrap the first available agent entry point.
+
+    Args:
+        project_root: Path to the project root directory.
+        state_store: State store for agent wrapper.
+        session_manager: SessionManager instance to share with orchestrator for
+            background task visibility. If provided and the orchestrator accepts it,
+            the same instance will be used for both UI endpoints and orchestrator.
+    """
 
     result = discover_agent(project_root)
     config = result.config_factory() if result.config_factory else None
     state_store = state_store or InMemoryStateStore()
 
     if result.kind == "orchestrator":
-        orchestrator = _instantiate_orchestrator(result.target, config)
+        orchestrator = _instantiate_orchestrator(
+            result.target, config, session_manager=session_manager
+        )
         wrapper: AgentWrapper = OrchestratorAgentWrapper(
             orchestrator,
             state_store=state_store,
@@ -779,14 +813,14 @@ def create_playground_app(
     spec_payload, parsed_spec = _load_spec_payload(Path(project_root or ".").resolve())
     meta_payload = _meta_from_spec(parsed_spec)
 
+    # Determine session_store first so we can create SessionManager before load_agent.
+    # This allows the orchestrator to share the same SessionManager for background task visibility.
     if agent_wrapper is None:
         store = state_store or InMemoryStateStore()
-        agent_wrapper, discovery = load_agent(project_root, state_store=store)
-        planner_factory = _build_planner_factory(discovery)
     else:
         if store is None:
             store = getattr(agent_wrapper, "_state_store", None) or InMemoryStateStore()
-        planner_factory = None
+
     # Share the same store with the SessionManager when it supports task persistence.
     # Otherwise, keep session/task state in-memory (the Playground can still store trajectories/events).
     session_store: Any | None = None
@@ -795,6 +829,15 @@ def create_playground_app(
     ):
         session_store = store
     session_manager = SessionManager(limits=session_limits, state_store=session_store)
+
+    # Now load the agent, passing the shared SessionManager
+    if agent_wrapper is None:
+        agent_wrapper, discovery = load_agent(
+            project_root, state_store=store, session_manager=session_manager
+        )
+        planner_factory = _build_planner_factory(discovery)
+    else:
+        planner_factory = None
     try:
         supports_steering_chat = "steering" in inspect.signature(agent_wrapper.chat).parameters
     except (TypeError, ValueError):
@@ -1235,6 +1278,7 @@ def create_playground_app(
         tool_payload = _parse_context_arg(tool_context)
         queue: asyncio.Queue[bytes | object] = asyncio.Queue()
         trace_holder: dict[str, str | None] = {"id": secrets.token_hex(8)}
+        stream_message_id = f"msg_{secrets.token_hex(8)}"
         session = await session_manager.get_or_create(session_value)
         try:
             await session.ensure_capacity(TaskType.FOREGROUND)
@@ -1305,7 +1349,7 @@ def create_playground_app(
             if tid is None:
                 return
             trace_holder["id"] = tid
-            frame = _event_frame(event, tid, session_value)
+            frame = _event_frame(event, tid, session_value, default_message_id=stream_message_id)
             if frame:
                 try:
                     queue.put_nowait(frame)
@@ -1660,7 +1704,7 @@ def create_playground_app(
         )
 
     if PenguiFlowAdapter is not None and create_agui_endpoint is not None and RunAgentInput is not None:
-        agui_adapter = PenguiFlowAdapter(agent_wrapper)
+        agui_adapter = PenguiFlowAdapter(agent_wrapper, session_manager=session_manager)
 
         @app.post("/agui/agent")
         async def agui_agent(input: RunAgentInput, request: Request) -> StreamingResponse:

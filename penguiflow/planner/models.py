@@ -259,6 +259,50 @@ class BackgroundTasksConfig(BaseModel):
     max_pending_steering: int = 2
     """Maximum steering messages queued per task before backpressure."""
 
+    # Proactive report-back settings
+    proactive_report_enabled: bool = False
+    """Master switch for proactive messages on auto-merge completion."""
+
+    proactive_report_strategies: list[str] = ["APPEND", "REPLACE"]
+    """Merge strategies that trigger proactive reports (not HUMAN_GATED)."""
+
+    proactive_report_max_queued: int = 5
+    """Maximum queued reports before dropping oldest."""
+
+    proactive_report_timeout_s: float = 30.0
+    """Timeout for proactive message generation."""
+
+    proactive_report_fallback_notification: bool = True
+    """Fall back to notification panel if generation fails."""
+
+    # Task group settings (RFC_TASK_GROUPS)
+    default_group_merge_strategy: str = "APPEND"
+    """Default merge strategy for task groups."""
+
+    default_group_report: str = "all"
+    """Default report strategy for groups: 'all', 'any', or 'none'."""
+
+    group_timeout_s: float = 600.0
+    """Timeout for group completion (seal to complete)."""
+
+    group_partial_on_failure: bool = True
+    """If True, report partial results when some tasks in a group fail."""
+
+    max_tasks_per_group: int = 10
+    """Maximum tasks allowed in a single group."""
+
+    auto_seal_groups_on_foreground_yield: bool = True
+    """Auto-seal OPEN groups when foreground yields to user."""
+
+    retain_turn_timeout_s: float = 30.0
+    """Max time foreground waits for retained tasks/groups before force-yield."""
+
+    background_continuation_max_hops: int = 2
+    """Maximum background continuation cycles after retain-timeout."""
+
+    background_continuation_cooldown_s: float = 0.0
+    """Delay between background continuation cycles."""
+
 
 class BackgroundTaskHandle(BaseModel):
     """Return type for tools that run asynchronously in the background."""

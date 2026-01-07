@@ -6,6 +6,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
 import secrets
 import time
 from collections import deque
@@ -28,22 +29,30 @@ from penguiflow.steering import (
 from .broker import UpdateBroker
 from .models import (
     ContextPatch,
+    GroupProactiveReportRequest,
+    GroupReportStrategy,
+    GroupStatus,
     MergeStrategy,
     NotificationAction,
     NotificationPayload,
+    ProactiveReportRequest,
     StateUpdate,
     TaskContextSnapshot,
+    TaskGroup,
     TaskState,
     TaskStateModel,
     TaskStatus,
     TaskType,
     UpdateType,
+    _utc_now,
 )
 from .persistence import InMemorySessionStateStore, SessionStateStore, StateStoreSessionAdapter
 from .policy import ControlPolicy
 from .registry import TaskRegistry
 from .telemetry import NoOpTaskTelemetrySink, TaskTelemetryEvent, TaskTelemetrySink
 from .transport import SessionConnection, Transport
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -206,6 +215,19 @@ class StreamingSession:
         self._context = SessionContext()
         self._foreground_task_id: str | None = None
         self._hydrated = False
+        # Proactive report-back infrastructure
+        self._proactive_queue: asyncio.Queue[ProactiveReportRequest] = asyncio.Queue()
+        self._group_report_queue: asyncio.Queue[GroupProactiveReportRequest] = asyncio.Queue()
+        self._foreground_busy = asyncio.Event()
+        self._foreground_busy.set()  # Initially idle
+        self._proactive_task: asyncio.Task[None] | None = None
+        self._proactive_generator: Callable[[ProactiveReportRequest], Awaitable[None]] | None = None
+        self._group_report_generator: Callable[[GroupProactiveReportRequest], Awaitable[None]] | None = None
+        self._proactive_config: dict[str, Any] | None = None
+        # Task group state
+        self._groups: dict[str, TaskGroup] = {}
+        self._current_turn_id: str | None = None
+        self._group_completion_events: dict[str, asyncio.Event] = {}
 
     @property
     def registry(self) -> TaskRegistry:
@@ -261,12 +283,147 @@ class StreamingSession:
         self._context.version += 1
         self._context.context_hash = _hash_context(self._context.llm_context)
 
+    def configure_proactive_reporting(
+        self,
+        *,
+        generator: Callable[[ProactiveReportRequest], Awaitable[None]],
+        enabled: bool = False,
+        strategies: list[str] | None = None,
+        max_queued: int = 5,
+        timeout_s: float = 30.0,
+        fallback_notification: bool = True,
+    ) -> None:
+        """Configure proactive report-back for background task completions.
+
+        Args:
+            generator: Async callable to generate proactive messages.
+            enabled: Master switch for proactive reporting.
+            strategies: Merge strategies that trigger reports (default: APPEND, REPLACE).
+            max_queued: Maximum queued reports before dropping oldest.
+            timeout_s: Timeout for proactive message generation.
+            fallback_notification: Fall back to notification panel if generation fails.
+        """
+        self._proactive_generator = generator
+        self._proactive_config = {
+            "enabled": enabled,
+            "strategies": strategies or ["APPEND", "REPLACE"],
+            "max_queued": max_queued,
+            "timeout_s": timeout_s,
+            "fallback_notification": fallback_notification,
+        }
+        if enabled and self._proactive_task is None:
+            self._proactive_task = asyncio.create_task(
+                self._run_proactive_reporter(),
+                name=f"proactive_reporter:{self.session_id}",
+            )
+
+    def _enqueue_proactive_report(
+        self,
+        *,
+        task_id: str,
+        trace_id: str | None,
+        description: str | None,
+        execution_time_ms: int,
+        patch: ContextPatch,
+        merge_strategy: MergeStrategy,
+    ) -> None:
+        """Queue a proactive report request for generation when foreground is idle."""
+        config = self._proactive_config
+        if config is None or not config.get("enabled"):
+            return
+        # Check if merge strategy triggers proactive reporting
+        strategy_name = merge_strategy.value.upper()
+        allowed_strategies = config.get("strategies", ["APPEND", "REPLACE"])
+        if strategy_name not in allowed_strategies:
+            return
+        # Enforce queue size limit (drop oldest if full)
+        max_queued = config.get("max_queued", 5)
+        while self._proactive_queue.qsize() >= max_queued:
+            try:
+                self._proactive_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        request = ProactiveReportRequest(
+            task_id=task_id,
+            session_id=self.session_id,
+            trace_id=trace_id,
+            task_description=description,
+            execution_time_ms=execution_time_ms,
+            patch=patch,
+            merge_strategy=merge_strategy,
+        )
+        self._proactive_queue.put_nowait(request)
+
+    async def _run_proactive_reporter(self) -> None:
+        """Background task that processes proactive reports when foreground is idle."""
+        while True:
+            try:
+                # Wait for a report request
+                request = await self._proactive_queue.get()
+                # Wait for foreground to be idle
+                await self._foreground_busy.wait()
+                # Generate proactive message
+                await self._generate_proactive_message(request)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                # Log error and continue processing
+                pass
+
+    async def _generate_proactive_message(self, request: ProactiveReportRequest) -> None:
+        """Generate a proactive message for a completed background task."""
+        config = self._proactive_config
+        if config is None or self._proactive_generator is None:
+            return
+        timeout_s = config.get("timeout_s", 30.0)
+        fallback = config.get("fallback_notification", True)
+        try:
+            await asyncio.wait_for(
+                self._proactive_generator(request),
+                timeout=timeout_s,
+            )
+        except TimeoutError:
+            if fallback:
+                self._publish(
+                    StateUpdate(
+                        session_id=self.session_id,
+                        task_id=request.task_id,
+                        trace_id=request.trace_id,
+                        update_type=UpdateType.NOTIFICATION,
+                        content={
+                            "severity": "info",
+                            "title": "Background task complete",
+                            "body": "Task completed but proactive report timed out.",
+                            "task_id": request.task_id,
+                        },
+                    )
+                )
+        except Exception:
+            if fallback:
+                self._publish(
+                    StateUpdate(
+                        session_id=self.session_id,
+                        task_id=request.task_id,
+                        trace_id=request.trace_id,
+                        update_type=UpdateType.NOTIFICATION,
+                        content={
+                            "severity": "warning",
+                            "title": "Background task complete",
+                            "body": "Task completed but failed to generate proactive report.",
+                            "task_id": request.task_id,
+                        },
+                    )
+                )
+
     async def _ensure_limits(self, task_type: TaskType) -> None:
         tasks = await self._registry.list_tasks(self.session_id)
-        if self._limits.max_tasks_per_session and len(tasks) >= self._limits.max_tasks_per_session:
+        # Only count active tasks (not COMPLETE, FAILED, CANCELLED) towards limits
+        terminal_statuses = {TaskStatus.COMPLETE, TaskStatus.FAILED, TaskStatus.CANCELLED}
+        active_tasks = [t for t in tasks if t.status not in terminal_statuses]
+        if self._limits.max_tasks_per_session and len(active_tasks) >= self._limits.max_tasks_per_session:
             raise RuntimeError("task_limit_exceeded")
         if task_type == TaskType.BACKGROUND and self._limits.max_background_tasks:
-            background_count = len([t for t in tasks if t.task_type == TaskType.BACKGROUND])
+            background_count = len([t for t in active_tasks if t.task_type == TaskType.BACKGROUND])
             if background_count >= self._limits.max_background_tasks:
                 raise RuntimeError("background_task_limit_exceeded")
 
@@ -290,6 +447,7 @@ class StreamingSession:
         merge_strategy: MergeStrategy = MergeStrategy.APPEND,
         propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
         notify_on_complete: bool = True,
+        group_id: str | None = None,
     ) -> str:
         await self._ensure_limits(task_type)
         task_id = task_id or secrets.token_hex(8)
@@ -341,6 +499,7 @@ class StreamingSession:
         )
         if task_type == TaskType.FOREGROUND:
             self._foreground_task_id = task_id
+            self._foreground_busy.clear()  # Mark foreground as busy
         steering = SteeringInbox(maxsize=self._limits.steering_queue_size)
         self._steering_inboxes[task_id] = steering
         handle = asyncio.create_task(
@@ -349,6 +508,7 @@ class StreamingSession:
                 state=state,
                 steering=steering,
                 merge_strategy=merge_strategy,
+                group_id=group_id,
             ),
             name=f"task:{task_id}",
         )
@@ -423,6 +583,7 @@ class StreamingSession:
         )
         if task_type == TaskType.FOREGROUND:
             self._foreground_task_id = task_id
+            self._foreground_busy.clear()  # Mark foreground as busy
         steering = SteeringInbox(maxsize=self._limits.steering_queue_size)
         self._steering_inboxes[task_id] = steering
         try:
@@ -434,6 +595,8 @@ class StreamingSession:
             )
         finally:
             self._steering_inboxes.pop(task_id, None)
+            if task_type == TaskType.FOREGROUND:
+                self._foreground_busy.set()  # Mark foreground as idle
 
     async def steer(self, event: SteeringEvent) -> bool:
         if event.session_id != self.session_id:
@@ -779,6 +942,7 @@ class StreamingSession:
         state: TaskState,
         steering: SteeringInbox,
         merge_strategy: MergeStrategy,
+        group_id: str | None = None,
     ) -> None:
         try:
             await self._execute_task(
@@ -786,10 +950,14 @@ class StreamingSession:
                 state=state,
                 steering=steering,
                 merge_strategy=merge_strategy,
+                group_id=group_id,
             )
         except asyncio.CancelledError:
             await self._registry.update_task(state.task_id, status=TaskStatus.CANCELLED, error="cancelled")
             self._emit_status_change(state, reason="cancelled")
+            # Mark task as failed in group if applicable
+            if group_id is not None:
+                await self.mark_task_complete_in_group(group_id, state.task_id, success=False)
             asyncio.create_task(
                 self._telemetry.emit(
                     TaskTelemetryEvent(
@@ -816,12 +984,405 @@ class StreamingSession:
                 handle.cancel()
 
     async def close(self) -> None:
+        # Cancel proactive reporter task
+        if self._proactive_task is not None and not self._proactive_task.done():
+            self._proactive_task.cancel()
+            self._proactive_task = None
         for task_id, handle in list(self._task_handles.items()):
             if not handle.done():
                 handle.cancel()
             await self._registry.update_task(task_id, status=TaskStatus.CANCELLED, error="session_closed")
         self._task_handles.clear()
         self._steering_inboxes.clear()
+
+    # -------------------------------------------------------------------------
+    # Task Group Methods
+    # -------------------------------------------------------------------------
+
+    async def resolve_or_create_group(
+        self,
+        *,
+        group_name: str | None = None,
+        group_id: str | None = None,
+        turn_id: str | None = None,
+        merge_strategy: MergeStrategy | None = None,
+        report_strategy: GroupReportStrategy | None = None,
+        retain_turn: bool = False,
+    ) -> TaskGroup:
+        """Resolve an existing group or create a new one based on name/ID.
+
+        Turn-scoped name resolution:
+        - If group_id provided, join that exact group (error if not found/joinable)
+        - If group_name provided, resolve to OPEN group with that name created
+          in the same turn, or create new group if none exists
+        """
+        # If explicit group_id provided, look it up directly
+        if group_id is not None:
+            existing = self._groups.get(group_id)
+            if existing is None:
+                raise RuntimeError(f"group_not_found: {group_id}")
+            if existing.status != "open":
+                raise RuntimeError(f"group_not_joinable: {group_id} is {existing.status}")
+            return existing
+
+        # Turn-scoped name resolution: find OPEN group with matching name + turn_id
+        if group_name is not None:
+            for grp in self._groups.values():
+                if (
+                    grp.name == group_name
+                    and grp.status == "open"
+                    and grp.turn_id == turn_id
+                ):
+                    return grp
+
+        # Create new group
+        new_group = TaskGroup(
+            name=group_name or f"group_{secrets.token_hex(4)}",
+            session_id=self.session_id,
+            merge_strategy=merge_strategy or MergeStrategy.APPEND,
+            report_strategy=report_strategy or "all",
+            retain_turn=retain_turn,
+            turn_id=turn_id,
+        )
+        self._groups[new_group.group_id] = new_group
+        return new_group
+
+    async def add_task_to_group(self, group_id: str, task_id: str) -> bool:
+        """Add a task to a group. Returns False if group not found or not open."""
+        group = self._groups.get(group_id)
+        if group is None:
+            return False
+        if group.status != "open":
+            return False
+        if task_id not in group.task_ids:
+            group.task_ids.append(task_id)
+        return True
+
+    async def seal_group(self, group_id: str) -> bool:
+        """Seal a group (no more tasks can join). Returns False if already sealed."""
+        group = self._groups.get(group_id)
+        if group is None:
+            return False
+        if group.status != "open":
+            return False
+        group.status = "sealed"
+        group.sealed_at = _utc_now()
+        # Check if already complete (all tasks finished before seal)
+        await self._check_group_completion(group_id)
+        return True
+
+    async def get_group(
+        self,
+        group_id: str | None = None,
+        *,
+        group_name: str | None = None,
+        turn_id: str | None = None,
+    ) -> TaskGroup | None:
+        """Get a task group by ID or by name+turn resolution.
+
+        Args:
+            group_id: Direct lookup by group ID
+            group_name: Name-based lookup (requires turn_id for disambiguation)
+            turn_id: Turn ID for name-based lookup
+        """
+        # Direct lookup by ID
+        if group_id is not None:
+            return self._groups.get(group_id)
+        # Name-based lookup
+        if group_name is not None:
+            for grp in self._groups.values():
+                if grp.name == group_name:
+                    # If turn_id specified, match it; otherwise return first match
+                    if turn_id is None or grp.turn_id == turn_id:
+                        return grp
+        return None
+
+    async def list_groups(
+        self, *, status: GroupStatus | None = None
+    ) -> list[TaskGroup]:
+        """List all task groups, optionally filtered by status."""
+        groups = list(self._groups.values())
+        if status is not None:
+            groups = [g for g in groups if g.status == status]
+        return groups
+
+    async def mark_task_complete_in_group(
+        self,
+        group_id: str,
+        task_id: str,
+        *,
+        success: bool,
+        patch: ContextPatch | None = None,
+        patch_id: str | None = None,
+    ) -> None:
+        """Mark a task as complete (success or failure) within its group."""
+        group = self._groups.get(group_id)
+        if group is None:
+            return
+        if success:
+            if task_id not in group.completed_task_ids:
+                group.completed_task_ids.append(task_id)
+        else:
+            if task_id not in group.failed_task_ids:
+                group.failed_task_ids.append(task_id)
+        # Track patch for bundled approval if HUMAN_GATED
+        if patch_id is not None and patch_id not in group.patches:
+            group.patches.append(patch_id)
+        # Check completion
+        await self._check_group_completion(group_id)
+
+    async def _check_group_completion(self, group_id: str) -> bool:
+        """Check if a group is complete and trigger reporting if so."""
+        group = self._groups.get(group_id)
+        if group is None:
+            return False
+        if not group.is_complete:
+            return False
+        # Already complete/failed - don't re-process
+        if group.status in ("complete", "failed"):
+            return True
+        # Mark as complete or failed
+        if group.failed_task_ids:
+            group.status = "failed"
+        else:
+            group.status = "complete"
+        group.completed_at = _utc_now()
+        # Emit telemetry event
+        asyncio.create_task(
+            self._telemetry.emit(
+                TaskTelemetryEvent(
+                    event_type="task_group_completed" if group.status == "complete" else "task_group_failed",
+                    outcome="completed" if group.status == "complete" else "failed",
+                    session_id=self.session_id,
+                    task_id=group.group_id,
+                    task_type=TaskType.BACKGROUND,  # Groups contain background tasks
+                    status=TaskStatus.COMPLETE if group.status == "complete" else TaskStatus.FAILED,
+                    extra={
+                        "group_name": group.name,
+                        "task_count": len(group.task_ids),
+                        "completed_count": len(group.completed_task_ids),
+                        "failed_count": len(group.failed_task_ids),
+                    },
+                )
+            )
+        )
+        # Queue group report if configured
+        if group.report_strategy == "all" and not group.report_queued:
+            group.report_queued = True
+            await self._enqueue_group_report(group)
+        # Signal any waiters that the group is complete
+        event = self._group_completion_events.get(group_id)
+        if event is not None:
+            event.set()
+        return True
+
+    async def wait_for_group_completion(
+        self,
+        group_id: str,
+        *,
+        timeout_s: float | None = None,
+    ) -> tuple[TaskGroup | None, bool]:
+        """Wait for a group to complete.
+
+        Args:
+            group_id: The group to wait for.
+            timeout_s: Maximum time to wait in seconds. If None, wait indefinitely.
+
+        Returns:
+            A tuple of (group, timed_out). If timed_out is True, the group may
+            not be complete yet. If group is None, the group was not found.
+        """
+        group = self._groups.get(group_id)
+        if group is None:
+            return None, False
+        # Already complete - return immediately
+        if group.status in ("complete", "failed"):
+            return group, False
+        # Create event if not exists
+        if group_id not in self._group_completion_events:
+            self._group_completion_events[group_id] = asyncio.Event()
+        event = self._group_completion_events[group_id]
+        try:
+            if timeout_s is not None:
+                await asyncio.wait_for(event.wait(), timeout=timeout_s)
+            else:
+                await event.wait()
+            # Re-fetch group after wait (state may have changed)
+            group = self._groups.get(group_id)
+            return group, False
+        except TimeoutError:
+            # Re-fetch group to get current state
+            group = self._groups.get(group_id)
+            return group, True
+
+    async def get_group_results(self, group_id: str) -> list[dict[str, Any]]:
+        """Get aggregated results/digests from a completed group's tasks."""
+        group = self._groups.get(group_id)
+        if group is None:
+            return []
+        results: list[dict[str, Any]] = []
+        for task_id in group.completed_task_ids:
+            state = await self._registry.get_task(task_id)
+            if state is None:
+                continue
+            # Extract result digest if available
+            result = state.result
+            if result is not None:
+                results.append({
+                    "task_id": task_id,
+                    "digest": result.get("digest") if isinstance(result, dict) else str(result),
+                    "facts": result.get("facts") if isinstance(result, dict) else {},
+                })
+        return results
+
+    async def _enqueue_group_report(self, group: TaskGroup) -> None:
+        """Queue a proactive report for a completed task group."""
+        config = self._proactive_config
+        if config is None or not config.get("enabled"):
+            return
+        # For HUMAN_GATED groups, don't generate synthesis from unapproved results
+        if group.merge_strategy == MergeStrategy.HUMAN_GATED:
+            # Just emit a notification that group is ready for approval
+            self._publish(
+                StateUpdate(
+                    session_id=self.session_id,
+                    task_id=group.group_id,
+                    trace_id=None,
+                    update_type=UpdateType.CHECKPOINT,
+                    content={
+                        "kind": "group_approval",
+                        "group_id": group.group_id,
+                        "group_name": group.name,
+                        "task_count": len(group.task_ids),
+                        "completed_count": len(group.completed_task_ids),
+                        "failed_count": len(group.failed_task_ids),
+                        "prompt": f"Task group '{group.name}' complete. Apply results?",
+                        "options": ["approve", "reject"],
+                    },
+                )
+            )
+            return
+        # Build combined report request
+        combined_digest: list[str] = []
+        combined_facts: dict[str, Any] = {}
+        combined_artifacts: list[dict[str, Any]] = []
+        combined_sources: list[dict[str, Any]] = []
+        failed_summaries: list[dict[str, Any]] = []
+        context_diverged = False
+        # Collect from pending patches or merged context
+        for task_id in group.task_ids:
+            task = await self._registry.get_task(task_id)
+            if task is None:
+                continue
+            # Check for pending patch
+            for patch_id in group.patches:
+                pending = self._pending_patches.get(patch_id)
+                if pending is not None and pending.task_id == task_id:
+                    patch = pending.patch
+                    combined_digest.extend(patch.digest or [])
+                    combined_facts.update(patch.facts or {})
+                    combined_artifacts.extend(patch.artifacts or [])
+                    combined_sources.extend(patch.sources or [])
+                    if patch.context_diverged:
+                        context_diverged = True
+            if task_id in group.failed_task_ids:
+                failed_summaries.append({
+                    "task_id": task_id,
+                    "description": task.description,
+                    "error": task.error,
+                })
+        request = GroupProactiveReportRequest(
+            group_id=group.group_id,
+            session_id=self.session_id,
+            group_name=group.name,
+            task_count=len(group.task_ids),
+            completed_count=len(group.completed_task_ids),
+            failed_count=len(group.failed_task_ids),
+            combined_digest=combined_digest,
+            combined_facts=combined_facts,
+            combined_artifacts=combined_artifacts,
+            combined_sources=combined_sources,
+            merge_strategy=group.merge_strategy,
+            context_diverged=context_diverged,
+            failed_task_summaries=failed_summaries,
+        )
+        # Enforce queue size limit
+        max_queued = config.get("max_queued", 5)
+        while self._group_report_queue.qsize() >= max_queued:
+            try:
+                self._group_report_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        self._group_report_queue.put_nowait(request)
+
+    async def cancel_group(
+        self,
+        group_id: str,
+        *,
+        reason: str | None = None,
+        propagate: bool = True,
+    ) -> bool:
+        """Cancel a task group and optionally all its tasks."""
+        group = self._groups.get(group_id)
+        if group is None:
+            return False
+        if group.status in ("complete", "failed"):
+            return False
+        group.status = "failed"
+        group.completed_at = _utc_now()
+        if propagate:
+            for task_id in group.pending_task_ids:
+                await self.cancel_task(task_id, reason=reason or "group_cancelled")
+        return True
+
+    async def apply_group_patches(
+        self,
+        group_id: str,
+        *,
+        action: Literal["apply", "reject"] = "apply",
+        strategy: MergeStrategy | None = None,
+    ) -> bool:
+        """Apply or reject all pending patches for a task group."""
+        group = self._groups.get(group_id)
+        if group is None:
+            return False
+        for patch_id in list(group.patches):
+            pending = self._pending_patches.get(patch_id)
+            if pending is None:
+                continue
+            if action == "apply":
+                await self.apply_pending_patch(
+                    patch_id=patch_id,
+                    strategy=strategy or MergeStrategy.APPEND,
+                )
+            else:
+                self._pending_patches.pop(patch_id, None)
+        group.patches.clear()
+        # Now that patches are applied, we can generate the synthesis report
+        if action == "apply" and group.merge_strategy == MergeStrategy.HUMAN_GATED:
+            # Re-queue for synthesis now that results are approved
+            group.merge_strategy = MergeStrategy.APPEND  # Switch for synthesis
+            group.report_queued = False
+            await self._enqueue_group_report(group)
+        return True
+
+    def set_turn_id(self, turn_id: str | None) -> None:
+        """Set the current foreground turn ID for group name resolution."""
+        self._current_turn_id = turn_id
+
+    async def auto_seal_open_groups(self, turn_id: str | None = None) -> int:
+        """Auto-seal all OPEN groups created in the given turn (or current turn).
+
+        Called when foreground yields to ensure groups don't stay open.
+        Returns count of groups sealed.
+        """
+        target_turn = turn_id or self._current_turn_id
+        sealed_count = 0
+        for group in list(self._groups.values()):
+            if group.status == "open" and group.turn_id == target_turn:
+                await self.seal_group(group.group_id)
+                sealed_count += 1
+        return sealed_count
 
     async def _execute_task(
         self,
@@ -830,6 +1391,7 @@ class StreamingSession:
         state: TaskState,
         steering: SteeringInbox,
         merge_strategy: MergeStrategy,
+        group_id: str | None = None,
     ) -> TaskResult:
         semaphore = self._concurrency_semaphore
         if semaphore is not None:
@@ -864,6 +1426,39 @@ class StreamingSession:
                 patch_id = await self.apply_context_patch(
                     patch=task_result.context_patch,
                     strategy=merge_strategy,
+                )
+                # Check if task is in a group
+                task_group = self._groups.get(group_id) if group_id else None
+                # Enqueue proactive report for auto-merged background tasks
+                # Suppress per-task reports for grouped tasks with report_strategy="all"
+                should_report = (
+                    patch_id is None
+                    and state.task_type == TaskType.BACKGROUND
+                    and self._proactive_config is not None
+                    and self._proactive_config.get("enabled")
+                )
+                if should_report and task_group is not None:
+                    # Suppress per-task report if group uses "all" strategy
+                    if task_group.report_strategy == "all":
+                        should_report = False
+                if should_report:
+                    execution_time_ms = int((time.monotonic() - start_ts) * 1000)
+                    self._enqueue_proactive_report(
+                        task_id=state.task_id,
+                        trace_id=state.trace_id,
+                        description=state.description,
+                        execution_time_ms=execution_time_ms,
+                        patch=task_result.context_patch,
+                        merge_strategy=merge_strategy,
+                    )
+            # Mark task complete in group if applicable
+            if group_id is not None:
+                await self.mark_task_complete_in_group(
+                    group_id,
+                    state.task_id,
+                    success=True,
+                    patch=task_result.context_patch,
+                    patch_id=patch_id,
                 )
             content = {
                 "digest": task_result.digest,
@@ -928,6 +1523,9 @@ class StreamingSession:
         except SteeringCancelled as exc:
             await self._registry.update_task(state.task_id, status=TaskStatus.CANCELLED, error=exc.reason)
             self._emit_status_change(state, reason="cancelled")
+            # Mark task as failed in group if applicable
+            if group_id is not None:
+                await self.mark_task_complete_in_group(group_id, state.task_id, success=False)
             asyncio.create_task(
                 self._telemetry.emit(
                     TaskTelemetryEvent(
@@ -958,6 +1556,9 @@ class StreamingSession:
         except TimeoutError:
             await self._registry.update_task(state.task_id, status=TaskStatus.FAILED, error="timeout")
             self._emit_status_change(state, reason="timeout")
+            # Mark task as failed in group if applicable
+            if group_id is not None:
+                await self.mark_task_complete_in_group(group_id, state.task_id, success=False)
             asyncio.create_task(
                 self._telemetry.emit(
                     TaskTelemetryEvent(
@@ -978,6 +1579,13 @@ class StreamingSession:
             )
             raise
         except Exception as exc:
+            # Log immediately for terminal visibility (telemetry emit is async/fire-and-forget)
+            _LOGGER.exception(
+                "Task %s failed with %s: %s",
+                state.task_id,
+                exc.__class__.__name__,
+                exc,
+            )
             await self._registry.update_task(state.task_id, status=TaskStatus.FAILED, error=str(exc))
             self._publish(
                 StateUpdate(
@@ -989,6 +1597,9 @@ class StreamingSession:
                 )
             )
             self._emit_status_change(state, reason="failed")
+            # Mark task as failed in group if applicable
+            if group_id is not None:
+                await self.mark_task_complete_in_group(group_id, state.task_id, success=False)
             asyncio.create_task(
                 self._telemetry.emit(
                     TaskTelemetryEvent(

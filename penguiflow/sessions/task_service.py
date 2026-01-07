@@ -11,12 +11,13 @@ distributed queues, databases, or multi-tenant governance layers.
 from __future__ import annotations
 
 import asyncio
+import builtins
 from collections.abc import Callable
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
-from .models import MergeStrategy, TaskStatus, TaskType
+from .models import GroupReportStrategy, GroupStatus, MergeStrategy, TaskGroup, TaskStatus, TaskType
 from .planner import PlannerFactory, PlannerTaskPipeline
 from .session import SessionManager, TaskPipeline
 
@@ -42,10 +43,31 @@ class TaskDetails(TaskSummary):
     spawned_from_event_id: str | None = None
 
 
+class GroupCompletionResult(BaseModel):
+    """Result of a completed group when using retain_turn."""
+
+    group_id: str
+    group_name: str
+    status: GroupStatus
+    task_count: int
+    completed_task_ids: list[str]
+    failed_task_ids: list[str]
+    results: list[dict[str, Any]] = Field(default_factory=list)
+    """Aggregated results/digests from completed tasks."""
+    timed_out: bool = False
+    """True if the wait timed out and foreground was force-yielded."""
+
+
 class TaskSpawnResult(BaseModel):
     task_id: str
     session_id: str
     status: TaskStatus
+    group_id: str | None = None
+    group: str | None = None
+    retained: bool = False
+    """True if the foreground was retained and waited for completion."""
+    group_completion: GroupCompletionResult | None = None
+    """Populated when retain_turn=True and group completed (or timed out)."""
 
 
 class SpawnRequest(BaseModel):
@@ -90,6 +112,14 @@ class TaskService(Protocol):
         context_depth: ContextDepth = "full",
         task_id: str | None = None,
         idempotency_key: str | None = None,
+        # Group parameters
+        group: str | None = None,
+        group_id: str | None = None,
+        group_sealed: bool = False,
+        retain_turn: bool = False,
+        group_merge_strategy: MergeStrategy | None = None,
+        group_report: GroupReportStrategy | None = None,
+        turn_id: str | None = None,
     ) -> TaskSpawnResult: ...
 
     async def list(
@@ -97,7 +127,7 @@ class TaskService(Protocol):
         *,
         session_id: str,
         status: TaskStatus | None = None,
-    ) -> list[TaskSummary]: ...
+    ) -> builtins.list[TaskSummary]: ...
 
     async def get(
         self,
@@ -144,7 +174,60 @@ class TaskService(Protocol):
         propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
         notify_on_complete: bool = True,
         task_id: str | None = None,
+        # Group parameters
+        group: str | None = None,
+        group_id: str | None = None,
+        group_sealed: bool = False,
+        retain_turn: bool = False,
+        group_merge_strategy: MergeStrategy | None = None,
+        group_report: GroupReportStrategy | None = None,
+        turn_id: str | None = None,
     ) -> TaskSpawnResult: ...
+
+    # Task Group Methods
+
+    async def seal_group(
+        self,
+        *,
+        session_id: str,
+        group_id: str | None = None,
+        group_name: str | None = None,
+        turn_id: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    async def cancel_group(
+        self,
+        *,
+        session_id: str,
+        group_id: str,
+        reason: str | None = None,
+        propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
+    ) -> dict[str, Any]: ...
+
+    async def apply_group(
+        self,
+        *,
+        session_id: str,
+        group_id: str,
+        action: Literal["apply", "reject"] = "apply",
+        strategy: MergeStrategy | None = None,
+    ) -> dict[str, Any]: ...
+
+    async def list_groups(
+        self,
+        *,
+        session_id: str,
+        status: GroupStatus | None = None,
+    ) -> builtins.list[TaskGroup]: ...
+
+    async def get_group(
+        self,
+        *,
+        session_id: str,
+        group_id: str | None = None,
+        group_name: str | None = None,
+        turn_id: str | None = None,
+    ) -> TaskGroup | None: ...
 
 
 def _digest_from_result(result: Any) -> list[str]:
@@ -193,6 +276,14 @@ class InProcessTaskService:
         context_depth: ContextDepth = "full",
         task_id: str | None = None,
         idempotency_key: str | None = None,
+        # Group parameters
+        group: str | None = None,
+        group_id: str | None = None,
+        group_sealed: bool = False,
+        retain_turn: bool = False,
+        group_merge_strategy: MergeStrategy | None = None,
+        group_report: GroupReportStrategy | None = None,
+        turn_id: str | None = None,
     ) -> TaskSpawnResult:
         if self._subagent_factory is None:
             raise RuntimeError("background_tasks_unavailable")
@@ -248,6 +339,18 @@ class InProcessTaskService:
                 context_hash=session.context_hash,
             )
 
+        # Resolve/create task group if group parameters provided
+        resolved_group: TaskGroup | None = None
+        if group or group_id:
+            resolved_group = await session.resolve_or_create_group(
+                group_name=group,
+                group_id=group_id,
+                turn_id=turn_id,
+                merge_strategy=group_merge_strategy,
+                report_strategy=group_report,
+                retain_turn=retain_turn,
+            )
+
         pipeline = PlannerTaskPipeline(planner_factory=self._subagent_factory)
         created_id = await session.spawn_task(
             pipeline,
@@ -262,19 +365,61 @@ class InProcessTaskService:
             merge_strategy=merge_strategy,
             propagate_on_cancel=propagate_on_cancel,
             notify_on_complete=notify_on_complete,
+            group_id=resolved_group.group_id if resolved_group else None,
         )
+
+        # Add task to group and optionally seal
+        if resolved_group:
+            await session.add_task_to_group(resolved_group.group_id, created_id)
+            if group_sealed:
+                await session.seal_group(resolved_group.group_id)
+
         if idempotency_key is not None:
             async with self._lock:
                 self._idempotency[(session_id, idempotency_key)] = created_id
+
+        # Handle retained turn - wait for group completion if group is sealed
+        group_completion: GroupCompletionResult | None = None
+        retained = False
+        if retain_turn and resolved_group and resolved_group.status == "sealed":
+            # Validate retain_turn constraints (no HUMAN_GATED)
+            if resolved_group.merge_strategy == MergeStrategy.HUMAN_GATED:
+                # Cannot retain turn with HUMAN_GATED - results need approval
+                pass  # Fall through to normal return
+            else:
+                retained = True
+                # Get timeout from config - default 30s
+                timeout_s = 30.0  # TODO: get from config
+                completed_group, timed_out = await session.wait_for_group_completion(
+                    resolved_group.group_id,
+                    timeout_s=timeout_s,
+                )
+                if completed_group is not None:
+                    results = await session.get_group_results(resolved_group.group_id)
+                    group_completion = GroupCompletionResult(
+                        group_id=completed_group.group_id,
+                        group_name=completed_group.name,
+                        status=completed_group.status,
+                        task_count=len(completed_group.task_ids),
+                        completed_task_ids=list(completed_group.completed_task_ids),
+                        failed_task_ids=list(completed_group.failed_task_ids),
+                        results=results,
+                        timed_out=timed_out,
+                    )
+
         task = await session.get_task(created_id)
         status = task.status if task else TaskStatus.PENDING
         return TaskSpawnResult(
             task_id=created_id,
             session_id=session_id,
             status=status,
+            group_id=resolved_group.group_id if resolved_group else None,
+            group=resolved_group.name if resolved_group else None,
+            retained=retained,
+            group_completion=group_completion,
         )
 
-    async def list(self, *, session_id: str, status: TaskStatus | None = None) -> list[TaskSummary]:
+    async def list(self, *, session_id: str, status: TaskStatus | None = None) -> builtins.list[TaskSummary]:
         session = await self._sessions.get_or_create(session_id)
         tasks = await session.list_tasks(status=status)
         summaries: list[TaskSummary] = []
@@ -376,6 +521,14 @@ class InProcessTaskService:
         propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
         notify_on_complete: bool = True,
         task_id: str | None = None,
+        # Group parameters
+        group: str | None = None,
+        group_id: str | None = None,
+        group_sealed: bool = False,
+        retain_turn: bool = False,
+        group_merge_strategy: MergeStrategy | None = None,
+        group_report: GroupReportStrategy | None = None,
+        turn_id: str | None = None,
     ) -> TaskSpawnResult:
         if self._tool_job_factory is None:
             raise RuntimeError("tool_background_unavailable")
@@ -392,6 +545,19 @@ class InProcessTaskService:
         if not decision.allowed:
             raise RuntimeError(decision.reason or "spawn_blocked")
         session = await self._sessions.get_or_create(session_id)
+
+        # Resolve/create task group if group parameters provided
+        resolved_group: TaskGroup | None = None
+        if group or group_id:
+            resolved_group = await session.resolve_or_create_group(
+                group_name=group,
+                group_id=group_id,
+                turn_id=turn_id,
+                merge_strategy=group_merge_strategy,
+                report_strategy=group_report,
+                retain_turn=retain_turn,
+            )
+
         pipeline = self._tool_job_factory(tool_name, tool_args)
         created_id = await session.spawn_task(
             pipeline,
@@ -405,13 +571,176 @@ class InProcessTaskService:
             merge_strategy=merge_strategy,
             propagate_on_cancel=propagate_on_cancel,
             notify_on_complete=notify_on_complete,
+            group_id=resolved_group.group_id if resolved_group else None,
         )
+
+        # Add task to group and optionally seal
+        if resolved_group:
+            await session.add_task_to_group(resolved_group.group_id, created_id)
+            if group_sealed:
+                await session.seal_group(resolved_group.group_id)
+
+        # Handle retained turn - wait for group completion if group is sealed
+        group_completion: GroupCompletionResult | None = None
+        retained = False
+        if retain_turn and resolved_group and resolved_group.status == "sealed":
+            # Validate retain_turn constraints (no HUMAN_GATED)
+            if resolved_group.merge_strategy == MergeStrategy.HUMAN_GATED:
+                # Cannot retain turn with HUMAN_GATED - results need approval
+                pass  # Fall through to normal return
+            else:
+                retained = True
+                # Get timeout from config - default 30s
+                timeout_s = 30.0  # TODO: get from config
+                completed_group, timed_out = await session.wait_for_group_completion(
+                    resolved_group.group_id,
+                    timeout_s=timeout_s,
+                )
+                if completed_group is not None:
+                    results = await session.get_group_results(resolved_group.group_id)
+                    group_completion = GroupCompletionResult(
+                        group_id=completed_group.group_id,
+                        group_name=completed_group.name,
+                        status=completed_group.status,
+                        task_count=len(completed_group.task_ids),
+                        completed_task_ids=list(completed_group.completed_task_ids),
+                        failed_task_ids=list(completed_group.failed_task_ids),
+                        results=results,
+                        timed_out=timed_out,
+                    )
+
         task = await session.get_task(created_id)
         status = task.status if task else TaskStatus.PENDING
         return TaskSpawnResult(
             task_id=created_id,
             session_id=session_id,
             status=status,
+            group_id=resolved_group.group_id if resolved_group else None,
+            group=resolved_group.name if resolved_group else None,
+            retained=retained,
+            group_completion=group_completion,
+        )
+
+    # Task Group Methods
+
+    async def seal_group(
+        self,
+        *,
+        session_id: str,
+        group_id: str | None = None,
+        group_name: str | None = None,
+        turn_id: str | None = None,
+    ) -> dict[str, Any]:
+        session = await self._sessions.get_or_create(session_id)
+        group = await session.get_group(
+            group_id=group_id, group_name=group_name, turn_id=turn_id
+        )
+        if group is None:
+            return {"ok": False, "error": "group_not_found"}
+        if group.status != "open":
+            return {
+                "ok": False,
+                "error": "group_not_open",
+                "status": group.status,
+            }
+        await session.seal_group(group.group_id)
+        updated = await session.get_group(group_id=group.group_id)
+        return {
+            "ok": True,
+            "group_id": group.group_id,
+            "status": updated.status if updated else "sealed",
+            "sealed_task_count": len(group.task_ids),
+        }
+
+    async def cancel_group(
+        self,
+        *,
+        session_id: str,
+        group_id: str,
+        reason: str | None = None,
+        propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
+    ) -> dict[str, Any]:
+        session = await self._sessions.get_or_create(session_id)
+        group = await session.get_group(group_id=group_id)
+        if group is None:
+            return {"ok": False, "error": "group_not_found"}
+        # Cancel group and optionally propagate to tasks
+        propagate = propagate_on_cancel == "cascade"
+        await session.cancel_group(group_id, reason=reason, propagate=propagate)
+        cancelled_count = len(group.pending_task_ids) if propagate else 0
+        return {
+            "ok": True,
+            "group_id": group_id,
+            "cancelled_task_count": cancelled_count,
+            "total_tasks": len(group.task_ids),
+        }
+
+    async def apply_group(
+        self,
+        *,
+        session_id: str,
+        group_id: str,
+        action: Literal["apply", "reject"] = "apply",
+        strategy: MergeStrategy | None = None,
+    ) -> dict[str, Any]:
+        session = await self._sessions.get_or_create(session_id)
+        group = await session.get_group(group_id=group_id)
+        if group is None:
+            return {"ok": False, "error": "group_not_found"}
+        if not group.is_complete:
+            return {
+                "ok": False,
+                "error": "group_not_complete",
+                "pending_tasks": group.pending_task_ids,
+            }
+        applied_count = 0
+        rejected_count = 0
+        for patch_id in group.patches:
+            if action == "apply":
+                if await session.apply_pending_patch(patch_id=patch_id, strategy=strategy):
+                    applied_count += 1
+            else:
+                from penguiflow.steering import SteeringEvent, SteeringEventType
+
+                await session.steer(
+                    SteeringEvent(
+                        session_id=session_id,
+                        task_id="context_patch",
+                        event_type=SteeringEventType.REJECT,
+                        payload={"patch_id": patch_id},
+                        source="user",
+                    )
+                )
+                rejected_count += 1
+        return {
+            "ok": True,
+            "group_id": group_id,
+            "action": action,
+            "applied_patch_count": applied_count if action == "apply" else 0,
+            "rejected_patch_count": rejected_count if action == "reject" else 0,
+            "total_patches": len(group.patches),
+        }
+
+    async def list_groups(
+        self,
+        *,
+        session_id: str,
+        status: GroupStatus | None = None,
+    ) -> builtins.list[TaskGroup]:
+        session = await self._sessions.get_or_create(session_id)
+        return await session.list_groups(status=status)
+
+    async def get_group(
+        self,
+        *,
+        session_id: str,
+        group_id: str | None = None,
+        group_name: str | None = None,
+        turn_id: str | None = None,
+    ) -> TaskGroup | None:
+        session = await self._sessions.get_or_create(session_id)
+        return await session.get_group(
+            group_id=group_id, group_name=group_name, turn_id=turn_id
         )
 
 

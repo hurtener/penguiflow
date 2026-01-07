@@ -5,17 +5,21 @@
     trajectoryContent?: Snippet;
     eventsContent?: Snippet;
     artifactsContent?: Snippet;
+    tasksContent?: Snippet;
+    notificationsContent?: Snippet;
   }
 
-  let { trajectoryContent, eventsContent, artifactsContent }: Props = $props();
+  let { trajectoryContent, eventsContent, artifactsContent, tasksContent, notificationsContent }: Props = $props();
 
   let isOpen = $state(false);
-  let activeTab = $state<'trajectory' | 'events' | 'artifacts'>('trajectory');
+  let activeTab = $state<'trajectory' | 'events' | 'artifacts' | 'tasks' | 'notifications'>('trajectory');
 
   const tabs = [
     { id: 'trajectory', label: 'Steps' },
     { id: 'events', label: 'Events' },
-    { id: 'artifacts', label: 'Artifacts' }
+    { id: 'artifacts', label: 'Artifacts' },
+    { id: 'tasks', label: 'Tasks' },
+    { id: 'notifications', label: 'Alerts' }
   ] as const;
 </script>
 
@@ -49,8 +53,12 @@
         {@render trajectoryContent?.()}
       {:else if activeTab === 'events'}
         {@render eventsContent?.()}
-      {:else}
+      {:else if activeTab === 'artifacts'}
         {@render artifactsContent?.()}
+      {:else if activeTab === 'tasks'}
+        {@render tasksContent?.()}
+      {:else if activeTab === 'notifications'}
+        {@render notificationsContent?.()}
       {/if}
     </div>
   {/if}
@@ -144,7 +152,9 @@
 
   .panel-content :global(.trajectory-card),
   .panel-content :global(.events-card),
-  .panel-content :global(.artifacts-card) {
+  .panel-content :global(.artifacts-card),
+  .panel-content :global(.tasks-card),
+  .panel-content :global(.notifications-card) {
     flex: none;
     max-height: none;
     min-height: auto;

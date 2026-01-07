@@ -16,6 +16,7 @@ from . import prompts
 from .artifact_handling import _ArtifactCollector, _SourceCollector
 from .artifact_registry import ArtifactRegistry
 from .constraints import _ConstraintTracker, _CostTracker
+from .error_recovery import ErrorRecoveryConfig, step_with_recovery
 from .llm import _redact_artifacts
 from .models import PlannerAction, PlannerEvent, PlannerFinish, PlannerPause, ReflectionCritique
 from .pause import _PlannerPauseSignal
@@ -122,7 +123,8 @@ async def run(
     )
     planner._artifact_registry = ArtifactRegistry.from_snapshot(trajectory.metadata.get("artifact_registry"))
     planner._artifact_registry.write_snapshot(trajectory.metadata)
-    result = await run_loop(planner, trajectory, tracker=None)
+    error_recovery_cfg = getattr(planner, "_error_recovery_config", None)
+    result = await run_loop(planner, trajectory, tracker=None, error_recovery_config=error_recovery_cfg)
     await planner._maybe_record_memory_turn(query, result, trajectory, resolved_key)
     return result
 
@@ -175,7 +177,8 @@ async def resume(
         )
     )
 
-    result = await run_loop(planner, trajectory, tracker=tracker)
+    error_recovery_cfg = getattr(planner, "_error_recovery_config", None)
+    result = await run_loop(planner, trajectory, tracker=tracker, error_recovery_config=error_recovery_cfg)
     await planner._maybe_record_memory_turn(trajectory.query, result, trajectory, resolved_key)
     return result
 
@@ -577,6 +580,7 @@ async def run_loop(
     trajectory: Trajectory,
     *,
     tracker: _ConstraintTracker | None,
+    error_recovery_config: ErrorRecoveryConfig | None = None,
 ) -> PlannerFinish | PlannerPause:
     last_observation: Any | None = None
     artifact_collector = _ArtifactCollector(trajectory.artifacts)
@@ -609,7 +613,7 @@ async def run_loop(
             # Emit step start event and bump action sequence
             step_start_ts, current_action_seq = _emit_step_start(planner, trajectory)
 
-            action = await planner.step(trajectory)
+            action = await step_with_recovery(planner, trajectory, config=error_recovery_config)
 
             # Log the action received from LLM
             _log_action_received(planner, action, trajectory)

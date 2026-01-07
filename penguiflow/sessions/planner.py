@@ -6,6 +6,9 @@ import secrets
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from pydantic import BaseModel
+
+from penguiflow.artifacts import ArtifactRef
 from penguiflow.planner import PlannerEvent, PlannerFinish, PlannerPause, ReactPlanner
 from penguiflow.steering import SteeringCancelled, SteeringEventType
 
@@ -22,6 +25,85 @@ from .session import TaskResult, TaskRuntime
 
 PlannerFactory = Callable[[], ReactPlanner]
 PlannerEventSink = Callable[[PlannerEvent, str | None], None]
+
+
+def _is_artifact_ref_dict(value: Any) -> bool:
+    """Check if a dict looks like a serialized ArtifactRef."""
+    if not isinstance(value, dict):
+        return False
+    # ArtifactRef has required 'id' field and typically 'mime_type'
+    return "id" in value and isinstance(value.get("id"), str)
+
+
+def _serialize_artifact_value(value: Any) -> dict[str, Any] | None:
+    """Serialize an artifact value to a dict, preserving ArtifactRef semantics.
+
+    Returns None for non-artifact values that should be skipped.
+    """
+    if isinstance(value, ArtifactRef):
+        return value.model_dump(mode="json")
+    if isinstance(value, BaseModel):
+        # Other Pydantic models - serialize them
+        return value.model_dump(mode="json")
+    if _is_artifact_ref_dict(value):
+        # Already serialized ArtifactRef
+        return value
+    if isinstance(value, dict):
+        # Generic dict - include it as-is (may be tool-specific artifact data)
+        return value
+    # Skip non-dict, non-model values (strings, ints, etc.)
+    return None
+
+
+def _normalize_artifacts_for_patch(
+    artifacts: dict[str, Any] | list[Any] | None,
+) -> list[dict[str, Any]]:
+    """Convert trajectory artifacts dict to ContextPatch list format.
+
+    The ReactPlanner stores artifacts as a dict: {node_name: {field_name: value}}.
+    ContextPatch.artifacts expects a list[dict[str, Any]].
+
+    This function normalizes the structure while preserving ArtifactRef objects
+    (either as Pydantic objects or already-serialized dicts). Raw binary data
+    should never appear here - only references to ArtifactStore.
+
+    Args:
+        artifacts: Either a dict from trajectory.artifacts or an already-normalized list.
+
+    Returns:
+        List of artifact dicts suitable for ContextPatch.artifacts.
+    """
+    if not artifacts:
+        return []
+
+    # Already a list - validate and return
+    if isinstance(artifacts, list):
+        return [item for item in artifacts if isinstance(item, dict)]
+
+    # Not a dict - can't normalize
+    if not isinstance(artifacts, dict):
+        return []
+
+    result: list[dict[str, Any]] = []
+    for node_name, fields in artifacts.items():
+        if not isinstance(fields, dict):
+            # Single artifact value for node (uncommon but possible)
+            serialized = _serialize_artifact_value(fields)
+            if serialized is not None:
+                result.append({"node": node_name, "artifact": serialized})
+            continue
+
+        # Multiple fields for this node
+        for field_name, value in fields.items():
+            serialized = _serialize_artifact_value(value)
+            if serialized is not None:
+                result.append({
+                    "node": node_name,
+                    "field": field_name,
+                    "artifact": serialized,
+                })
+
+    return result
 
 
 def _extract_answer(payload: Any) -> str | None:
@@ -62,7 +144,7 @@ def _build_context_patch(
         source_context_version=context_version,
         source_context_hash=context_hash,
         digest=digest,
-        artifacts=list(artifacts or []),
+        artifacts=_normalize_artifacts_for_patch(artifacts),
         sources=list(sources or []),
     )
 
@@ -187,7 +269,9 @@ class PlannerTaskPipeline:
             payload=result.payload,
             context_patch=patch,
             digest=digest,
-            artifacts=list(metadata.get("artifacts", [])) if isinstance(metadata, Mapping) else [],
+            artifacts=_normalize_artifacts_for_patch(
+                metadata.get("artifacts") if isinstance(metadata, Mapping) else None
+            ),
             sources=list(metadata.get("sources", [])) if isinstance(metadata, Mapping) else [],
             notification=notification,
             metadata=dict(metadata) if isinstance(metadata, Mapping) else {},

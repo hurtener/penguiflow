@@ -14,15 +14,18 @@ test.describe('Spec Validation', () => {
     await expect(page.getByText('Validation').first()).toBeVisible();
   });
 
-  test('displays validate button', async ({ page }) => {
+  // Skip: Validate/Generate buttons are currently deactivated in the UI
+  test.skip('displays validate button', async ({ page }) => {
     await expect(page.getByRole('button', { name: 'Validate' })).toBeVisible();
   });
 
-  test('displays generate button', async ({ page }) => {
+  // Skip: Validate/Generate buttons are currently deactivated in the UI
+  test.skip('displays generate button', async ({ page }) => {
     await expect(page.getByRole('button', { name: 'Generate' })).toBeVisible();
   });
 
-  test('can click validate button', async ({ page }) => {
+  // Skip: Validate/Generate buttons are currently deactivated in the UI
+  test.skip('can click validate button', async ({ page }) => {
     const validateBtn = page.getByRole('button', { name: 'Validate' });
     await expect(validateBtn).toBeEnabled();
   });

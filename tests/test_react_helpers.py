@@ -267,6 +267,18 @@ def test_streaming_args_extractor_extracts_answer():
     assert "Hello" in text or extractor.emitted_count > 0
 
 
+def test_streaming_args_extractor_args_before_next_node():
+    """_StreamingArgsExtractor should stream when args precede next_node."""
+    extractor = _StreamingArgsExtractor()
+    chunks = []
+    chunks.extend(extractor.feed('{"thought": "done", "args": {"raw_answer": "Hi'))
+    chunks.extend(extractor.feed(' there"}, "next_node": null}'))
+
+    text = "".join(chunks)
+    assert "Hi" in text or extractor.emitted_count > 0
+    assert extractor.is_finish_action
+
+
 def test_streaming_args_extractor_handles_escapes():
     """_StreamingArgsExtractor should handle escape sequences."""
     extractor = _StreamingArgsExtractor()

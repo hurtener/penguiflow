@@ -8,6 +8,7 @@ import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
+from enum import Enum
 from typing import Any, get_args, get_origin
 
 from pydantic import BaseModel
@@ -22,6 +23,100 @@ from .models import (
 from .trajectory import Trajectory, TrajectorySummary
 
 logger = logging.getLogger("penguiflow.planner")
+
+
+# ---------------------------------------------------------------------------
+# LLM Error Classification
+# ---------------------------------------------------------------------------
+
+
+class LLMErrorType(Enum):
+    """Classification of LLM errors for recovery strategy selection."""
+
+    CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded"
+    RATE_LIMIT = "rate_limit"
+    SERVICE_UNAVAILABLE = "service_unavailable"
+    BAD_REQUEST_OTHER = "bad_request_other"
+    UNKNOWN = "unknown"
+
+
+_CONTEXT_LENGTH_PATTERNS = (
+    "input is too long",
+    "context length",
+    "maximum context",
+    "token limit",
+    "context_length_exceeded",
+    "max_tokens",
+    "too many tokens",
+    "exceeds the model",
+)
+
+
+def classify_llm_error(exc: Exception) -> LLMErrorType:
+    """
+    Classify an LLM exception for appropriate recovery strategy.
+
+    Args:
+        exc: The exception raised by the LLM client.
+
+    Returns:
+        The classified error type.
+    """
+    error_str = str(exc).lower()
+    error_type_name = exc.__class__.__name__
+
+    # Check for rate limiting errors
+    if "RateLimit" in error_type_name:
+        return LLMErrorType.RATE_LIMIT
+
+    # Check for service unavailable errors
+    if "ServiceUnavailable" in error_type_name:
+        return LLMErrorType.SERVICE_UNAVAILABLE
+
+    # Check for context length exceeded errors
+    if any(pattern in error_str for pattern in _CONTEXT_LENGTH_PATTERNS):
+        return LLMErrorType.CONTEXT_LENGTH_EXCEEDED
+
+    # Check for other bad request errors
+    if "BadRequest" in error_type_name:
+        return LLMErrorType.BAD_REQUEST_OTHER
+
+    return LLMErrorType.UNKNOWN
+
+
+def extract_clean_error_message(exc: Exception) -> str:
+    """
+    Extract a user-friendly error message from an LLM exception.
+
+    Handles nested JSON error messages from providers like Databricks.
+
+    Args:
+        exc: The exception to extract the message from.
+
+    Returns:
+        A clean, user-readable error message.
+    """
+    error_str = str(exc)
+
+    # Try to extract nested JSON message (common in Databricks errors)
+    # Pattern: {"error_code":"BAD_REQUEST","message":"{"message":"..."}"}
+    try:
+        # Find the innermost "message" value
+        import re
+
+        # Look for nested message patterns
+        matches = re.findall(r'"message"\s*:\s*"([^"]+)"', error_str)
+        if matches:
+            # Return the last (most nested) message
+            return matches[-1]
+    except Exception:
+        pass
+
+    # Fallback: extract after the last colon for standard exceptions
+    if ": " in error_str:
+        return error_str.split(": ", 1)[-1].strip('"{}')
+
+    return error_str
 
 
 def _extract_json_from_text(text: str) -> str:
@@ -482,6 +577,17 @@ class _LiteLLMJSONClient:
             )
         )
 
+        # DEBUG: Log streaming decision at LLM client level
+        logger.info(
+            "llm_client_streaming_decision",
+            extra={
+                "stream_requested": stream,
+                "streaming_enabled": self._streaming_enabled,
+                "allow_streaming": allow_streaming,
+                "has_callback": on_stream_chunk is not None,
+            },
+        )
+
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
             try:
@@ -496,6 +602,7 @@ class _LiteLLMJSONClient:
                         response = await litellm.acompletion(**stream_params)
                         pieces: list[str] = []
                         usage_payload: Mapping[str, Any] | None = None
+                        _llm_chunk_count = 0
 
                         async for chunk in response:
                             chunk_usage = (
@@ -521,6 +628,7 @@ class _LiteLLMJSONClient:
                                     delta_content = None
 
                             if delta_content:
+                                _llm_chunk_count += 1
                                 pieces.append(delta_content)
                                 try:
                                     on_stream_chunk(delta_content, False)
@@ -531,6 +639,15 @@ class _LiteLLMJSONClient:
                             on_stream_chunk("", True)
                         except Exception:
                             logger.exception("llm_stream_chunk_callback_error")
+
+                        # DEBUG: Log total chunks received from LLM
+                        logger.info(
+                            "llm_streaming_complete",
+                            extra={
+                                "total_chunks": _llm_chunk_count,
+                                "content_length": sum(len(p) for p in pieces),
+                            },
+                        )
 
                         content = "".join(pieces)
                         cost = 0.0
@@ -618,12 +735,24 @@ def _estimate_size(messages: Sequence[Mapping[str, str]]) -> int:
 async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str, str]]:
     llm_context = trajectory.llm_context
     conversation_memory = None
-    if isinstance(llm_context, Mapping) and "conversation_memory" in llm_context:
-        conversation_memory = llm_context.get("conversation_memory")
-        llm_context = {k: v for k, v in llm_context.items() if k != "conversation_memory"}
+    proactive_report = None
+    if isinstance(llm_context, Mapping):
+        if "conversation_memory" in llm_context:
+            conversation_memory = llm_context.get("conversation_memory")
+            llm_context = {k: v for k, v in llm_context.items() if k != "conversation_memory"}
+        if "proactive_report" in llm_context:
+            proactive_report = llm_context.get("proactive_report")
+
+    # Build system prompt with optional proactive report guidance
+    system_prompt = planner._system_prompt
+    if proactive_report is not None:
+        system_prompt = prompts.merge_prompt_extras(
+            system_prompt,
+            prompts.render_proactive_report_guidance(),
+        ) or system_prompt
 
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": planner._system_prompt},
+        {"role": "system", "content": system_prompt},
     ]
     if conversation_memory is not None:
         messages.append(
@@ -997,4 +1126,7 @@ __all__ = [
     "critique_answer",
     "request_revision",
     "generate_clarification",
+    "LLMErrorType",
+    "classify_llm_error",
+    "extract_clean_error_message",
 ]

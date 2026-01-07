@@ -29,6 +29,12 @@ def _env_csv(name: str, default: list[str]) -> list[str]:
     return items
 
 
+def _env_float(name: str, default: float) -> float:
+    """Parse float from environment variable."""
+    raw = os.getenv(name)
+    return float(raw) if raw is not None else default
+
+
 @dataclass
 class Config:
     """Environment-driven configuration."""
@@ -56,6 +62,12 @@ class Config:
     background_tasks_max_tasks_per_session: int = 50
     background_tasks_task_timeout_s: int = 3600
     background_tasks_max_pending_steering: int = 2
+    # Proactive report-back settings
+    background_tasks_proactive_report_enabled: bool = False
+    background_tasks_proactive_report_strategies: list[str] = field(default_factory=lambda: ["APPEND", "REPLACE"])
+    background_tasks_proactive_report_max_queued: int = 5
+    background_tasks_proactive_report_timeout_s: float = 30.0
+    background_tasks_proactive_report_fallback_notification: bool = True
 {% endif %}
 
     @classmethod
@@ -88,5 +100,11 @@ class Config:
             background_tasks_max_tasks_per_session=_env_int("BACKGROUND_TASKS_MAX_TASKS_PER_SESSION", 50),
             background_tasks_task_timeout_s=_env_int("BACKGROUND_TASKS_TASK_TIMEOUT_S", 3600),
             background_tasks_max_pending_steering=_env_int("BACKGROUND_TASKS_MAX_PENDING_STEERING", 2),
+            # Proactive report-back settings
+            background_tasks_proactive_report_enabled=_env_flag("BACKGROUND_TASKS_PROACTIVE_REPORT_ENABLED", False),
+            background_tasks_proactive_report_strategies=_env_csv("BACKGROUND_TASKS_PROACTIVE_REPORT_STRATEGIES", ["APPEND", "REPLACE"]),
+            background_tasks_proactive_report_max_queued=_env_int("BACKGROUND_TASKS_PROACTIVE_REPORT_MAX_QUEUED", 5),
+            background_tasks_proactive_report_timeout_s=_env_float("BACKGROUND_TASKS_PROACTIVE_REPORT_TIMEOUT_S", 30.0),
+            background_tasks_proactive_report_fallback_notification=_env_flag("BACKGROUND_TASKS_PROACTIVE_REPORT_FALLBACK_NOTIFICATION", True),
 {% endif %}
         )

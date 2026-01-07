@@ -21,6 +21,8 @@
   import { EventsCard } from "$lib/components/features/sidebar-right/events";
   import { ConfigCard } from "$lib/components/features/sidebar-right/config";
   import { ArtifactsCard } from "$lib/components/features/sidebar-right/artifacts";
+  import { TasksCard } from "$lib/components/features/sidebar-right/tasks";
+  import { NotificationsCard } from "$lib/components/features/sidebar-right/notifications";
   import { MobileHeader, MobileBottomPanel } from "$lib/components/features/mobile";
   import { ChatCard } from "$lib/components/features/chat";
   import type { ChatMessage, PendingInteraction } from '$lib/types';
@@ -238,6 +240,12 @@
       {/snippet}
       {#snippet artifactsContent()}
         <ArtifactsCard />
+      {/snippet}
+      {#snippet tasksContent()}
+        <TasksCard />
+      {/snippet}
+      {#snippet notificationsContent()}
+        <NotificationsCard />
       {/snippet}
     </MobileBottomPanel>
   </div>

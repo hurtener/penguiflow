@@ -7,9 +7,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from penguiflow.catalog import build_catalog
 from penguiflow.planner import PlannerEventCallback, ReactPlanner
 {% if with_background_tasks %}
 from penguiflow.planner import BackgroundTasksConfig
+from penguiflow.sessions.task_tools import build_task_tool_specs
 {% endif %}
 from penguiflow.rich_output import DEFAULT_ALLOWLIST, RichOutputConfig, attach_rich_output_nodes, get_runtime
 
@@ -99,6 +101,12 @@ def _build_background_tasks_config(config: Config) -> BackgroundTasksConfig:
         max_tasks_per_session=config.background_tasks_max_tasks_per_session,
         task_timeout_s=config.background_tasks_task_timeout_s,
         max_pending_steering=config.background_tasks_max_pending_steering,
+        # Proactive report-back settings
+        proactive_report_enabled=config.background_tasks_proactive_report_enabled,
+        proactive_report_strategies=config.background_tasks_proactive_report_strategies,
+        proactive_report_max_queued=config.background_tasks_proactive_report_max_queued,
+        proactive_report_timeout_s=config.background_tasks_proactive_report_timeout_s,
+        proactive_report_fallback_notification=config.background_tasks_proactive_report_fallback_notification,
     )
 
 {% endif %}
@@ -122,11 +130,15 @@ def build_planner(
     rich_output_config = _build_rich_output_config(config)
     nodes.extend(attach_rich_output_nodes(registry, config=rich_output_config))
     rich_output_prompt = get_runtime().prompt_section()
+    catalog = build_catalog(nodes, registry)
+{% if with_background_tasks %}
+    if config.background_tasks_enabled:
+        catalog.extend(build_task_tool_specs())
+{% endif %}
     llm_client = ScriptedLLM()
     planner = ReactPlanner(
         llm_client=llm_client,
-        nodes=nodes,
-        registry=registry,
+        catalog=catalog,
         system_prompt_extra=_build_system_prompt(rich_output_prompt),
         event_callback=event_callback,
 {% if with_background_tasks %}

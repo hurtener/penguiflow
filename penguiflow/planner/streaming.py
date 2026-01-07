@@ -100,15 +100,38 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
 
     The args field is typically a dict like {"answer": "..."} or {"raw_answer": "..."},
     so we need to look for the string value inside the object.
+
+    Uses incremental pattern matching to start streaming as early as possible:
+    1. Detect "next_node": null
+    2. Detect "args":
+    3. Detect opening brace {
+    4. Detect "answer": or "raw_answer":
+    5. Detect opening quote "
+    6. Start streaming content
     """
 
-    __slots__ = ("_is_finish_action", "_in_args_string", "_emitted_count")
+    __slots__ = (
+        "_is_finish_action",
+        "_next_node_seen",
+        "_next_node_is_non_null",
+        "_in_args_string",
+        "_emitted_count",
+        "_found_args_key",
+        "_found_args_brace",
+        "_found_answer_key",
+    )
 
     def __init__(self) -> None:
         super().__init__()
         self._is_finish_action = False
+        self._next_node_seen = False
+        self._next_node_is_non_null = False
         self._in_args_string = False  # Inside the actual string value we want to stream
         self._emitted_count = 0
+        # Incremental pattern matching state
+        self._found_args_key = False  # Found "args":
+        self._found_args_brace = False  # Found { after "args":
+        self._found_answer_key = False  # Found "answer": or "raw_answer":
 
     @property
     def is_finish_action(self) -> bool:
@@ -127,25 +150,51 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
         self._buffer += chunk
         emits: list[str] = []
 
-        # Detect finish action by looking for "next_node": null
-        if not self._is_finish_action:
-            normalized = self._buffer.replace(" ", "").replace("\n", "")
-            if '"next_node":null' in normalized:
-                self._is_finish_action = True
-
-        # Once we know it's a finish, look for args content
-        # The args is a dict like {"answer": "..."} or {"raw_answer": "..."}
-        # We need to find the string value inside
-        if self._is_finish_action and not self._in_args_string:
+        # Detect next_node value (null or string) as early as possible.
+        if not self._next_node_seen:
             import re
 
-            # Look for "args": { ... "answer"/"raw_answer": " pattern
-            # Match: "args" : { "answer" : "  or "args":{"raw_answer":"
-            args_value_match = re.search(r'"args"\s*:\s*\{\s*"(?:answer|raw_answer)"\s*:\s*"', self._buffer)
-            if args_value_match:
-                self._in_args_string = True
-                # Keep only content after the opening quote of the value
-                self._buffer = self._buffer[args_value_match.end() :]
+            next_node_match = re.search(r'"next_node"\s*:\s*(null|"[^"]*")', self._buffer)
+            if next_node_match:
+                self._next_node_seen = True
+                if next_node_match.group(1) == "null":
+                    self._is_finish_action = True
+                else:
+                    self._next_node_is_non_null = True
+
+        # Incremental pattern matching for args content
+        # This allows streaming to start as soon as we find the opening quote
+        # instead of waiting for the entire pattern
+        if not self._next_node_is_non_null and not self._in_args_string:
+            import re
+
+            # Stage 1: Look for "args":
+            if not self._found_args_key:
+                args_key_match = re.search(r'"args"\s*:', self._buffer)
+                if args_key_match:
+                    self._found_args_key = True
+                    self._buffer = self._buffer[args_key_match.end() :]
+
+            # Stage 2: Look for { after "args":
+            if self._found_args_key and not self._found_args_brace:
+                stripped = self._buffer.lstrip()
+                if stripped.startswith("{"):
+                    self._found_args_brace = True
+                    self._buffer = stripped[1:]  # Remove the {
+
+            # Stage 3: Look for "answer": or "raw_answer":
+            if self._found_args_brace and not self._found_answer_key:
+                answer_key_match = re.search(r'"(?:answer|raw_answer)"\s*:', self._buffer)
+                if answer_key_match:
+                    self._found_answer_key = True
+                    self._buffer = self._buffer[answer_key_match.end() :]
+
+            # Stage 4: Look for opening quote of the value
+            if self._found_answer_key:
+                stripped = self._buffer.lstrip()
+                if stripped.startswith('"'):
+                    self._in_args_string = True
+                    self._buffer = stripped[1:]  # Remove the opening quote
 
         # Extract string content character by character
         if self._in_args_string:

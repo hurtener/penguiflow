@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from .context import AnyContext, ToolContext
 from .dspy_client import DSPyLLMClient
+from .error_recovery import ErrorRecoveryConfig
+from .llm import LLMErrorType
 from .models import BackgroundTaskHandle, BackgroundTasksConfig
 from .react import (
     JoinInjection,
@@ -29,6 +31,8 @@ __all__ = [
     "DSPyLLMClient",
     "BackgroundTasksConfig",
     "BackgroundTaskHandle",
+    "ErrorRecoveryConfig",
+    "LLMErrorType",
     "JoinInjection",
     "ParallelCall",
     "ParallelJoin",

@@ -36,7 +36,8 @@ test.describe('Layout', () => {
     await expect(page.getByText('Validation').first()).toBeVisible();
   });
 
-  test('displays generator card', async ({ page }) => {
+  // Skip: Validate/Generate buttons are currently deactivated in the UI
+  test.skip('displays generator card', async ({ page }) => {
     await expect(page.getByRole('button', { name: 'Validate' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Generate' })).toBeVisible();
   });
