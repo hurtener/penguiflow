@@ -442,7 +442,14 @@ class OrchestratorAgentWrapper:
         self._event_recorder = _EventRecorder(state_store)
         self._initialized = False
 
-    async def _call_execute(self, *, query: str, session_id: str, tool_context: Mapping[str, Any]) -> Any:
+    async def _call_execute(
+        self,
+        *,
+        query: str,
+        session_id: str,
+        tool_context: Mapping[str, Any],
+        steering: SteeringInbox | None = None,
+    ) -> Any:
         execute = self._orchestrator.execute
         try:
             sig = inspect.signature(execute)
@@ -460,11 +467,14 @@ class OrchestratorAgentWrapper:
             params = sig.parameters
             if "tool_context" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
                 kwargs["tool_context"] = dict(tool_context)
+            if "steering" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                kwargs["steering"] = steering
 
         try:
             return await execute(**kwargs)
         except TypeError:
             kwargs.pop("tool_context", None)
+            kwargs.pop("steering", None)
             return await execute(**kwargs)
 
     async def _call_resume(
@@ -474,6 +484,7 @@ class OrchestratorAgentWrapper:
         session_id: str,
         user_input: str | None,
         tool_context: Mapping[str, Any],
+        steering: SteeringInbox | None = None,
     ) -> Any:
         resume_fn = self._orchestrator.resume
         try:
@@ -492,11 +503,14 @@ class OrchestratorAgentWrapper:
             params = sig.parameters
             if "tool_context" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
                 kwargs["tool_context"] = dict(tool_context)
+            if "steering" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                kwargs["steering"] = steering
 
         try:
             return await resume_fn(resume_token, **kwargs)
         except TypeError:
             kwargs.pop("tool_context", None)
+            kwargs.pop("steering", None)
             return await resume_fn(resume_token, **kwargs)
 
     async def initialize(self) -> None:
@@ -532,7 +546,6 @@ class OrchestratorAgentWrapper:
         }
         planner = getattr(self._orchestrator, "_planner", None)
         trace_holder: dict[str, str | None] = {"id": trace_id_hint}
-        _ = steering
 
         def _trace_id_supplier() -> str | None:
             if trace_holder["id"]:
@@ -549,7 +562,9 @@ class OrchestratorAgentWrapper:
             planner._event_callback = _combine_callbacks(original_callback, callback)
 
         try:
-            response = await self._call_execute(query=query, session_id=session_id, tool_context=tool_ctx)
+            response = await self._call_execute(
+                query=query, session_id=session_id, tool_context=tool_ctx, steering=steering
+            )
         finally:
             if planner is not None and callback is not None:
                 planner._event_callback = original_callback
@@ -633,7 +648,6 @@ class OrchestratorAgentWrapper:
         }
         planner = getattr(self._orchestrator, "_planner", None)
         trace_holder: dict[str, str | None] = {"id": trace_id_hint}
-        _ = steering
 
         def _trace_id_supplier() -> str | None:
             if trace_holder["id"]:
@@ -655,6 +669,7 @@ class OrchestratorAgentWrapper:
                 session_id=session_id,
                 user_input=user_input,
                 tool_context=tool_ctx,
+                steering=steering,
             )
         finally:
             if planner is not None and callback is not None:

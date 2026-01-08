@@ -34,11 +34,17 @@ _TASK_SERVICE_KEY = "task_service"
 def _apply_steering(planner: Any, trajectory: Trajectory) -> None:
     steering: SteeringInbox | None = getattr(planner, "_steering", None)
     if steering is None:
+        logger.info("_apply_steering: no steering inbox connected to planner")
         return
 
     if steering.cancelled:
         raise SteeringCancelled(steering.cancel_reason)
 
+    has_pending = steering.has_event()
+    logger.info(
+        "steering_check",
+        extra={"has_pending": has_pending, "step": len(trajectory.steps)},
+    )
     events = steering.drain()
     if not events:
         return
@@ -639,6 +645,31 @@ async def run_loop(
                 continue
 
             if action.next_node is None:
+                # Before finishing, check if there are pending steering events
+                # that arrived while the LLM was generating this finish action.
+                # If so, process them and continue instead of finishing.
+                steering_inbox: SteeringInbox | None = getattr(planner, "_steering", None)
+                if steering_inbox is not None and steering_inbox.has_event():
+                    _apply_steering(planner, trajectory)
+                    if trajectory.steering_inputs:
+                        # User sent steering while LLM was responding - defer finish
+                        logger.info(
+                            "finish_deferred_for_steering",
+                            extra={
+                                "pending_inputs": len(trajectory.steering_inputs),
+                                "step": len(trajectory.steps),
+                            },
+                        )
+                        # Record the attempted finish as a step so LLM knows it tried
+                        trajectory.steps.append(
+                            TrajectoryStep(
+                                action=action,
+                                observation="Finish deferred: new steering input received from user.",
+                            )
+                        )
+                        trajectory.summary = None
+                        continue  # Process steering in next iteration
+
                 return await _handle_finish_action(
                     planner,
                     action,

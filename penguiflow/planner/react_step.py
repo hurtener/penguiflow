@@ -64,24 +64,11 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
             )
         )
 
-        # DEBUG: Log streaming state before LLM call
-        logger.info(
-            "stream_debug_pre_llm",
-            extra={
-                "stream_allowed": stream_allowed,
-                "_stream_final_response": planner._stream_final_response,
-                "client_type": type(planner._client).__name__,
-                "step": len(trajectory.steps),
-                "has_event_callback": planner._event_callback is not None,
-            },
-        )
-
         # Create extractor to detect finish actions and stream args content
         args_extractor = _StreamingArgsExtractor()
         thought_extractor = _StreamingThoughtExtractor()
 
         current_action_seq = planner._action_seq
-        _chunk_counter = {"total": 0, "answer": 0, "thinking": 0}
 
         def _emit_llm_chunk(
             text: str,
@@ -90,21 +77,12 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
             _extractor: _StreamingArgsExtractor = args_extractor,
             _thought_extractor: _StreamingThoughtExtractor = thought_extractor,
             _action_seq: int = current_action_seq,
-            _counter: dict = _chunk_counter,
         ) -> None:
-            _counter["total"] += 1
             if planner._event_callback is None:
                 return
 
-            # DEBUG: Log incoming chunks
-            logger.debug(
-                "llm_chunk_received",
-                extra={"text": text[:100] if text else "", "done": done, "buffer_len": len(_extractor._buffer)},
-            )
-
             thought_chars = _thought_extractor.feed(text)
             if thought_chars:
-                _counter["thinking"] += 1
                 thought_text = "".join(thought_chars)
                 planner._emit_event(
                     PlannerEvent(
@@ -123,25 +101,10 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
             # Feed chunk to extractor to detect args content
             args_chars = _extractor.feed(text)
 
-            # DEBUG: Log extractor state
-            logger.debug(
-                "extractor_state",
-                extra={
-                    "is_finish": _extractor.is_finish_action,
-                    "in_args_string": _extractor._in_args_string,
-                    "chars_extracted": len(args_chars),
-                },
-            )
-
             # Emit args content as "answer" phase for real-time display
             if args_chars:
-                _counter["answer"] += 1
                 # Batch small chars into reasonable chunks for efficiency
                 args_text = "".join(args_chars)
-                logger.info(
-                    "emit_answer_chunk",
-                    extra={"text_len": len(args_text), "answer_count": _counter["answer"], "is_finish": _extractor.is_finish_action},
-                )
                 planner._emit_event(
                     PlannerEvent(
                         event_type="llm_stream_chunk",
@@ -206,17 +169,6 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                         extra={"text": "", "done": True, "phase": "action", "channel": "thinking"},
                     )
                 )
-            # DEBUG: Log chunk counts after LLM call
-            logger.info(
-                "stream_debug_post_llm",
-                extra={
-                    "stream_allowed": stream_allowed,
-                    "total_chunks": _chunk_counter["total"],
-                    "answer_chunks": _chunk_counter["answer"],
-                    "thinking_chunks": _chunk_counter["thinking"],
-                    "step": len(trajectory.steps),
-                },
-            )
         raw, cost = _coerce_llm_response(llm_result)
         last_raw = raw
         planner._cost_tracker.record_main_call(cost)

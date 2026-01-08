@@ -577,17 +577,6 @@ class _LiteLLMJSONClient:
             )
         )
 
-        # DEBUG: Log streaming decision at LLM client level
-        logger.info(
-            "llm_client_streaming_decision",
-            extra={
-                "stream_requested": stream,
-                "streaming_enabled": self._streaming_enabled,
-                "allow_streaming": allow_streaming,
-                "has_callback": on_stream_chunk is not None,
-            },
-        )
-
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
             try:
@@ -602,7 +591,6 @@ class _LiteLLMJSONClient:
                         response = await litellm.acompletion(**stream_params)
                         pieces: list[str] = []
                         usage_payload: Mapping[str, Any] | None = None
-                        _llm_chunk_count = 0
 
                         async for chunk in response:
                             chunk_usage = (
@@ -628,7 +616,6 @@ class _LiteLLMJSONClient:
                                     delta_content = None
 
                             if delta_content:
-                                _llm_chunk_count += 1
                                 pieces.append(delta_content)
                                 try:
                                     on_stream_chunk(delta_content, False)
@@ -639,15 +626,6 @@ class _LiteLLMJSONClient:
                             on_stream_chunk("", True)
                         except Exception:
                             logger.exception("llm_stream_chunk_callback_error")
-
-                        # DEBUG: Log total chunks received from LLM
-                        logger.info(
-                            "llm_streaming_complete",
-                            extra={
-                                "total_chunks": _llm_chunk_count,
-                                "content_length": sum(len(p) for p in pieces),
-                            },
-                        )
 
                         content = "".join(pieces)
                         cost = 0.0

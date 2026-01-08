@@ -26,6 +26,8 @@ from .clients.analyst import AnalystClient
 {% if memory_enabled %}
 from .clients.memory import MemoryClient
 {% endif %}
+from penguiflow.steering import SteeringInbox
+
 from .config import Config
 from .models import AnalysisResult
 from .planner import PlannerBundle, build_planner
@@ -197,6 +199,7 @@ class {{ class_name }}Orchestrator:
         user_id: str,
         session_id: str,
         tool_context: Mapping[str, Any] | None = None,
+        steering: SteeringInbox | None = None,
     ) -> AgentResponse:
         """Execute the ReactPlanner for analyst flows."""
         trace_id = secrets.token_hex(8)
@@ -251,6 +254,7 @@ class {{ class_name }}Orchestrator:
             query=query,
             llm_context=llm_context,
             tool_context=merged_tool_context,
+            steering=steering,
         )
 {% if with_streaming %}
         streams = _collect_streams(getattr(result, "metadata", {}) or {})
@@ -304,6 +308,7 @@ class {{ class_name }}Orchestrator:
         session_id: str,
         user_input: str | None = None,
         tool_context: Mapping[str, Any] | None = None,
+        steering: SteeringInbox | None = None,
     ) -> AgentResponse:
         """Resume a paused planner execution."""
         trace_id = secrets.token_hex(8)
@@ -335,6 +340,7 @@ class {{ class_name }}Orchestrator:
             token=resume_token,
             user_input=user_input,
             tool_context=merged_tool_context,
+            steering=steering,
         )
 {% if with_streaming %}
         streams = _collect_streams(getattr(result, "metadata", {}) or {})

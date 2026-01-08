@@ -185,6 +185,10 @@ class SteeringInbox:
                 self._pending_user_message_count -= 1
             return False
 
+    def has_event(self) -> bool:
+        """Check if there are queued steering events without draining them."""
+        return not self._queue.empty()
+
     def drain(self) -> list[SteeringEvent]:
         """Drain any queued steering events without blocking."""
         events: list[SteeringEvent] = []

@@ -23,6 +23,8 @@ from penguiflow.sessions.tool_jobs import build_tool_job_pipeline
 from .a2a import A2AServer
 {% endif %}
 from .clients.registry import ServiceRegistry
+from penguiflow.steering import SteeringInbox
+
 from .config import Config
 from .planner import PlannerBundle, build_planner
 from .telemetry import AgentTelemetry
@@ -195,6 +197,7 @@ class {{ class_name }}Orchestrator:
         user_id: str,
         session_id: str,
         tool_context: Mapping[str, Any] | None = None,
+        steering: SteeringInbox | None = None,
     ) -> AgentResponse:
         """Execute the ReactPlanner with enterprise best practices."""
         trace_id = secrets.token_hex(8)
@@ -249,6 +252,7 @@ class {{ class_name }}Orchestrator:
             query=query,
             llm_context=llm_context,
             tool_context=merged_tool_context,
+            steering=steering,
         )
 {% if with_streaming %}
         streams = _collect_streams(getattr(result, "metadata", {}) or {})
@@ -303,6 +307,7 @@ class {{ class_name }}Orchestrator:
         session_id: str,
         user_input: str | None = None,
         tool_context: Mapping[str, Any] | None = None,
+        steering: SteeringInbox | None = None,
     ) -> AgentResponse:
         """Resume a paused planner execution."""
         trace_id = secrets.token_hex(8)
@@ -333,6 +338,7 @@ class {{ class_name }}Orchestrator:
             token=resume_token,
             user_input=user_input,
             tool_context=merged_tool_context,
+            steering=steering,
         )
 {% if with_streaming %}
         streams = _collect_streams(getattr(result, "metadata", {}) or {})

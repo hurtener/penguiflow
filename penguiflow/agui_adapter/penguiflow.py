@@ -287,7 +287,7 @@ class PenguiFlowAdapter(AGUIAdapter):
         async for event in self.with_run_lifecycle(
             input, _stream(), initial_state=dict(initial_state) if initial_state else None
         ):
-            _LOGGER.info("AG-UI yielding event: type=%s", getattr(event, 'type', type(event).__name__))
+            _LOGGER.debug("AG-UI yielding event: type=%s", getattr(event, 'type', type(event).__name__))
             yield event
 
     async def resume(
@@ -430,19 +430,6 @@ class PenguiFlowAdapter(AGUIAdapter):
             done = bool(extra.get("done"))
             phase = extra.get("phase")
 
-            # DEBUG: Log llm_stream_chunk events
-            _LOGGER.info(
-                "convert_llm_stream_chunk",
-                extra={
-                    "channel": channel,
-                    "text_len": len(text),
-                    "done": done,
-                    "phase": phase,
-                    "message_started": self._message_started,
-                    "streamed_answer": self._streamed_answer,
-                },
-            )
-
             # Emit thinking/observation content as CUSTOM events
             if channel == "thinking":
                 if text:
@@ -462,10 +449,8 @@ class PenguiFlowAdapter(AGUIAdapter):
             # Handle answer channel - stream as text message
             if channel == "answer":
                 if not self._message_started:
-                    _LOGGER.info("agui_emitting_text_start", extra={"channel": channel})
                     mapped.append(self.text_start())
                 if text:
-                    _LOGGER.info("agui_emitting_text_content", extra={"text_len": len(text), "channel": channel})
                     mapped.append(self.text_content(text))
                 # NOTE: Don't emit text_end() here on done=True - let with_run_lifecycle handle it
                 # This prevents premature message end when there are multiple LLM calls

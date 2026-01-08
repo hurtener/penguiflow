@@ -616,6 +616,36 @@ class TestSteeringInbox:
         result = await inbox.push(user_msg)
         assert result is False
 
+    @pytest.mark.asyncio
+    async def test_inbox_has_event_empty(self) -> None:
+        """Test has_event returns False for empty inbox."""
+        from penguiflow.steering import SteeringInbox
+
+        inbox = SteeringInbox(maxsize=10)
+        assert inbox.has_event() is False
+
+    @pytest.mark.asyncio
+    async def test_inbox_has_event_with_pending(self) -> None:
+        """Test has_event returns True when events are pending."""
+        from penguiflow.state.models import SteeringEvent, SteeringEventType
+        from penguiflow.steering import SteeringInbox
+
+        inbox = SteeringInbox(maxsize=10)
+        assert inbox.has_event() is False
+
+        event = SteeringEvent(
+            session_id="s1",
+            task_id="t1",
+            event_type=SteeringEventType.USER_MESSAGE,
+            payload={"text": "test"},
+        )
+        await inbox.push(event)
+        assert inbox.has_event() is True
+
+        # After drain, should be empty again
+        inbox.drain()
+        assert inbox.has_event() is False
+
 
 class TestSteeringCancelled:
     """Tests for SteeringCancelled exception."""

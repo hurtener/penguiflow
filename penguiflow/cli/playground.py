@@ -843,6 +843,11 @@ def create_playground_app(
     except (TypeError, ValueError):
         supports_steering_chat = False
 
+    _LOGGER.info(
+        "playground_steering_support",
+        extra={"supports_steering_chat": supports_steering_chat},
+    )
+
     @asynccontextmanager
     async def _lifespan(_: FastAPI):
         # Eagerly initialize the agent wrapper (connects external tools, sets up planner)
