@@ -542,7 +542,7 @@ def _parse_finish_repair_response(raw: str) -> str | None:
     try:
         parsed = json.loads(text)
         if isinstance(parsed, dict):
-            # Look for raw_answer or common answer keys
+            # Look for raw_answer or common answer keys at top level
             for key in ("raw_answer", "answer", "text", "response", "content"):
                 if key in parsed:
                     value = parsed[key]
@@ -551,8 +551,38 @@ def _parse_finish_repair_response(raw: str) -> str | None:
                         lower = value.lower().strip()
                         if lower not in {"<auto>", "unknown", "n/a", "", "<fill_value>"}:
                             return value
-    except json.JSONDecodeError:
-        pass
+                        else:
+                            logger.info(
+                                "finish_repair_parse_placeholder",
+                                extra={"key": key, "value": value[:100] if value else None},
+                            )
+
+            # Check if LLM returned full action schema with args.raw_answer
+            # This handles cases where model returns {"thought": ..., "next_node": ..., "args": {"raw_answer": ...}}
+            if "args" in parsed and isinstance(parsed["args"], dict):
+                args_dict = parsed["args"]
+                for key in ("raw_answer", "answer", "text", "response", "content"):
+                    if key in args_dict:
+                        value = args_dict[key]
+                        if isinstance(value, str) and value.strip():
+                            lower = value.lower().strip()
+                            if lower not in {"<auto>", "unknown", "n/a", "", "<fill_value>"}:
+                                logger.info(
+                                    "finish_repair_parse_from_args",
+                                    extra={"key": key, "answer_len": len(value)},
+                                )
+                                return value
+
+            # JSON parsed but no answer key found
+            logger.info(
+                "finish_repair_parse_no_answer_key",
+                extra={"keys_found": list(parsed.keys())[:10], "response_preview": text[:300]},
+            )
+    except json.JSONDecodeError as e:
+        logger.info(
+            "finish_repair_parse_json_error",
+            extra={"error": str(e), "response_preview": text[:300]},
+        )
 
     # If the response is just plain text (not JSON), use it directly
     # This handles cases where the model ignores the JSON instruction
@@ -563,6 +593,11 @@ def _parse_finish_repair_response(raw: str) -> str | None:
                 text = text[len(prefix) :].strip()
         if text and text.lower() not in {"<auto>", "unknown", "n/a", "<fill_value>"}:
             return text
+        else:
+            logger.info(
+                "finish_repair_parse_plaintext_placeholder",
+                extra={"text_preview": text[:100] if text else None},
+            )
 
     return None
 
@@ -577,6 +612,7 @@ async def _attempt_finish_repair(
     emit_event: Callable[[PlannerEvent], None],
     time_source: Callable[[], float],
     system_prompt_extra: str | None,
+    action_seq: int,
 ) -> str | None:
     """
     Attempt to get the raw_answer when the model finishes without providing one.
@@ -646,6 +682,37 @@ async def _attempt_finish_repair(
             finish_repair_success_count = int(trajectory.metadata.get("finish_repair_success_count", 0))
             trajectory.metadata["finish_repair_success_count"] = finish_repair_success_count + 1
 
+            # Stream the repaired answer to frontend as llm_stream_chunk events
+            # This ensures the answer shows up in the UI just like normal streamed responses
+            emit_event(
+                PlannerEvent(
+                    event_type="llm_stream_chunk",
+                    ts=time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    extra={
+                        "text": raw_answer,
+                        "done": False,
+                        "phase": "args",
+                        "channel": "answer",
+                        "action_seq": action_seq,
+                    },
+                )
+            )
+            emit_event(
+                PlannerEvent(
+                    event_type="llm_stream_chunk",
+                    ts=time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    extra={
+                        "text": "",
+                        "done": True,
+                        "phase": "args",
+                        "channel": "answer",
+                        "action_seq": action_seq,
+                    },
+                )
+            )
+
             emit_event(
                 PlannerEvent(
                     event_type="finish_repair_success",
@@ -658,7 +725,15 @@ async def _attempt_finish_repair(
 
             return raw_answer
 
-        # Parsing failed
+        # Parsing failed - log what we received for debugging
+        logger.info(
+            "finish_repair_parse_failed",
+            extra={
+                "raw_len": len(raw),
+                "raw_preview": raw[:500] if len(raw) > 500 else raw,
+            },
+        )
+
         finish_repair_failure_count = int(trajectory.metadata.get("finish_repair_failure_count", 0))
         trajectory.metadata["finish_repair_failure_count"] = finish_repair_failure_count + 1
 
@@ -669,6 +744,7 @@ async def _attempt_finish_repair(
                 trajectory_step=len(trajectory.steps),
                 latency_ms=latency_ms,
                 error="parse_failed",
+                extra={"raw_len": len(raw)},
             )
         )
 

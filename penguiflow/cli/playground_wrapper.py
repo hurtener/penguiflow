@@ -611,8 +611,15 @@ class OrchestratorAgentWrapper:
                 pause=pause_dict,
             )
 
+        raw_answer = _get_attr(response, "answer")
+        normalised_answer = _normalise_answer(raw_answer)
+        _LOGGER.info(
+            "orchestrator_answer_extract: has_answer=%s, answer_len=%s",
+            normalised_answer is not None,
+            len(normalised_answer) if normalised_answer else 0,
+        )
         return ChatResult(
-            answer=_normalise_answer(_get_attr(response, "answer")),
+            answer=normalised_answer,
             trace_id=trace_id,
             session_id=session_id,
             metadata=metadata,
@@ -702,8 +709,15 @@ class OrchestratorAgentWrapper:
                 pause=pause_dict,
             )
 
+        raw_answer = _get_attr(response, "answer")
+        normalised_answer = _normalise_answer(raw_answer)
+        _LOGGER.info(
+            "orchestrator_resume_answer_extract: has_answer=%s, answer_len=%s",
+            normalised_answer is not None,
+            len(normalised_answer) if normalised_answer else 0,
+        )
         return ChatResult(
-            answer=_normalise_answer(_get_attr(response, "answer")),
+            answer=normalised_answer,
             trace_id=trace_id,
             session_id=session_id,
             metadata=metadata,

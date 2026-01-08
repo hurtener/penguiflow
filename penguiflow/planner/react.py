@@ -695,6 +695,8 @@ class ReactPlanner:
         last_observation: Any | None,
         artifact_collector: _ArtifactCollector,
         source_collector: _SourceCollector,
+        *,
+        action_seq: int,
     ) -> PlannerFinish:
         return await _handle_finish_action_impl(
             self,
@@ -704,6 +706,7 @@ class ReactPlanner:
             last_observation,
             artifact_collector,
             source_collector,
+            action_seq=action_seq,
         )
 
     async def _run_loop(
@@ -1113,6 +1116,8 @@ class ReactPlanner:
         self,
         trajectory: Trajectory,
         action: PlannerAction,
+        *,
+        action_seq: int,
     ) -> str | None:
         return await _attempt_finish_repair_impl(
             trajectory=trajectory,
@@ -1123,6 +1128,7 @@ class ReactPlanner:
             emit_event=self._emit_event,
             time_source=self._time_source,
             system_prompt_extra=self._system_prompt_extra,
+            action_seq=action_seq,
         )
 
     def _parse_finish_repair_response(self, raw: str) -> str | None:

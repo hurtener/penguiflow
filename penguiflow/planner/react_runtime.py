@@ -291,6 +291,7 @@ async def _handle_finish_action(
     last_observation: Any | None,
     artifact_collector: _ArtifactCollector,
     source_collector: _SourceCollector,
+    action_seq: int,
 ) -> PlannerFinish:
     # Check if raw_answer is missing and attempt finish repair
     has_raw_answer = (
@@ -313,6 +314,7 @@ async def _handle_finish_action(
         filled_answer = await planner._attempt_finish_repair(
             trajectory,
             action,
+            action_seq=action_seq,
         )
 
         if filled_answer is not None:
@@ -323,7 +325,10 @@ async def _handle_finish_action(
                 action.args["raw_answer"] = filled_answer
             logger.info(
                 "finish_repair_success",
-                extra={"answer_len": len(filled_answer)},
+                extra={
+                    "answer_len": len(filled_answer),
+                    "args_keys": list(action.args.keys()) if isinstance(action.args, dict) else None,
+                },
             )
         else:
             logger.warning(
@@ -332,6 +337,15 @@ async def _handle_finish_action(
             )
 
     candidate_answer = action.args or last_observation
+    # Trace: Log candidate_answer state (helps debug answer loss issues)
+    _ca_raw = candidate_answer.get("raw_answer") if isinstance(candidate_answer, dict) else None
+    logger.info(
+        "finish_candidate_answer",
+        extra={
+            "has_raw_answer": _ca_raw is not None,
+            "raw_answer_len": len(_ca_raw) if isinstance(_ca_raw, str) else None,
+        },
+    )
     metadata_reflection: dict[str, Any] | None = None
 
     if candidate_answer is not None and planner._reflection_config and planner._reflection_config.enabled:
@@ -562,11 +576,26 @@ async def _handle_finish_action(
 
     trajectory.artifacts = artifact_collector.snapshot()
     trajectory.sources = source_collector.snapshot()
+
+    # Trace: Verify answer state before final payload
+    _pre_raw = candidate_answer.get("raw_answer") if isinstance(candidate_answer, dict) else None
+    logger.info(
+        "finish_pre_payload",
+        extra={
+            "has_raw_answer": _pre_raw is not None,
+            "raw_answer_len": len(_pre_raw) if isinstance(_pre_raw, str) else None,
+        },
+    )
+
     final_payload = planner._build_final_payload(
         candidate_answer,
         last_observation,
         trajectory.artifacts,
         trajectory.sources,
+    )
+    logger.info(
+        "finish_payload_built",
+        extra={"raw_answer_len": len(final_payload.raw_answer) if final_payload.raw_answer else 0},
     )
     # Note: Real-time streaming of args content happens during LLM call
     # via _StreamingArgsExtractor in step(). No post-hoc chunking needed.
@@ -678,6 +707,7 @@ async def run_loop(
                     last_observation,
                     artifact_collector,
                     source_collector,
+                    action_seq=current_action_seq,
                 )
 
             spec = planner._spec_by_name.get(action.next_node)

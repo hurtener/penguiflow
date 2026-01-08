@@ -781,6 +781,24 @@ class TestParseFinishRepairResponse:
         result = minimal_planner._parse_finish_repair_response(raw)
         assert result is None
 
+    def test_nested_args_raw_answer(self, minimal_planner):
+        """Should extract raw_answer from nested args dict (full action schema)."""
+        raw = '{"thought": "Greeting user", "next_node": null, "args": {"raw_answer": "Hello there!"}}'
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result == "Hello there!"
+
+    def test_nested_args_answer(self, minimal_planner):
+        """Should extract answer from nested args dict."""
+        raw = '{"thought": "Responding", "next_node": null, "args": {"answer": "Test response"}}'
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result == "Test response"
+
+    def test_nested_args_placeholder_rejected(self, minimal_planner):
+        """Should reject placeholder values in nested args."""
+        raw = '{"thought": "Test", "next_node": null, "args": {"raw_answer": "<auto>"}}'
+        result = minimal_planner._parse_finish_repair_response(raw)
+        assert result is None
+
 
 class TestIsArgFillEligible:
     """Tests for ReactPlanner._is_arg_fill_eligible."""
