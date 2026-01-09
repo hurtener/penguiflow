@@ -941,7 +941,8 @@ def render_arg_fill_prompt(
     missing_fields : list[str]
         List of field names that need values.
     field_descriptions : dict[str, str] | None
-        Optional mapping of field names to descriptions.
+        Optional mapping of field names to descriptions (may include enum values,
+        examples, and constraints from the enhanced extraction).
     user_query : str | None
         Original user query for context.
 
@@ -963,18 +964,57 @@ def render_arg_fill_prompt(
 
     fields_block = "\n".join(field_lines)
 
-    # Build example response
+    # Build example response - try to use real values from hints
     example_values: dict[str, str] = {}
     for field in missing_fields:
+        desc = field_descriptions.get(field, "")
+
+        # Try to extract a valid example from the description hints
+        example_value = None
+
+        # Check for "Valid options: ['opt1', 'opt2']" pattern
+        if "Valid options:" in desc:
+            import re
+
+            match = re.search(r"Valid options:\s*\[([^\]]+)\]", desc)
+            if match:
+                # Parse the options and use the first one
+                options_str = match.group(1)
+                # Handle both 'single' and "double" quoted strings
+                options = re.findall(r"['\"]([^'\"]+)['\"]", options_str)
+                if options:
+                    example_value = options[0]
+
+        # Check for "Examples: [...]" pattern
+        if example_value is None and "Examples:" in desc:
+            match = re.search(r"Examples:\s*\[([^\]]+)\]", desc)
+            if match:
+                examples = re.findall(r"['\"]([^'\"]+)['\"]", match.group(1))
+                if examples:
+                    example_value = examples[0]
+
         # Smart defaults based on common field names
-        if field in {"query", "question", "prompt", "input", "search_query"}:
-            example_values[field] = user_query if user_query else "your value here"
-        else:
-            example_values[field] = "your value here"
+        if example_value is None:
+            if field in {"query", "question", "prompt", "input", "search_query"}:
+                example_value = user_query if user_query else "your value here"
+            else:
+                example_value = "your value here"
+
+        example_values[field] = example_value
 
     example_json = json.dumps(example_values, ensure_ascii=False, indent=2)
 
     user_context = f'\nUser\'s request: "{user_query}"\n' if user_query else ""
+
+    # Check if any field has valid options - add emphasis
+    has_constrained_fields = any(
+        "Valid options:" in field_descriptions.get(f, "") for f in missing_fields
+    )
+    constraint_note = (
+        "- For fields with 'Valid options', you MUST use one of the listed values\n"
+        if has_constrained_fields
+        else ""
+    )
 
     return (
         f"FILL MISSING VALUES\n\n"
@@ -984,6 +1024,7 @@ def render_arg_fill_prompt(
         f"Reply with ONLY a JSON object containing the missing field values:\n"
         f"{example_json}\n\n"
         "Rules:\n"
+        f"{constraint_note}"
         "- Provide REAL values only (no placeholders like '<auto>' or 'unknown')\n"
         "- Include ONLY the fields listed above\n"
         "- Reply with valid JSON only, no explanation"
@@ -1040,6 +1081,124 @@ def render_finish_repair_prompt(
         "- Follow the voice and style specified above\n"
         "- Do NOT use placeholders\n"
         "- Reply with valid JSON only, no explanation"
+    )
+
+
+def render_finish_guidance(repair_count: int) -> str | None:
+    """
+    Generate tiered guidance about including raw_answer based on past repair count.
+
+    This is injected into the system prompt when the model has previously forgotten
+    to include raw_answer and required finish_repair. The tone escalates with the count.
+
+    Parameters
+    ----------
+    repair_count : int
+        Number of times finish_repair has been used in previous turns.
+        0 = no guidance needed
+        1 = gentle reminder
+        2 = firm reminder
+        3+ = emphatic warning
+
+    Returns
+    -------
+    str | None
+        Guidance text to merge into system prompt, or None if no guidance needed.
+    """
+    if repair_count <= 0:
+        return None
+
+    if repair_count == 1:
+        return (
+            "<finish_reminder>\n"
+            "REMINDER: When finishing (next_node: null), always include your complete answer "
+            "in args.raw_answer. Do not leave args empty or use placeholders.\n"
+            "</finish_reminder>"
+        )
+
+    if repair_count == 2:
+        return (
+            "<finish_warning>\n"
+            "IMPORTANT: You have previously forgotten to include raw_answer when finishing.\n"
+            "When you set next_node to null, you MUST provide:\n"
+            '{"thought": "...", "next_node": null, "args": {"raw_answer": "Your complete answer here"}}\n'
+            "Do NOT leave args empty. Do NOT use placeholders like <auto>.\n"
+            "</finish_warning>"
+        )
+
+    # repair_count >= 3
+    return (
+        "<finish_critical>\n"
+        "CRITICAL: You have repeatedly failed to include raw_answer when finishing.\n"
+        "This is causing performance issues. You MUST follow this exact pattern:\n\n"
+        "When next_node is null (finishing), args MUST contain raw_answer:\n"
+        '{"thought": "Answering user query", "next_node": null, "args": {"raw_answer": "Your full answer"}}\n\n'
+        "NEVER:\n"
+        "- Leave args as null or empty {}\n"
+        "- Use placeholder values like <auto>, unknown, or <fill_value>\n"
+        "- Omit the raw_answer field\n\n"
+        "Your response to the user goes in raw_answer. This is mandatory.\n"
+        "</finish_critical>"
+    )
+
+
+def render_arg_fill_guidance(repair_count: int) -> str | None:
+    """
+    Generate tiered guidance about proper tool argument usage.
+
+    This is injected into the system prompt when the model has repeatedly
+    failed to provide valid tool arguments (using placeholders like <auto>).
+
+    Parameters
+    ----------
+    repair_count : int
+        Number of times arg-fill repair has been used in previous turns.
+        0 = no guidance needed
+        1 = gentle reminder
+        2 = firm reminder
+        3+ = emphatic warning
+
+    Returns
+    -------
+    str | None
+        Guidance text to merge into system prompt, or None if no guidance needed.
+    """
+    if repair_count <= 0:
+        return None
+
+    if repair_count == 1:
+        return (
+            "<arg_reminder>\n"
+            "REMINDER: When calling tools, provide ALL required arguments with real values.\n"
+            "Do not use placeholders like '<auto>', 'unknown', or leave fields empty.\n"
+            "If a field has valid options listed, you MUST use one of those exact values.\n"
+            "</arg_reminder>"
+        )
+
+    if repair_count == 2:
+        return (
+            "<arg_warning>\n"
+            "IMPORTANT: You have previously failed to provide valid tool arguments.\n"
+            "When calling a tool, you MUST:\n"
+            "1. Provide REAL values for ALL required fields\n"
+            "2. Use EXACTLY one of the valid options when listed (check field descriptions)\n"
+            "3. NEVER use placeholders like '<auto>', 'unknown', 'n/a', or empty strings\n"
+            "4. If you don't know a valid value, FINISH instead of guessing\n"
+            "</arg_warning>"
+        )
+
+    # repair_count >= 3
+    return (
+        "<arg_critical>\n"
+        "CRITICAL: You have repeatedly failed to provide valid tool arguments.\n"
+        "This is causing performance issues. STOP using placeholders.\n\n"
+        "RULES:\n"
+        "- Check the tool's field descriptions for 'Valid options:' - you MUST use one of those\n"
+        "- Do NOT invent values - use only what's documented\n"
+        "- If unsure, FINISH with next_node: null instead of calling the tool\n"
+        "- Every field must have a real, valid value - no '<auto>', 'unknown', or empty\n\n"
+        "If you cannot provide valid arguments, explain to the user what information you need.\n"
+        "</arg_critical>"
     )
 
 
@@ -1126,3 +1285,55 @@ the digest and facts. The user should feel like the agent autonomously completed
 is now reporting back with full context.
 </proactive_report_guidance>
 """
+
+
+def render_graceful_failure_prompt(
+    user_query: str | None = None,
+    voice_context: str | None = None,
+) -> str:
+    """
+    Generate a prompt asking the model to gracefully explain it cannot complete the action.
+
+    This is used when the planner hits a failure threshold (repeated arg failures, etc.)
+    instead of just returning a technical error. The model should provide a user-friendly
+    response without technical details.
+
+    Parameters
+    ----------
+    user_query : str | None
+        The original user query.
+    voice_context : str | None
+        Optional voice/personality context (from system_prompt_extra).
+    """
+    context_parts: list[str] = []
+    if user_query:
+        context_parts.append(f'The user asked: "{user_query}"')
+
+    context = "\n".join(context_parts) if context_parts else ""
+
+    # Include voice context if provided
+    voice_section = ""
+    if voice_context:
+        voice_section = (
+            "\n<voice_and_style>\n"
+            "IMPORTANT - Your response MUST follow this voice and style:\n\n"
+            f"{voice_context}\n"
+            "</voice_and_style>\n"
+        )
+
+    return (
+        "I was unable to complete the requested action due to an internal issue.\n\n"
+        f"{context}\n"
+        f"{voice_section}\n"
+        "Please respond to the user in a helpful, friendly way:\n"
+        "- Acknowledge that you couldn't complete what they asked\n"
+        "- Do NOT mention technical details (tool failures, validation errors, placeholders, etc.)\n"
+        "- Offer to help in another way or ask if they'd like to try something different\n"
+        "- Keep the response brief and conversational\n\n"
+        "Reply with ONLY a JSON object:\n"
+        '{"raw_answer": "Your friendly response to the user here"}\n\n'
+        "Rules:\n"
+        "- Be helpful and apologetic without being overly formal\n"
+        "- Do NOT expose internal system details\n"
+        "- Reply with valid JSON only, no explanation"
+    )

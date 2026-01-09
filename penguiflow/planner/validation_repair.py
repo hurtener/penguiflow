@@ -220,15 +220,80 @@ def _scan_placeholder_paths(
 
 
 def _extract_field_descriptions(spec: NodeSpec) -> dict[str, str]:
-    """Extract field descriptions from the tool's args schema."""
+    """Extract field descriptions from the tool's args schema.
+
+    This now includes comprehensive hints: description, enum values, examples,
+    type constraints, and patterns - giving the model actionable context.
+    """
     schema = spec.args_model.model_json_schema()
     properties = schema.get("properties", {})
+    # Also check $defs for referenced schemas (enums, nested models)
+    defs = schema.get("$defs", {})
+
     descriptions: dict[str, str] = {}
     for field_name, field_info in properties.items():
-        if isinstance(field_info, dict):
-            desc = field_info.get("description")
-            if desc:
-                descriptions[field_name] = desc
+        if not isinstance(field_info, dict):
+            continue
+
+        hints: list[str] = []
+
+        # Start with description if available
+        desc = field_info.get("description")
+        if desc:
+            hints.append(desc)
+
+        # Handle $ref to definitions (common for enums)
+        ref = field_info.get("$ref")
+        if ref and ref.startswith("#/$defs/"):
+            ref_name = ref.split("/")[-1]
+            ref_schema = defs.get(ref_name, {})
+            # Check for enum in referenced schema
+            if "enum" in ref_schema:
+                enum_values = ref_schema["enum"]
+                hints.append(f"Valid options: {enum_values}")
+            # Check for description in referenced schema
+            if not desc and "description" in ref_schema:
+                hints.insert(0, ref_schema["description"])
+
+        # Handle anyOf (common for Optional fields with enums)
+        any_of = field_info.get("anyOf", [])
+        for option in any_of:
+            if isinstance(option, dict):
+                if "$ref" in option:
+                    ref_name = option["$ref"].split("/")[-1]
+                    ref_schema = defs.get(ref_name, {})
+                    if "enum" in ref_schema:
+                        hints.append(f"Valid options: {ref_schema['enum']}")
+                elif "enum" in option:
+                    hints.append(f"Valid options: {option['enum']}")
+
+        # Direct enum values
+        if "enum" in field_info:
+            hints.append(f"Valid options: {field_info['enum']}")
+
+        # Examples
+        examples = field_info.get("examples")
+        if examples:
+            hints.append(f"Examples: {examples}")
+
+        # Type hint (useful for complex types)
+        field_type = field_info.get("type")
+        if field_type and field_type not in {"string", "integer", "number", "boolean"}:
+            hints.append(f"Type: {field_type}")
+
+        # Pattern (regex constraint)
+        pattern = field_info.get("pattern")
+        if pattern:
+            hints.append(f"Must match pattern: {pattern}")
+
+        # Default value (if not null)
+        default = field_info.get("default")
+        if default is not None:
+            hints.append(f"Default: {default}")
+
+        if hints:
+            descriptions[field_name] = " | ".join(hints)
+
     return descriptions
 
 
@@ -251,8 +316,9 @@ def _is_arg_fill_eligible(
     if not arg_fill_enabled:
         return False
 
-    # Check if already attempted
-    if trajectory.metadata.get("arg_fill_attempted"):
+    # Check if already attempted for THIS tool (per-tool tracking prevents
+    # one tool's failed arg-fill from blocking other tools)
+    if trajectory.metadata.get(f"arg_fill_attempted_{spec.name}"):
         return False
 
     # Get schema to check field types
@@ -372,8 +438,8 @@ async def _attempt_arg_fill(
     This uses a minimal prompt asking only for the missing field values,
     which is easier for small models than re-emitting the full action JSON.
     """
-    # Mark that we're attempting arg-fill
-    trajectory.metadata["arg_fill_attempted"] = True
+    # Mark that we're attempting arg-fill for this specific tool
+    trajectory.metadata[f"arg_fill_attempted_{spec.name}"] = True
 
     # Get field descriptions for context
     field_descriptions = _extract_field_descriptions(spec)
@@ -774,6 +840,125 @@ async def _attempt_finish_repair(
         return None
 
 
+async def _attempt_graceful_failure(
+    *,
+    trajectory: Trajectory,
+    build_messages: Callable[[Trajectory], Awaitable[list[dict[str, str]]]],
+    client: Any,
+    cost_tracker: Any,
+    emit_event: Callable[[PlannerEvent], None],
+    time_source: Callable[[], float],
+    system_prompt_extra: str | None,
+    action_seq: int,
+) -> str | None:
+    """
+    Attempt to get a user-friendly message when the planner hits a failure threshold.
+
+    Instead of returning a technical error, this prompts the model to generate
+    a graceful, non-technical response explaining it couldn't complete the action.
+    """
+    # Get user query for context
+    user_query = trajectory.resume_user_input or trajectory.query
+
+    # Build the graceful failure prompt
+    graceful_prompt = prompts.render_graceful_failure_prompt(
+        user_query=user_query,
+        voice_context=system_prompt_extra,
+    )
+
+    # Build messages with the graceful failure prompt
+    base_messages = await build_messages(trajectory)
+    messages = list(base_messages) + [
+        {"role": "user", "content": graceful_prompt},
+    ]
+
+    emit_event(
+        PlannerEvent(
+            event_type="graceful_failure_attempt",
+            ts=time_source(),
+            trajectory_step=len(trajectory.steps),
+        )
+    )
+
+    start_time = time_source()
+
+    try:
+        llm_result = await client.complete(
+            messages=messages,
+            response_format={"type": "json_object"},
+            stream=False,
+            on_stream_chunk=None,
+        )
+        raw, cost = _coerce_llm_response(llm_result)
+        cost_tracker.record_main_call(cost)
+
+        latency_ms = (time_source() - start_time) * 1000
+
+        # Parse the response - look for raw_answer
+        raw_answer = _parse_finish_repair_response(raw)
+
+        if raw_answer is not None:
+            # Stream the graceful response to frontend
+            emit_event(
+                PlannerEvent(
+                    event_type="llm_stream_chunk",
+                    ts=time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    extra={
+                        "text": raw_answer,
+                        "done": False,
+                        "phase": "args",
+                        "channel": "answer",
+                        "action_seq": action_seq,
+                    },
+                )
+            )
+            emit_event(
+                PlannerEvent(
+                    event_type="llm_stream_chunk",
+                    ts=time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    extra={
+                        "text": "",
+                        "done": True,
+                        "phase": "args",
+                        "channel": "answer",
+                        "action_seq": action_seq,
+                    },
+                )
+            )
+
+            emit_event(
+                PlannerEvent(
+                    event_type="graceful_failure_success",
+                    ts=time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    latency_ms=latency_ms,
+                    extra={"answer_len": len(raw_answer)},
+                )
+            )
+
+            logger.info(
+                "graceful_failure_success",
+                extra={"answer_len": len(raw_answer), "latency_ms": latency_ms},
+            )
+
+            return raw_answer
+
+        logger.warning(
+            "graceful_failure_parse_failed",
+            extra={"raw_len": len(raw), "raw_preview": raw[:300]},
+        )
+        return None
+
+    except Exception as exc:
+        logger.warning(
+            "graceful_failure_exception",
+            extra={"error": str(exc)},
+        )
+        return None
+
+
 def _record_invalid_response(
     *,
     trajectory: Trajectory,
@@ -848,25 +1033,41 @@ def _apply_arg_validation(
     extra = spec.extra or {}
     raw_validation = extra.get("arg_validation")
     validator = extra.get("arg_validator")
-    if raw_validation is None and validator is None:
-        return None
 
+    # Parse validation config (if provided)
     validation: dict[str, Any] = {}
     if isinstance(raw_validation, Mapping):
         validation = dict(raw_validation)
     elif raw_validation is True:
         validation = {"reject_placeholders": True}
 
+    # Always include <auto> in placeholder list - this is critical for detecting
+    # autofilled values that the model didn't properly fill
     placeholders = list(validation.get("placeholders") or [])
     if AUTO_STR_SENTINEL not in placeholders:
         placeholders.append(AUTO_STR_SENTINEL)
 
+    # ALWAYS scan for placeholders - this is independent of arg_validation config
+    # The autofill mechanism inserts <auto> placeholders, and we need to detect them
+    # regardless of whether custom validation rules are configured
     placeholder_paths: list[str] = []
     if placeholders:
         placeholder_paths = _scan_placeholder_paths(action.args or {}, placeholders)
 
+    # Determine validation behavior:
+    # - emit_suspect: default True (always emit suspect events for observability)
+    # - reject_placeholders: default True when autofilled_fields exist (catch autofill placeholders)
+    #                        otherwise use config value (default False for backwards compat)
+    # - reject_autofill: use config value (default False)
     emit_suspect = validation.get("emit_suspect", True)
-    reject_placeholders = validation.get("reject_placeholders", False)
+
+    # Key change: reject placeholders by default when they exist in autofilled fields
+    # This catches the <auto> sentinel that _autofill_missing_args inserts
+    has_autofilled_placeholders = bool(
+        autofilled_fields and placeholder_paths and
+        any(path.split(".")[0].split("[")[0] in autofilled_fields for path in placeholder_paths)
+    )
+    reject_placeholders = validation.get("reject_placeholders", has_autofilled_placeholders)
     reject_autofill = validation.get("reject_autofill", False)
 
     if emit_suspect and (placeholder_paths or autofilled_fields):
@@ -909,6 +1110,7 @@ def _apply_arg_validation(
         )
         return error_summary
 
+    # Custom validator (only runs if configured)
     if callable(validator):
         try:
             result = validator(parsed_args, action)

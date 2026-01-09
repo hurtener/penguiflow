@@ -595,3 +595,12 @@ Background Tasks v2.11 - Design Document
   | tests/test_task_service.py  | Update assertions to check trajectory.background_results            |
 
   ---
+
+concern: retain_turn (foreground waits for background) (need attention)
+
+  - retain_turn only waits when a group exists and is sealed; without a sealed group it returns immediately, so “keep the turn
+    until they finish” only works with group+sealed. penguiflow/sessions/task_service.py
+  - retain_turn timeout is hardcoded (30s) and the planner config retain_turn_timeout_s isn’t used anywhere; background
+    continuation hooks are defined but not wired. penguiflow/planner/models.py, penguiflow/sessions/task_service.py
+  - even with retain_turn, background completion still queues proactive reports; once the foreground turn completes, the proactive
+    reporter can emit a redundant update for results already included in the same reply. penguiflow/sessions/session.py

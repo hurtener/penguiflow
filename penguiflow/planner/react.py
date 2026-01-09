@@ -158,6 +158,9 @@ from .validation_repair import (
     _attempt_finish_repair as _attempt_finish_repair_impl,
 )
 from .validation_repair import (
+    _attempt_graceful_failure as _attempt_graceful_failure_impl,
+)
+from .validation_repair import (
     _extract_field_descriptions as _extract_field_descriptions_impl,
 )
 from .validation_repair import (
@@ -1033,8 +1036,15 @@ class ReactPlanner:
 
         if event_type == "planner_args_invalid":
             metadata["consecutive_arg_failures"] = int(metadata.get("consecutive_arg_failures", 0)) + 1
+            # Also track per-tool failures so one tool's repeated failures
+            # aren't reset by successful calls to other tools
+            per_tool_key = f"consecutive_arg_failures_{spec.name}"
+            metadata[per_tool_key] = int(metadata.get(per_tool_key, 0)) + 1
             if autofilled_fields:
+                # Track both global (for metadata reporting) and per-tool (for threshold checks)
                 metadata["autofill_rejection_count"] = int(metadata.get("autofill_rejection_count", 0)) + 1
+                autofill_per_tool_key = f"autofill_rejection_count_{spec.name}"
+                metadata[autofill_per_tool_key] = int(metadata.get(autofill_per_tool_key, 0)) + 1
 
         self._emit_event(
             PlannerEvent(
@@ -1131,6 +1141,24 @@ class ReactPlanner:
             action_seq=action_seq,
         )
 
+    async def _attempt_graceful_failure(
+        self,
+        trajectory: Trajectory,
+        *,
+        action_seq: int,
+    ) -> str | None:
+        """Attempt to get a user-friendly message when hitting failure thresholds."""
+        return await _attempt_graceful_failure_impl(
+            trajectory=trajectory,
+            build_messages=self._build_messages,
+            client=self._client,
+            cost_tracker=self._cost_tracker,
+            emit_event=self._emit_event,
+            time_source=self._time_source,
+            system_prompt_extra=self._system_prompt_extra,
+            action_seq=action_seq,
+        )
+
     def _parse_finish_repair_response(self, raw: str) -> str | None:
         return _parse_finish_repair_response_impl(raw)
 
@@ -1211,6 +1239,11 @@ class ReactPlanner:
         metadata["arg_fill_failure_count"] = int(trajectory.metadata.get("arg_fill_failure_count", 0))
         metadata["finish_repair_success_count"] = int(trajectory.metadata.get("finish_repair_success_count", 0))
         metadata["finish_repair_failure_count"] = int(trajectory.metadata.get("finish_repair_failure_count", 0))
+
+        # Accumulate repair counts for tiered guidance in future runs
+        # These persist in the planner instance across runs
+        self._finish_repair_history_count += metadata["finish_repair_success_count"]
+        self._arg_fill_repair_history_count += metadata["arg_fill_success_count"]
 
         # Emit finish event
         extra_data: dict[str, Any] = {

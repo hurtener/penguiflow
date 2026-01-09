@@ -400,7 +400,12 @@ async def test_consecutive_arg_failures_force_finish() -> None:
 
 @pytest.mark.asyncio
 async def test_consecutive_arg_failures_reset_on_success() -> None:
-    """Test that consecutive failure counter resets after successful tool call."""
+    """Test that global consecutive failure counter resets after successful tool call.
+
+    Note: Per-tool counters are tracked separately and only reset when THAT tool succeeds.
+    This test validates the global counter reset behavior using a threshold high enough
+    to not trigger the per-tool force_finish (strict_tool fails twice = 2, threshold = 3).
+    """
     registry = ModelRegistry()
     registry.register("strict_tool", StrictArgs, StrictResult)
     registry.register("triage", Query, Intent)
@@ -419,13 +424,13 @@ async def test_consecutive_arg_failures_reset_on_success() -> None:
             "next_node": "strict_tool",
             "args": {"query": "<auto>"},
         },
-        # Successful call resets counter
+        # Successful call resets global counter (but per-tool counter for strict_tool stays)
         {
             "thought": "Call triage instead",
             "next_node": "triage",
             "args": {"question": "real query"},
         },
-        # New failure - counter starts fresh
+        # New failure - global counter starts fresh, per-tool increments
         {
             "thought": "Try placeholder again",
             "next_node": "strict_tool",
@@ -443,13 +448,79 @@ async def test_consecutive_arg_failures_reset_on_success() -> None:
         llm_client=StubClient(responses),
         catalog=catalog,
         max_iters=10,
-        max_consecutive_arg_failures=2,  # Would trigger on 2nd consecutive failure
+        # Threshold 3 so per-tool counter (2 for strict_tool) doesn't trigger force_finish
+        max_consecutive_arg_failures=3,
     )
     result = await planner.run("test reset behavior")
 
-    # Should complete normally - counter was reset by successful triage call
+    # Should complete normally - global counter was reset by successful triage call
     assert result.reason == "answer_complete"
-    # Final consecutive count should be 1 (not 2) since it was reset
+    # Final global consecutive count should be 1 (reset by triage success)
+    assert result.metadata["consecutive_arg_failures"] == 1
+    # Note: per-tool counter (consecutive_arg_failures_strict_tool = 2) is tracked
+    # internally but not exposed in result metadata
+
+
+@pytest.mark.asyncio
+async def test_per_tool_arg_failures_force_finish() -> None:
+    """Test that per-tool failure counter triggers graceful failure even when other tools succeed.
+
+    This prevents infinite loops where the model repeatedly fails on one tool
+    but the global counter keeps getting reset by successful calls to other tools.
+    When the threshold is reached, the model is asked to generate a user-friendly
+    response instead of returning a technical error.
+    """
+    registry = ModelRegistry()
+    registry.register("strict_tool", StrictArgs, StrictResult)
+    registry.register("triage", Query, Intent)
+    catalog = build_catalog(
+        [
+            Node(strict_tool, name="strict_tool"),
+            Node(triage, name="triage"),
+        ],
+        registry,
+    )
+
+    responses = [
+        # First failure on strict_tool
+        {
+            "thought": "Try with placeholder",
+            "next_node": "strict_tool",
+            "args": {"query": "<auto>"},
+        },
+        # Successful call to triage - resets global but not per-tool
+        {
+            "thought": "Call triage instead",
+            "next_node": "triage",
+            "args": {"question": "real query"},
+        },
+        # Second failure on strict_tool - per-tool counter = 2, hits threshold
+        {
+            "thought": "Try placeholder again",
+            "next_node": "strict_tool",
+            "args": {"query": "<auto>"},
+        },
+        # Graceful failure response - model provides user-friendly message
+        {
+            "raw_answer": "I apologize, but I'm having trouble completing that action. Let me help you in another way."
+        },
+    ]
+
+    planner = ReactPlanner(
+        llm_client=StubClient(responses),
+        catalog=catalog,
+        max_iters=10,
+        # Threshold 2 so per-tool counter triggers graceful failure
+        max_consecutive_arg_failures=2,
+    )
+    result = await planner.run("test per-tool force finish")
+
+    # Should gracefully finish with a user-friendly message instead of no_path
+    assert result.reason == "answer_complete"
+    assert result.payload.get("graceful_failure") is True
+    assert result.payload.get("failure_reason") == "consecutive_arg_failures"
+    assert "apologize" in result.payload.get("raw_answer", "").lower()
+    # Global counter was reset by triage success (only 1 failure since reset)
     assert result.metadata["consecutive_arg_failures"] == 1
 
 
@@ -878,11 +949,21 @@ async def test_react_planner_recovers_from_invalid_node() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_autofills_missing_args() -> None:
-    """Test that missing required args are autofilled with defaults."""
+    """Test that missing required string args trigger arg-fill recovery.
+
+    When the model omits required args, the planner:
+    1. Autofills with placeholder values (e.g., "<auto>" for strings)
+    2. Detects the placeholder and rejects it (triggers arg validation error)
+    3. Attempts arg-fill to get proper values from the model
+    4. Merges filled values and proceeds with tool execution
+    """
     client = StubClient(
         [
-            # Args empty - will be autofilled with defaults
+            # Model provides empty args - triggers autofill with <auto> placeholder
             {"thought": "retrieve", "next_node": "retrieve", "args": {}},
+            # Arg-fill response - model provides the missing "intent" value
+            {"intent": "docs"},
+            # Model finishes
             {"thought": "finish", "next_node": None, "args": {"raw_answer": "ok"}},
         ]
     )
@@ -890,12 +971,14 @@ async def test_react_planner_autofills_missing_args() -> None:
 
     result = await planner.run("Test autofill path")
 
-    # Should complete without validation errors because autofill kicks in
+    # Should complete successfully after arg-fill recovery
     assert result.reason == "answer_complete"
-    # First step should have observation (tool was called successfully with autofilled args)
+    # First step should have observation (tool was called with arg-fill values)
     steps = result.metadata["steps"]
     assert len(steps) >= 1
     assert steps[0]["observation"] is not None
+    # Verify arg-fill was used (not just silent autofill acceptance)
+    assert result.metadata.get("arg_fill_success_count", 0) >= 1
 
 
 @pytest.mark.asyncio()

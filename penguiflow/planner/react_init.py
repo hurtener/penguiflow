@@ -157,6 +157,11 @@ def init_react_planner(
     planner._pause_records = {}
     planner._active_trajectory = None
     planner._active_tracker = None
+
+    # Internal repair history tracking for tiered guidance
+    # These accumulate across runs and are used by build_messages() to inject guidance
+    planner._finish_repair_history_count = 0
+    planner._arg_fill_repair_history_count = 0
     planner._cost_tracker = _CostTracker()
     planner._deadline_s = deadline_s
     planner._hop_budget = hop_budget

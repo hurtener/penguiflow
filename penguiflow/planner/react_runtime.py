@@ -763,12 +763,15 @@ async def run_loop(
                 autofilled_fields=autofilled_fields,
             )
             if arg_validation_error is not None:
-                autofill_rejection_count = int(trajectory.metadata.get("autofill_rejection_count", 0))
-                consecutive_failures = int(trajectory.metadata.get("consecutive_arg_failures", 0))
+                # Use per-tool counters to avoid one tool's failures affecting another tool's chances
+                autofill_rejection_key = f"autofill_rejection_count_{spec.name}"
+                autofill_rejection_count = int(trajectory.metadata.get(autofill_rejection_key, 0))
+                consecutive_failures_key = f"consecutive_arg_failures_{spec.name}"
+                consecutive_failures = int(trajectory.metadata.get(consecutive_failures_key, 0))
 
                 # Force finish conditions:
-                # 1. Second autofill rejection (gave model one chance with explicit field names)
-                # 2. Consecutive failures threshold reached
+                # 1. Second autofill rejection for THIS tool (gave model one chance with explicit field names)
+                # 2. Consecutive failures threshold reached for THIS tool
                 force_finish = (
                     (autofilled_fields and autofill_rejection_count >= 2)
                     or consecutive_failures >= planner._max_consecutive_arg_failures
@@ -794,6 +797,30 @@ async def run_loop(
                     trajectory.steps.append(TrajectoryStep(action=action, error=arg_validation_error))
                     trajectory.artifacts = artifact_collector.snapshot()
                     trajectory.sources = source_collector.snapshot()
+
+                    # Attempt graceful failure: ask model to generate user-friendly response
+                    # instead of returning a technical error
+                    graceful_answer = await planner._attempt_graceful_failure(
+                        trajectory,
+                        action_seq=planner._action_seq,
+                    )
+
+                    if graceful_answer is not None:
+                        # Success - return with a proper answer instead of no_path
+                        return planner._finish(
+                            trajectory,
+                            reason="answer_complete",
+                            payload={
+                                "raw_answer": graceful_answer,
+                                "graceful_failure": True,
+                                "failure_reason": failure_reason,
+                                "tool": spec.name,
+                            },
+                            thought=f"Gracefully handled {failure_reason} for tool '{spec.name}'",
+                            constraints=tracker,
+                        )
+
+                    # Graceful failure didn't work - fall back to no_path
                     return planner._finish(
                         trajectory,
                         reason="no_path",
@@ -843,9 +870,14 @@ async def run_loop(
                             )
 
                             if revalidation_error is None:
-                                # Success! Reset failure counters and proceed to tool execution
+                                # Success! Reset ALL failure counters for this tool
+                                # This is critical: autofill_rejection_count must reset so the tool
+                                # gets fresh chances if it needs to retry later (e.g., tool fails
+                                # for other reasons and model retries with autofill again)
                                 trajectory.metadata["consecutive_arg_failures"] = 0
-                                trajectory.metadata["arg_fill_attempted"] = False
+                                trajectory.metadata[f"consecutive_arg_failures_{spec.name}"] = 0
+                                trajectory.metadata[f"autofill_rejection_count_{spec.name}"] = 0
+                                trajectory.metadata[f"arg_fill_attempted_{spec.name}"] = False
 
                                 logger.info(
                                     "arg_fill_merged_success",
@@ -1274,9 +1306,12 @@ async def run_loop(
                 )
             )
 
-            # Reset consecutive arg failure counter on successful tool execution
+            # Reset consecutive arg failure counters on successful tool execution
             if trajectory.metadata.get("consecutive_arg_failures"):
                 trajectory.metadata["consecutive_arg_failures"] = 0
+            per_tool_key = f"consecutive_arg_failures_{spec.name}"
+            if trajectory.metadata.get(per_tool_key):
+                trajectory.metadata[per_tool_key] = 0
 
         if tracker.deadline_triggered or tracker.hop_exhausted:
             thought = (

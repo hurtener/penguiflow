@@ -800,6 +800,190 @@ class TestParseFinishRepairResponse:
         assert result is None
 
 
+class TestRenderFinishGuidance:
+    """Tests for render_finish_guidance tiered prompts."""
+
+    def test_no_guidance_for_zero(self):
+        """Should return None when count is 0."""
+        from penguiflow.planner.prompts import render_finish_guidance
+        assert render_finish_guidance(0) is None
+
+    def test_no_guidance_for_negative(self):
+        """Should return None for negative counts."""
+        from penguiflow.planner.prompts import render_finish_guidance
+        assert render_finish_guidance(-1) is None
+
+    def test_gentle_reminder_for_one(self):
+        """Should return gentle reminder for count=1."""
+        from penguiflow.planner.prompts import render_finish_guidance
+        result = render_finish_guidance(1)
+        assert result is not None
+        assert "REMINDER" in result
+        assert "raw_answer" in result
+
+    def test_firm_warning_for_two(self):
+        """Should return firm warning for count=2."""
+        from penguiflow.planner.prompts import render_finish_guidance
+        result = render_finish_guidance(2)
+        assert result is not None
+        assert "IMPORTANT" in result
+        assert "raw_answer" in result
+
+    def test_critical_for_three_plus(self):
+        """Should return critical warning for count>=3."""
+        from penguiflow.planner.prompts import render_finish_guidance
+        result = render_finish_guidance(3)
+        assert result is not None
+        assert "CRITICAL" in result
+        # Same message for higher counts
+        assert render_finish_guidance(5) == render_finish_guidance(3)
+
+
+class TestRenderArgFillGuidance:
+    """Tests for render_arg_fill_guidance tiered guidance."""
+
+    def test_no_guidance_for_zero(self):
+        """Should return None when count is 0."""
+        from penguiflow.planner.prompts import render_arg_fill_guidance
+        assert render_arg_fill_guidance(0) is None
+
+    def test_no_guidance_for_negative(self):
+        """Should return None for negative counts."""
+        from penguiflow.planner.prompts import render_arg_fill_guidance
+        assert render_arg_fill_guidance(-1) is None
+
+    def test_gentle_reminder_for_one(self):
+        """Should return gentle reminder for count=1."""
+        from penguiflow.planner.prompts import render_arg_fill_guidance
+        result = render_arg_fill_guidance(1)
+        assert result is not None
+        assert "REMINDER" in result
+        assert "<auto>" in result
+
+    def test_firm_warning_for_two(self):
+        """Should return firm warning for count=2."""
+        from penguiflow.planner.prompts import render_arg_fill_guidance
+        result = render_arg_fill_guidance(2)
+        assert result is not None
+        assert "IMPORTANT" in result
+        assert "valid options" in result.lower()
+
+    def test_critical_for_three_plus(self):
+        """Should return critical warning for count>=3."""
+        from penguiflow.planner.prompts import render_arg_fill_guidance
+        result = render_arg_fill_guidance(3)
+        assert result is not None
+        assert "CRITICAL" in result
+        # Same message for higher counts
+        assert render_arg_fill_guidance(5) == render_arg_fill_guidance(3)
+
+
+class TestExtractFieldDescriptions:
+    """Tests for _extract_field_descriptions enhanced extraction."""
+
+    def test_extracts_basic_description(self):
+        """Should extract field description from schema."""
+        from penguiflow.planner.validation_repair import _extract_field_descriptions
+
+        class ArgsWithDesc(BaseModel):
+            query: str = Field(description="The search query")
+
+        class FakeSpec:
+            args_model = ArgsWithDesc
+
+        result = _extract_field_descriptions(FakeSpec())
+        assert "query" in result
+        assert "The search query" in result["query"]
+
+    def test_extracts_enum_values(self):
+        """Should extract enum values from schema."""
+        from penguiflow.planner.validation_repair import _extract_field_descriptions
+
+        class Color(str):
+            pass
+
+        class ArgsWithEnum(BaseModel):
+            color: Literal["red", "green", "blue"] = Field(description="The color")
+
+        class FakeSpec:
+            args_model = ArgsWithEnum
+
+        result = _extract_field_descriptions(FakeSpec())
+        assert "color" in result
+        # Should include Valid options
+        assert "Valid options:" in result["color"]
+        assert "red" in result["color"]
+
+    def test_extracts_examples(self):
+        """Should extract examples from schema."""
+        from penguiflow.planner.validation_repair import _extract_field_descriptions
+
+        class ArgsWithExamples(BaseModel):
+            name: str = Field(description="User name", examples=["Alice", "Bob"])
+
+        class FakeSpec:
+            args_model = ArgsWithExamples
+
+        result = _extract_field_descriptions(FakeSpec())
+        assert "name" in result
+        assert "Examples:" in result["name"]
+
+    def test_handles_missing_info_gracefully(self):
+        """Should handle fields without descriptions."""
+        from penguiflow.planner.validation_repair import _extract_field_descriptions
+
+        class ArgsNoDesc(BaseModel):
+            query: str
+
+        class FakeSpec:
+            args_model = ArgsNoDesc
+
+        result = _extract_field_descriptions(FakeSpec())
+        # Should not have entry for field without any hints
+        assert result.get("query") is None or result.get("query") == ""
+
+
+class TestRenderArgFillPrompt:
+    """Tests for render_arg_fill_prompt with enhanced hints."""
+
+    def test_uses_enum_value_in_example(self):
+        """Should use first enum value in example JSON instead of placeholder."""
+        from penguiflow.planner.prompts import render_arg_fill_prompt
+
+        result = render_arg_fill_prompt(
+            tool_name="test_tool",
+            missing_fields=["color"],
+            field_descriptions={"color": "The color | Valid options: ['red', 'green', 'blue']"},
+        )
+
+        # Should use 'red' (first option) in the example, not "your value here"
+        assert '"color": "red"' in result
+
+    def test_adds_constraint_note_for_enum_fields(self):
+        """Should add note about valid options when fields have constraints."""
+        from penguiflow.planner.prompts import render_arg_fill_prompt
+
+        result = render_arg_fill_prompt(
+            tool_name="test_tool",
+            missing_fields=["component"],
+            field_descriptions={"component": "Valid options: ['chart', 'table']"},
+        )
+
+        assert "MUST use one of the listed values" in result
+
+    def test_no_constraint_note_for_regular_fields(self):
+        """Should not add constraint note when no enum fields."""
+        from penguiflow.planner.prompts import render_arg_fill_prompt
+
+        result = render_arg_fill_prompt(
+            tool_name="test_tool",
+            missing_fields=["query"],
+            field_descriptions={"query": "The search query"},
+        )
+
+        assert "MUST use one of the listed values" not in result
+
+
 class TestIsArgFillEligible:
     """Tests for ReactPlanner._is_arg_fill_eligible."""
 
@@ -865,9 +1049,10 @@ class TestIsArgFillEligible:
         )
 
         trajectory = Trajectory(query="test")
-        trajectory.metadata["arg_fill_attempted"] = True
-
         spec = planner._spec_by_name["string_tool"]
+        # Per-tool flag now (not global)
+        trajectory.metadata[f"arg_fill_attempted_{spec.name}"] = True
+
         result = planner._is_arg_fill_eligible(spec, ["query"], trajectory)
         assert result is False
 

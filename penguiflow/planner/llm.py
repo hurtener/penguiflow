@@ -721,8 +721,41 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
         if "proactive_report" in llm_context:
             proactive_report = llm_context.get("proactive_report")
 
-    # Build system prompt with optional proactive report guidance
+    # Build system prompt with optional guidance
     system_prompt = planner._system_prompt
+
+    # Inject finish_repair guidance if model has needed repair in past runs
+    # Uses planner's internal tracking (persists across runs, no orchestrator wiring needed)
+    finish_repair_count = planner._finish_repair_history_count
+    arg_fill_count = planner._arg_fill_repair_history_count
+
+    logger.info(
+        "build_messages_repair_counts",
+        extra={
+            "finish_repair_history_count": finish_repair_count,
+            "arg_fill_history_count": arg_fill_count,
+        },
+    )
+
+    finish_guidance = prompts.render_finish_guidance(finish_repair_count)
+    if finish_guidance is not None:
+        tier = "critical" if finish_repair_count >= 3 else ("warning" if finish_repair_count >= 2 else "reminder")
+        logger.info("injecting_finish_guidance", extra={"tier": tier, "count": finish_repair_count})
+        system_prompt = prompts.merge_prompt_extras(
+            system_prompt,
+            finish_guidance,
+        ) or system_prompt
+
+    # Inject arg_fill guidance if model has repeatedly failed to provide valid args
+    arg_fill_guidance = prompts.render_arg_fill_guidance(arg_fill_count)
+    if arg_fill_guidance is not None:
+        tier = "critical" if arg_fill_count >= 3 else ("warning" if arg_fill_count >= 2 else "reminder")
+        logger.info("injecting_arg_fill_guidance", extra={"tier": tier, "count": arg_fill_count})
+        system_prompt = prompts.merge_prompt_extras(
+            system_prompt,
+            arg_fill_guidance,
+        ) or system_prompt
+
     if proactive_report is not None:
         system_prompt = prompts.merge_prompt_extras(
             system_prompt,
