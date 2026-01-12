@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from . import prompts
 from .llm import _coerce_llm_response, _LiteLLMJSONClient
-from .migration import normalize_action
+from .migration import normalize_action_with_debug
 from .models import PlannerAction, PlannerEvent
 from .streaming import _StreamingArgsExtractor, _StreamingThoughtExtractor
 from .trajectory import Trajectory
@@ -39,6 +39,17 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
     messages: list[dict[str, str]] = list(base_messages)
     last_error: str | None = None
     last_raw: str | None = None
+
+    # DEBUG_REMOVE: Log message structure being sent to LLM
+    logger.info(
+        "DEBUG_step_messages",
+        extra={
+            "message_count": len(messages),
+            "message_roles": [m.get("role") for m in messages],
+            "last_message_preview": messages[-1].get("content", "")[:500] if messages else "none",
+            "has_arg_repair": arg_repair_message is not None,
+        },
+    )
 
     for attempt in range(1, planner._repair_attempts + 1):
         if last_error is not None:
@@ -203,9 +214,9 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
         last_raw = raw
         planner._cost_tracker.record_main_call(cost)
 
-        # Debug log the raw LLM response for troubleshooting
-        logger.debug(
-            "llm_raw_response",
+        # DEBUG_REMOVE: Log raw LLM response for troubleshooting (INFO level for debugging)
+        logger.info(
+            "DEBUG_llm_raw_response",
             extra={
                 "attempt": attempt,
                 "response_len": len(raw),
@@ -214,7 +225,7 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
         )
 
         try:
-            action = normalize_action(raw)
+            action, parse_debug = normalize_action_with_debug(raw)
         except ValueError as exc:
             # Unparseable JSON (e.g. weak model emitted non-JSON). Treat as repairable.
             last_error = str(exc)
@@ -239,16 +250,73 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
             last_error = json.dumps(exc.errors(), ensure_ascii=False)
             continue
 
+        # Attach raw LLM response for debugging (excluded from serialization)
+        action.raw_llm_response = raw
+        if parse_debug is not None:
+            other_actions = parse_debug.get("other_actions")
+            if isinstance(other_actions, list) and other_actions:
+                # Attach candidates to the action for runtime fallbacks/batched execution.
+                action.alternate_actions = [item for item in other_actions if isinstance(item, dict)]
+                # Track repeated multi-action emission across runs to inject guidance.
+                if hasattr(planner, "_multi_action_history_count"):
+                    planner._multi_action_history_count += 1
+            # Persist the parse diagnostics (truncated previews only) so operators can
+            # inspect what text/JSON was ignored when models emit mixed outputs.
+            if isinstance(trajectory.metadata, MutableMapping):
+                history = trajectory.metadata.get("llm_parse_extras")
+                if not isinstance(history, list):
+                    history = []
+                    trajectory.metadata["llm_parse_extras"] = history
+                # Avoid bloating trajectory storage: keep only small candidate fields.
+                entry = {
+                    "attempt": attempt,
+                    **{k: v for k, v in parse_debug.items() if k != "other_actions"},
+                }
+                if isinstance(other_actions, list):
+                    entry["other_actions"] = other_actions
+                history.append(entry)
+                # Cap history to avoid unbounded growth in long runs.
+                if len(history) > 10:
+                    del history[: len(history) - 10]
+            # Emit a structured event for UIs/logs (only when there is something to report).
+            ignored_len = parse_debug.get("ignored_text_len")
+            other_count = parse_debug.get("other_json_count")
+            if (
+                planner._event_callback is not None
+                and (
+                    (isinstance(ignored_len, int) and ignored_len > 0)
+                    or (isinstance(other_count, int) and other_count > 0)
+                )
+            ):
+                # Keep SSE payload small: exclude raw candidate args.
+                event_debug = {k: v for k, v in parse_debug.items() if k != "other_actions"}
+                planner._emit_event(
+                    PlannerEvent(
+                        event_type="llm_parse_extras",
+                        ts=planner._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        extra={
+                            **event_debug,
+                            "attempt": attempt,
+                        },
+                    )
+                )
+
         # Log successful parse with args info for finish actions
         if action.next_node == "final_response":
-            logger.debug(
-                "finish_action_parsed",
-                extra={
-                    "args_keys": list(action.args.keys()),
-                    "raw_answer_present": "raw_answer" in action.args,
-                    "answer_present": "answer" in action.args,
-                },
-            )
+            has_answer = "answer" in action.args or "raw_answer" in action.args
+            # Use INFO level if answer is missing (helps debug repair triggers)
+            # Also log full raw LLM output so we can see exactly what the model returned
+            log_level = logging.INFO if not has_answer else logging.DEBUG
+            extra: dict[str, Any] = {
+                "args_keys": list(action.args.keys()),
+                "raw_answer_present": "raw_answer" in action.args,
+                "answer_present": "answer" in action.args,
+            }
+            if not has_answer:
+                # Log full raw response (truncated at 2000 chars) to help debug
+                extra["raw_llm_output"] = raw[:2000] if len(raw) > 2000 else raw
+            logger.log(log_level, "finish_action_parsed", extra=extra)
         return action
 
     if last_raw is not None:

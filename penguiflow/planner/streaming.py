@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from re import Pattern
+from typing import Any, ClassVar
 
 
 @dataclass(slots=True)
@@ -110,6 +112,11 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
     6. Start streaming content
     """
 
+    # Pre-compiled regex patterns for streaming performance (RFC alignment)
+    _RE_NEXT_NODE: ClassVar[Pattern[str]] = re.compile(r'"next_node"\s*:\s*(null|"[^"]*")')
+    _RE_ARGS_KEY: ClassVar[Pattern[str]] = re.compile(r'"args"\s*:')
+    _RE_ANSWER_KEY: ClassVar[Pattern[str]] = re.compile(r'"(?:answer|raw_answer)"\s*:')
+
     __slots__ = (
         "_is_finish_action",
         "_next_node_seen",
@@ -152,9 +159,7 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
 
         # Detect next_node value (null or string) as early as possible.
         if not self._next_node_seen:
-            import re
-
-            next_node_match = re.search(r'"next_node"\s*:\s*(null|"[^"]*")', self._buffer)
+            next_node_match = self._RE_NEXT_NODE.search(self._buffer)
             if next_node_match:
                 self._next_node_seen = True
                 token = next_node_match.group(1)
@@ -171,11 +176,9 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
         # This allows streaming to start as soon as we find the opening quote
         # instead of waiting for the entire pattern
         if not self._next_node_is_non_null and not self._in_args_string:
-            import re
-
             # Stage 1: Look for "args":
             if not self._found_args_key:
-                args_key_match = re.search(r'"args"\s*:', self._buffer)
+                args_key_match = self._RE_ARGS_KEY.search(self._buffer)
                 if args_key_match:
                     self._found_args_key = True
                     self._buffer = self._buffer[args_key_match.end() :]
@@ -189,7 +192,7 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
 
             # Stage 3: Look for "answer": or "raw_answer":
             if self._found_args_brace and not self._found_answer_key:
-                answer_key_match = re.search(r'"(?:answer|raw_answer)"\s*:', self._buffer)
+                answer_key_match = self._RE_ANSWER_KEY.search(self._buffer)
                 if answer_key_match:
                     self._found_answer_key = True
                     self._buffer = self._buffer[answer_key_match.end() :]
@@ -218,6 +221,9 @@ class _StreamingThoughtExtractor(_JsonStringBufferExtractor):
     UI renders it in a collapsible "Thinking…" panel (not as a user-facing answer).
     """
 
+    # Pre-compiled regex pattern for thought extraction (RFC alignment)
+    _RE_THOUGHT_KEY: ClassVar[Pattern[str]] = re.compile(r'"thought"\s*:\s*"')
+
     __slots__ = ("_in_thought_string", "_emitted_count", "_started")
 
     def __init__(self) -> None:
@@ -235,9 +241,7 @@ class _StreamingThoughtExtractor(_JsonStringBufferExtractor):
         emits: list[str] = []
 
         if not self._started and not self._in_thought_string:
-            import re
-
-            match = re.search(r'"thought"\s*:\s*"', self._buffer)
+            match = self._RE_THOUGHT_KEY.search(self._buffer)
             if match:
                 self._started = True
                 self._in_thought_string = True

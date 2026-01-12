@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
@@ -58,3 +58,39 @@ async def test_build_tool_job_pipeline_runs_tool_and_emits_tool_call() -> None:
     updates = await session.list_updates(task_id=task_id)
     assert any(update.update_type == UpdateType.TOOL_CALL for update in updates)
 
+
+class OutWithArtifact(BaseModel):
+    answer: str
+    chart_artifacts: dict | None = Field(default=None, json_schema_extra={"artifact": True})
+
+
+@tool(desc="Tool for job mode with artifacts.")
+async def job_tool_with_artifact(args: Args, ctx):  # type: ignore[no-untyped-def]
+    _ = ctx
+    return {
+        "answer": f"ok:{args.x}",
+        "chart_artifacts": {"type": "echarts", "config": {"title": {"text": "Job chart"}}},
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_tool_job_pipeline_collects_artifact_fields() -> None:
+    registry = ModelRegistry()
+    registry.register("job_tool_with_artifact", Args, OutWithArtifact)
+    spec = build_catalog([Node(job_tool_with_artifact, name="job_tool_with_artifact")], registry)[0]
+
+    session = StreamingSession("s-tooljob-artifacts")
+    pipeline = build_tool_job_pipeline(spec=spec, args_payload={"x": 3})
+    task_id = "t-job-artifacts"
+
+    result = await session.run_task(pipeline, task_type=TaskType.BACKGROUND, task_id=task_id, query=None)
+    assert result.payload["answer"] == "ok:3"
+    assert result.context_patch is not None
+    assert result.context_patch.artifacts
+    assert result.context_patch.artifacts[0]["node"] == "job_tool_with_artifact"
+    assert result.context_patch.artifacts[0]["field"] == "chart_artifacts"
+    stub = result.context_patch.artifacts[0]["artifact"]
+    assert stub["type"] == "echarts"
+    assert "config" not in stub
+    assert stub["artifact"]["id"]
+    assert result.artifacts == result.context_patch.artifacts

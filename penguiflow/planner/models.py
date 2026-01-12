@@ -4,12 +4,88 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast
 
 from pydantic import BaseModel, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from .context import PlannerPauseReason
+
+# ---------------------------------------------------------------------------
+# TypedDict schemas for unified action args (RFC_UNIFIED_ACTION_SCHEMA)
+# ---------------------------------------------------------------------------
+
+
+class PlanStep(TypedDict):
+    """Single step in a parallel plan."""
+
+    node: str
+    args: dict[str, Any]
+
+
+class PlanJoin(TypedDict, total=False):
+    """Aggregation config after parallel execution."""
+
+    node: str | None
+    args: dict[str, Any]
+    inject: dict[str, str]
+
+
+class PlanArgs(TypedDict):
+    """Args schema for next_node='parallel'."""
+
+    steps: list[PlanStep]
+    join: NotRequired[PlanJoin]
+
+
+class TaskArgs(TypedDict, total=False):
+    """Args schema for next_node='task.subagent' and next_node='task.tool'."""
+
+    name: str
+    # subagent mode
+    query: str
+    # tool job mode
+    tool: str
+    tool_args: dict[str, Any]
+    # merge behavior
+    merge_strategy: Literal["HUMAN_GATED", "APPEND", "REPLACE"]
+    # task groups
+    group: str
+    group_id: str
+    group_sealed: bool
+    group_report: Literal["all", "any", "none"]
+    group_merge_strategy: Literal["HUMAN_GATED", "APPEND", "REPLACE"]
+    retain_turn: bool
+
+
+class FinalResponseArgs(TypedDict, total=False):
+    """Args schema for next_node='final_response'."""
+
+    answer: str
+    artifacts: dict[str, Any]
+    sources: list[dict[str, Any]]
+    suggested_actions: list[dict[str, Any]]
+    confidence: float
+    language: str
+
+
+# ---------------------------------------------------------------------------
+# Action format configuration (RFC_UNIFIED_ACTION_SCHEMA)
+# ---------------------------------------------------------------------------
+
+
+class ActionFormat:
+    """Configuration for action schema parsing format.
+
+    Values:
+        UNIFIED: Use the unified 2-field format (next_node + args only)
+        LEGACY: Use the legacy 5-field format with separate tool_name, plan, etc.
+        AUTO: Automatically detect format from LLM response structure
+    """
+
+    UNIFIED = "unified"
+    LEGACY = "legacy"
+    AUTO = "auto"
 
 
 class JSONLLMClient(Protocol):
@@ -172,22 +248,48 @@ class PlannerAction(BaseModel):
     Internally, we keep a best-effort ``thought`` field for trajectory logging and
     repair prompts, but it is excluded from the JSON schema so it is not required
     (or encouraged) in structured outputs.
+
+    Special next_node values:
+    - "final_response": Terminal action, args.answer streams to user
+    - "parallel": Parallel execution, args contains steps and join config
+    - "task.subagent": Background subagent task, args contains query and group config
+    - "task.tool": Background single-tool job, args contains tool/tool_args and group config
+    - Any other value: Tool call, args passed to the tool
     """
 
     next_node: str
     args: dict[str, Any] = Field(default_factory=dict)
     thought: SkipJsonSchema[str] = ""
+    # Internal field to carry raw LLM response for debugging (excluded from serialization)
+    raw_llm_response: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
+    # Optional additional action candidates extracted from mixed model output
+    # (e.g. multiple JSON objects in a single response). Excluded from schema/serialization.
+    alternate_actions: SkipJsonSchema[list[dict[str, Any]] | None] = Field(default=None, exclude=True)
 
     def is_terminal(self) -> bool:
+        """True if this is a terminal action (final response to user)."""
         return self.next_node == "final_response"
 
     def is_parallel(self) -> bool:
+        """True if this is a parallel execution plan."""
         return self.next_node == "parallel"
 
+    def is_background_task(self) -> bool:
+        """True if this is a background task spawn."""
+        return self.next_node in {"task.subagent", "task.tool"}
+
     def is_tool_call(self) -> bool:
-        return self.next_node not in RESERVED_NEXT_NODES
+        """True if this is a regular tool call."""
+        return self.next_node not in SPECIAL_NODE_TYPES
+
+    def get_answer(self) -> str | None:
+        """Extract answer text for terminal actions."""
+        if not self.is_terminal():
+            return None
+        return self.args.get("answer")
 
     def answer_text(self) -> str | None:
+        """Extract answer from args.answer or args.raw_answer (backward compatible)."""
         value = self.args.get("answer")
         if isinstance(value, str):
             return value
@@ -196,8 +298,72 @@ class PlannerAction(BaseModel):
             return legacy
         return None
 
+    def get_plan_steps(self) -> list[PlanStep] | None:
+        """Extract parallel plan steps."""
+        if not self.is_parallel():
+            return None
+        steps = self.args.get("steps", [])
+        return steps if isinstance(steps, list) else []
 
-RESERVED_NEXT_NODES = frozenset({"parallel", "task.subagent", "task.tool", "final_response"})
+    def get_plan_join(self) -> PlanJoin | None:
+        """Extract parallel plan join config."""
+        if not self.is_parallel():
+            return None
+        join = self.args.get("join")
+        return cast(PlanJoin, join) if isinstance(join, dict) else None
+
+
+# Special node types that aren't tool names (RFC_UNIFIED_ACTION_SCHEMA)
+SPECIAL_NODE_TYPES = frozenset({"parallel", "task.subagent", "task.tool", "final_response"})
+
+# Backward compatible alias
+RESERVED_NEXT_NODES = SPECIAL_NODE_TYPES
+
+
+@dataclass
+class ActionWithReasoning:
+    """Container for planner action with associated reasoning.
+
+    Reasoning comes from LiteLLM's native reasoning_content,
+    not from a JSON field.
+    """
+
+    action: PlannerAction
+    reasoning: str | None = None
+    reasoning_tokens: int | None = None
+
+    @classmethod
+    def from_llm_response(
+        cls,
+        response: Any,
+        action: PlannerAction,
+    ) -> ActionWithReasoning:
+        """Create from LiteLLM response with reasoning extraction."""
+        reasoning = None
+        reasoning_tokens = None
+
+        if isinstance(response, Mapping):
+            choice = response.get("choices", [{}])[0]
+            message = choice.get("message", {}) if isinstance(choice, Mapping) else {}
+            reasoning = message.get("reasoning_content")
+            usage = response.get("usage", {})
+            if isinstance(usage, Mapping):
+                reasoning_tokens = usage.get("reasoning_tokens")
+        else:
+            try:
+                message = response.choices[0].message
+                reasoning = getattr(message, "reasoning_content", None)
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    reasoning_tokens = getattr(usage, "reasoning_tokens", None)
+            except (AttributeError, IndexError):
+                pass
+
+        return cls(
+            action=action,
+            reasoning=reasoning,
+            reasoning_tokens=reasoning_tokens,
+        )
 
 
 class PlannerPause(BaseModel):

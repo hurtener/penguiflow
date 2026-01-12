@@ -131,6 +131,9 @@ planner:
   max_iters: 12              # Maximum planning iterations
   hop_budget: 8              # Maximum tool calls per run
   absolute_max_parallel: 5   # Max parallel tool executions
+  # multi_action_sequential: false       # Execute extra tool calls if model emits multiple JSON objects
+  # multi_action_read_only_only: true    # Only auto-execute extra actions for pure/read tools
+  # multi_action_max_tools: 2            # Max extra tool calls per LLM response
 
   # System prompt extension - define your agent's personality and capabilities
   system_prompt_extra: |

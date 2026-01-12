@@ -86,6 +86,9 @@ class Config:
     planner_hop_budget: int = {{ planner_hop_budget }}
     planner_absolute_max_parallel: int = {{ planner_absolute_max_parallel }}
     planner_stream_final_response: bool = {{ planner_stream_final_response }}
+    planner_multi_action_sequential: bool = {{ planner_multi_action_sequential }}
+    planner_multi_action_read_only_only: bool = {{ planner_multi_action_read_only_only }}
+    planner_multi_action_max_tools: int = {{ planner_multi_action_max_tools }}
 
     # Artifact Store (binary/large text)
     artifact_store_enabled: bool = {{ artifact_store_enabled }}
@@ -169,6 +172,18 @@ class Config:
             planner_hop_budget=_env_int("PLANNER_HOP_BUDGET", {{ planner_hop_budget }}),
             planner_absolute_max_parallel=_env_int("PLANNER_ABSOLUTE_MAX_PARALLEL", {{ planner_absolute_max_parallel }}),
             planner_stream_final_response=_env_flag("PLANNER_STREAM_FINAL_RESPONSE", {{ planner_stream_final_response }}),
+            planner_multi_action_sequential=_env_flag(
+                "PLANNER_MULTI_ACTION_SEQUENTIAL",
+                {{ planner_multi_action_sequential }},
+            ),
+            planner_multi_action_read_only_only=_env_flag(
+                "PLANNER_MULTI_ACTION_READ_ONLY_ONLY",
+                {{ planner_multi_action_read_only_only }},
+            ),
+            planner_multi_action_max_tools=_env_int(
+                "PLANNER_MULTI_ACTION_MAX_TOOLS",
+                {{ planner_multi_action_max_tools }},
+            ),
 
             # Artifact Store (binary/large text)
             artifact_store_enabled=_env_flag("ARTIFACT_STORE_ENABLED", {{ artifact_store_enabled }}),

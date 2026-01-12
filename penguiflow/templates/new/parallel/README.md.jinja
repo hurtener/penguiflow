@@ -60,6 +60,9 @@ Key settings (via environment or `config.py`):
 | `LLM_MODEL` | `stub-llm` | LLM model identifier |
 | `PLANNER_MAX_ITERS` | `10` | Maximum planning iterations |
 | `PLANNER_HOP_BUDGET` | `6` | Maximum tool hops |
+| `PLANNER_MULTI_ACTION_SEQUENTIAL` | `false` | Execute extra tool actions sequentially when multiple JSON actions appear |
+| `PLANNER_MULTI_ACTION_READ_ONLY_ONLY` | `true` | Only auto-execute extra actions for read-only tools |
+| `PLANNER_MULTI_ACTION_MAX_TOOLS` | `2` | Max extra tool actions to auto-execute per turn |
 | `ABSOLUTE_MAX_PARALLEL` | `4` | Maximum concurrent tool calls |
 
 ## Use a Real LLM

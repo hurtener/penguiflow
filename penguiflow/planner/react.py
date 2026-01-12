@@ -344,10 +344,14 @@ class ReactPlanner:
     _system_prompt_extra: str | None
     _finish_repair_history_count: int
     _arg_fill_repair_history_count: int
+    _multi_action_history_count: int
     _time_source: Callable[[], float]
     _token_budget: int | None
     _tool_policy: ToolPolicy | None
     _background_tasks: BackgroundTasksConfig
+    _multi_action_sequential: bool
+    _multi_action_read_only_only: bool
+    _multi_action_max_tools: int
     _use_native_reasoning: bool
     _reasoning_effort: str | None
     _init_kwargs: dict[str, Any] | None
@@ -390,6 +394,9 @@ class ReactPlanner:
         short_term_memory: ShortTermMemory | ShortTermMemoryConfig | None = None,
         background_tasks: BackgroundTasksConfig | None = None,
         error_recovery: ErrorRecoveryConfig | None = None,
+        multi_action_sequential: bool = False,
+        multi_action_read_only_only: bool = True,
+        multi_action_max_tools: int = 2,
     ) -> None:
         # Store init kwargs so the planner can be safely forked for background tasks.
         # This is intentionally best-effort and uses references for non-serialisable objects.
@@ -429,6 +436,9 @@ class ReactPlanner:
             "short_term_memory": short_term_memory,
             "background_tasks": background_tasks,
             "error_recovery": error_recovery,
+            "multi_action_sequential": multi_action_sequential,
+            "multi_action_read_only_only": multi_action_read_only_only,
+            "multi_action_max_tools": multi_action_max_tools,
         }
         _init_react_planner(
             self,
@@ -467,6 +477,9 @@ class ReactPlanner:
             short_term_memory=short_term_memory,
             background_tasks=background_tasks,
             error_recovery=error_recovery,
+            multi_action_sequential=multi_action_sequential,
+            multi_action_read_only_only=multi_action_read_only_only,
+            multi_action_max_tools=multi_action_max_tools,
         )
 
     def fork(
@@ -1256,6 +1269,9 @@ class ReactPlanner:
         metadata["arg_fill_failure_count"] = int(trajectory.metadata.get("arg_fill_failure_count", 0))
         metadata["finish_repair_success_count"] = int(trajectory.metadata.get("finish_repair_success_count", 0))
         metadata["finish_repair_failure_count"] = int(trajectory.metadata.get("finish_repair_failure_count", 0))
+        # Used by streaming UIs to correlate the final done event with the
+        # step_start action_seq that began the finishing step.
+        metadata["answer_action_seq"] = self._action_seq
 
         # Accumulate repair counts for tiered guidance in future runs
         # These persist in the planner instance across runs

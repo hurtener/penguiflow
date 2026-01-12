@@ -68,6 +68,9 @@ LLM_MODEL=bedrock/anthropic.claude-3-sonnet-20240229-v1:0
 |----------|-------------|---------|
 | `LLM_MODEL` | Primary LLM model identifier | `stub-llm` |
 | `MEMORY_BASE_URL` | Memory service endpoint | `http://localhost:8000` |
+| `PLANNER_MULTI_ACTION_SEQUENTIAL` | Execute extra tool actions sequentially when multiple JSON actions appear | `false` |
+| `PLANNER_MULTI_ACTION_READ_ONLY_ONLY` | Only auto-execute extra actions for read-only tools | `true` |
+| `PLANNER_MULTI_ACTION_MAX_TOOLS` | Max extra tool actions to auto-execute per turn | `2` |
 
 ## Switching from ScriptedLLM to Real LLM
 

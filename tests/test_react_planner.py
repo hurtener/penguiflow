@@ -352,6 +352,301 @@ async def test_arg_validation_emits_events_for_placeholders() -> None:
 
 
 @pytest.mark.asyncio
+async def test_finish_metadata_includes_answer_action_seq() -> None:
+    """Ensure streaming UIs can correlate final 'done' with step_start action_seq."""
+    events: list[PlannerEvent] = []
+    planner = make_planner(
+        StubClient(
+            [
+                {
+                    "thought": "finish",
+                    "next_node": "final_response",
+                    "args": {"raw_answer": "Done"},
+                }
+            ]
+        ),
+        max_iters=3,
+        event_callback=events.append,
+    )
+    result = await planner.run("hi")
+
+    assert result.reason == "answer_complete"
+    assert isinstance(result.metadata.get("answer_action_seq"), int)
+    assert result.metadata["answer_action_seq"] == 1
+
+    step_start = next((evt for evt in events if evt.event_type == "step_start"), None)
+    assert step_start is not None
+    assert step_start.extra.get("action_seq") == result.metadata["answer_action_seq"]
+
+
+@pytest.mark.asyncio
+async def test_malformed_json_finish_still_sets_answer_action_seq() -> None:
+    """Regression: malformed JSON fallback answers must still reach streaming UIs."""
+
+    class MalformedClient:
+        def __init__(self, raw_responses: list[str]) -> None:
+            self._responses = list(raw_responses)
+
+        async def complete(  # type: ignore[override]
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del messages, response_format, stream, on_stream_chunk
+            if not self._responses:
+                raise AssertionError("No stub responses left")
+            return self._responses.pop(0), 0.0
+
+    events: list[PlannerEvent] = []
+    planner = make_planner(
+        MalformedClient(
+            [
+                '{"next_node":"triage","args":{"question":"hi"}',  # missing }
+                '{"next_node":"retrieve","args":{"intent":"docs"}',  # missing }
+                '{"next_node":"final_response","args":{"raw_answer":"Done"}',  # missing }}
+            ]
+        ),
+        repair_attempts=3,
+        max_iters=3,
+        event_callback=events.append,
+    )
+    result = await planner.run("hi")
+
+    assert result.reason == "answer_complete"
+    assert result.payload["raw_answer"] == "Done"
+    assert result.metadata["answer_action_seq"] == 1
+
+    step_start = next((evt for evt in events if evt.event_type == "step_start"), None)
+    assert step_start is not None
+    assert step_start.extra.get("action_seq") == result.metadata["answer_action_seq"]
+
+
+@pytest.mark.asyncio
+async def test_finish_repair_fills_missing_answer() -> None:
+    """When model finishes without an answer, finish_repair should fill it."""
+
+    class FinishRepairClient:
+        def __init__(self, raw_responses: list[str]) -> None:
+            self._responses = list(raw_responses)
+
+        async def complete(  # type: ignore[override]
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del messages, response_format, stream, on_stream_chunk
+            if not self._responses:
+                raise AssertionError("No stub responses left")
+            return self._responses.pop(0), 0.0
+
+    events: list[PlannerEvent] = []
+    planner = make_planner(
+        FinishRepairClient(
+            [
+                # Finish without answer (triggers finish_repair).
+                '{"next_node":"final_response","args":{}}',
+                # Finish repair response.
+                '{"raw_answer":"Fixed"}',
+            ]
+        ),
+        max_iters=1,
+        event_callback=events.append,
+    )
+    result = await planner.run("hi")
+
+    assert result.reason == "answer_complete"
+    assert result.payload["raw_answer"] == "Fixed"
+    assert any(evt.event_type == "finish_repair_attempt" for evt in events)
+    assert any(evt.event_type == "finish_repair_success" for evt in events)
+    assert any(
+        evt.event_type == "llm_stream_chunk" and evt.extra.get("channel") == "answer" for evt in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_mixed_output_with_multiple_json_objects_executes_tool_call() -> None:
+    """Regression: if the model emits multiple JSON objects, execute the action one."""
+
+    class MixedClient:
+        def __init__(self, raw_responses: list[str]) -> None:
+            self._responses = list(raw_responses)
+
+        async def complete(  # type: ignore[override]
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del messages, response_format, stream, on_stream_chunk
+            if not self._responses:
+                raise AssertionError("No stub responses left")
+            return self._responses.pop(0), 0.0
+
+    events: list[PlannerEvent] = []
+    planner = make_planner(
+        MixedClient(
+            [
+                # Tool call JSON, plus a second JSON object that previously broke naive extraction.
+                '{"next_node":"retrieve","args":{"intent":"docs"}}\n'
+                '{"answer":"```json\\n{\\n  \\"next_node\\": \\"retrieve\\"\\n}\\n```"}',
+                # Normal finish.
+                '{"next_node":"final_response","args":{"answer":"ok"}}',
+            ]
+        ),
+        max_iters=5,
+        event_callback=events.append,
+    )
+    result = await planner.run("hi")
+
+    assert result.reason == "answer_complete"
+    assert result.payload["raw_answer"] == "ok"
+    assert any(evt.event_type == "tool_call_start" for evt in events)
+    assert any(evt.event_type == "step_complete" for evt in events)
+
+
+@pytest.mark.asyncio
+async def test_step_records_llm_parse_extras_in_trajectory_metadata() -> None:
+    """Ensure parse extras are persisted for later inspection."""
+
+    class MixedClient:
+        def __init__(self, raw_responses: list[str]) -> None:
+            self._responses = list(raw_responses)
+
+        async def complete(  # type: ignore[override]
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del messages, response_format, stream, on_stream_chunk
+            if not self._responses:
+                raise AssertionError("No stub responses left")
+            return self._responses.pop(0), 0.0
+
+    planner = make_planner(
+        MixedClient(
+            [
+                "PREFACE\n"
+                '{"next_node":"retrieve","args":{"intent":"docs"}}\n'
+                '{"foo":"bar"}\n',
+                '{"next_node":"final_response","args":{"answer":"ok"}}',
+            ]
+        ),
+        max_iters=5,
+    )
+    result = await planner.run("hi")
+
+    assert result.reason == "answer_complete"
+    trajectory_meta = result.metadata.get("trajectory_metadata", {})
+    extras = trajectory_meta.get("llm_parse_extras")
+    assert isinstance(extras, list)
+    assert extras, "Expected at least one llm_parse_extras entry"
+    assert extras[0].get("selected_next_node") == "retrieve"
+
+@pytest.mark.asyncio
+async def test_multi_action_fallback_uses_alternate_when_first_tool_invalid() -> None:
+    """If the model emits multiple actions, use the next valid tool candidate on failure."""
+
+    class MixedClient:
+        def __init__(self, raw_responses: list[str]) -> None:
+            self._responses = list(raw_responses)
+            self.calls: int = 0
+
+        async def complete(  # type: ignore[override]
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del messages, response_format, stream, on_stream_chunk
+            self.calls += 1
+            if not self._responses:
+                raise AssertionError("No stub responses left")
+            return self._responses.pop(0), 0.0
+
+    events: list[PlannerEvent] = []
+    client = MixedClient(
+        [
+            # First candidate is an unknown tool; second candidate is a real tool.
+            '{"next_node":"not_a_real_tool","args":{"x":1}}\\n'
+            '{"next_node":"triage","args":{"question":"hi"}}',
+            '{"next_node":"final_response","args":{"answer":"ok"}}',
+        ]
+    )
+    planner = make_planner(client, max_iters=5, event_callback=events.append)
+    result = await planner.run("hi")
+
+    assert result.reason == "answer_complete"
+    assert result.payload["raw_answer"] == "ok"
+    assert any(evt.event_type == "multi_action_fallback_used" for evt in events)
+    tool_starts = [evt for evt in events if evt.event_type == "tool_call_start"]
+    assert tool_starts and tool_starts[0].extra.get("tool_name") == "triage"
+
+
+@pytest.mark.asyncio
+async def test_multi_action_sequential_executes_extra_readonly_tools_without_llm_call() -> None:
+    """When enabled, run extra tool calls emitted in one LLM response sequentially."""
+
+    class MixedClient:
+        def __init__(self, raw_responses: list[str]) -> None:
+            self._responses = list(raw_responses)
+            self.calls: int = 0
+
+        async def complete(  # type: ignore[override]
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del messages, response_format, stream, on_stream_chunk
+            self.calls += 1
+            if not self._responses:
+                raise AssertionError("No stub responses left")
+            return self._responses.pop(0), 0.0
+
+    events: list[PlannerEvent] = []
+    client = MixedClient(
+        [
+            # Two tool calls in one response (triage + retrieve). final_response is ignored and requested next.
+            '{"next_node":"triage","args":{"question":"hi"}}\\n'
+            '{"next_node":"retrieve","args":{"intent":"docs"}}\\n'
+            '{"next_node":"final_response","args":{"answer":"premature"}}',
+            '{"next_node":"final_response","args":{"answer":"ok"}}',
+        ]
+    )
+    planner = make_planner(
+        client,
+        max_iters=10,
+        event_callback=events.append,
+        multi_action_sequential=True,
+        multi_action_read_only_only=True,
+        multi_action_max_tools=2,
+    )
+    result = await planner.run("hi")
+
+    assert result.reason == "answer_complete"
+    assert result.payload["raw_answer"] == "ok"
+    # Only two LLM calls: first mixed output, then final answer (retrieve was executed from queue).
+    assert client.calls == 2
+    tool_names = [evt.extra.get("tool_name") for evt in events if evt.event_type == "tool_call_start"]
+    assert tool_names == ["triage", "retrieve"]
+
+
+@pytest.mark.asyncio
 async def test_consecutive_arg_failures_force_finish() -> None:
     """Test that consecutive arg validation failures trigger early finish."""
     registry = ModelRegistry()

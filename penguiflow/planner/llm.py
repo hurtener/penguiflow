@@ -120,18 +120,64 @@ def extract_clean_error_message(exc: Exception) -> str:
 
 
 def _extract_json_from_text(text: str) -> str:
-    """Extract JSON object content from mixed text + fenced code blocks."""
+    """Extract JSON object content from mixed text + fenced code blocks.
 
+    Handles multiple scenarios including:
+    - Plain JSON object
+    - JSON in fenced code blocks (```json ... ```)
+    - Thinking/reasoning content followed by JSON (RFC fallback parsing)
+    """
     text = text.strip()
-    fence_match = re.search(r"```(?:json)?\\s*(\\{.*?\\})\\s*```", text, re.DOTALL)
+
+    # Try fenced code block first (```json ... ```)
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if fence_match:
         return fence_match.group(1)
 
+    # Fallback: find first { and last } to extract JSON object
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
         return text[start : end + 1]
+
     return text
+
+
+def _supports_reasoning(model_name: str) -> bool:
+    """Check if a model supports native reasoning via LiteLLM.
+
+    Uses LiteLLM's supports_reasoning() function when available.
+    Falls back to heuristic detection for known reasoning models.
+
+    Args:
+        model_name: The model identifier string (e.g., "openai/o1", "deepseek-reasoner").
+
+    Returns:
+        True if the model supports native reasoning content.
+    """
+    try:
+        import litellm
+
+        # Use LiteLLM's built-in detection if available.
+        if hasattr(litellm, "supports_reasoning"):
+            result = litellm.supports_reasoning(model=model_name)
+            # Only trust explicit True; for False/unknown we fall back to heuristics
+            # because LiteLLM may not recognize unprefixed or custom model IDs.
+            if result is True:
+                return True
+    except Exception:
+        pass
+
+    # Fallback heuristic for known reasoning models
+    lower = model_name.lower()
+    reasoning_indicators = (
+        "o1",  # OpenAI o1 family
+        "o3",  # OpenAI o3 family
+        "deepseek-reasoner",
+        "deepseek-r1",
+        "reasoning",
+    )
+    return any(indicator in lower for indicator in reasoning_indicators)
 
 
 def _coerce_llm_response(result: str | tuple[str, float]) -> tuple[str, float]:
@@ -468,12 +514,20 @@ class _LiteLLMJSONClient:
             params = dict(self._llm)
         params.setdefault("temperature", self._temperature)
         params["messages"] = list(messages)
-        if self._use_native_reasoning and self._reasoning_effort is not None:
+
+        # Only pass reasoning_effort if the model actually supports native reasoning.
+        # Some providers (e.g., Databricks) crash during parameter mapping if
+        # reasoning_effort is passed to non-reasoning models, even with drop_params=True.
+        model_name = self._llm if isinstance(self._llm, str) else self._llm.get("model", "")
+        if (
+            self._use_native_reasoning
+            and self._reasoning_effort is not None
+            and _supports_reasoning(model_name)
+        ):
             params["reasoning_effort"] = self._reasoning_effort
             # Providers vary in support; drop unsupported params instead of failing.
             params.setdefault("drop_params", True)
         if self._json_schema_mode and response_format is not None:
-            model_name = self._llm if isinstance(self._llm, str) else self._llm.get("model", "")
             policy = _response_format_policy(model_name)
 
             if "json_schema" in response_format:
@@ -662,6 +716,69 @@ class _LiteLLMJSONClient:
                         reasoning_content = reasoning_val if isinstance(reasoning_val, str) else None
 
                     if content_text is None:
+                        # DEBUG_REMOVE: Log full response details when content is empty
+                        # Check for tool_calls which might explain why content is empty
+                        _tool_calls = None
+                        _tool_calls_info = "none"
+                        if isinstance(response, Mapping):
+                            _debug_message = response.get("choices", [{}])[0].get("message", {})
+                            _debug_choice = response.get("choices", [{}])[0]
+                            if isinstance(_debug_message, Mapping):
+                                _tool_calls = _debug_message.get("tool_calls")
+                            else:
+                                _tool_calls = None
+                        else:
+                            _debug_message = getattr(response.choices[0], "message", None) if response.choices else None
+                            _debug_choice = response.choices[0] if response.choices else None
+                            _tool_calls = getattr(_debug_message, "tool_calls", None) if _debug_message else None
+
+                        if _tool_calls:
+                            if isinstance(_tool_calls, list):
+                                _tool_calls_info = f"list[{len(_tool_calls)}]"
+                                # Log first tool call details
+                                if _tool_calls:
+                                    first_tc = _tool_calls[0]
+                                    if isinstance(first_tc, Mapping):
+                                        fn_name = first_tc.get("function", {}).get("name", "unknown")
+                                        _tool_calls_info += f" first={fn_name}"
+                                    else:
+                                        fn = getattr(first_tc, "function", None)
+                                        fn_name = getattr(fn, "name", "unknown") if fn else "unknown"
+                                        _tool_calls_info += f" first={fn_name}"
+                            else:
+                                _tool_calls_info = f"type={type(_tool_calls).__name__}"
+
+                        response_keys = (
+                            list(response.keys()) if isinstance(response, Mapping) else "not_mapping"
+                        )
+                        choices_count = (
+                            len(response.get("choices", [])) if isinstance(response, Mapping) else "n/a"
+                        )
+                        message_keys = (
+                            list(_debug_message.keys())
+                            if isinstance(_debug_message, Mapping)
+                            else (dir(_debug_message)[:10] if _debug_message else "none")
+                        )
+                        finish_reason = (
+                            _debug_choice.get("finish_reason")
+                            if isinstance(_debug_choice, Mapping)
+                            else getattr(_debug_choice, "finish_reason", "n/a")
+                        )
+
+                        logger.warning(
+                            "DEBUG_llm_empty_content",
+                            extra={
+                                "response_type": type(response).__name__,
+                                "response_keys": response_keys,
+                                "choices_count": choices_count,
+                                "message_keys": message_keys,
+                                "content_val_type": type(content_val).__name__ if content_val is not None else "None",
+                                "content_val_repr": repr(content_val)[:200] if content_val is not None else "None",
+                                "reasoning_content": reasoning_content[:200] if reasoning_content else "None",
+                                "finish_reason": finish_reason,
+                                "tool_calls": _tool_calls_info,
+                            },
+                        )
                         raise RuntimeError("LiteLLM returned empty content")
 
                     if on_reasoning_chunk is not None and reasoning_content:
@@ -757,12 +874,14 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
     # Uses planner's internal tracking (persists across runs, no orchestrator wiring needed)
     finish_repair_count = planner._finish_repair_history_count
     arg_fill_count = planner._arg_fill_repair_history_count
+    multi_action_count = int(getattr(planner, "_multi_action_history_count", 0))
 
     logger.info(
         "build_messages_repair_counts",
         extra={
             "finish_repair_history_count": finish_repair_count,
             "arg_fill_history_count": arg_fill_count,
+            "multi_action_history_count": multi_action_count,
         },
     )
 
@@ -783,6 +902,15 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
         system_prompt = prompts.merge_prompt_extras(
             system_prompt,
             arg_fill_guidance,
+        ) or system_prompt
+
+    multi_action_guidance = prompts.render_multi_action_guidance(multi_action_count)
+    if multi_action_guidance is not None:
+        tier = "critical" if multi_action_count >= 3 else ("warning" if multi_action_count >= 2 else "reminder")
+        logger.info("injecting_multi_action_guidance", extra={"tier": tier, "count": multi_action_count})
+        system_prompt = prompts.merge_prompt_extras(
+            system_prompt,
+            multi_action_guidance,
         ) or system_prompt
 
     if proactive_report is not None:
@@ -1171,6 +1299,8 @@ __all__ = [
     "_sanitize_json_schema",
     "_estimate_size",
     "_redact_artifacts",
+    "_supports_reasoning",
+    "_extract_json_from_text",
     "build_messages",
     "summarise_trajectory",
     "critique_answer",

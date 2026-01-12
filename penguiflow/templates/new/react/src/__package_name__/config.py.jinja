@@ -35,6 +35,10 @@ class Config:
 
     memory_base_url: str = "http://localhost:8000"
     llm_model: str = "stub-llm"
+    # Planner settings
+    multi_action_sequential: bool = False
+    multi_action_read_only_only: bool = True
+    multi_action_max_tools: int = 2
     rich_output_enabled: bool = {{ "True" if with_rich_output else "False" }}
     rich_output_allowlist: list[str] = field(default_factory=lambda: {{ '["markdown", "json", "echarts", "mermaid", "plotly", "datagrid", "metric", "report", "grid", "tabs", "accordion", "code", "latex", "callout", "image", "video", "form", "confirm", "select_option"]' if with_rich_output else "[]" }})
     rich_output_include_prompt_catalog: bool = True
@@ -79,6 +83,9 @@ class Config:
         return cls(
             memory_base_url=os.getenv("MEMORY_BASE_URL", "http://localhost:8000"),
             llm_model=os.getenv("LLM_MODEL", "stub-llm"),
+            multi_action_sequential=_env_flag("PLANNER_MULTI_ACTION_SEQUENTIAL", False),
+            multi_action_read_only_only=_env_flag("PLANNER_MULTI_ACTION_READ_ONLY_ONLY", True),
+            multi_action_max_tools=_env_int("PLANNER_MULTI_ACTION_MAX_TOOLS", 2),
             rich_output_enabled=_env_flag("RICH_OUTPUT_ENABLED", {{ "True" if with_rich_output else "False" }}),
             rich_output_allowlist=_env_csv(
                 "RICH_OUTPUT_ALLOWLIST",

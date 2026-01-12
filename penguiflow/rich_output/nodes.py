@@ -10,7 +10,7 @@ from penguiflow.planner import ToolContext
 from penguiflow.planner.artifact_registry import (
     get_artifact_registry,
     has_artifact_refs,
-    resolve_artifact_refs,
+    resolve_artifact_refs_async,
 )
 
 from .runtime import get_runtime
@@ -62,11 +62,12 @@ async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> Rende
         if registry is None:
             raise RuntimeError("artifact_ref usage requires an active planner run")
         session_id = ctx.tool_context.get("session_id")
-        props = resolve_artifact_refs(
+        props = await resolve_artifact_refs_async(
             props,
             registry=registry,
             trajectory=getattr(ctx, "_trajectory", None),
             session_id=str(session_id) if session_id is not None else None,
+            artifact_store=getattr(ctx, "artifacts", None),
         )
         if not isinstance(props, Mapping):
             raise RuntimeError("artifact_ref resolution returned invalid props")
@@ -101,7 +102,20 @@ async def list_artifacts(args: ListArtifactsArgs, ctx: ToolContext) -> ListArtif
     registry = get_artifact_registry(ctx)
     if registry is None:
         return ListArtifactsResult(artifacts=[])
-    kind = None if args.kind == "all" else args.kind
+    # Backward/behavioral compatibility: callers often use kind="tool_artifact"
+    # when they really mean "any tool-produced artifact" (including ui_component).
+    kind = None if args.kind in {"all", "tool_artifact"} else args.kind
+
+    # Background task results are merged into llm_context as ContextPatch payloads.
+    # Those artifacts must be ingested into the in-run registry so they can be
+    # referenced via artifact_ref and resolved later in the same run.
+    llm_context = getattr(ctx, "llm_context", None)
+    if llm_context is not None:
+        try:
+            registry.ingest_llm_context(llm_context)
+        except Exception:
+            # Never fail listing due to best-effort ingestion.
+            pass
     items = registry.list_records(kind=kind, source_tool=args.source_tool, limit=args.limit)
     return ListArtifactsResult(artifacts=[ArtifactSummary.model_validate(item) for item in items])
 

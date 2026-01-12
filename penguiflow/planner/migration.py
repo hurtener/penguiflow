@@ -23,6 +23,268 @@ from .models import PlannerAction
 
 _DEFAULT_THOUGHT = "planning next step"
 
+
+def _action_candidate_score(data: Mapping[str, Any]) -> int:
+    """Heuristic score for selecting the best JSON object from mixed outputs."""
+
+    score = 0
+    if "action" in data and isinstance(data.get("action"), Mapping):
+        score += 5
+    if "next_node" in data:
+        score += 10
+        next_node = data.get("next_node")
+        if isinstance(next_node, str) and next_node.strip():
+            score += 2
+    # Legacy-ish markers.
+    if "thought" in data:
+        score += 1
+    if "plan" in data or "join" in data:
+        score += 1
+    if "args" in data:
+        score += 2
+        args = data.get("args")
+        if isinstance(args, Mapping):
+            score += 1
+        elif isinstance(args, str) and args.strip():
+            score += 1
+    return score
+
+
+def _iter_json_objects(text: str) -> list[object]:
+    """Extract JSON values from a mixed string.
+
+    Uses json.JSONDecoder.raw_decode to parse the *first complete* JSON value
+    starting at each candidate '{' or '['. This is robust to trailing prose or
+    multiple JSON objects concatenated together.
+    """
+
+    decoder = json.JSONDecoder()
+    objs: list[object] = []
+    idx = 0
+    n = len(text)
+    while idx < n:
+        next_obj = text.find("{", idx)
+        next_arr = text.find("[", idx)
+        if next_obj == -1 and next_arr == -1:
+            break
+        if next_obj == -1:
+            start = next_arr
+        elif next_arr == -1:
+            start = next_obj
+        else:
+            start = min(next_obj, next_arr)
+
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+
+        objs.append(obj)
+        # Continue scanning after the parsed value.
+        idx = max(end, start + 1)
+    return objs
+
+
+def _iter_json_spans(text: str) -> list[tuple[object, int, int]]:
+    """Extract JSON values with character spans in the original text."""
+
+    decoder = json.JSONDecoder()
+    spans: list[tuple[object, int, int]] = []
+    idx = 0
+    n = len(text)
+    while idx < n:
+        next_obj = text.find("{", idx)
+        next_arr = text.find("[", idx)
+        if next_obj == -1 and next_arr == -1:
+            break
+        if next_obj == -1:
+            start = next_arr
+        elif next_arr == -1:
+            start = next_obj
+        else:
+            start = min(next_obj, next_arr)
+
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+
+        spans.append((obj, start, end))
+        idx = max(end, start + 1)
+    return spans
+
+
+def _iter_json_fence_contents(text: str) -> list[tuple[str, int]]:
+    """Extract fenced code blocks (```json ... ```) contents."""
+
+    blocks: list[tuple[str, int]] = []
+    for match in re.finditer(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE):
+        content = match.group(1)
+        if content:
+            blocks.append((content.strip(), match.start(1)))
+    return blocks
+
+
+def _truncate_preview(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def _coerce_mapping_from_text(text: str) -> tuple[Mapping[str, Any] | None, dict[str, Any] | None]:
+    """Best-effort extraction of an action-like mapping from mixed model output."""
+
+    candidates: list[tuple[Mapping[str, Any], dict[str, Any]]] = []
+
+    # 1) Try fenced blocks first (models often wrap JSON there).
+    for block, base in _iter_json_fence_contents(text):
+        for obj, start, end in _iter_json_spans(block):
+            if isinstance(obj, Mapping):
+                meta = {"source": "fence", "start": base + start, "end": base + end}
+                candidates.append((obj, meta))
+            elif isinstance(obj, str) and "{" in obj:
+                # Some providers double-encode JSON as a string.
+                for inner in _iter_json_objects(obj):
+                    if isinstance(inner, Mapping):
+                        meta = {"source": "embedded_string", "start": None, "end": None}
+                        candidates.append((inner, meta))
+
+    # 2) Scan the whole text for JSON objects/arrays.
+    for obj, start, end in _iter_json_spans(text):
+        if isinstance(obj, Mapping):
+            meta = {"source": "text", "start": start, "end": end}
+            candidates.append((obj, meta))
+        elif isinstance(obj, list):
+            # Weak-model pattern: returns a list of candidate actions.
+            for item in obj:
+                if isinstance(item, Mapping):
+                    meta = {"source": "list_item", "start": start, "end": end}
+                    candidates.append((item, meta))
+        elif isinstance(obj, str) and "{" in obj:
+            for inner in _iter_json_objects(obj):
+                if isinstance(inner, Mapping):
+                    meta = {"source": "embedded_string", "start": None, "end": None}
+                    candidates.append((inner, meta))
+
+    if not candidates:
+        return None, None
+
+    # Prefer action-shaped payloads over generic dicts.
+    actionish: list[tuple[Mapping[str, Any], dict[str, Any]]] = []
+    for c, meta in candidates:
+        if (
+            "next_node" in c
+            or "thought" in c
+            or "plan" in c
+            or "join" in c
+            or ("action" in c and isinstance(c.get("action"), Mapping))
+        ):
+            actionish.append((c, meta))
+
+    # If we didn't find any action-shaped objects, avoid selecting nested args dicts
+    # (common when the outer JSON object is truncated). The only exception is when
+    # the dict itself looks like a final payload (answer/raw_answer), which we can
+    # still salvage.
+    if actionish:
+        pool = actionish
+    else:
+        answerish: list[tuple[Mapping[str, Any], dict[str, Any]]] = []
+        for c, meta in candidates:
+            if any(key in c for key in ("raw_answer", "answer")):
+                answerish.append((c, meta))
+        if not answerish:
+            return None, None
+        pool = answerish
+    # Deterministic: higher score first, then earlier start index (when known).
+    def _sort_key(item: tuple[Mapping[str, Any], dict[str, Any]]) -> tuple[int, int]:
+        c, meta = item
+        start = meta.get("start")
+        start_i = int(start) if isinstance(start, int) else 10**9
+        return (_action_candidate_score(c), -start_i)
+
+    selected, selected_meta = sorted(pool, key=_sort_key, reverse=True)[0]
+
+    # Build debug: show what was ignored outside the selected JSON span.
+    selected_start = selected_meta.get("start")
+    selected_end = selected_meta.get("end")
+    debug: dict[str, Any] = {
+        "selected_source": selected_meta.get("source"),
+        "selected_next_node": selected.get("next_node"),
+        "candidate_count": len(candidates),
+    }
+
+    # Summarize other JSON candidates for debugging (keys only; avoid huge payloads).
+    others: list[dict[str, Any]] = []
+    for c, meta in candidates:
+        if c is selected and meta is selected_meta:
+            continue
+        others.append(
+            {
+                "source": meta.get("source"),
+                "next_node": c.get("next_node"),
+                "keys": list(c.keys())[:12],
+                "score": _action_candidate_score(c),
+            }
+        )
+    debug["other_json_count"] = len(others)
+    debug["other_json_summaries"] = others[:5]
+
+    # Provide other action candidates (normalized shape) for runtime fallbacks.
+    # Order by appearance in the text when possible.
+    def _meta_start(m: dict[str, Any]) -> int:
+        start = m.get("start")
+        return int(start) if isinstance(start, int) else 10**9
+
+    ordered = sorted(candidates, key=lambda item: _meta_start(item[1]))
+    other_actions: list[dict[str, Any]] = []
+    for c, meta in ordered:
+        if c is selected and meta is selected_meta:
+            continue
+        try:
+            payload = _normalize_to_unified_payload(c)
+            candidate_action = PlannerAction.model_validate(payload)
+        except Exception:
+            continue
+        # Store only minimal fields; mask large answers for safety.
+        args_out = dict(candidate_action.args or {})
+        if candidate_action.next_node == "final_response":
+            answer_val = args_out.get("answer") or args_out.get("raw_answer")
+            if isinstance(answer_val, str) and answer_val:
+                args_out = {"answer_len": len(answer_val)}
+        other_actions.append({"next_node": candidate_action.next_node, "args": args_out})
+        if len(other_actions) >= 5:
+            break
+    debug["other_actions"] = other_actions
+
+    if (
+        isinstance(selected_start, int)
+        and isinstance(selected_end, int)
+        and 0 <= selected_start <= selected_end <= len(text)
+    ):
+        prefix = text[:selected_start]
+        suffix = text[selected_end:]
+        ignored = (prefix + suffix).strip()
+        debug.update(
+            {
+                "selected_start": selected_start,
+                "selected_end": selected_end,
+                "ignored_prefix_len": len(prefix),
+                "ignored_suffix_len": len(suffix),
+                "ignored_text_len": len(ignored),
+                "ignored_prefix_preview": _truncate_preview(prefix.strip(), 400),
+                "ignored_suffix_preview": _truncate_preview(suffix.strip(), 400),
+                "ignored_text_preview": _truncate_preview(ignored, 1200),
+            }
+        )
+    else:
+        # Unknown span (e.g., embedded string) – only provide coarse info.
+        debug["ignored_text_len"] = None
+
+    return selected, debug
+
+
 def dump_action_legacy(action: PlannerAction) -> dict[str, Any]:
     """Render a ``PlannerAction`` as the legacy on-disk/metadata shape.
 
@@ -100,14 +362,28 @@ def _coerce_mapping(raw: str | Mapping[str, Any]) -> Mapping[str, Any] | None:
     if not text:
         return None
 
+    # Fast path: direct JSON object.
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, Mapping) else None
+        except Exception:
+            pass
+
+    # Robust path: scan mixed text (reasoning + JSON, fenced blocks, multiple objects).
+    parsed, _debug = _coerce_mapping_from_text(text)
+    if parsed is not None:
+        return parsed
+
+    # Legacy fallback: attempt to extract a single object via naive slicing + python literal eval.
     extracted = _extract_json_object(text)
     try:
-        parsed = json.loads(extracted)
-        return parsed if isinstance(parsed, Mapping) else None
+        parsed2 = json.loads(extracted)
+        return parsed2 if isinstance(parsed2, Mapping) else None
     except Exception:
         try:
-            parsed = ast.literal_eval(extracted)
-            return parsed if isinstance(parsed, Mapping) else None
+            parsed2 = ast.literal_eval(extracted)
+            return parsed2 if isinstance(parsed2, Mapping) else None
         except Exception:
             return None
 
@@ -115,15 +391,51 @@ def _coerce_mapping(raw: str | Mapping[str, Any]) -> Mapping[str, Any] | None:
 def _extract_json_object(text: str) -> str:
     """Extract a JSON object from fenced or mixed text."""
 
-    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    # NOTE: This is intentionally a legacy fallback. Prefer _coerce_mapping_from_text(),
+    # which uses a real JSON decoder to identify complete objects.
+    fence_match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
     if fence_match:
-        return fence_match.group(1)
+        return fence_match.group(1).strip()
 
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
         return text[start : end + 1]
     return text
+
+
+def normalize_action_with_debug(raw: str | Mapping[str, Any]) -> tuple[PlannerAction, dict[str, Any] | None]:
+    """Normalize an action and return parse diagnostics for mixed outputs."""
+
+    if isinstance(raw, Mapping):
+        payload = _normalize_to_unified_payload(raw)
+        return PlannerAction.model_validate(payload), None
+
+    text = raw.strip()
+    if not text:
+        raise ValueError("action_payload_unparseable")
+
+    # Fast path: direct JSON object.
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, Mapping):
+                payload = _normalize_to_unified_payload(parsed)
+                return PlannerAction.model_validate(payload), None
+        except Exception:
+            pass
+
+    parsed, debug = _coerce_mapping_from_text(text)
+    if parsed is not None:
+        payload = _normalize_to_unified_payload(parsed)
+        return PlannerAction.model_validate(payload), debug
+
+    # Legacy fallback.
+    parsed2 = _coerce_mapping(text)
+    if parsed2 is None:
+        raise ValueError("action_payload_unparseable")
+    payload = _normalize_to_unified_payload(parsed2)
+    return PlannerAction.model_validate(payload), None
 
 
 def _normalize_to_unified_payload(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -147,6 +459,10 @@ def _normalize_to_unified_payload(data: Mapping[str, Any]) -> dict[str, Any]:
         if next_node in {"task.subagent", "task.tool", "task"}:
             return _normalize_unified_task(next_node, args, thought=data.get("thought"))
         return _normalize_unified_tool_call(next_node, args, thought=data.get("thought"))
+
+    # Weak-model fallback: sometimes returns final payload directly without wrapping in args/next_node.
+    if any(key in data for key in ("raw_answer", "answer")):
+        return _normalize_unified_final(data, thought=data.get("thought"))
 
     # Hybrid/unexpected: treat as finish attempt if there's an answer-like payload.
     if isinstance(args, Mapping) and any(key in args for key in ("raw_answer", "answer")):
@@ -234,7 +550,15 @@ def _normalize_unified_tool_call(next_node: str, args: Any, *, thought: Any = No
 
 
 def _normalize_unified_final(args: Any, *, thought: Any = None) -> dict[str, Any]:
-    payload: dict[str, Any] = dict(args) if isinstance(args, Mapping) else {}
+    # Handle case where weak model puts answer directly in args as a string
+    # e.g., {"next_node": "final_response", "args": "Here is my answer"}
+    if isinstance(args, str) and args.strip():
+        payload = {"answer": args.strip(), "raw_answer": args.strip()}
+    elif isinstance(args, Mapping):
+        payload = dict(args)
+    else:
+        payload = {}
+
     answer = _extract_answer_value(payload)
     if answer is not None:
         payload.setdefault("answer", answer)

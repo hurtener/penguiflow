@@ -299,6 +299,11 @@ def _parse_arg_fill_response(
     """
     Parse an arg-fill response, trying JSON first then tagged format.
 
+    Handles multiple response formats:
+    1. Simple field values: {"component": "report"}
+    2. Full action with args: {"next_node": "...", "args": {"component": "report"}}
+    3. Tagged format: <component>report</component>
+
     Returns:
         Parsed field values dict, or None if parsing failed.
     """
@@ -313,28 +318,44 @@ def _parse_arg_fill_response(
             lines = lines[:-1]
         text = "\n".join(lines).strip()
 
+    def _extract_fields_from_dict(source: dict[str, Any]) -> dict[str, Any] | None:
+        """Extract expected fields from a dict, rejecting placeholders."""
+        result: dict[str, Any] = {}
+        for field in expected_fields:
+            if field in source:
+                value = source[field]
+                # Reject placeholder values
+                if isinstance(value, str):
+                    lower = value.lower().strip()
+                    if lower in {"<auto>", "unknown", "n/a", "", "<fill_value>", "your value here"}:
+                        logger.debug(
+                            "arg_fill_placeholder_detected",
+                            extra={"field": field, "value": value},
+                        )
+                        return None
+                result[field] = value
+        return result if result else None
+
     # Try JSON parsing first
     try:
         parsed = json.loads(text)
         if isinstance(parsed, dict):
-            # Validate that all values are non-placeholder
-            result: dict[str, Any] = {}
-            for field in expected_fields:
-                if field in parsed:
-                    value = parsed[field]
-                    # Reject placeholder values
-                    if isinstance(value, str):
-                        lower = value.lower().strip()
-                        if lower in {"<auto>", "unknown", "n/a", "", "<fill_value>", "your value here"}:
-                            logger.debug(
-                                "arg_fill_placeholder_detected",
-                                extra={"field": field, "value": value},
-                            )
-                            return None
-                    result[field] = value
-            # Check we got at least one valid field
+            # First, try direct field extraction (simple format)
+            result = _extract_fields_from_dict(parsed)
             if result:
                 return result
+
+            # If that failed, check if model returned a full action with args
+            # This handles cases where the model returns {"next_node": "...", "args": {...}}
+            args = parsed.get("args")
+            if isinstance(args, dict):
+                result = _extract_fields_from_dict(args)
+                if result:
+                    logger.debug(
+                        "arg_fill_extracted_from_action_args",
+                        extra={"fields": list(result.keys())},
+                    )
+                    return result
     except json.JSONDecodeError:
         pass
 
@@ -422,6 +443,17 @@ async def _attempt_arg_fill(
 
     start_time = time_source()
 
+    # DEBUG_REMOVE: Log messages being sent to LLM for arg_fill
+    logger.info(
+        "DEBUG_arg_fill_messages",
+        extra={
+            "message_count": len(messages),
+            "last_message_role": messages[-1].get("role") if messages else "none",
+            "last_message_preview": messages[-1].get("content", "")[:500] if messages else "none",
+            "fill_prompt_preview": fill_prompt[:500],
+        },
+    )
+
     try:
         # Make the LLM call with a simple JSON response format
         # Use a minimal schema for just the expected fields
@@ -432,6 +464,15 @@ async def _attempt_arg_fill(
             on_stream_chunk=None,
         )
         raw, cost = _coerce_llm_response(llm_result)
+
+        # DEBUG_REMOVE: Log raw response for arg_fill
+        logger.info(
+            "DEBUG_arg_fill_raw_response",
+            extra={
+                "raw_len": len(raw) if raw else 0,
+                "raw_preview": raw[:1000] if raw else "empty",
+            },
+        )
         cost_tracker.record_main_call(cost)
 
         latency_ms = (time_source() - start_time) * 1000
@@ -662,6 +703,17 @@ async def _attempt_finish_repair(
 
     start_time = time_source()
 
+    # DEBUG_REMOVE: Log messages being sent to LLM for finish_repair
+    logger.info(
+        "DEBUG_finish_repair_messages",
+        extra={
+            "message_count": len(messages),
+            "last_message_role": messages[-1].get("role") if messages else "none",
+            "last_message_preview": messages[-1].get("content", "")[:500] if messages else "none",
+            "repair_prompt_preview": repair_prompt[:500],
+        },
+    )
+
     try:
         # Make the LLM call
         llm_result = await client.complete(
@@ -671,6 +723,16 @@ async def _attempt_finish_repair(
             on_stream_chunk=None,
         )
         raw, cost = _coerce_llm_response(llm_result)
+
+        # DEBUG_REMOVE: Log raw response for finish_repair
+        logger.info(
+            "DEBUG_finish_repair_raw_response",
+            extra={
+                "raw_len": len(raw) if raw else 0,
+                "raw_preview": raw[:1000] if raw else "empty",
+            },
+        )
+
         cost_tracker.record_main_call(cost)
 
         latency_ms = (time_source() - start_time) * 1000

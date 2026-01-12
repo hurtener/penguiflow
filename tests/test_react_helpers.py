@@ -870,6 +870,39 @@ class TestRenderArgFillGuidance:
         assert render_arg_fill_guidance(5) == render_arg_fill_guidance(3)
 
 
+class TestRenderMultiActionGuidance:
+    """Tests for render_multi_action_guidance tiered guidance."""
+
+    def test_no_guidance_for_zero(self):
+        from penguiflow.planner.prompts import render_multi_action_guidance
+        assert render_multi_action_guidance(0) is None
+
+    def test_no_guidance_for_negative(self):
+        from penguiflow.planner.prompts import render_multi_action_guidance
+        assert render_multi_action_guidance(-1) is None
+
+    def test_gentle_reminder_for_one(self):
+        from penguiflow.planner.prompts import render_multi_action_guidance
+        result = render_multi_action_guidance(1)
+        assert result is not None
+        assert "REMINDER" in result
+        assert "ONE JSON object" in result
+
+    def test_firm_warning_for_two(self):
+        from penguiflow.planner.prompts import render_multi_action_guidance
+        result = render_multi_action_guidance(2)
+        assert result is not None
+        assert "IMPORTANT" in result
+        assert "parallel" in result
+
+    def test_critical_for_three_plus(self):
+        from penguiflow.planner.prompts import render_multi_action_guidance
+        result = render_multi_action_guidance(3)
+        assert result is not None
+        assert "CRITICAL" in result
+        assert render_multi_action_guidance(5) == render_multi_action_guidance(3)
+
+
 class TestExtractFieldDescriptions:
     """Tests for _extract_field_descriptions enhanced extraction."""
 

@@ -23,12 +23,89 @@ from .pause import _PlannerPauseSignal
 from .planner_context import _PlannerContext
 from .react_utils import _safe_json_dumps
 from .streaming import _StreamingArgsExtractor
+from .tool_aliasing import rewrite_action_node
 from .trajectory import Trajectory, TrajectoryStep
 from .validation_repair import _autofill_missing_args, _coerce_tool_context, _validate_llm_context
 
 logger = logging.getLogger("penguiflow.planner")
 
 _TASK_SERVICE_KEY = "task_service"
+_MULTI_ACTION_BLOCKED_NODES = frozenset({"final_response", "render_component", "tasks.spawn"})
+_MULTI_ACTION_READONLY_SIDE_EFFECTS = frozenset({"pure", "read"})
+
+
+def _alternate_candidates(action: PlannerAction) -> list[PlannerAction]:
+    """Convert action.alternate_actions into PlannerAction instances."""
+
+    raw = action.alternate_actions
+    if not isinstance(raw, list) or not raw:
+        return []
+    candidates: list[PlannerAction] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        next_node = item.get("next_node")
+        args = item.get("args")
+        if not isinstance(next_node, str) or not next_node.strip():
+            continue
+        if not isinstance(args, dict):
+            args = {}
+        candidates.append(PlannerAction(next_node=next_node, args=dict(args)))
+    return candidates
+
+
+def _candidate_is_executable_tool(planner: Any, candidate: PlannerAction) -> bool:
+    if candidate.next_node in _MULTI_ACTION_BLOCKED_NODES:
+        return False
+    if not candidate.is_tool_call():
+        return False
+    spec = getattr(planner, "_spec_by_name", {}).get(candidate.next_node)
+    if spec is None:
+        return False
+    return True
+
+
+def _maybe_select_alternate_action(
+    planner: Any,
+    action: PlannerAction,
+    *,
+    prefer_same_tool: bool,
+    require_read_only: bool,
+) -> tuple[PlannerAction | None, str | None]:
+    """Pick an alternate candidate action that can be executed."""
+
+    candidates = _alternate_candidates(action)
+    if not candidates:
+        return None, None
+
+    def _passes_readonly(spec: Any) -> bool:
+        if not require_read_only:
+            return True
+        side_effects = getattr(spec, "side_effects", None)
+        return side_effects in _MULTI_ACTION_READONLY_SIDE_EFFECTS
+
+    # Prefer candidates that target the same tool (likely args correction).
+    ordered: list[PlannerAction] = []
+    if prefer_same_tool and action.next_node:
+        ordered.extend([c for c in candidates if c.next_node == action.next_node])
+    ordered.extend([c for c in candidates if c.next_node != action.next_node])
+
+    for candidate in ordered:
+        if candidate.next_node in _MULTI_ACTION_BLOCKED_NODES:
+            continue
+        if not candidate.is_tool_call():
+            continue
+        spec = planner._spec_by_name.get(candidate.next_node)
+        if spec is None:
+            continue
+        if not _passes_readonly(spec):
+            continue
+        try:
+            spec.args_model.model_validate(candidate.args)
+        except ValidationError:
+            continue
+        return candidate, spec.name
+    return None, None
 
 
 def _apply_steering(planner: Any, trajectory: Trajectory) -> None:
@@ -291,11 +368,22 @@ async def _handle_finish_action(
 
     if not has_answer and not trajectory.metadata.get("finish_repair_attempted"):
         # Model tried to finish without an answer - attempt repair
+        # Log full args for debugging what the model actually returned
+        args_dump = str(action.args)
+        if len(args_dump) > 1000:
+            args_dump = args_dump[:1000] + "..."
+        # Include raw LLM response for exact model output debugging
+        raw_response = action.raw_llm_response
+        if raw_response and len(raw_response) > 2000:
+            raw_response = raw_response[:2000] + "..."
         logger.info(
             "finish_repair_attempt",
             extra={
                 "args_keys": list(action.args.keys()),
+                "args_dump": args_dump,
                 "thought": action.thought,
+                "answer_text_result": repr(answer),  # Show what answer_text() returned
+                "raw_llm_response": raw_response,  # Exact model output
             },
         )
 
@@ -634,7 +722,67 @@ async def run_loop(
             # Emit step start event and bump action sequence
             step_start_ts, current_action_seq = _emit_step_start(planner, trajectory)
 
-            action = await step_with_recovery(planner, trajectory, config=error_recovery_config)
+            # Support executing additional tool actions that were emitted in the same
+            # LLM response as the previous step (multi-JSON outputs).
+            queued_action: PlannerAction | None = None
+            if isinstance(trajectory.metadata, MutableMapping):
+                pending = trajectory.metadata.get("pending_actions")
+                if isinstance(pending, list) and pending:
+                    item = pending.pop(0)
+                    if isinstance(item, dict):
+                        next_node = item.get("next_node")
+                        args = item.get("args")
+                        if isinstance(next_node, str):
+                            queued_action = PlannerAction(
+                                next_node=next_node,
+                                args=dict(args) if isinstance(args, dict) else {},
+                            )
+
+            if queued_action is not None:
+                action = queued_action
+            else:
+                action = await step_with_recovery(planner, trajectory, config=error_recovery_config)
+                # If this action came from a mixed-output response, enqueue eligible
+                # follow-up tool calls for sequential execution without another LLM call.
+                if getattr(planner, "_multi_action_sequential", False) and action.alternate_actions:
+                    if isinstance(trajectory.metadata, MutableMapping):
+                        pending = trajectory.metadata.get("pending_actions")
+                        if not isinstance(pending, list):
+                            pending = []
+                            trajectory.metadata["pending_actions"] = pending
+                        max_tools = int(getattr(planner, "_multi_action_max_tools", 0) or 0)
+                        read_only_only = bool(getattr(planner, "_multi_action_read_only_only", True))
+                        added = 0
+                        for candidate in _alternate_candidates(action):
+                            if candidate.next_node in _MULTI_ACTION_BLOCKED_NODES:
+                                continue
+                            if not candidate.is_tool_call():
+                                continue
+                            spec = planner._spec_by_name.get(candidate.next_node)
+                            if spec is None:
+                                continue
+                            if read_only_only and (
+                                getattr(spec, "side_effects", None) not in _MULTI_ACTION_READONLY_SIDE_EFFECTS
+                            ):
+                                continue
+                            pending.append({"next_node": candidate.next_node, "args": dict(candidate.args or {})})
+                            added += 1
+                            if max_tools > 0 and added >= max_tools:
+                                break
+                        if added:
+                            planner._emit_event(
+                                PlannerEvent(
+                                    event_type="multi_action_enqueued",
+                                    ts=planner._time_source(),
+                                    trajectory_step=len(trajectory.steps),
+                                    extra={"count": added},
+                                )
+                            )
+
+            # Normalize aliased tool names to their real names (RFC alignment)
+            tool_aliases = getattr(planner, "_tool_aliases", {})
+            if tool_aliases:
+                action.next_node = rewrite_action_node(action.next_node, alias_to_real=tool_aliases)
 
             # Log the action received from LLM
             _log_action_received(planner, action, trajectory)
@@ -707,48 +855,111 @@ async def run_loop(
 
             spec = planner._spec_by_name.get(action.next_node)
             if spec is None:
+                # Try alternate candidates (multi-action outputs) before requiring another LLM step.
+                alt, _ = _maybe_select_alternate_action(
+                    planner,
+                    action,
+                    prefer_same_tool=False,
+                    require_read_only=False,
+                )
+                if alt is not None:
+                    previous = action.next_node
+                    action.next_node = alt.next_node
+                    action.args = dict(alt.args or {})
+                    # Remove used candidate from alternates to avoid reuse.
+                    if isinstance(action.alternate_actions, list):
+                        action.alternate_actions = [
+                            item
+                            for item in action.alternate_actions
+                            if not (
+                                isinstance(item, dict)
+                                and item.get("next_node") == alt.next_node
+                                and isinstance(item.get("args"), dict)
+                                and dict(item.get("args") or {}) == dict(alt.args or {})
+                            )
+                        ]
+                    planner._emit_event(
+                        PlannerEvent(
+                            event_type="multi_action_fallback_used",
+                            ts=planner._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={"from": previous, "to": action.next_node, "reason": "unknown_tool"},
+                        )
+                    )
+                    spec = planner._spec_by_name.get(action.next_node)
                 error = prompts.render_invalid_node(
                     action.next_node,
                     list(planner._spec_by_name.keys()),
                 )
-                trajectory.steps.append(TrajectoryStep(action=action, error=error))
-                trajectory.summary = None
-                continue
+                if spec is None:
+                    trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                    trajectory.summary = None
+                    continue
 
             autofilled_fields: tuple[str, ...] = ()
             try:
                 parsed_args = spec.args_model.model_validate(action.args)
             except ValidationError as exc:
-                autofilled = _autofill_missing_args(spec, action.args)
-                if autofilled is not None:
-                    autofilled_args, filled_fields = autofilled
-                    try:
-                        parsed_args = spec.args_model.model_validate(autofilled_args)
-                        action.args = autofilled_args
-                        autofilled_fields = filled_fields
-                        logger.info(
-                            "planner_autofill_args",
-                            extra={
-                                "tool": spec.name,
-                                "filled": list(filled_fields),
-                            },
+                # If the model emitted multiple candidates, try a same-tool alternative args payload first.
+                alt, _ = _maybe_select_alternate_action(
+                    planner,
+                    action,
+                    prefer_same_tool=True,
+                    require_read_only=False,
+                )
+                if alt is not None and alt.next_node == action.next_node:
+                    action.args = dict(alt.args or {})
+                    if isinstance(action.alternate_actions, list):
+                        action.alternate_actions = [
+                            item
+                            for item in action.alternate_actions
+                            if not (
+                                isinstance(item, dict)
+                                and item.get("next_node") == alt.next_node
+                                and isinstance(item.get("args"), dict)
+                                and dict(item.get("args") or {}) == dict(alt.args or {})
+                            )
+                        ]
+                    planner._emit_event(
+                        PlannerEvent(
+                            event_type="multi_action_fallback_used",
+                            ts=planner._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={"tool": spec.name, "reason": "args_validation"},
                         )
-                    except ValidationError as autofill_exc:
+                    )
+                    parsed_args = spec.args_model.model_validate(action.args)
+                else:
+                    autofilled = _autofill_missing_args(spec, action.args)
+                    if autofilled is not None:
+                        autofilled_args, filled_fields = autofilled
+                        try:
+                            parsed_args = spec.args_model.model_validate(autofilled_args)
+                            action.args = autofilled_args
+                            autofilled_fields = filled_fields
+                            logger.info(
+                                "planner_autofill_args",
+                                extra={
+                                    "tool": spec.name,
+                                    "filled": list(filled_fields),
+                                },
+                            )
+                        except ValidationError as autofill_exc:
+                            error = prompts.render_validation_error(
+                                spec.name,
+                                json.dumps(autofill_exc.errors(), ensure_ascii=False),
+                            )
+                            trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                            trajectory.summary = None
+                            continue
+                    else:
                         error = prompts.render_validation_error(
                             spec.name,
-                            json.dumps(autofill_exc.errors(), ensure_ascii=False),
+                            json.dumps(exc.errors(), ensure_ascii=False),
                         )
                         trajectory.steps.append(TrajectoryStep(action=action, error=error))
                         trajectory.summary = None
                         continue
-                else:
-                    error = prompts.render_validation_error(
-                        spec.name,
-                        json.dumps(exc.errors(), ensure_ascii=False),
-                    )
-                    trajectory.steps.append(TrajectoryStep(action=action, error=error))
-                    trajectory.summary = None
-                    continue
 
             arg_validation_error = planner._apply_arg_validation(
                 trajectory,

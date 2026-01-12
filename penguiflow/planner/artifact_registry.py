@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
@@ -74,6 +75,7 @@ class ArtifactRegistry:
         self._payloads: dict[str, Any] = {}
         self._counter = 0
         self._binary_index: dict[str, str] = {}
+        self._external_keys: set[str] = set()
 
     @classmethod
     def from_snapshot(cls, snapshot: Mapping[str, Any] | None) -> ArtifactRegistry:
@@ -108,6 +110,9 @@ class ArtifactRegistry:
             registry._records.append(record)
             if record.ref:
                 registry._records_by_ref[record.ref] = record
+            external_key = record.metadata.get("_external_key")
+            if isinstance(external_key, str) and external_key:
+                registry._external_keys.add(external_key)
             if record.artifact_id:
                 registry._binary_index[record.artifact_id] = record.ref
         return registry
@@ -209,6 +214,72 @@ class ArtifactRegistry:
         self._payloads[ref] = payload
         return record
 
+    def ingest_llm_context(self, llm_context: Any, *, step_index: int | None = None) -> None:
+        """Ingest artifacts embedded in llm_context ContextPatch payloads.
+
+        Background task results are merged into session llm_context as serialized
+        ContextPatch dicts (typically under `background_result(s)`), including an
+        `artifacts` list. Those need to be registered into the in-run
+        ArtifactRegistry so they can be referenced via `artifact_ref` and later
+        resolved into UI component payloads.
+
+        This is best-effort and idempotent for a given task/artifact key.
+        """
+        if not isinstance(llm_context, Mapping):
+            return
+        target_step = 0 if step_index is None else int(step_index)
+
+        patches: list[Mapping[str, Any]] = []
+        single = llm_context.get("background_result")
+        if isinstance(single, Mapping):
+            patches.append(single)
+        many = llm_context.get("background_results")
+        if isinstance(many, list):
+            for item in many:
+                if isinstance(item, Mapping):
+                    patches.append(item)
+
+        for patch in patches:
+            task_id = patch.get("task_id")
+            task_id_str = str(task_id) if task_id is not None else ""
+            artifacts = patch.get("artifacts")
+            if not isinstance(artifacts, list):
+                continue
+            for entry in artifacts:
+                if not isinstance(entry, Mapping):
+                    continue
+                node = entry.get("node")
+                if not isinstance(node, str) or not node:
+                    continue
+                field = entry.get("field")
+                if not isinstance(field, str) or not field:
+                    field = "artifact"
+                item_index = entry.get("item_index")
+                if item_index is None:
+                    item_index = entry.get("index")
+                if not isinstance(item_index, int):
+                    item_index = None
+                payload = entry.get("artifact")
+                if payload is None:
+                    continue
+
+                external_key = f"bg:{task_id_str}:{node}:{field}:{item_index}"
+                if external_key in self._external_keys:
+                    continue
+                self._external_keys.add(external_key)
+
+                self.register_tool_artifact(
+                    node,
+                    field,
+                    payload,
+                    step_index=target_step,
+                    item_index=item_index,
+                    metadata_extra={
+                        "_external_key": external_key,
+                        "background_task_id": task_id_str,
+                    },
+                )
+
     def register_binary_artifact(
         self,
         ref: ArtifactRef,
@@ -255,6 +326,42 @@ class ArtifactRegistry:
             payload = _payload_from_trajectory(trajectory, record)
         if payload is None:
             return None
+        component_payload = _component_payload_from_tool_payload(payload)
+        if component_payload is None:
+            return None
+        return component_payload
+
+    async def resolve_ref_async(
+        self,
+        ref: str,
+        *,
+        trajectory: Any | None = None,
+        session_id: str | None = None,
+        artifact_store: Any | None = None,
+    ) -> dict[str, Any] | None:
+        """Async variant of resolve_ref that can hydrate stored tool artifacts.
+
+        Tool artifacts coming from background jobs may be stored out-of-band in an
+        ArtifactStore (as JSON), with only a compact ArtifactRef stub present in
+        the artifact payload.
+        """
+        record = self._records_by_ref.get(ref)
+        if record is None:
+            return None
+        if record.kind == "binary":
+            return _binary_component_payload(record, session_id=session_id)
+
+        payload = self._payloads.get(ref)
+        if payload is None and trajectory is not None:
+            payload = _payload_from_trajectory(trajectory, record)
+        if payload is None:
+            return None
+
+        hydrated = await _maybe_hydrate_stored_payload(payload, artifact_store=artifact_store)
+        if hydrated is not None:
+            payload = hydrated
+            self._payloads[ref] = payload
+
         component_payload = _component_payload_from_tool_payload(payload)
         if component_payload is None:
             return None
@@ -308,6 +415,62 @@ def resolve_artifact_refs(
     return value
 
 
+async def resolve_artifact_refs_async(
+    value: Any,
+    *,
+    registry: ArtifactRegistry,
+    trajectory: Any | None,
+    session_id: str | None,
+    artifact_store: Any | None,
+) -> Any:
+    if isinstance(value, list):
+        return [
+            await resolve_artifact_refs_async(
+                item,
+                registry=registry,
+                trajectory=trajectory,
+                session_id=session_id,
+                artifact_store=artifact_store,
+            )
+            for item in value
+        ]
+    if isinstance(value, dict):
+        if "artifact_ref" in value:
+            ref = value.get("artifact_ref")
+            if isinstance(ref, str):
+                resolved = await registry.resolve_ref_async(
+                    ref,
+                    trajectory=trajectory,
+                    session_id=session_id,
+                    artifact_store=artifact_store,
+                )
+                if resolved is None:
+                    raise RuntimeError(f"Unknown artifact_ref '{ref}'")
+                merged = dict(resolved)
+                for key, sub_value in value.items():
+                    if key == "artifact_ref":
+                        continue
+                    merged[key] = await resolve_artifact_refs_async(
+                        sub_value,
+                        registry=registry,
+                        trajectory=trajectory,
+                        session_id=session_id,
+                        artifact_store=artifact_store,
+                    )
+                return merged
+        return {
+            key: await resolve_artifact_refs_async(
+                sub_value,
+                registry=registry,
+                trajectory=trajectory,
+                session_id=session_id,
+                artifact_store=artifact_store,
+            )
+            for key, sub_value in value.items()
+        }
+    return value
+
+
 def has_artifact_refs(value: Any) -> bool:
     if isinstance(value, list):
         return any(has_artifact_refs(item) for item in value)
@@ -316,6 +479,39 @@ def has_artifact_refs(value: Any) -> bool:
             return True
         return any(has_artifact_refs(item) for item in value.values())
     return False
+
+
+def _is_artifact_ref_dict(value: Any) -> bool:
+    return isinstance(value, Mapping) and isinstance(value.get("id"), str)
+
+
+async def _maybe_hydrate_stored_payload(payload: Any, *, artifact_store: Any | None) -> Any | None:
+    """Hydrate payload stored as JSON in ArtifactStore via a compact stub.
+
+    Expected stub shape:
+    - {"artifact": {"id": "...", ...}, ...}
+    """
+    if artifact_store is None:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    ref_dict = payload.get("artifact")
+    if not _is_artifact_ref_dict(ref_dict):
+        return None
+    get_fn = getattr(artifact_store, "get", None)
+    if not callable(get_fn):
+        return None
+    raw = await get_fn(str(ref_dict["id"]))
+    if raw is None:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except Exception:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
 
 
 def _component_payload_from_tool_payload(payload: Any) -> dict[str, Any] | None:
@@ -502,6 +698,7 @@ __all__ = [
     "ArtifactKind",
     "get_artifact_registry",
     "resolve_artifact_refs",
+    "resolve_artifact_refs_async",
     "has_artifact_refs",
 ]
 

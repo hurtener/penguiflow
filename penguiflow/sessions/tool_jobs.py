@@ -19,7 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from penguiflow.artifacts import ArtifactStore, NoOpArtifactStore
+from penguiflow.artifacts import ArtifactScope, ArtifactStore, NoOpArtifactStore
 from penguiflow.catalog import NodeSpec
 from penguiflow.planner.context import PlannerPauseReason, ToolContext
 
@@ -101,6 +101,98 @@ def _extract_digest(payload: Any) -> list[str]:
     return [str(payload)[:5000]]
 
 
+def _infer_artifact_type(payload: Any) -> str | None:
+    if isinstance(payload, Mapping):
+        component = payload.get("component")
+        if isinstance(component, str) and component:
+            return component
+        payload_type = payload.get("type")
+        if isinstance(payload_type, str) and payload_type:
+            return payload_type
+    return None
+
+
+def _extract_compact_metadata(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        return {}
+    allowed_keys = {
+        "type",
+        "chart_type",
+        "chart_id",
+        "analysis_id",
+        "title",
+        "metric",
+        "unit",
+    }
+    compact: dict[str, Any] = {}
+    for key in allowed_keys:
+        value = payload.get(key)
+        if isinstance(value, (str, int, float, bool)):
+            compact[key] = value
+    return compact
+
+
+async def _extract_artifacts_from_observation(
+    *,
+    node_name: str,
+    out_model: type[BaseModel],
+    observation: Mapping[str, Any],
+    artifact_store: ArtifactStore,
+    session_id: str | None,
+) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    for field_name, field_info in out_model.model_fields.items():
+        extra = field_info.json_schema_extra
+        if not isinstance(extra, Mapping) or not extra.get("artifact"):
+            continue
+        if field_name not in observation:
+            continue
+        value = observation.get(field_name)
+        if value is None:
+            continue
+
+        async def _store(item: Any, *, item_index: int | None) -> None:
+            serialized = json.dumps(item, ensure_ascii=False)
+            scope = ArtifactScope(session_id=session_id) if session_id else None
+            ref = await artifact_store.put_text(
+                serialized,
+                mime_type="application/json",
+                filename=f"{node_name}.{field_name}.json",
+                namespace=f"tool_artifact.{node_name}.{field_name}",
+                scope=scope,
+                meta={
+                    "node": node_name,
+                    "field": field_name,
+                    "item_index": item_index,
+                },
+            )
+            artifact_type = _infer_artifact_type(item)
+            compact_meta = _extract_compact_metadata(item)
+            stub: dict[str, Any] = {
+                "artifact": ref.model_dump(mode="json"),
+                **compact_meta,
+            }
+            if artifact_type:
+                stub["type"] = artifact_type
+            entry: dict[str, Any] = {
+                "node": node_name,
+                "field": field_name,
+                "artifact": stub,
+            }
+            if item_index is not None:
+                entry["item_index"] = item_index
+            artifacts.append(entry)
+
+        if isinstance(value, list):
+            for idx, item in enumerate(value):
+                if item is None:
+                    continue
+                await _store(item, item_index=idx)
+        else:
+            await _store(value, item_index=None)
+    return artifacts
+
+
 def build_tool_job_pipeline(
     *,
     spec: NodeSpec,
@@ -128,18 +220,29 @@ def build_tool_job_pipeline(
         result = await spec.node.func(parsed_args, ctx)
         observation: BaseModel = spec.out_model.model_validate(result)
         payload = observation.model_dump(mode="json")
+        session_id = snapshot.session_id if isinstance(snapshot.session_id, str) and snapshot.session_id else None
+        extracted_artifacts = []
+        if isinstance(payload, Mapping):
+            extracted_artifacts = await _extract_artifacts_from_observation(
+                node_name=spec.name,
+                out_model=spec.out_model,
+                observation=payload,
+                artifact_store=ctx.artifacts,
+                session_id=session_id,
+            )
         patch = ContextPatch(
             task_id=runtime.state.task_id,
             spawned_from_event_id=runtime.context_snapshot.spawned_from_event_id,
             source_context_version=runtime.context_snapshot.context_version,
             source_context_hash=runtime.context_snapshot.context_hash,
             digest=_extract_digest(payload),
+            artifacts=extracted_artifacts,
         )
         return TaskResult(
             payload=payload,
             context_patch=patch if runtime.state.task_type == TaskType.BACKGROUND else None,
             digest=patch.digest,
-            artifacts=[],
+            artifacts=extracted_artifacts,
             sources=[],
             notification=None,
         )

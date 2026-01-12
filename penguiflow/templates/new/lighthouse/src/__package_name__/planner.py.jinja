@@ -156,6 +156,9 @@ def build_planner(
         catalog=catalog,
         system_prompt_extra=_build_system_prompt(rich_output_prompt),
         event_callback=event_callback,
+        multi_action_sequential=config.multi_action_sequential,
+        multi_action_read_only_only=config.multi_action_read_only_only,
+        multi_action_max_tools=config.multi_action_max_tools,
 {% if with_background_tasks %}
         background_tasks=_build_background_tasks_config(config),
 {% endif %}

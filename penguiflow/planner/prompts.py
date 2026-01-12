@@ -574,13 +574,47 @@ Field meanings:
 - next_node:
   - Tool call: a tool name from the catalog
   - Parallel: "parallel" (executes tools concurrently)
-  - Background tasks: "task.subagent" or "task.tool" (spawns a task via tasks.spawn; only use if tasks.spawn exists)
+  - Background tasks: "task.subagent" or "task.tool" (spawns a task; only use if task management is enabled)
   - Terminal: "final_response" (streams args.answer to the user)
 - args:
   - Tool call: tool arguments matching args_schema
   - Parallel: {"steps": [{"node": "...", "args": {...}}, ...], "join": {...} | null}
-  - Task: see background task section below
+  - Task: see examples below
   - Final: {"answer": "..."} plus optional metadata fields
+
+Background task examples (use only when task management is enabled):
+
+Example - task.subagent (for complex reasoning tasks):
+{
+  "next_node": "task.subagent",
+  "args": {
+    "name": "Research market trends",
+    "query": "Analyze Q4 2024 market trends and provide a summary",
+    "merge_strategy": "HUMAN_GATED",
+    "group": "analysis",
+    "retain_turn": false
+  }
+}
+
+Example - task.tool (for simple tool execution in background):
+{
+  "next_node": "task.tool",
+  "args": {
+    "tool": "search_documents",
+    "tool_args": {"query": "revenue reports", "limit": 10},
+    "merge_strategy": "APPEND"
+  }
+}
+
+Args schema for task actions:
+- name: Human-readable task name (for task.subagent)
+- query: The task instruction (for task.subagent)
+- tool: Tool name to execute (for task.tool)
+- tool_args: Arguments for the tool (for task.tool)
+- merge_strategy: "HUMAN_GATED" (default), "APPEND", or "REPLACE"
+- group: Optional group name for coordinated tasks
+- group_sealed: true to seal the group (no more tasks can join)
+- retain_turn: true to wait for result (requires APPEND/REPLACE merge)
 
 Remember: The ONLY place for user-facing text is args.answer when next_node is "final_response".
 </action_schema>""")
@@ -1193,6 +1227,49 @@ def render_arg_fill_guidance(repair_count: int) -> str | None:
         "- Every field must have a real, valid value - no '<auto>', 'unknown', or empty\n\n"
         "If you cannot provide valid arguments, explain to the user what information you need.\n"
         "</arg_critical>"
+    )
+
+
+def render_multi_action_guidance(multi_count: int) -> str | None:
+    """
+    Generate tiered guidance about emitting exactly one action JSON object.
+
+    This is injected into the system prompt when the model has emitted multiple
+    JSON objects in a single response (e.g. tool call + another tool call + final_response),
+    which can cause the planner to ignore extra actions unless using next_node="parallel".
+    """
+    if multi_count <= 0:
+        return None
+
+    if multi_count == 1:
+        return (
+            "<multi_action_reminder>\n"
+            "REMINDER: Output exactly ONE JSON object per assistant message.\n"
+            "If you need multiple tool calls, use next_node=\"parallel\" with args.steps.\n"
+            "Do not output multiple JSON objects sequentially.\n"
+            "</multi_action_reminder>"
+        )
+
+    if multi_count == 2:
+        return (
+            "<multi_action_warning>\n"
+            "IMPORTANT: You have emitted multiple JSON objects in a single response.\n"
+            "You MUST output exactly ONE JSON object.\n"
+            "If you need multiple tool calls, use:\n"
+            "{\"next_node\": \"parallel\", \"args\": {\"steps\": [{\"node\": \"tool_a\", \"args\": {...}}]}}\n"
+            "Do NOT emit multiple JSON objects one after another.\n"
+            "</multi_action_warning>"
+        )
+
+    return (
+        "<multi_action_critical>\n"
+        "CRITICAL: You repeatedly emitted multiple JSON objects in one response.\n"
+        "This breaks tool execution reliability.\n\n"
+        "RULES:\n"
+        "- Output exactly ONE JSON object per message.\n"
+        "- For multiple tool calls, use next_node=\"parallel\" (args.steps + optional join).\n"
+        "- Do NOT include extra commentary, code fences, or additional JSON objects.\n"
+        "</multi_action_critical>"
     )
 
 

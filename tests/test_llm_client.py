@@ -18,6 +18,7 @@ from penguiflow.planner.llm import (
     _LiteLLMJSONClient,
     _response_format_policy,
     _sanitize_json_schema,
+    _supports_reasoning,
 )
 
 
@@ -420,7 +421,7 @@ class TestLiteLLMJSONClient:
     async def test_reasoning_effort_passed_with_drop_params(self, mock_litellm: MagicMock) -> None:
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
-                "gpt-4o",
+                "openai/o1-preview",  # Must use a reasoning model for reasoning_effort to be passed
                 temperature=0.0,
                 json_schema_mode=False,
                 use_native_reasoning=True,
@@ -674,3 +675,131 @@ class TestResponseFormatPolicyExtended:
 
     def test_o3_model_returns_json_object(self) -> None:
         assert _response_format_policy("openrouter/o3-mini") == "json_object"
+
+
+# ─── RFC_UNIFIED_ACTION_SCHEMA: Native reasoning support tests ────────────────
+
+
+class TestSupportsReasoning:
+    """Tests for _supports_reasoning model detection."""
+
+    def test_o1_model_supports_reasoning(self) -> None:
+        """OpenAI o1 models should support native reasoning."""
+        assert _supports_reasoning("openai/o1-preview") is True
+        assert _supports_reasoning("o1-mini") is True
+
+    def test_o3_model_supports_reasoning(self) -> None:
+        """OpenAI o3 models should support native reasoning."""
+        assert _supports_reasoning("openai/o3-mini") is True
+        assert _supports_reasoning("o3-preview") is True
+
+    def test_deepseek_reasoner_supports_reasoning(self) -> None:
+        """DeepSeek reasoner models should support native reasoning."""
+        assert _supports_reasoning("deepseek-reasoner") is True
+        assert _supports_reasoning("deepseek-r1") is True
+
+    def test_model_with_reasoning_in_name(self) -> None:
+        """Any model with 'reasoning' in name should be detected."""
+        assert _supports_reasoning("custom-reasoning-model") is True
+
+    def test_regular_model_no_reasoning(self) -> None:
+        """Regular models should not support native reasoning."""
+        assert _supports_reasoning("gpt-4o") is False
+        assert _supports_reasoning("claude-3-sonnet") is False
+        assert _supports_reasoning("mistral-large") is False
+
+    def test_databricks_model_no_reasoning(self) -> None:
+        """Databricks models should not support native reasoning."""
+        assert _supports_reasoning("databricks/gpt-oss-120b") is False
+        assert _supports_reasoning("databricks/llama-3") is False
+
+
+class TestReasoningEffortGuard:
+    """Tests for reasoning_effort parameter guarding."""
+
+    @pytest.fixture
+    def mock_litellm(self) -> MagicMock:
+        mock = MagicMock()
+        mock.acompletion = AsyncMock(
+            return_value={
+                "choices": [{"message": {"content": '{"ok": true}'}}],
+                "usage": {"total_tokens": 10},
+                "_hidden_params": {"response_cost": 0.001},
+            }
+        )
+        return mock
+
+    @pytest.mark.asyncio
+    async def test_reasoning_effort_not_passed_for_non_reasoning_model(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        """reasoning_effort should NOT be passed to models that don't support reasoning."""
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                "databricks/gpt-oss-120b",  # Non-reasoning model
+                temperature=0.0,
+                json_schema_mode=False,
+                use_native_reasoning=True,
+                reasoning_effort="medium",
+            )
+            await client.complete(messages=[{"role": "user", "content": "test"}])
+            call_kwargs = mock_litellm.acompletion.call_args[1]
+            # reasoning_effort should NOT be in params for non-reasoning models
+            assert "reasoning_effort" not in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_reasoning_effort_passed_for_reasoning_model(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        """reasoning_effort SHOULD be passed to models that support reasoning."""
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                "openai/o1-preview",  # Reasoning model
+                temperature=0.0,
+                json_schema_mode=False,
+                use_native_reasoning=True,
+                reasoning_effort="medium",
+            )
+            await client.complete(messages=[{"role": "user", "content": "test"}])
+            call_kwargs = mock_litellm.acompletion.call_args[1]
+            # reasoning_effort SHOULD be in params for reasoning models
+            assert call_kwargs.get("reasoning_effort") == "medium"
+
+
+class TestExtractJsonFromTextAdvanced:
+    """Additional tests for JSON extraction with reasoning/thinking content."""
+
+    def test_json_after_thinking_text(self) -> None:
+        """Should extract JSON even when preceded by thinking text."""
+        text = """Let me think about this...
+
+After careful consideration, here's my response:
+{"next_node": "final_response", "args": {"answer": "42"}}"""
+        result = _extract_json_from_text(text)
+        assert '"next_node"' in result
+        assert '"final_response"' in result
+
+    def test_fenced_json_with_language_tag(self) -> None:
+        """Should handle ```json blocks correctly."""
+        text = """Here is the action:
+```json
+{"next_node": "search", "args": {"query": "test"}}
+```
+"""
+        result = _extract_json_from_text(text)
+        assert result == '{"next_node": "search", "args": {"query": "test"}}'
+
+    def test_fenced_code_without_language_tag(self) -> None:
+        """Should handle ``` blocks without json tag."""
+        text = """```
+{"next_node": "tool", "args": {}}
+```"""
+        result = _extract_json_from_text(text)
+        assert '"next_node"' in result
+
+    def test_multiple_json_objects_returns_outer(self) -> None:
+        """When multiple JSON objects exist, should extract from first { to last }."""
+        text = '{"a": 1} some text {"b": 2}'
+        result = _extract_json_from_text(text)
+        # Should get the full span from first { to last }
+        assert result == '{"a": 1} some text {"b": 2}'

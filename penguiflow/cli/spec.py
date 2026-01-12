@@ -701,6 +701,11 @@ class PlannerSpec(BaseModel):
     background_tasks: PlannerBackgroundTasksSpec = Field(default_factory=PlannerBackgroundTasksSpec)
     hints: PlannerHintsSpec | None = None
     stream_final_response: bool = False
+    # When models emit multiple JSON objects in a single response, optionally
+    # execute additional tool calls sequentially (guarded by read-only gating).
+    multi_action_sequential: bool = False
+    multi_action_read_only_only: bool = True
+    multi_action_max_tools: int = Field(default=2, ge=0, le=10)
 
     model_config = ConfigDict(extra="forbid")
 

@@ -45,6 +45,9 @@ class Config:
     # Planner limits
     max_iters: int = 12
     hop_budget: int = 8
+    multi_action_sequential: bool = False
+    multi_action_read_only_only: bool = True
+    multi_action_max_tools: int = 2
 
     # Circuit breaker settings
     circuit_breaker_enabled: bool = True
@@ -107,6 +110,9 @@ class Config:
             # Planner limits
             max_iters=int(os.getenv("PLANNER_MAX_ITERS", "12")),
             hop_budget=int(os.getenv("PLANNER_HOP_BUDGET", "8")),
+            multi_action_sequential=_env_flag("PLANNER_MULTI_ACTION_SEQUENTIAL", False),
+            multi_action_read_only_only=_env_flag("PLANNER_MULTI_ACTION_READ_ONLY_ONLY", True),
+            multi_action_max_tools=_env_int("PLANNER_MULTI_ACTION_MAX_TOOLS", 2),
             # Circuit breaker
             circuit_breaker_enabled=os.getenv("CIRCUIT_BREAKER_ENABLED", "true").lower() == "true",
             circuit_breaker_failure_threshold=int(os.getenv("CIRCUIT_BREAKER_THRESHOLD", "5")),

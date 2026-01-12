@@ -20,6 +20,7 @@ from .llm import _LiteLLMJSONClient
 from .memory import ShortTermMemory, ShortTermMemoryConfig
 from .memory_integration import _ShortTermMemorySummary
 from .models import (
+    ActionFormat,
     BackgroundTasksConfig,
     ClarificationResponse,
     JSONLLMClient,
@@ -73,6 +74,10 @@ def init_react_planner(
     short_term_memory: ShortTermMemory | ShortTermMemoryConfig | None = None,
     background_tasks: BackgroundTasksConfig | None = None,
     error_recovery: ErrorRecoveryConfig | None = None,
+    action_format: str = ActionFormat.AUTO,
+    multi_action_sequential: bool = False,
+    multi_action_read_only_only: bool = True,
+    multi_action_max_tools: int = 2,
 ) -> None:
     if catalog is None:
         if nodes is None or registry is None:
@@ -133,6 +138,7 @@ def init_react_planner(
     planner._repair_attempts = repair_attempts
     planner._max_consecutive_arg_failures = max_consecutive_arg_failures
     planner._arg_fill_enabled = arg_fill_enabled
+    planner._action_format = action_format
     planner._json_schema_mode = json_schema_mode
     planner._token_budget = token_budget
     planner._pause_enabled = pause_enabled
@@ -167,6 +173,7 @@ def init_react_planner(
     # These accumulate across runs and are used by build_messages() to inject guidance
     planner._finish_repair_history_count = 0
     planner._arg_fill_repair_history_count = 0
+    planner._multi_action_history_count = 0
     planner._cost_tracker = _CostTracker()
     planner._deadline_s = deadline_s
     planner._hop_budget = hop_budget
@@ -190,6 +197,9 @@ def init_react_planner(
     planner._reflection_config = reflection_config
     planner._action_seq = 0
     planner._ready_answer_seq = None
+    planner._multi_action_sequential = bool(multi_action_sequential)
+    planner._multi_action_read_only_only = bool(multi_action_read_only_only)
+    planner._multi_action_max_tools = int(multi_action_max_tools)
 
     planner._memory_config = ShortTermMemoryConfig()
     planner._memory_singleton = None
