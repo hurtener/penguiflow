@@ -16,10 +16,18 @@
   let steeringPending = $state(false);
 
   // Derived: check if foreground task is currently running
-  const foregroundRunning = $derived.by(() => {
-    return tasksStore.tasks.some(
-      (task: TaskState) => task.task_type === 'FOREGROUND' && task.status === 'RUNNING'
-    );
+  const activeForegroundTask = $derived.by(() => {
+    const active = tasksStore.tasks.filter((task: TaskState) => {
+      if (task.task_type !== 'FOREGROUND') return false;
+      return task.status === 'RUNNING' || task.status === 'PENDING' || task.status === 'PAUSED';
+    });
+    if (!active.length) return null;
+    // Prefer RUNNING task when present, otherwise pick the most recently updated.
+    const running = active.find(task => task.status === 'RUNNING');
+    if (running) return running;
+    return active
+      .slice()
+      .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))[0];
   });
 
   // Derived: get active background tasks for steering context
@@ -30,15 +38,8 @@
     );
   });
 
-  // Derived: get the running foreground task (if any)
-  const runningForegroundTask = $derived.by(() => {
-    return tasksStore.tasks.find(
-      (task: TaskState) => task.task_type === 'FOREGROUND' && task.status === 'RUNNING'
-    );
-  });
-
   // Determine if we're in steering mode
-  const isSteeringMode = $derived(foregroundRunning);
+  const isSteeringMode = $derived(!!activeForegroundTask);
 
   const handleKeydown = (e: KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -57,7 +58,7 @@
 
   const handleSteeringMessage = async () => {
     const message = chatStore.input.trim();
-    if (!message || !runningForegroundTask) return;
+    if (!message || !activeForegroundTask) return;
 
     steeringPending = true;
 
@@ -73,7 +74,7 @@
     try {
       const accepted = await sendSteeringMessage(
         sessionStore.sessionId,
-        runningForegroundTask.task_id,
+        activeForegroundTask.task_id,
         message,
         backgroundContext
       );

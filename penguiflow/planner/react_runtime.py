@@ -169,6 +169,24 @@ def _apply_steering(planner: Any, trajectory: Trajectory) -> None:
             }
             trajectory.steering_inputs.append(json.dumps(injection, ensure_ascii=False))
 
+        # Record steering history for observability/debugging (but do not re-inject indefinitely).
+        if isinstance(trajectory.metadata, MutableMapping):
+            history = trajectory.metadata.get("steering_history")
+            if not isinstance(history, list):
+                history = []
+                trajectory.metadata["steering_history"] = history
+            history.append(
+                {
+                    "event_id": event.event_id,
+                    "event_type": event.event_type.value,
+                    "source": event.source,
+                    "payload": dict(event.payload or {}),
+                    "trajectory_step": len(trajectory.steps),
+                }
+            )
+            if len(history) > 50:
+                del history[: len(history) - 50]
+
 
 async def run(
     planner: Any,

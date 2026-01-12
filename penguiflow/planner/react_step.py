@@ -21,6 +21,12 @@ logger = logging.getLogger("penguiflow.planner")
 
 
 async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
+    had_pending_steering = bool(trajectory.steering_inputs)
+
+    def _consume_steering_inputs() -> None:
+        if had_pending_steering:
+            trajectory.steering_inputs.clear()
+
     base_messages = await planner._build_messages(trajectory)
     arg_repair_message: str | None = None
     if isinstance(trajectory.metadata, MutableMapping):
@@ -246,6 +252,7 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                     "planner_action_salvaged",
                     extra={"errors": json.dumps(exc.errors(), ensure_ascii=False)},
                 )
+                _consume_steering_inputs()
                 return salvaged
             last_error = json.dumps(exc.errors(), ensure_ascii=False)
             continue
@@ -317,6 +324,7 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                 # Log full raw response (truncated at 2000 chars) to help debug
                 extra["raw_llm_output"] = raw[:2000] if len(raw) > 2000 else raw
             logger.log(log_level, "finish_action_parsed", extra=extra)
+        _consume_steering_inputs()
         return action
 
     if last_raw is not None:
@@ -340,6 +348,7 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                     "planner_fallback_answer_extracted",
                     extra={"length": len(extracted_answer)},
                 )
+                _consume_steering_inputs()
                 return PlannerAction(
                     next_node="final_response",
                     args={"answer": extracted_answer, "raw_answer": extracted_answer},
@@ -357,6 +366,7 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                 "raw_preview": last_raw,
             },
         )
+        _consume_steering_inputs()
         return PlannerAction(
             next_node="final_response",
             args={"answer": last_raw, "raw_answer": last_raw},
@@ -364,6 +374,7 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
         )
 
     # Should not reach here, but return a fail-safe action
+    _consume_steering_inputs()
     return PlannerAction(
         next_node="final_response",
         args={"answer": "LLM response parsing failed", "raw_answer": "LLM response parsing failed"},

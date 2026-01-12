@@ -1936,6 +1936,61 @@ async def test_parallel_plan_without_join_emits_tool_call_events_for_branches() 
 
 
 @pytest.mark.asyncio()
+async def test_steering_user_message_is_consumed_after_next_llm_call() -> None:
+    """Steering USER_MESSAGE should not be re-injected on every subsequent step."""
+
+    from penguiflow.planner.react_runtime import run_loop
+    from penguiflow.state.models import SteeringEvent, SteeringEventType
+    from penguiflow.steering import SteeringInbox
+
+    class EchoArgs(BaseModel):
+        text: str
+
+    class EchoOut(BaseModel):
+        echoed: str
+
+    @tool(desc="Echo tool", side_effects="read")
+    async def echo(args: EchoArgs, ctx: object) -> EchoOut:
+        return EchoOut(echoed=args.text)
+
+    client = StubClient(
+        [
+            {"next_node": "echo", "args": {"text": "hi"}},
+            {"next_node": "final_response", "args": {"answer": "done", "raw_answer": "done"}},
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("echo", EchoArgs, EchoOut)
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog([Node(echo, name="echo")], registry),
+    )
+
+    inbox = SteeringInbox()
+    planner._steering = inbox
+    await inbox.push(
+        SteeringEvent(
+            session_id="s",
+            task_id="t",
+            event_type=SteeringEventType.USER_MESSAGE,
+            payload={"text": "do this once"},
+            source="user",
+        )
+    )
+
+    trajectory = Trajectory(query="test", llm_context={}, tool_context={})
+    result = await run_loop(planner, trajectory, tracker=None, error_recovery_config=None)
+    assert result.reason == "answer_complete"
+
+    assert len(client.calls) >= 2
+    first_call = client.calls[0]
+    second_call = client.calls[1]
+    assert any("Steering input:" in msg.get("content", "") for msg in first_call)
+    assert not any("Steering input:" in msg.get("content", "") for msg in second_call)
+
+
+@pytest.mark.asyncio()
 async def test_react_planner_parallel_join_explicit_inject_mapping() -> None:
     client = StubClient(
         [
