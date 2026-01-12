@@ -7,6 +7,7 @@ parallel plan execution, so frontends receive consistent live tool telemetry.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
@@ -24,6 +25,14 @@ from .react_utils import _safe_json_dumps
 from .trajectory import Trajectory
 
 _TASK_SERVICE_KEY = "task_service"
+
+
+def _dedupe_key(value: Any) -> str:
+    try:
+        canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        canonical = str(value)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass(slots=True)
@@ -95,6 +104,49 @@ async def execute_tool_call(
     ctx = _PlannerContext(planner, trajectory)
     if tool_context_update and isinstance(ctx.tool_context, MutableMapping):
         ctx.tool_context.update(dict(tool_context_update))
+
+    # Prevent "render_component" loops where the model re-renders the exact same UI payload in
+    # the next step because it can't infer success from a minimal {"ok": true} observation.
+    if spec.name == "render_component" and isinstance(trajectory.metadata, MutableMapping):
+        dedupe = _dedupe_key(args_payload)
+        last_key = trajectory.metadata.get("_render_component_last_dedupe_key")
+        last_step = trajectory.metadata.get("_render_component_last_step_index")
+        if (
+            isinstance(last_key, str)
+            and last_key == dedupe
+            and isinstance(last_step, int)
+            and last_step == step_index - 1
+        ):
+            component = args_payload.get("component")
+            last_ref = trajectory.metadata.get("_render_component_last_artifact_ref")
+            result_payload = {
+                "ok": True,
+                "component": component if isinstance(component, str) else None,
+                "artifact_ref": last_ref if isinstance(last_ref, str) else None,
+                "dedupe_key": dedupe,
+                "summary": "Duplicate render skipped",
+                "skipped": "duplicate_render",
+            }
+            result_json = _safe_json_dumps(result_payload)
+            planner._emit_event(
+                PlannerEvent(
+                    event_type="tool_call_result",
+                    ts=planner._time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    extra={
+                        "tool_call_id": tool_call_id,
+                        "tool_name": spec.name,
+                        "result_json": result_json,
+                        "action_seq": action_seq,
+                    },
+                )
+            )
+            planner._record_hint_progress(spec.name, trajectory)
+            return ToolCallOutcome(
+                observation=result_payload,
+                llm_observation=result_payload,
+                streams=ctx._collect_chunks() or None,
+            )
 
     try:
         extra = spec.extra if isinstance(spec.extra, Mapping) else {}
@@ -281,6 +333,17 @@ async def execute_tool_call(
         )
 
     observation_json = observation_model.model_dump(mode="json")
+
+    if spec.name == "render_component" and isinstance(trajectory.metadata, MutableMapping):
+        key = observation_json.get("dedupe_key")
+        if not isinstance(key, str):
+            key = _dedupe_key(args_payload)
+        ref = observation_json.get("artifact_ref")
+        if not isinstance(ref, str):
+            ref = None
+        trajectory.metadata["_render_component_last_dedupe_key"] = key
+        trajectory.metadata["_render_component_last_step_index"] = step_index
+        trajectory.metadata["_render_component_last_artifact_ref"] = ref
 
     registry = getattr(planner, "_artifact_registry", None)
     if registry is not None:

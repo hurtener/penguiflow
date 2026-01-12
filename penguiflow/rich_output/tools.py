@@ -19,6 +19,22 @@ class RenderComponentArgs(BaseModel):
 
 class RenderComponentResult(BaseModel):
     ok: bool = True
+    component: str | None = Field(default=None, description="Rendered component name")
+    artifact_ref: str | None = Field(
+        default=None,
+        description="Artifact registry ref for the rendered component payload (if available).",
+    )
+    dedupe_key: str | None = Field(
+        default=None,
+        description="Stable hash of the rendered payload; useful for de-duplication.",
+    )
+    summary: str | None = Field(default=None, description="Compact description of what was rendered")
+    skipped: str | None = Field(
+        default=None,
+        description="If set, render was skipped (e.g. duplicate_render).",
+    )
+
+    model_config = ConfigDict(extra="forbid")
 
 
 ArtifactKind = Literal["ui_component", "binary", "tool_artifact"]
