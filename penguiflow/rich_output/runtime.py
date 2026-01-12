@@ -111,13 +111,14 @@ class RichOutputRuntime:
             tool_context=tool_context,
         )
 
-    def prompt_section(self) -> str:
+    def prompt_section(self, *, include_examples: bool | None = None) -> str:
         base = ""
         if self.config.include_prompt_catalog:
+            include = self.config.include_prompt_examples if include_examples is None else bool(include_examples)
             base = generate_component_system_prompt(
                 self.registry,
                 allowlist=list(self.allowlist) if self.allowlist else None,
-                include_examples=self.config.include_prompt_examples,
+                include_examples=include,
             )
         extras = [ext.prompt_extra for ext in self.extensions if ext.prompt_extra]
         if not extras:

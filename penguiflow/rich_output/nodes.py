@@ -27,6 +27,7 @@ from .tools import (
     UIInteractionResult,
     UISelectOptionArgs,
 )
+from .validate import RichOutputValidationError
 
 
 def _ensure_enabled() -> None:
@@ -72,7 +73,16 @@ async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> Rende
         if not isinstance(props, Mapping):
             raise RuntimeError("artifact_ref resolution returned invalid props")
 
-    runtime.validate_component(component, props, tool_context=ctx.tool_context)
+    try:
+        runtime.validate_component(component, props, tool_context=ctx.tool_context)
+    except RichOutputValidationError as exc:
+        hint = (
+            f"{exc}\n"
+            "To fix this, call `describe_component` with the component name to get the exact props schema, "
+            "then retry `render_component` with props matching that schema.\n"
+            f"Example: {{\"next_node\":\"describe_component\",\"args\":{{\"name\":\"{component}\"}}}}"
+        )
+        raise RuntimeError(hint) from exc
 
     meta = _emit_metadata(args.metadata)
     meta.setdefault("registry_version", runtime.registry.version)

@@ -1991,6 +1991,33 @@ async def test_steering_user_message_is_consumed_after_next_llm_call() -> None:
 
 
 @pytest.mark.asyncio()
+async def test_rich_output_prompt_is_injected_when_render_component_is_present() -> None:
+    from penguiflow.rich_output.runtime import (
+        RichOutputConfig,
+        attach_rich_output_nodes,
+        configure_rich_output,
+        reset_runtime,
+    )
+
+    reset_runtime()
+    configure_rich_output(RichOutputConfig(enabled=True, include_prompt_catalog=True, allowlist=["markdown", "report"]))
+
+    registry = ModelRegistry()
+    nodes = list(
+        attach_rich_output_nodes(
+            registry,
+            config=RichOutputConfig(enabled=True, allowlist=["markdown", "report"]),
+        )
+    )
+    catalog = build_catalog(nodes, registry)
+
+    client = StubClient([{"next_node": "final_response", "args": {"raw_answer": "ok"}}])
+    planner = ReactPlanner(llm="gpt-oss-120b", llm_client=client, catalog=catalog)
+
+    assert "# Rich Output Components" in planner._system_prompt
+
+
+@pytest.mark.asyncio()
 async def test_react_planner_parallel_join_explicit_inject_mapping() -> None:
     client = StubClient(
         [

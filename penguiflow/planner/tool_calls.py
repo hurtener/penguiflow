@@ -225,6 +225,15 @@ async def execute_tool_call(
             streams=ctx._collect_chunks() or None,
         )
     except Exception as exc:
+        if spec.name == "render_component":
+            try:
+                count = int(getattr(planner, "_render_component_failure_history_count", 0))
+            except Exception:
+                count = 0
+            try:
+                planner._render_component_failure_history_count = count + 1
+            except Exception:
+                pass
         failure_payload = planner._build_failure_payload(spec, parsed_args, exc)
         error = f"tool '{spec.name}' raised {exc.__class__.__name__}: {exc}"
         planner._emit_event(

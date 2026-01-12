@@ -127,6 +127,34 @@ def init_react_planner(
             system_prompt_extra,
             prompts.render_background_task_guidance(),
         )
+
+    # Rich output prompt catalog: ensure models know how to call render_component and where to
+    # fetch schemas (describe_component), even when the host app forgot to inject it.
+    if "render_component" in planner._spec_by_name:
+        try:
+            from penguiflow.rich_output.runtime import get_runtime
+
+            runtime = get_runtime()
+            if runtime.config.enabled and runtime.config.include_prompt_catalog:
+                marker = "# Rich Output Components"
+                already_included = bool(system_prompt_extra and marker in system_prompt_extra)
+                if not already_included:
+                    model_name = None
+                    if isinstance(llm, str):
+                        model_name = llm
+                    elif isinstance(llm, Mapping):
+                        raw = llm.get("model") or llm.get("name") or llm.get("llm")
+                        if isinstance(raw, str):
+                            model_name = raw
+                    weak_model = False
+                    if model_name:
+                        needle = model_name.lower().replace("_", "-").strip()
+                        weak_model = "gpt-oss-120b" in needle or "oss-120b" in needle
+                    rich_prompt = runtime.prompt_section(include_examples=True if weak_model else None)
+                    if rich_prompt:
+                        system_prompt_extra = prompts.merge_prompt_extras(system_prompt_extra, rich_prompt)
+        except Exception:  # pragma: no cover - optional integration
+            pass
     planner._system_prompt = prompts.build_system_prompt(
         planner._catalog_records,
         extra=system_prompt_extra,
@@ -174,6 +202,7 @@ def init_react_planner(
     planner._finish_repair_history_count = 0
     planner._arg_fill_repair_history_count = 0
     planner._multi_action_history_count = 0
+    planner._render_component_failure_history_count = 0
     planner._cost_tracker = _CostTracker()
     planner._deadline_s = deadline_s
     planner._hop_budget = hop_budget

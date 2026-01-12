@@ -1063,15 +1063,27 @@ async def run_loop(
                         metadata_extra={"requires_followup": True},
                     )
 
-                # Try arg-fill if eligible (only for autofilled fields, i.e. missing required args)
-                if autofilled_fields and planner._is_arg_fill_eligible(
-                    spec, autofilled_fields, trajectory
+                # Try arg-fill if eligible:
+                # - Default: only for autofilled required args (missing fields at Pydantic layer)
+                # - Special case: render_component may be "Pydantic-valid" but still invalid vs
+                #   rich output registry schemas (e.g. report requires props.sections). In that
+                #   case, trigger arg-fill for `props` to avoid deterministic tool failures/loops.
+                missing_fields_for_arg_fill: list[str] | None = None
+                if autofilled_fields:
+                    missing_fields_for_arg_fill = list(autofilled_fields)
+                elif spec.name == "render_component":
+                    schema_error = trajectory.metadata.get("render_component_schema_error")
+                    if isinstance(schema_error, Mapping) and schema_error.get("code") == "schema_invalid":
+                        missing_fields_for_arg_fill = ["props"]
+
+                if missing_fields_for_arg_fill and planner._is_arg_fill_eligible(
+                    spec, missing_fields_for_arg_fill, trajectory
                 ):
                     filled_args = await planner._attempt_arg_fill(
                         trajectory,
                         spec,
                         action,
-                        list(autofilled_fields),
+                        missing_fields_for_arg_fill,
                     )
 
                     if filled_args is not None:
@@ -1102,6 +1114,9 @@ async def run_loop(
                                 trajectory.metadata[f"consecutive_arg_failures_{spec.name}"] = 0
                                 trajectory.metadata[f"autofill_rejection_count_{spec.name}"] = 0
                                 trajectory.metadata[f"arg_fill_attempted_{spec.name}"] = False
+                                if isinstance(trajectory.metadata, MutableMapping):
+                                    trajectory.metadata.pop("render_component_schema_error", None)
+                                    trajectory.metadata.pop("render_component_props_arg_fill_attempted", None)
 
                                 logger.info(
                                     "arg_fill_merged_success",
@@ -1125,17 +1140,83 @@ async def run_loop(
                                         "error": revalidation_error,
                                     },
                                 )
-                                # Fall through to repair message
-                                repair_msg = prompts.render_arg_repair_message(
-                                    spec.name,
-                                    revalidation_error,
-                                )
-                                if isinstance(trajectory.metadata, MutableMapping):
-                                    trajectory.metadata["arg_repair_message"] = repair_msg
-                                error = prompts.render_validation_error(spec.name, revalidation_error)
-                                trajectory.steps.append(TrajectoryStep(action=action, error=error))
-                                trajectory.summary = None
-                                continue
+                                # Special-case: allow a second arg-fill for render_component props
+                                # if the first arg-fill filled `component` but left `props` empty.
+                                if (
+                                    spec.name == "render_component"
+                                    and "props" not in filled_args
+                                    and isinstance(trajectory.metadata.get("render_component_schema_error"), Mapping)
+                                    and not trajectory.metadata.get("render_component_props_arg_fill_attempted")
+                                ):
+                                    trajectory.metadata["render_component_props_arg_fill_attempted"] = True
+                                    trajectory.metadata[f"arg_fill_attempted_{spec.name}"] = False
+                                    if planner._is_arg_fill_eligible(spec, ["props"], trajectory):
+                                        props_fill = await planner._attempt_arg_fill(
+                                            trajectory,
+                                            spec,
+                                            action,
+                                            ["props"],
+                                        )
+                                        if props_fill is not None and "props" in props_fill:
+                                            merged_again = dict(action.args or {})
+                                            merged_again.update(props_fill)
+                                            try:
+                                                parsed_args = spec.args_model.model_validate(merged_again)
+                                            except ValidationError as merge_exc:
+                                                revalidation_error = json.dumps(
+                                                    merge_exc.errors(), ensure_ascii=False
+                                                )
+                                            else:
+                                                action.args = merged_again
+                                                revalidation_error = planner._apply_arg_validation(
+                                                    trajectory,
+                                                    spec=spec,
+                                                    action=action,
+                                                    parsed_args=parsed_args,
+                                                    autofilled_fields=(),
+                                                )
+                                                if revalidation_error is None:
+                                                    trajectory.metadata["consecutive_arg_failures"] = 0
+                                                    trajectory.metadata[f"consecutive_arg_failures_{spec.name}"] = 0
+                                                    trajectory.metadata[f"autofill_rejection_count_{spec.name}"] = 0
+                                                    trajectory.metadata[f"arg_fill_attempted_{spec.name}"] = False
+                                                    if isinstance(trajectory.metadata, MutableMapping):
+                                                        trajectory.metadata.pop(
+                                                            "render_component_schema_error", None
+                                                        )
+                                                        trajectory.metadata.pop(
+                                                            "render_component_props_arg_fill_attempted", None
+                                                        )
+                                                    logger.info(
+                                                        "arg_fill_merged_success",
+                                                        extra={
+                                                            "tool": spec.name,
+                                                            "filled_fields": list(props_fill.keys()),
+                                                        },
+                                                    )
+                                                    pass
+                                                else:
+                                                    logger.warning(
+                                                        "arg_fill_revalidation_failed",
+                                                        extra={
+                                                            "tool": spec.name,
+                                                            "filled_fields": list(props_fill.keys()),
+                                                            "error": revalidation_error,
+                                                        },
+                                                    )
+
+                                if revalidation_error is not None:
+                                    # Fall through to repair message
+                                    repair_msg = prompts.render_arg_repair_message(
+                                        spec.name,
+                                        revalidation_error,
+                                    )
+                                    if isinstance(trajectory.metadata, MutableMapping):
+                                        trajectory.metadata["arg_repair_message"] = repair_msg
+                                    error = prompts.render_validation_error(spec.name, revalidation_error)
+                                    trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                                    trajectory.summary = None
+                                    continue
 
                         except ValidationError as merge_exc:
                             # Merge failed validation

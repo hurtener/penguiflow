@@ -6,7 +6,42 @@
 
 ## Summary
 
-This RFC proposes replacing the LiteLLM dependency with a native, penguiflow-owned LLM abstraction layer. The design extracts proven patterns from PydanticAI (schema transformers, output modes, retry mechanisms) while maintaining penguiflow's existing strengths (cost tracking, streaming callbacks, error recovery).
+This RFC proposes replacing the LiteLLM dependency with a native, penguiflow-owned LLM abstraction layer. The design extracts proven patterns from PydanticAI (schema transformers, output modes, retry mechanisms) while maintaining penguiflow's existing strengths (streaming callbacks, cost/usage tracking, cancellation propagation, and error recovery).
+
+This revised design explicitly addresses key cross-provider realities:
+
+- Structured output mechanisms are **provider-native** (not “OpenAI-shaped” everywhere)
+- Requests and responses are normalized via **typed internal message/tool/event models** (no raw `dict` plumbing)
+- Schema transformation produces a **schema plan** with compatibility signals and graceful degradation
+- Retry/timeout/cancellation/cost are part of the **core contract**, not incidental implementation details
+
+> Note: Code snippets in this RFC are illustrative pseudocode. Provider SDKs differ materially in payload shapes (tools, content blocks, streaming events, usage reporting), so real implementations must use provider-specific adapters.
+
+## Scope (v1) and Non-Goals
+
+### Goals
+
+- Provide a stable internal LLM interface used by the planner/runtime (and a compatibility adapter for `JSONLLMClient`)
+- Support structured outputs with automatic fallback across modes: provider-native → tools → prompted
+- Preserve streaming callbacks, cancellation propagation, and trajectory logging hooks
+- Standardize error taxonomy (retryability, user-facing messages, raw payload retention)
+- Unify cost/usage accounting across attempts (including retries)
+
+### Non-Goals (v1)
+
+- Perfect feature parity across all providers for every capability (e.g., identical “native” structured output semantics)
+- Comprehensive provider coverage beyond the initial set (OpenAI, Anthropic, Google, Bedrock, Databricks, OpenRouter)
+- Implementing a full agent framework (planning/memory/tools orchestration remains in existing PenguiFlow layers)
+
+### Target Support Matrix (v1)
+
+This is the intended “works as designed” surface for v1; anything beyond this is best-effort:
+
+- OpenAI: `native` (schema-guided), `tools`, `prompted`, streaming + usage
+- Anthropic: `native` (tool-use), `tools`, `prompted`, streaming + usage
+- Bedrock: `native` (tool-use via Converse), `tools`, `prompted`, usage (streaming best-effort)
+- Databricks: `native` (constrained decoding `json_schema`), `tools` (preview limits), `prompted`, usage (streaming best-effort)
+- OpenRouter: OpenAI-compatible best-effort (depends on routed provider)
 
 ## Motivation
 
@@ -50,30 +85,40 @@ Extract PydanticAI's provider patterns and build a penguiflow-native implementat
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                            LLMClient                                     │
-│  (Orchestrates: provider selection, output mode, retry, streaming)       │
+│                               LLMClient                                  │
+│  (Orchestrates: routing, mode selection, schema planning, retry,         │
+│   streaming, cancellation, timeouts, cost/usage accounting)              │
 └────────────────────────────────────┬────────────────────────────────────┘
                                      │
          ┌───────────────────────────┼───────────────────────────┐
          │                           │                           │
          v                           v                           v
 ┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
-│   OutputMode    │       │  ModelProfile   │       │     Retry       │
-│ Tool/Native/    │       │ Capabilities +  │       │ ValidationRetry │
-│   Prompted      │       │  Transformer    │       │ + Backoff       │
+│   Mode Engine   │       │  Schema Plan    │       │    Retry +       │
+│ Native/Tools/   │       │ Transform +     │       │ Error Taxonomy   │
+│ Prompted        │       │ Compatibility   │       │ + Backoff        │
 └─────────────────┘       └─────────────────┘       └─────────────────┘
-                                     │
-                                     v
-                          ┌─────────────────┐
-                          │    Provider     │
-                          │ (Direct SDK)    │
-                          └────────┬────────┘
-                                   │
-    ┌──────────┬──────────┬────────┼────────┬──────────┬──────────┐
-    v          v          v        v        v          v          v
-┌───────┐ ┌────────┐ ┌────────┐ ┌───────┐ ┌────────┐ ┌────────┐ ┌─────┐
-│OpenAI │ │Anthropic│ │ Google │ │Bedrock│ │Databricks│ │OpenRouter│ │...│
-└───────┘ └────────┘ └────────┘ └───────┘ └────────┘ └────────┘ └─────┘
+                 │                 │                           │
+                 └───────────┬─────┴───────────┬──────────────┘
+                             v                 v
+                    ┌─────────────────┐  ┌─────────────────┐
+                    │ Typed Requests  │  │   Routing        │
+                    │ Messages/Tools/ │  │ ProviderRegistry │
+                    │ Stream Events   │  │ + ModelProfiles  │
+                    └────────┬────────┘  └────────┬────────┘
+                             │                    │
+                             v                    v
+                          ┌────────────────────────────────┐
+                          │            Provider            │
+                          │  (Direct SDK + per-provider    │
+                          │   request/response adapters)   │
+                          └───────────────┬────────────────┘
+                                          │
+              ┌──────────┬──────────┬─────┼─────┬──────────┬──────────┐
+              v          v          v     v     v          v          v
+          ┌───────┐  ┌────────┐  ┌───────┐ ┌───────┐  ┌────────┐  ┌─────┐
+          │OpenAI │  │Anthropic│ │ Google│ │Bedrock│  │Databricks│ │OpenR│
+          └───────┘  └────────┘  └───────┘ └───────┘  └────────┘  └─────┘
 ```
 
 ### Module Structure
@@ -83,6 +128,11 @@ penguiflow/llm/
 ├── __init__.py              # Public API: create_client(), LLMClient
 ├── protocol.py              # JSONLLMClient protocol (existing interface)
 ├── client.py                # LLMClient implementation
+├── types.py                 # Typed requests/messages/tools/events
+├── routing.py               # ProviderRegistry + model string parsing
+├── pricing.py               # Pricing table + cost calculation
+├── errors.py                # LLMError taxonomy + provider error mapping
+├── telemetry.py             # Hooks: attempts, retries, usage, cost
 │
 ├── profiles/
 │   ├── __init__.py          # ModelProfile dataclass, PROFILES registry
@@ -96,16 +146,17 @@ penguiflow/llm/
 ├── schema/
 │   ├── __init__.py          # JsonSchemaTransformer ABC
 │   ├── transformer.py       # Base transformer with recursive walking
+│   ├── plan.py              # SchemaPlan: transformed schema + compatibility
 │   ├── openai.py            # OpenAI: additionalProperties, strict mode
 │   ├── anthropic.py         # Anthropic: constraint relocation
 │   ├── google.py            # Google: const→enum, format in description
 │   └── bedrock.py           # Bedrock: inline defs transformer
 │
 ├── output/
-│   ├── __init__.py          # OutputMode enum, select_output_mode()
-│   ├── tool.py              # Tool-based structured output
-│   ├── native.py            # response_format with JSON schema
-│   └── prompted.py          # Schema in prompt + parse/retry
+│   ├── __init__.py          # OutputMode enum, choose_output_mode()
+│   ├── tool.py              # Tool-based structured output (portable)
+│   ├── native.py            # Provider-native structured output (adapter-driven)
+│   └── prompted.py          # Schema in prompt + parse/retry (fallback)
 │
 ├── providers/
 │   ├── __init__.py          # Provider registry, create_provider()
@@ -118,33 +169,116 @@ penguiflow/llm/
 │   └── openrouter.py        # OpenAI-compatible + model routing
 │
 ├── retry.py                 # ModelRetry, ValidationRetry, retry loop
-├── cost.py                  # Pricing tables, token counting
-├── streaming.py             # StreamChunk, callback handling
-└── errors.py                # LLMError hierarchy
+└── errors.py                # LLMError taxonomy
 ```
 
 ### Core Components
+
+#### 0. Typed Request/Response Model (No Raw `dict` Plumbing)
+
+One root cause of “provider quirks leaking everywhere” is pushing raw request/response dictionaries through the stack. v1 should define a small typed core model that all providers adapt to/from.
+
+Key properties:
+
+- Provider adapters handle SDK-specific payload shapes (Anthropic content blocks, Google parts, Bedrock converse formats)
+- Output strategies operate on typed messages/tools/events, not provider-specific JSON
+- Streaming and cancellation can be standardized at the interface level
+
+Illustrative types:
+
+```python
+from dataclasses import dataclass
+from typing import Any, Callable, Literal
+
+Role = Literal["system", "user", "assistant", "tool"]
+
+@dataclass(frozen=True)
+class TextPart:
+    text: str
+
+@dataclass(frozen=True)
+class ToolCallPart:
+    name: str
+    arguments_json: str  # raw JSON string for faithful round-trip
+    call_id: str | None = None
+
+@dataclass(frozen=True)
+class ToolResultPart:
+    name: str
+    result_json: str
+    call_id: str | None = None
+
+ContentPart = TextPart | ToolCallPart | ToolResultPart
+
+@dataclass(frozen=True)
+class LLMMessage:
+    role: Role
+    parts: list[ContentPart]
+
+@dataclass(frozen=True)
+class ToolSpec:
+    name: str
+    description: str
+    json_schema: dict[str, Any]
+
+@dataclass(frozen=True)
+class StructuredOutputSpec:
+    name: str
+    json_schema: dict[str, Any]
+    strict: bool
+
+@dataclass(frozen=True)
+class LLMRequest:
+    model: str
+    messages: list[LLMMessage]
+    tools: list[ToolSpec] | None = None
+    tool_choice: str | None = None  # tool name or None
+    structured_output: StructuredOutputSpec | None = None
+    temperature: float = 0.0
+    max_tokens: int | None = None
+    extra: dict[str, Any] | None = None  # provider-specific passthrough (sanitized)
+
+@dataclass(frozen=True)
+class StreamEvent:
+    # A minimal common denominator; providers can emit richer events internally.
+    delta_text: str | None = None
+    usage: "Usage" | None = None
+    done: bool = False
+
+StreamCallback = Callable[[StreamEvent], None]
+```
 
 #### 1. ModelProfile
 
 Declarative capability description per model, adapted from PydanticAI:
 
 ```python
-from dataclasses import dataclass, field
-from typing import Callable, Literal
+from dataclasses import dataclass
+from typing import Literal
 
 @dataclass
 class ModelProfile:
     """Describes capabilities and configuration for a specific model."""
 
     # Output capabilities
-    supports_json_schema_output: bool = False  # Native response_format with schema
-    supports_json_object_output: bool = True   # response_format: {"type": "json_object"}
-    supports_tools: bool = True                # Tool/function calling
-    supports_reasoning: bool = False           # Native reasoning (o1, o3, deepseek-r1)
+    supports_schema_guided_output: bool = False  # Provider-native schema-guided structured output
+    supports_json_only_output: bool = True       # Provider-native “JSON only” mode (if supported)
+    supports_tools: bool = True                  # Tool/function calling
+    supports_reasoning: bool = False             # Native reasoning (o1, o3, deepseek-r1)
 
     # Output mode selection
-    default_output_mode: Literal["tool", "native", "prompted"] = "tool"
+    default_output_mode: Literal["native", "tools", "prompted"] = "native"
+
+    # Provider-native structured output mechanism (used by OutputMode.NATIVE)
+    native_structured_kind: Literal[
+        "openai_response_format",
+        "databricks_constrained_decoding",
+        "anthropic_tool_use",
+        "google_response_schema",
+        "bedrock_tool_use",
+        "openai_compatible_tools",
+        "unknown",
+    ] = "unknown"
 
     # Schema transformation
     schema_transformer_class: type["JsonSchemaTransformer"] | None = None
@@ -152,10 +286,6 @@ class ModelProfile:
     # Reasoning configuration
     reasoning_effort_param: str | None = None  # Parameter name if supported
     thinking_tags: tuple[str, str] | None = None  # e.g., ("<think>", "</think>")
-
-    # Cost tracking (per 1K tokens)
-    cost_per_1k_input: float = 0.0
-    cost_per_1k_output: float = 0.0
 
     # Provider quirks
     strict_mode_default: bool = True           # Default for strict JSON schema
@@ -169,56 +299,49 @@ class ModelProfile:
 PROFILES: dict[str, ModelProfile] = {
     # OpenAI
     "gpt-4o": ModelProfile(
-        supports_json_schema_output=True,
+        supports_schema_guided_output=True,
         schema_transformer_class=OpenAIJsonSchemaTransformer,
-        cost_per_1k_input=0.0025,
-        cost_per_1k_output=0.01,
+        native_structured_kind="openai_response_format",
     ),
     "gpt-4o-mini": ModelProfile(
-        supports_json_schema_output=True,
+        supports_schema_guided_output=True,
         schema_transformer_class=OpenAIJsonSchemaTransformer,
-        cost_per_1k_input=0.00015,
-        cost_per_1k_output=0.0006,
+        native_structured_kind="openai_response_format",
     ),
     "o1": ModelProfile(
-        supports_json_schema_output=True,
+        supports_schema_guided_output=True,
         supports_reasoning=True,
         reasoning_effort_param="reasoning_effort",
         schema_transformer_class=OpenAIJsonSchemaTransformer,
-        cost_per_1k_input=0.015,
-        cost_per_1k_output=0.06,
+        native_structured_kind="openai_response_format",
     ),
 
     # Anthropic
     "claude-3-5-sonnet": ModelProfile(
-        supports_json_schema_output=True,
+        supports_schema_guided_output=True,
         schema_transformer_class=AnthropicJsonSchemaTransformer,
         strict_mode_default=False,  # Lossy transformation
-        cost_per_1k_input=0.003,
-        cost_per_1k_output=0.015,
+        native_structured_kind="anthropic_tool_use",
     ),
     "claude-3-5-haiku": ModelProfile(
-        supports_json_schema_output=True,
+        supports_schema_guided_output=True,
         schema_transformer_class=AnthropicJsonSchemaTransformer,
         strict_mode_default=False,
-        cost_per_1k_input=0.0008,
-        cost_per_1k_output=0.004,
+        native_structured_kind="anthropic_tool_use",
     ),
 
     # Google
     "gemini-2.0-flash": ModelProfile(
-        supports_json_schema_output=True,
+        supports_schema_guided_output=True,
         schema_transformer_class=GoogleJsonSchemaTransformer,
-        cost_per_1k_input=0.0,  # Free tier
-        cost_per_1k_output=0.0,
+        native_structured_kind="google_response_schema",
     ),
 
     # Bedrock (via Anthropic)
     "anthropic.claude-3-5-sonnet": ModelProfile(
-        supports_json_schema_output=True,
+        supports_schema_guided_output=True,
         schema_transformer_class=BedrockJsonSchemaTransformer,
-        cost_per_1k_input=0.003,
-        cost_per_1k_output=0.015,
+        native_structured_kind="bedrock_tool_use",
     ),
 
     # Databricks Foundation Model APIs
@@ -226,33 +349,37 @@ PROFILES: dict[str, ModelProfile] = {
     # Limitations: no anyOf/oneOf/allOf/$ref/pattern, max 64 keys
     # Reference: https://docs.databricks.com/aws/en/machine-learning/model-serving/structured-outputs
     "databricks-meta-llama-3-1-70b-instruct": ModelProfile(
-        supports_json_schema_output=True,
-        supports_json_object_output=True,
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
         supports_tools=True,  # Public Preview, max 32 tools
         schema_transformer_class=DatabricksJsonSchemaTransformer,
         default_output_mode="native",
+        native_structured_kind="databricks_constrained_decoding",
     ),
     "databricks-meta-llama-3-3-70b-instruct": ModelProfile(
-        supports_json_schema_output=True,
-        supports_json_object_output=True,
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
         supports_tools=True,
         schema_transformer_class=DatabricksJsonSchemaTransformer,
         default_output_mode="native",
+        native_structured_kind="databricks_constrained_decoding",
     ),
     "databricks-dbrx-instruct": ModelProfile(
-        supports_json_schema_output=True,
-        supports_json_object_output=True,
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
         supports_tools=True,
         schema_transformer_class=DatabricksJsonSchemaTransformer,
         default_output_mode="native",
+        native_structured_kind="databricks_constrained_decoding",
     ),
     # Anthropic on Databricks - only supports json_schema, NOT json_object
     "databricks-claude-3-5-sonnet": ModelProfile(
-        supports_json_schema_output=True,
-        supports_json_object_output=False,  # Claude on Databricks only supports json_schema
+        supports_schema_guided_output=True,
+        supports_json_only_output=False,  # Claude on Databricks only supports schema-guided mode
         supports_tools=True,
         schema_transformer_class=DatabricksJsonSchemaTransformer,
         default_output_mode="native",
+        native_structured_kind="databricks_constrained_decoding",
     ),
 }
 
@@ -271,9 +398,35 @@ def get_profile(model: str) -> ModelProfile:
     return ModelProfile()
 ```
 
-#### 2. JsonSchemaTransformer
+#### 2. Schema Planning + JsonSchemaTransformer
 
-Base class for recursive schema transformation, extracted from PydanticAI:
+Provider constraints vary widely (e.g., Databricks forbids `$ref` and `anyOf`; some providers ignore constraints; others require `additionalProperties=false`). To avoid pushing these decisions into ad-hoc code paths, the LLM layer should compute a **SchemaPlan** for every structured call.
+
+The plan is used to:
+
+- Transform and (when safe) inline `$ref`/`$defs`
+- Count/validate schema complexity against provider limits
+- Decide whether “native structured output” is viable, or whether to degrade to tools/prompted
+
+Illustrative plan type:
+
+```python
+from dataclasses import dataclass
+from typing import Any
+
+@dataclass(frozen=True)
+class SchemaPlan:
+    requested_schema: dict[str, Any]
+    transformed_schema: dict[str, Any]
+    strict_requested: bool
+    strict_applied: bool
+    compatible_with_native: bool
+    compatible_with_tools: bool
+    reasons: list[str]
+    estimated_total_keys: int | None = None
+```
+
+Base class for recursive schema transformation (adapted from PydanticAI). Note that `$ref` support is explicit and provider-tunable: some providers require inlining, some can keep `$ref`, and some must reject recursion.
 
 ```python
 from abc import ABC, abstractmethod
@@ -283,13 +436,14 @@ class JsonSchemaTransformer(ABC):
     """Base class for provider-specific JSON schema transformations.
 
     Walks the schema recursively, applying transformations at each level.
-    Handles $ref resolution, recursive schemas, and keyword stripping.
+    Handles recursive walking, optional $ref inlining, and keyword stripping.
     """
 
     def __init__(self, schema: dict[str, Any], *, strict: bool = True):
         self.original_schema = schema
         self.strict = strict
         self.is_strict_compatible = True
+        self._prefer_inline_refs = False
         self._refs_stack: list[str] = []
         self._recursive_refs: set[str] = set()
 
@@ -329,12 +483,83 @@ class JsonSchemaTransformer(ABC):
         if ref in self._refs_stack:
             self._recursive_refs.add(ref)
             return node  # Keep recursive ref as-is
-        # Inline non-recursive refs if preferred
-        return node
+
+        if self._prefer_inline_refs and ref.startswith("#/$defs/"):
+            def_name = ref.removeprefix("#/$defs/")
+            defs = self.original_schema.get("$defs", {})
+            if def_name in defs:
+                self._refs_stack.append(ref)
+                inlined = self._walk(defs[def_name].copy())
+                self._refs_stack.pop()
+                return inlined
+
+        return node  # Keep as $ref when allowed by provider
 
     def _finalize(self, schema: dict[str, Any]) -> dict[str, Any]:
         """Final cleanup after transformation."""
         return schema
+```
+
+Schema planning ties transformers + provider limits to mode selection:
+
+```python
+def estimate_object_key_count(schema: dict[str, Any]) -> int:
+    """Best-effort count of object properties keys (heuristic)."""
+    count = 0
+    if schema.get("type") == "object" and isinstance(schema.get("properties"), dict):
+        count += len(schema["properties"])
+        for v in schema["properties"].values():
+            if isinstance(v, dict):
+                count += estimate_object_key_count(v)
+    if isinstance(schema.get("items"), dict):
+        count += estimate_object_key_count(schema["items"])
+    for k in ("anyOf", "oneOf", "allOf"):
+        if isinstance(schema.get(k), list):
+            for v in schema[k]:
+                if isinstance(v, dict):
+                    count += estimate_object_key_count(v)
+    if isinstance(schema.get("$defs"), dict):
+        for v in schema["$defs"].values():
+            if isinstance(v, dict):
+                count += estimate_object_key_count(v)
+    return count
+
+
+def plan_schema(profile: ModelProfile, schema: dict[str, Any], *, mode: "OutputMode") -> SchemaPlan:
+    strict_requested = profile.strict_mode_default and mode in (OutputMode.NATIVE, OutputMode.TOOLS)
+
+    transformed = schema
+    reasons: list[str] = []
+    strict_applied = strict_requested
+
+    if profile.schema_transformer_class:
+        transformer = profile.schema_transformer_class(schema, strict=strict_requested)
+        transformed = transformer.transform()
+        if strict_requested and not transformer.is_strict_compatible:
+            strict_applied = False
+            reasons.append("Schema required lossy transformations; strict disabled.")
+
+    estimated_keys = estimate_object_key_count(transformed)
+
+    # Provider-specific viability checks (examples)
+    compatible_with_native = True
+    compatible_with_tools = True
+
+    if profile.native_structured_kind == "databricks_constrained_decoding":
+        if estimated_keys > 64:
+            compatible_with_native = False
+            reasons.append("Databricks: schema exceeds 64-key limit.")
+
+    return SchemaPlan(
+        requested_schema=schema,
+        transformed_schema=transformed,
+        strict_requested=strict_requested,
+        strict_applied=strict_applied,
+        compatible_with_native=compatible_with_native,
+        compatible_with_tools=compatible_with_tools,
+        reasons=reasons,
+        estimated_total_keys=estimated_keys,
+    )
 ```
 
 **OpenAI Transformer:**
@@ -497,107 +722,120 @@ class BedrockJsonSchemaTransformer(JsonSchemaTransformer):
         return node
 ```
 
-#### 3. Output Modes
+#### 3. Structured Output Modes (Provider-Native, With Degradation)
 
-Strategy pattern for structured output extraction:
+Structured output is implemented as a three-mode ladder, with deterministic fallback:
+
+1. `native`: provider’s best structured mechanism (schema-guided decoding where available, or provider-native tool use)
+2. `tools`: force tool calling (portable, often higher fidelity than prompted JSON)
+3. `prompted`: inject schema into prompt and validate/retry
+
+Key principle: “native” is **not** a single wire format. It is expressed differently per provider via adapters, driven by `ModelProfile.native_structured_kind`.
+
+Illustrative API:
 
 ```python
+import json
 from enum import Enum
 from typing import Any
 from pydantic import BaseModel
 
+
 class OutputMode(Enum):
-    TOOL = "tool"        # Force structured output via tool calling
-    NATIVE = "native"    # Use provider's response_format with JSON schema
-    PROMPTED = "prompted"  # Schema in system prompt + parse/retry
+    NATIVE = "native"
+    TOOLS = "tools"
+    PROMPTED = "prompted"
 
 
-def select_output_mode(profile: ModelProfile, schema: dict[str, Any]) -> OutputMode:
-    """Select the best output mode for the given profile and schema."""
-    if profile.supports_json_schema_output:
-        return OutputMode.NATIVE
-    if profile.supports_tools:
-        return OutputMode.TOOL
-    return OutputMode.PROMPTED
+def choose_output_mode(profile: ModelProfile, schema: dict[str, Any]) -> tuple[OutputMode, SchemaPlan]:
+    """Choose mode by planning schema compatibility per mode."""
+    preference: list[OutputMode] = [
+        OutputMode(profile.default_output_mode),
+        OutputMode.NATIVE,
+        OutputMode.TOOLS,
+        OutputMode.PROMPTED,
+    ]
 
+    seen: set[OutputMode] = set()
+    ordered = [m for m in preference if not (m in seen or seen.add(m))]
 
-class ToolOutputStrategy:
-    """Structured output via tool calling."""
+    last_plan: SchemaPlan | None = None
+    for mode in ordered:
+        plan = plan_schema(profile, schema, mode=mode)  # returns SchemaPlan
+        last_plan = plan
+        if mode == OutputMode.NATIVE and profile.supports_schema_guided_output and plan.compatible_with_native:
+            return mode, plan
+        if mode == OutputMode.TOOLS and profile.supports_tools and plan.compatible_with_tools:
+            return mode, plan
+        if mode == OutputMode.PROMPTED:
+            return mode, plan
 
-    def build_request(
-        self,
-        messages: list[dict],
-        schema: type[BaseModel],
-        profile: ModelProfile,
-    ) -> dict[str, Any]:
-        """Build request with tool definition."""
-        tool_schema = schema.model_json_schema()
-
-        if profile.schema_transformer_class:
-            transformer = profile.schema_transformer_class(
-                tool_schema,
-                strict=profile.strict_mode_default,
-            )
-            tool_schema = transformer.transform()
-
-        return {
-            "messages": messages,
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "structured_output",
-                    "description": "Return structured data",
-                    "parameters": tool_schema,
-                },
-            }],
-            "tool_choice": {"type": "function", "function": {"name": "structured_output"}},
-        }
-
-    def parse_response(self, response: Any, schema: type[BaseModel]) -> BaseModel:
-        """Parse tool call response."""
-        tool_call = response.choices[0].message.tool_calls[0]
-        return schema.model_validate_json(tool_call.function.arguments)
+    # Defensive fallback
+    assert last_plan is not None
+    return OutputMode.PROMPTED, last_plan
 
 
 class NativeOutputStrategy:
-    """Structured output via response_format."""
+    """Provider-native structured output (adapter-driven)."""
 
     def build_request(
         self,
-        messages: list[dict],
-        schema: type[BaseModel],
+        model: str,
+        messages: list[LLMMessage],
+        response_model: type[BaseModel],
         profile: ModelProfile,
-    ) -> dict[str, Any]:
-        """Build request with response_format."""
-        json_schema = schema.model_json_schema()
+        plan: SchemaPlan,
+    ) -> LLMRequest:
+        return LLMRequest(
+            model=model,
+            messages=messages,
+            structured_output=StructuredOutputSpec(
+                name=response_model.__name__,
+                json_schema=plan.transformed_schema,
+                strict=plan.strict_applied,
+            ),
+            temperature=0.0,
+        )
 
-        if profile.schema_transformer_class:
-            transformer = profile.schema_transformer_class(
-                json_schema,
-                strict=profile.strict_mode_default,
-            )
-            json_schema = transformer.transform()
+    def parse_response(self, response: CompletionResponse, response_model: type[BaseModel]) -> BaseModel:
+        text = extract_text(response.message)
+        return response_model.model_validate_json(text)
 
-        return {
-            "messages": messages,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": schema.__name__,
-                    "schema": json_schema,
-                    "strict": profile.strict_mode_default,
-                },
-            },
-        }
 
-    def parse_response(self, response: Any, schema: type[BaseModel]) -> BaseModel:
-        """Parse JSON response."""
-        content = response.choices[0].message.content
-        return schema.model_validate_json(content)
+class ToolsOutputStrategy:
+    """Force tool calling to return structured output."""
+
+    TOOL_NAME = "structured_output"
+
+    def build_request(
+        self,
+        model: str,
+        messages: list[LLMMessage],
+        response_model: type[BaseModel],
+        profile: ModelProfile,
+        plan: SchemaPlan,
+    ) -> LLMRequest:
+        return LLMRequest(
+            model=model,
+            messages=messages,
+            tools=[
+                ToolSpec(
+                    name=self.TOOL_NAME,
+                    description="Return structured data",
+                    json_schema=plan.transformed_schema,
+                )
+            ],
+            tool_choice=self.TOOL_NAME,
+            temperature=0.0,
+        )
+
+    def parse_response(self, response: CompletionResponse, response_model: type[BaseModel]) -> BaseModel:
+        call = extract_single_tool_call(response.message, expected_name=self.TOOL_NAME)
+        return response_model.model_validate_json(call.arguments_json)
 
 
 class PromptedOutputStrategy:
-    """Structured output via prompt injection + parse/retry."""
+    """Prompt injection + parse/retry (last resort)."""
 
     TEMPLATE = """You must respond with a valid JSON object matching this schema:
 
@@ -607,39 +845,23 @@ Do not include any text before or after the JSON. Only output the JSON object.""
 
     def build_request(
         self,
-        messages: list[dict],
-        schema: type[BaseModel],
+        model: str,
+        messages: list[LLMMessage],
+        response_model: type[BaseModel],
         profile: ModelProfile,
-    ) -> dict[str, Any]:
-        """Build request with schema in system prompt."""
-        json_schema = schema.model_json_schema()
-        schema_str = json.dumps(json_schema, indent=2)
+        plan: SchemaPlan,
+    ) -> LLMRequest:
+        schema_str = json.dumps(plan.transformed_schema, indent=2)
+        injected = LLMMessage(role="system", parts=[TextPart(text=self.TEMPLATE.format(schema=schema_str))])
+        return LLMRequest(
+            model=model,
+            messages=[injected, *messages],
+            temperature=0.0,
+        )
 
-        # Inject schema into system message
-        system_content = self.TEMPLATE.format(schema=schema_str)
-
-        augmented_messages = messages.copy()
-        if augmented_messages and augmented_messages[0].get("role") == "system":
-            augmented_messages[0]["content"] += "\n\n" + system_content
-        else:
-            augmented_messages.insert(0, {"role": "system", "content": system_content})
-
-        return {
-            "messages": augmented_messages,
-            "response_format": {"type": "json_object"},
-        }
-
-    def parse_response(self, response: Any, schema: type[BaseModel]) -> BaseModel:
-        """Parse JSON response, stripping markdown if present."""
-        content = response.choices[0].message.content
-
-        # Strip markdown code blocks
-        content = content.strip()
-        if content.startswith("```"):
-            lines = content.split("\n")
-            content = "\n".join(lines[1:-1]) if lines[-1] == "```" else "\n".join(lines[1:])
-
-        return schema.model_validate_json(content)
+    def parse_response(self, response: CompletionResponse, response_model: type[BaseModel]) -> BaseModel:
+        text = strip_markdown_fences(extract_text(response.message))
+        return response_model.model_validate_json(text)
 ```
 
 #### 4. Retry Mechanism
@@ -668,8 +890,8 @@ class ValidationRetry(Exception):
         super().__init__(f"Validation failed: {errors}")
 
 
-def format_retry_message(error: ValidationError | ValidationRetry) -> dict:
-    """Format validation error as a message for the LLM."""
+def format_retry_message(error: ValidationError | ValidationRetry) -> LLMMessage:
+    """Format validation error as a user message for the LLM."""
     if isinstance(error, ValidationError):
         errors = error.errors()
     else:
@@ -687,7 +909,7 @@ def format_retry_message(error: ValidationError | ValidationRetry) -> dict:
         + "\n\nProvide a corrected response."
     )
 
-    return {"role": "user", "content": content}
+    return LLMMessage(role="user", parts=[TextPart(text=content)])
 
 
 @dataclass
@@ -697,32 +919,54 @@ class RetryConfig:
     max_retries: int = 3
     retry_on_validation: bool = True
     retry_on_parse: bool = True
+    retry_on_provider_errors: bool = True
 
 
 async def call_with_retry(
     provider: "Provider",
-    messages: list[dict],
-    schema: type[BaseModel],
-    output_strategy: "OutputStrategy",
+    base_messages: list[LLMMessage],
+    response_model: type[BaseModel],
+    output_strategy: Any,
     *,
     config: RetryConfig | None = None,
     on_retry: Callable[[int, Exception], None] | None = None,
-) -> BaseModel:
-    """Execute LLM call with automatic retry on validation failure."""
+    timeout_s: float | None = None,
+    cancel: CancelToken | None = None,
+    stream: bool = False,
+    on_stream_event: StreamCallback | None = None,
+    pricing: Callable[[str, int, int], float] = calculate_cost,
+    build_request: Callable[[list[LLMMessage]], LLMRequest] | None = None,
+) -> tuple[BaseModel, float]:
+    """Execute LLM call with automatic retry and cost accounting."""
     if config is None:
         config = RetryConfig()
 
-    working_messages = messages.copy()
+    if build_request is None:
+        raise ValueError("build_request is required")
+
+    working_messages = list(base_messages)
+    total_cost = 0.0
 
     for attempt in range(config.max_retries + 1):
         try:
-            request = output_strategy.build_request(
-                working_messages,
-                schema,
-                provider.profile,
+            request = build_request(working_messages)
+            response = await provider.complete(
+                request,
+                timeout_s=timeout_s,
+                cancel=cancel,
+                stream=stream,
+                on_stream_event=on_stream_event,
             )
-            response = await provider.complete(**request)
-            return output_strategy.parse_response(response, schema)
+
+            # Cost is charged per attempt; accumulate across retries.
+            total_cost += pricing(
+                request.model,
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+            )
+
+            parsed = output_strategy.parse_response(response, response_model)
+            return parsed, total_cost
 
         except ValidationError as e:
             if not config.retry_on_validation or attempt >= config.max_retries:
@@ -740,10 +984,24 @@ async def call_with_retry(
             if on_retry:
                 on_retry(attempt + 1, e)
 
-            working_messages.append({
-                "role": "user",
-                "content": f"Invalid JSON: {e}. Please provide valid JSON.",
-            })
+            working_messages.append(
+                LLMMessage(
+                    role="user",
+                    parts=[TextPart(text=f"Invalid JSON: {e}. Please provide valid JSON.")],
+                )
+            )
+
+        except LLMError as e:
+            if (
+                not config.retry_on_provider_errors
+                or not e.retryable
+                or attempt >= config.max_retries
+            ):
+                raise
+            if on_retry:
+                on_retry(attempt + 1, e)
+            # Optional: backoff/jitter is applied here in real code.
+            continue
 
     raise RuntimeError("Retry loop exited unexpectedly")
 ```
@@ -755,7 +1013,7 @@ Abstract base for all providers:
 ```python
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable
+from typing import Any, Callable, Protocol
 
 @dataclass
 class Usage:
@@ -766,21 +1024,23 @@ class Usage:
 
 
 @dataclass
-class StreamChunk:
-    """A chunk of streamed content."""
-    content: str
-    done: bool = False
-    usage: Usage | None = None
-
-
-@dataclass
 class CompletionResponse:
-    """Response from a completion call."""
-    content: str
+    """Normalized response from a completion call.
+
+    Providers adapt SDK responses into this portable shape so that the rest of the
+    system never needs to interpret provider-specific payload formats.
+    """
+
+    message: LLMMessage
     usage: Usage
     raw_response: Any
-    cost: float = 0.0
     reasoning_content: str | None = None
+
+
+class CancelToken(Protocol):
+    """Minimal cancellation contract compatible with PenguiFlow cancel propagation."""
+
+    def is_cancelled(self) -> bool: ...
 
 
 class Provider(ABC):
@@ -791,26 +1051,100 @@ class Provider(ABC):
     @abstractmethod
     async def complete(
         self,
-        messages: list[dict],
+        request: LLMRequest,
         *,
-        response_format: dict | None = None,
-        tools: list[dict] | None = None,
-        tool_choice: dict | None = None,
-        temperature: float = 0.0,
-        max_tokens: int | None = None,
+        timeout_s: float | None = None,
+        cancel: CancelToken | None = None,
         stream: bool = False,
-        on_stream_chunk: Callable[[StreamChunk], None] | None = None,
-        **kwargs: Any,
+        on_stream_event: StreamCallback | None = None,
     ) -> CompletionResponse:
-        """Execute a completion request."""
-        ...
+        """Execute a completion request.
 
-    def calculate_cost(self, usage: Usage) -> float:
-        """Calculate cost based on token usage."""
-        return (
-            usage.input_tokens * self.profile.cost_per_1k_input / 1000 +
-            usage.output_tokens * self.profile.cost_per_1k_output / 1000
-        )
+        Requirements:
+        - Respect cancellation (raise `asyncio.CancelledError` or `LLMCancelledError`)
+        - Enforce `timeout_s` (raise `LLMTimeoutError`)
+        - Emit `StreamEvent` via `on_stream_event` if streaming is enabled
+        - Normalize provider-specific responses into `CompletionResponse.message`
+        """
+        ...
+```
+
+#### 5.1 Error Taxonomy (Retryability + User-Facing Messages)
+
+The native layer should expose a small, stable error hierarchy with explicit retryability so that:
+
+- The retry loop can make correct decisions without string matching
+- The planner/runtime can log consistent failure reasons across providers
+- User-visible errors can be extracted cleanly while retaining raw payloads for debugging
+
+Illustrative error model:
+
+```python
+from dataclasses import dataclass
+from typing import Any
+
+@dataclass
+class LLMError(Exception):
+    message: str
+    provider: str | None = None
+    status_code: int | None = None
+    retryable: bool = False
+    raw: Any | None = None
+
+
+@dataclass
+class LLMTimeoutError(LLMError):
+    retryable: bool = True
+
+
+@dataclass
+class LLMRateLimitError(LLMError):
+    retryable: bool = True
+
+
+@dataclass
+class LLMServerError(LLMError):
+    retryable: bool = True
+
+
+@dataclass
+class LLMInvalidRequestError(LLMError):
+    retryable: bool = False
+
+
+@dataclass
+class LLMAuthError(LLMError):
+    retryable: bool = False
+
+
+@dataclass
+class LLMCancelledError(LLMError):
+    retryable: bool = False
+```
+
+Provider implementations map SDK exceptions → `LLMError` subclasses (including Databricks nested JSON extraction), attaching `raw` for observability while producing a clean `message`.
+
+#### 5.2 Compatibility Contract: `JSONLLMClient`
+
+PenguiFlow already depends on a JSON-only client protocol in planner code. The native layer must provide a compatibility adapter that preserves:
+
+- **Inputs**: OpenAI-style `list[{"role": ..., "content": ...}]` messages (existing templates)
+- **Streaming**: a callback that receives incremental assistant text (best-effort across providers)
+- **Cancellation**: cancel propagation from PenguiFlow runtime into provider calls
+- **Outputs**: parsed Pydantic model + accumulated cost across attempts
+
+Implementation sketch:
+
+```python
+# penguiflow/llm/protocol.py
+
+class JSONLLMClientAdapter:
+    def __init__(self, client: LLMClient):
+        self._client = client
+
+    async def __call__(self, messages: list[dict], response_model: type[BaseModel], **kwargs):
+        typed = adapt_openai_dict_messages(messages)  # -> list[LLMMessage]
+        return await self._client.call(typed, response_model, **kwargs)
 ```
 
 #### 6. Provider Implementations
@@ -818,10 +1152,12 @@ class Provider(ABC):
 **OpenAI Provider:**
 
 ```python
+import asyncio
 from openai import AsyncOpenAI
 
+
 class OpenAIProvider(Provider):
-    """OpenAI provider using native SDK."""
+    """OpenAI provider using native SDK (OpenAI-shaped wire format)."""
 
     def __init__(
         self,
@@ -837,105 +1173,112 @@ class OpenAIProvider(Provider):
 
     async def complete(
         self,
-        messages: list[dict],
+        request: LLMRequest,
         *,
-        response_format: dict | None = None,
-        tools: list[dict] | None = None,
-        tool_choice: dict | None = None,
-        temperature: float = 0.0,
-        max_tokens: int | None = None,
+        timeout_s: float | None = None,
+        cancel: CancelToken | None = None,
         stream: bool = False,
-        on_stream_chunk: Callable[[StreamChunk], None] | None = None,
-        reasoning_effort: str | None = None,
-        **kwargs: Any,
+        on_stream_event: StreamCallback | None = None,
     ) -> CompletionResponse:
+        params = self._to_openai_params(request)
+
+        async def _run() -> CompletionResponse:
+            if stream and on_stream_event:
+                return await self._stream(params, on_stream_event)
+
+            resp = await self._client.chat.completions.create(**params)
+            usage = Usage(
+                input_tokens=resp.usage.prompt_tokens,
+                output_tokens=resp.usage.completion_tokens,
+                total_tokens=resp.usage.total_tokens,
+            )
+            msg = resp.choices[0].message
+            parts: list[ContentPart] = []
+            if msg.content:
+                parts.append(TextPart(text=msg.content))
+            # Tool calls (if any) are normalized into ToolCallPart(s)
+            for tc in getattr(msg, "tool_calls", []) or []:
+                parts.append(
+                    ToolCallPart(
+                        name=tc.function.name,
+                        arguments_json=tc.function.arguments,
+                        call_id=getattr(tc, "id", None),
+                    )
+                )
+            return CompletionResponse(
+                message=LLMMessage(role="assistant", parts=parts),
+                usage=usage,
+                raw_response=resp,
+                reasoning_content=getattr(msg, "reasoning_content", None),
+            )
+
+        if cancel and cancel.is_cancelled():
+            raise asyncio.CancelledError()
+        if timeout_s is None:
+            return await _run()
+        async with asyncio.timeout(timeout_s):
+            return await _run()
+
+    def _to_openai_params(self, request: LLMRequest) -> dict[str, Any]:
+        """Adapt typed `LLMRequest` to OpenAI chat.completions params."""
         params: dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
+            "messages": adapt_messages_to_openai(request.messages),
+            "temperature": request.temperature,
         }
+        if request.max_tokens is not None:
+            params["max_tokens"] = request.max_tokens
+        if request.tools:
+            params["tools"] = adapt_tools_to_openai(request.tools)
+        if request.tool_choice:
+            params["tool_choice"] = {"type": "function", "function": {"name": request.tool_choice}}
+        if request.structured_output:
+            params["response_format"] = adapt_structured_output_to_openai(request.structured_output)
+        if request.extra:
+            params.update(request.extra)  # sanitized by higher layers
+        return params
 
-        if response_format:
-            params["response_format"] = response_format
-        if tools:
-            params["tools"] = tools
-        if tool_choice:
-            params["tool_choice"] = tool_choice
-        if max_tokens:
-            params["max_tokens"] = max_tokens
-
-        # Reasoning models
-        if self.profile.supports_reasoning and reasoning_effort:
-            params["reasoning_effort"] = reasoning_effort
-
-        if stream and on_stream_chunk:
-            return await self._stream_completion(params, on_stream_chunk)
-
-        response = await self._client.chat.completions.create(**params)
-
-        usage = Usage(
-            input_tokens=response.usage.prompt_tokens,
-            output_tokens=response.usage.completion_tokens,
-            total_tokens=response.usage.total_tokens,
-        )
-
-        content = response.choices[0].message.content or ""
-        reasoning = getattr(response.choices[0].message, "reasoning_content", None)
-
-        return CompletionResponse(
-            content=content,
-            usage=usage,
-            raw_response=response,
-            cost=self.calculate_cost(usage),
-            reasoning_content=reasoning,
-        )
-
-    async def _stream_completion(
-        self,
-        params: dict,
-        on_stream_chunk: Callable[[StreamChunk], None],
-    ) -> CompletionResponse:
+    async def _stream(self, params: dict[str, Any], on_stream_event: StreamCallback) -> CompletionResponse:
+        params = dict(params)
         params["stream"] = True
         params["stream_options"] = {"include_usage": True}
 
-        content_parts: list[str] = []
+        parts: list[ContentPart] = []
+        text_acc: list[str] = []
         usage: Usage | None = None
 
-        async with await self._client.chat.completions.create(**params) as stream:
-            async for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    text = chunk.choices[0].delta.content
-                    content_parts.append(text)
-                    on_stream_chunk(StreamChunk(content=text, done=False))
-
-                if chunk.usage:
+        async with await self._client.chat.completions.create(**params) as s:
+            async for chunk in s:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    text_acc.append(delta.content)
+                    on_stream_event(StreamEvent(delta_text=delta.content))
+                if getattr(chunk, "usage", None):
                     usage = Usage(
                         input_tokens=chunk.usage.prompt_tokens,
                         output_tokens=chunk.usage.completion_tokens,
                         total_tokens=chunk.usage.total_tokens,
                     )
 
-        full_content = "".join(content_parts)
-        on_stream_chunk(StreamChunk(content="", done=True, usage=usage))
-
-        if usage is None:
-            usage = Usage(0, 0, 0)
-
+        full_text = "".join(text_acc)
+        if full_text:
+            parts.append(TextPart(text=full_text))
+        on_stream_event(StreamEvent(done=True, usage=usage))
         return CompletionResponse(
-            content=full_content,
-            usage=usage,
+            message=LLMMessage(role="assistant", parts=parts),
+            usage=usage or Usage(0, 0, 0),
             raw_response=None,
-            cost=self.calculate_cost(usage),
         )
 ```
 
 **Anthropic Provider:**
 
 ```python
+import json
 from anthropic import AsyncAnthropic
 
 class AnthropicProvider(Provider):
-    """Anthropic provider using native SDK."""
+    """Anthropic provider using native SDK (content blocks + tool use)."""
 
     def __init__(
         self,
@@ -950,90 +1293,66 @@ class AnthropicProvider(Provider):
 
     async def complete(
         self,
-        messages: list[dict],
+        request: LLMRequest,
         *,
-        response_format: dict | None = None,
-        tools: list[dict] | None = None,
-        tool_choice: dict | None = None,
-        temperature: float = 0.0,
-        max_tokens: int | None = None,
+        timeout_s: float | None = None,
+        cancel: CancelToken | None = None,
         stream: bool = False,
-        on_stream_chunk: Callable[[StreamChunk], None] | None = None,
-        **kwargs: Any,
+        on_stream_event: StreamCallback | None = None,
     ) -> CompletionResponse:
-        # Convert OpenAI message format to Anthropic format
-        system_content, anthropic_messages = self._convert_messages(messages)
-
+        # Real implementation: enforce timeout/cancel, and use streaming events.
+        system_text, msgs = adapt_messages_to_anthropic(request.messages)
         params: dict[str, Any] = {
             "model": self.model,
-            "messages": anthropic_messages,
-            "max_tokens": max_tokens or 4096,
+            "system": system_text or None,
+            "messages": msgs,
+            "max_tokens": request.max_tokens or 4096,
         }
+        if request.temperature > 0:
+            params["temperature"] = request.temperature
+        if request.tools:
+            params["tools"] = adapt_tools_to_anthropic(request.tools)
+        if request.tool_choice:
+            params["tool_choice"] = {"type": "tool", "name": request.tool_choice}
 
-        if system_content:
-            params["system"] = system_content
-        if temperature > 0:
-            params["temperature"] = temperature
-        if tools:
-            params["tools"] = self._convert_tools(tools)
+        # Anthropic "native structured" is typically tool use; schema-guided decoding is not OpenAI-style.
+        if request.structured_output:
+            params = adapt_structured_output_to_anthropic(params, request.structured_output, profile=self.profile)
 
-        if stream and on_stream_chunk:
-            return await self._stream_completion(params, on_stream_chunk)
+        if stream and on_stream_event:
+            return await anthropic_stream(params, on_stream_event)  # emits StreamEvent deltas
 
-        response = await self._client.messages.create(**params)
-
+        resp = await self._client.messages.create(**params)
         usage = Usage(
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
-            total_tokens=response.usage.input_tokens + response.usage.output_tokens,
+            input_tokens=resp.usage.input_tokens,
+            output_tokens=resp.usage.output_tokens,
+            total_tokens=resp.usage.input_tokens + resp.usage.output_tokens,
         )
 
-        content = self._extract_content(response)
+        parts: list[ContentPart] = []
+        for block in resp.content:
+            if block.type == "text":
+                parts.append(TextPart(text=block.text))
+            elif block.type == "tool_use":
+                parts.append(
+                    ToolCallPart(
+                        name=block.name,
+                        arguments_json=json.dumps(block.input),
+                        call_id=block.id,
+                    )
+                )
 
         return CompletionResponse(
-            content=content,
+            message=LLMMessage(role="assistant", parts=parts),
             usage=usage,
-            raw_response=response,
-            cost=self.calculate_cost(usage),
+            raw_response=resp,
         )
-
-    def _convert_messages(self, messages: list[dict]) -> tuple[str, list[dict]]:
-        """Convert OpenAI messages to Anthropic format."""
-        system_parts = []
-        anthropic_messages = []
-
-        for msg in messages:
-            if msg["role"] == "system":
-                system_parts.append(msg["content"])
-            else:
-                anthropic_messages.append(msg)
-
-        return "\n\n".join(system_parts), anthropic_messages
-
-    def _convert_tools(self, tools: list[dict]) -> list[dict]:
-        """Convert OpenAI tool format to Anthropic format."""
-        return [
-            {
-                "name": t["function"]["name"],
-                "description": t["function"].get("description", ""),
-                "input_schema": t["function"]["parameters"],
-            }
-            for t in tools
-            if t.get("type") == "function"
-        ]
-
-    def _extract_content(self, response: Any) -> str:
-        """Extract text content from Anthropic response."""
-        for block in response.content:
-            if block.type == "text":
-                return block.text
-        return ""
 ```
 
 **Bedrock Provider:**
 
 ```python
-import json
+import asyncio
 import boto3
 from botocore.config import Config
 
@@ -1067,47 +1386,42 @@ class BedrockProvider(Provider):
 
     async def complete(
         self,
-        messages: list[dict],
+        request: LLMRequest,
         *,
-        response_format: dict | None = None,
-        tools: list[dict] | None = None,
-        tool_choice: dict | None = None,
-        temperature: float = 0.0,
-        max_tokens: int | None = None,
+        timeout_s: float | None = None,
+        cancel: CancelToken | None = None,
         stream: bool = False,
-        on_stream_chunk: Callable[[StreamChunk], None] | None = None,
-        **kwargs: Any,
+        on_stream_event: StreamCallback | None = None,
     ) -> CompletionResponse:
-        # Bedrock uses converse API
-        system_content, bedrock_messages = self._convert_messages(messages)
+        # Bedrock uses the Converse APIs; real implementation must adapt typed content/tool shapes.
+        system_content, bedrock_messages = adapt_messages_to_bedrock(request.messages)
 
         params: dict[str, Any] = {
             "modelId": self.model,
             "messages": bedrock_messages,
             "inferenceConfig": {
-                "maxTokens": max_tokens or 4096,
-                "temperature": temperature,
+                "maxTokens": request.max_tokens or 4096,
+                "temperature": request.temperature,
             },
         }
 
         if system_content:
             params["system"] = [{"text": system_content}]
 
-        if tools:
+        if request.tools:
             params["toolConfig"] = {
-                "tools": self._convert_tools(tools),
+                "tools": adapt_tools_to_bedrock(request.tools),
             }
 
-        # Run sync boto3 call in executor
-        import asyncio
+        # boto3 is sync; run in executor and respect timeout/cancel at the wrapper layer.
         loop = asyncio.get_event_loop()
 
-        if stream and on_stream_chunk:
+        if stream and on_stream_event:
             response = await loop.run_in_executor(
                 None,
                 lambda: self._client.converse_stream(**params),
             )
-            return await self._process_stream(response, on_stream_chunk)
+            return await bedrock_process_stream(response, on_stream_event)
 
         response = await loop.run_in_executor(
             None,
@@ -1120,51 +1434,12 @@ class BedrockProvider(Provider):
             total_tokens=response["usage"]["totalTokens"],
         )
 
-        content = self._extract_content(response)
-
+        parts = adapt_bedrock_output_to_parts(response)
         return CompletionResponse(
-            content=content,
+            message=LLMMessage(role="assistant", parts=parts),
             usage=usage,
             raw_response=response,
-            cost=self.calculate_cost(usage),
         )
-
-    def _convert_messages(self, messages: list[dict]) -> tuple[str, list[dict]]:
-        """Convert to Bedrock message format."""
-        system_parts = []
-        bedrock_messages = []
-
-        for msg in messages:
-            if msg["role"] == "system":
-                system_parts.append(msg["content"])
-            else:
-                bedrock_messages.append({
-                    "role": msg["role"],
-                    "content": [{"text": msg["content"]}],
-                })
-
-        return "\n\n".join(system_parts), bedrock_messages
-
-    def _convert_tools(self, tools: list[dict]) -> list[dict]:
-        """Convert to Bedrock tool format."""
-        return [
-            {
-                "toolSpec": {
-                    "name": t["function"]["name"],
-                    "description": t["function"].get("description", ""),
-                    "inputSchema": {"json": t["function"]["parameters"]},
-                }
-            }
-            for t in tools
-            if t.get("type") == "function"
-        ]
-
-    def _extract_content(self, response: dict) -> str:
-        """Extract text from Bedrock response."""
-        for block in response.get("output", {}).get("message", {}).get("content", []):
-            if "text" in block:
-                return block["text"]
-        return ""
 ```
 
 **Databricks Provider:**
@@ -1304,45 +1579,42 @@ class DatabricksProvider(Provider):
 
     async def complete(
         self,
-        messages: list[dict],
+        request: LLMRequest,
         *,
-        response_format: dict | None = None,
-        tools: list[dict] | None = None,
-        tool_choice: dict | None = None,
-        temperature: float = 0.0,
-        max_tokens: int | None = None,
+        timeout_s: float | None = None,
+        cancel: CancelToken | None = None,
         stream: bool = False,
-        on_stream_chunk: Callable[[StreamChunk], None] | None = None,
-        **kwargs: Any,
+        on_stream_event: StreamCallback | None = None,
     ) -> CompletionResponse:
-        # Databricks doesn't support reasoning_effort - strip it
-        kwargs.pop("reasoning_effort", None)
-
         params: dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
+            "messages": adapt_messages_to_openai(request.messages),
+            "temperature": request.temperature,
         }
 
-        # Databricks supports json_schema response_format via constrained decoding
-        if response_format:
-            params["response_format"] = response_format
+        if request.max_tokens is not None:
+            params["max_tokens"] = request.max_tokens
+
+        # Databricks supports schema-guided output via constrained decoding (OpenAI-compatible response_format).
+        if request.structured_output:
+            params["response_format"] = adapt_structured_output_to_databricks(request.structured_output)
 
         # Validate tool limits
-        if tools:
-            if len(tools) > self.MAX_TOOLS:
-                raise ValueError(
-                    f"Databricks supports max {self.MAX_TOOLS} tools, got {len(tools)}"
-                )
-            params["tools"] = tools
-        if tool_choice:
-            params["tool_choice"] = tool_choice
-        if max_tokens:
-            params["max_tokens"] = max_tokens
+        if request.tools:
+            if len(request.tools) > self.MAX_TOOLS:
+                raise ValueError(f"Databricks supports max {self.MAX_TOOLS} tools, got {len(request.tools)}")
+            params["tools"] = adapt_tools_to_openai(request.tools)
+        if request.tool_choice:
+            params["tool_choice"] = {"type": "function", "function": {"name": request.tool_choice}}
+
+        # Databricks does not support some OpenAI params (e.g. reasoning_effort); drop them safely.
+        extra = dict(request.extra or {})
+        extra.pop("reasoning_effort", None)
+        params.update(extra)
 
         try:
-            if stream and on_stream_chunk:
-                return await self._stream_completion(params, on_stream_chunk)
+            if stream and on_stream_event:
+                return await self._stream_completion(params, on_stream_event)
 
             response = await self._client.chat.completions.create(**params)
         except Exception as e:
@@ -1355,32 +1627,42 @@ class DatabricksProvider(Provider):
             total_tokens=response.usage.total_tokens,
         )
 
-        content = response.choices[0].message.content or ""
+        msg = response.choices[0].message
+        parts: list[ContentPart] = []
+        if msg.content:
+            parts.append(TextPart(text=msg.content))
+        for tc in getattr(msg, "tool_calls", []) or []:
+            parts.append(
+                ToolCallPart(
+                    name=tc.function.name,
+                    arguments_json=tc.function.arguments,
+                    call_id=getattr(tc, "id", None),
+                )
+            )
 
         return CompletionResponse(
-            content=content,
+            message=LLMMessage(role="assistant", parts=parts),
             usage=usage,
             raw_response=response,
-            cost=self.calculate_cost(usage),
         )
 
     async def _stream_completion(
         self,
         params: dict,
-        on_stream_chunk: Callable[[StreamChunk], None],
+        on_stream_event: StreamCallback,
     ) -> CompletionResponse:
-        """Stream completion with callback."""
+        """Stream completion with callback (OpenAI-compatible streaming)."""
         params["stream"] = True
 
-        content_parts: list[str] = []
+        text_parts: list[str] = []
         usage: Usage | None = None
 
         async with await self._client.chat.completions.create(**params) as stream:
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
                     text = chunk.choices[0].delta.content
-                    content_parts.append(text)
-                    on_stream_chunk(StreamChunk(content=text, done=False))
+                    text_parts.append(text)
+                    on_stream_event(StreamEvent(delta_text=text))
 
                 if hasattr(chunk, "usage") and chunk.usage:
                     usage = Usage(
@@ -1389,17 +1671,16 @@ class DatabricksProvider(Provider):
                         total_tokens=chunk.usage.total_tokens,
                     )
 
-        full_content = "".join(content_parts)
-        on_stream_chunk(StreamChunk(content="", done=True, usage=usage))
-
-        if usage is None:
-            usage = Usage(0, 0, 0)
+        full_text = "".join(text_parts)
+        on_stream_event(StreamEvent(done=True, usage=usage))
 
         return CompletionResponse(
-            content=full_content,
-            usage=usage,
+            message=LLMMessage(
+                role="assistant",
+                parts=[TextPart(text=full_text)] if full_text else [],
+            ),
+            usage=usage or Usage(0, 0, 0),
             raw_response=None,
-            cost=self.calculate_cost(usage),
         )
 
     def _wrap_error(self, exc: Exception) -> Exception:
@@ -1422,11 +1703,15 @@ class DatabricksProvider(Provider):
             # Check for double-nested JSON
             inner_json = re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"', inner_msg)
             if inner_json:
-                return LLMError(inner_json.group(1).replace('\\"', '"'))
+                return LLMInvalidRequestError(
+                    message=inner_json.group(1).replace('\\"', '"'),
+                    provider="databricks",
+                    raw=exc,
+                )
 
-            return LLMError(inner_msg)
+            return LLMInvalidRequestError(message=inner_msg, provider="databricks", raw=exc)
 
-        return exc
+        return LLMServerError(message=str(exc), provider="databricks", raw=exc)
 ```
 
 **OpenRouter Provider:**
@@ -1506,58 +1791,59 @@ class OpenRouterProvider(Provider):
 
             if profile_type == "anthropic":
                 return ModelProfile(
-                    supports_json_schema_output=True,
+                    supports_schema_guided_output=True,
                     schema_transformer_class=OpenRouterAnthropicTransformer,
                     strict_mode_default=False,
+                    native_structured_kind="openai_compatible_tools",
                 )
             elif profile_type == "google":
                 return ModelProfile(
-                    supports_json_schema_output=True,
+                    supports_schema_guided_output=True,
                     schema_transformer_class=OpenRouterGoogleTransformer,
+                    native_structured_kind="google_response_schema",
                 )
             elif profile_type == "openai":
                 return ModelProfile(
-                    supports_json_schema_output=True,
+                    supports_schema_guided_output=True,
                     schema_transformer_class=OpenAIJsonSchemaTransformer,
+                    native_structured_kind="openai_response_format",
                 )
 
         # Default profile for unknown providers
         return ModelProfile(
-            supports_json_schema_output=False,
-            supports_json_object_output=True,
+            supports_schema_guided_output=False,
+            supports_json_only_output=True,
             default_output_mode="prompted",
         )
 
     async def complete(
         self,
-        messages: list[dict],
+        request: LLMRequest,
         *,
-        response_format: dict | None = None,
-        tools: list[dict] | None = None,
-        tool_choice: dict | None = None,
-        temperature: float = 0.0,
-        max_tokens: int | None = None,
+        timeout_s: float | None = None,
+        cancel: CancelToken | None = None,
         stream: bool = False,
-        on_stream_chunk: Callable[[StreamChunk], None] | None = None,
-        **kwargs: Any,
+        on_stream_event: StreamCallback | None = None,
     ) -> CompletionResponse:
+        # OpenRouter is OpenAI-compatible; reuse the OpenAI-shaped adapter.
         params: dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
+            "messages": adapt_messages_to_openai(request.messages),
+            "temperature": request.temperature,
         }
+        if request.max_tokens is not None:
+            params["max_tokens"] = request.max_tokens
+        if request.tools:
+            params["tools"] = adapt_tools_to_openai(request.tools)
+        if request.tool_choice:
+            params["tool_choice"] = {"type": "function", "function": {"name": request.tool_choice}}
+        if request.structured_output:
+            params["response_format"] = adapt_structured_output_to_openai(request.structured_output)
+        if request.extra:
+            params.update(request.extra)
 
-        if response_format:
-            params["response_format"] = response_format
-        if tools:
-            params["tools"] = tools
-        if tool_choice:
-            params["tool_choice"] = tool_choice
-        if max_tokens:
-            params["max_tokens"] = max_tokens
-
-        if stream and on_stream_chunk:
-            return await self._stream_completion(params, on_stream_chunk)
+        if stream and on_stream_event:
+            return await openai_compatible_stream(self._client, params, on_stream_event)
 
         response = await self._client.chat.completions.create(**params)
 
@@ -1567,13 +1853,23 @@ class OpenRouterProvider(Provider):
             total_tokens=response.usage.total_tokens,
         )
 
-        content = response.choices[0].message.content or ""
+        msg = response.choices[0].message
+        parts: list[ContentPart] = []
+        if msg.content:
+            parts.append(TextPart(text=msg.content))
+        for tc in getattr(msg, "tool_calls", []) or []:
+            parts.append(
+                ToolCallPart(
+                    name=tc.function.name,
+                    arguments_json=tc.function.arguments,
+                    call_id=getattr(tc, "id", None),
+                )
+            )
 
         return CompletionResponse(
-            content=content,
+            message=LLMMessage(role="assistant", parts=parts),
             usage=usage,
             raw_response=response,
-            cost=self.calculate_cost(usage),
         )
 
 
@@ -1607,13 +1903,14 @@ class OpenRouterGoogleTransformer(GoogleJsonSchemaTransformer):
 The unified client that orchestrates everything:
 
 ```python
-from typing import Callable, Any
+from typing import Any, Callable
 from pydantic import BaseModel
 
 class LLMClient:
     """Main LLM client interface for PenguiFlow.
 
-    Orchestrates provider selection, output mode, retry, and streaming.
+    Orchestrates routing, schema planning, mode selection, retry, streaming,
+    cancellation, timeouts, and cost/usage accounting.
     """
 
     def __init__(
@@ -1624,7 +1921,7 @@ class LLMClient:
         max_retries: int = 3,
         timeout_s: float = 60.0,
         streaming_enabled: bool = False,
-        on_stream_chunk: Callable[[StreamChunk], None] | None = None,
+        on_stream_event: StreamCallback | None = None,
         # Provider-specific config
         api_key: str | None = None,
         base_url: str | None = None,
@@ -1635,7 +1932,7 @@ class LLMClient:
         self.max_retries = max_retries
         self.timeout_s = timeout_s
         self.streaming_enabled = streaming_enabled
-        self.on_stream_chunk = on_stream_chunk
+        self.on_stream_event = on_stream_event
 
         # Create provider
         self._provider = create_provider(
@@ -1645,43 +1942,62 @@ class LLMClient:
             **provider_kwargs,
         )
 
-        # Select output strategy based on profile
-        self._output_mode = select_output_mode(
-            self._provider.profile,
-            {},  # Will be refined per-call
-        )
-
     @property
     def profile(self) -> ModelProfile:
         return self._provider.profile
 
-    async def call(
+    async def call_dict(
         self,
         messages: list[dict],
         response_model: type[BaseModel],
+        **kwargs: Any,
+    ) -> tuple[BaseModel, float]:
+        """Convenience wrapper for OpenAI-style dict messages (for templates/back-compat)."""
+        typed = adapt_openai_dict_messages(messages)
+        return await self.call(typed, response_model, **kwargs)
+
+    async def call(
+        self,
+        messages: list[LLMMessage],
+        response_model: type[BaseModel],
         *,
+        mode: OutputMode | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
         stream: bool | None = None,
-        on_stream_chunk: Callable[[StreamChunk], None] | None = None,
+        on_stream_event: StreamCallback | None = None,
+        timeout_s: float | None = None,
+        cancel: CancelToken | None = None,
     ) -> tuple[BaseModel, float]:
         """Execute a structured output call.
 
         Args:
-            messages: The conversation messages.
+            messages: Typed conversation messages.
             response_model: Pydantic model for the expected response.
+            mode: Force a specific structured output mode (otherwise choose + degrade).
             temperature: Override default temperature.
             max_tokens: Maximum tokens to generate.
             stream: Override default streaming setting.
-            on_stream_chunk: Override default stream callback.
+            on_stream_event: Override default stream callback.
+            timeout_s: Override default timeout.
+            cancel: Cancellation token propagated from PenguiFlow.
 
         Returns:
             Tuple of (parsed response, cost in USD).
         """
-        # Select output strategy
         schema = response_model.model_json_schema()
-        output_mode = select_output_mode(self._provider.profile, schema)
-        strategy = self._get_strategy(output_mode)
+
+        chosen_mode, plan = choose_output_mode(self._provider.profile, schema)
+        if mode is not None:
+            # If forced mode is incompatible, callers get a fast/clear failure.
+            forced_plan = plan_schema(self._provider.profile, schema, mode=mode)
+            if mode == OutputMode.NATIVE and not forced_plan.compatible_with_native:
+                raise ValueError(f"Mode {mode} incompatible: {forced_plan.reasons}")
+            if mode == OutputMode.TOOLS and not forced_plan.compatible_with_tools:
+                raise ValueError(f"Mode {mode} incompatible: {forced_plan.reasons}")
+            chosen_mode, plan = mode, forced_plan
+
+        strategy = self._get_strategy(chosen_mode)
 
         # Build retry config
         retry_config = RetryConfig(
@@ -1692,51 +2008,77 @@ class LLMClient:
 
         # Determine streaming
         should_stream = stream if stream is not None else self.streaming_enabled
-        chunk_callback = on_stream_chunk or self.on_stream_chunk
+        stream_callback = on_stream_event or self.on_stream_event
+
+        def build_request(working_messages: list[LLMMessage]) -> LLMRequest:
+            req = strategy.build_request(
+                model=self.model,
+                messages=working_messages,
+                response_model=response_model,
+                profile=self._provider.profile,
+                plan=plan,
+            )
+            return LLMRequest(
+                model=req.model,
+                messages=req.messages,
+                tools=req.tools,
+                tool_choice=req.tool_choice,
+                structured_output=req.structured_output,
+                temperature=temperature if temperature is not None else self.temperature,
+                max_tokens=max_tokens,
+                extra=req.extra,
+            )
 
         # Execute with retry
-        result = await call_with_retry(
+        result, total_cost = await call_with_retry(
             self._provider,
-            messages,
-            response_model,
-            strategy,
+            base_messages=messages,
+            response_model=response_model,
+            output_strategy=strategy,
             config=retry_config,
+            timeout_s=timeout_s if timeout_s is not None else self.timeout_s,
+            cancel=cancel,
+            stream=should_stream,
+            on_stream_event=stream_callback,
+            build_request=build_request,
         )
-
-        # Get last call cost (simplified - full impl would track across retries)
-        cost = 0.0  # TODO: Accumulate cost across retries
-
-        return result, cost
+        return result, total_cost
 
     async def call_raw(
         self,
-        messages: list[dict],
+        messages: list[LLMMessage],
         *,
-        response_format: dict | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
         stream: bool | None = None,
-        on_stream_chunk: Callable[[StreamChunk], None] | None = None,
+        on_stream_event: StreamCallback | None = None,
+        timeout_s: float | None = None,
+        cancel: CancelToken | None = None,
     ) -> CompletionResponse:
         """Execute a raw completion call without structured output."""
         should_stream = stream if stream is not None else self.streaming_enabled
-        chunk_callback = on_stream_chunk or self.on_stream_chunk
+        stream_callback = on_stream_event or self.on_stream_event
 
-        return await self._provider.complete(
-            messages,
-            response_format=response_format,
-            temperature=temperature or self.temperature,
+        request = LLMRequest(
+            model=self.model,
+            messages=messages,
+            temperature=temperature if temperature is not None else self.temperature,
             max_tokens=max_tokens,
+        )
+        return await self._provider.complete(
+            request,
+            timeout_s=timeout_s if timeout_s is not None else self.timeout_s,
+            cancel=cancel,
             stream=should_stream,
-            on_stream_chunk=chunk_callback,
+            on_stream_event=stream_callback,
         )
 
     def _get_strategy(self, mode: OutputMode) -> Any:
         """Get output strategy for the given mode."""
-        if mode == OutputMode.TOOL:
-            return ToolOutputStrategy()
-        elif mode == OutputMode.NATIVE:
+        if mode == OutputMode.NATIVE:
             return NativeOutputStrategy()
+        elif mode == OutputMode.TOOLS:
+            return ToolsOutputStrategy()
         else:
             return PromptedOutputStrategy()
 
@@ -1749,26 +2091,46 @@ def create_provider(
     **kwargs: Any,
 ) -> Provider:
     """Create a provider instance based on model string."""
-    # Detect provider from model prefix
-    if model.startswith("openrouter/") or "/" in model and not model.startswith(("gpt", "claude", "gemini")):
+    # Avoid heuristic routing based on "/" which misclassifies many real model IDs.
+    # Prefer explicit prefixes and a small set of safe inferences for legacy model strings.
+    #
+    # Recommended model ref formats:
+    # - "openai/gpt-4o"
+    # - "anthropic/claude-3-5-sonnet"
+    # - "google/gemini-2.0-flash"
+    # - "bedrock/anthropic.claude-3-5-sonnet"
+    # - "databricks/databricks-dbrx-instruct"
+    # - "openrouter/anthropic/claude-3-5-sonnet"
+
+    if model.startswith("openrouter/"):
         return OpenRouterProvider(model, api_key=api_key, **kwargs)
 
-    if model.startswith("gpt") or model.startswith("o1") or model.startswith("o3"):
+    if model.startswith("databricks/"):
+        return DatabricksProvider(model.removeprefix("databricks/"), **kwargs)
+    if model.startswith("databricks-"):
+        return DatabricksProvider(model, **kwargs)
+
+    if model.startswith("bedrock/"):
+        return BedrockProvider(model.removeprefix("bedrock/"), **kwargs)
+    if model.startswith(("anthropic.", "amazon.", "meta.")):
+        return BedrockProvider(model, **kwargs)
+
+    if model.startswith("openai/"):
+        return OpenAIProvider(model.removeprefix("openai/"), api_key=api_key, base_url=base_url, **kwargs)
+    if model.startswith(("gpt", "o1", "o3")):
         return OpenAIProvider(model, api_key=api_key, base_url=base_url, **kwargs)
 
+    if model.startswith("anthropic/"):
+        return AnthropicProvider(model.removeprefix("anthropic/"), api_key=api_key, **kwargs)
     if model.startswith("claude"):
         return AnthropicProvider(model, api_key=api_key, **kwargs)
 
+    if model.startswith("google/"):
+        return GoogleProvider(model.removeprefix("google/"), api_key=api_key, **kwargs)
     if model.startswith("gemini"):
         return GoogleProvider(model, api_key=api_key, **kwargs)
 
-    if model.startswith("anthropic.") or model.startswith("amazon.") or model.startswith("meta."):
-        return BedrockProvider(model, **kwargs)
-
-    if model.startswith("databricks"):
-        return DatabricksProvider(model, **kwargs)
-
-    # Default to OpenAI-compatible
+    # Default: OpenAI-compatible, but require explicit base_url for non-OpenAI servers.
     return OpenAIProvider(model, api_key=api_key, base_url=base_url, **kwargs)
 
 
@@ -1779,7 +2141,7 @@ def create_client(
     max_retries: int = 3,
     timeout_s: float = 60.0,
     streaming_enabled: bool = False,
-    on_stream_chunk: Callable[[StreamChunk], None] | None = None,
+    on_stream_event: StreamCallback | None = None,
     **provider_kwargs: Any,
 ) -> LLMClient:
     """Create an LLMClient instance.
@@ -1793,7 +2155,7 @@ def create_client(
         max_retries: Maximum retry attempts on validation failure.
         timeout_s: Request timeout in seconds.
         streaming_enabled: Enable streaming by default.
-        on_stream_chunk: Default streaming callback.
+        on_stream_event: Default streaming callback.
         **provider_kwargs: Provider-specific configuration.
 
     Returns:
@@ -1805,17 +2167,17 @@ def create_client(
         max_retries=max_retries,
         timeout_s=timeout_s,
         streaming_enabled=streaming_enabled,
-        on_stream_chunk=on_stream_chunk,
+        on_stream_event=on_stream_event,
         **provider_kwargs,
     )
 ```
 
-### Cost Tracking
+### Usage + Cost Accounting
 
-Maintain pricing tables for supported models:
+Maintain a single pricing table and calculate cost from normalized `Usage`. Cost is accounted **per attempt** and accumulated across retries (so callers can see true spend).
 
 ```python
-# penguiflow/llm/cost.py
+# penguiflow/llm/pricing.py
 
 PRICING: dict[str, tuple[float, float]] = {
     # OpenAI (per 1K tokens: input, output)
@@ -1906,9 +2268,9 @@ def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
 
 | Task | Description | Files |
 |------|-------------|-------|
-| **4.1** | Streaming with callbacks | `streaming.py` |
-| **4.2** | Cost tracking tables | `cost.py` |
-| **4.3** | Integrate streaming into providers | All provider files |
+| **4.1** | Streaming events + callbacks | `types.py`, provider adapters |
+| **4.2** | Pricing + cost calculation | `pricing.py` |
+| **4.3** | Telemetry hooks + attempt logs | `telemetry.py`, `retry.py` |
 
 ### Phase 5: Integration & Migration (Week 5)
 
@@ -1977,25 +2339,36 @@ def test_anthropic_transformer_relocates_constraints():
     assert "minLength" not in result
     assert "minLength: 1" in result.get("description", "")
 
-# tests/test_llm_providers.py
-@pytest.mark.asyncio
-async def test_openai_provider_completion():
-    provider = OpenAIProvider("gpt-4o-mini")
-    response = await provider.complete([{"role": "user", "content": "Hi"}])
-    assert response.content
-    assert response.usage.total_tokens > 0
+# tests/test_llm_routing_and_modes.py
+def test_choose_output_mode_prefers_native_when_compatible():
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    profile = get_profile("gpt-4o-mini")
+    mode, plan = choose_output_mode(profile, schema)
+    assert mode in (OutputMode.NATIVE, OutputMode.TOOLS)
+    assert plan.transformed_schema
+
+def test_choose_output_mode_degrades_for_databricks_key_limit():
+    schema = {"type": "object", "properties": {f"k{i}": {"type": "string"} for i in range(100)}}
+    profile = get_profile("databricks-dbrx-instruct")
+    mode, plan = choose_output_mode(profile, schema)
+    assert mode != OutputMode.NATIVE
+    assert plan.reasons  # negative/error-path coverage
 
 # tests/test_llm_output_modes.py
 @pytest.mark.asyncio
-async def test_tool_output_strategy():
-    strategy = ToolOutputStrategy()
-    request = strategy.build_request(
-        [{"role": "user", "content": "Extract name"}],
-        PersonModel,
-        get_profile("gpt-4o"),
+async def test_tools_output_strategy_builds_forced_tool_request():
+    strategy = ToolsOutputStrategy()
+    profile = get_profile("gpt-4o-mini")
+    plan = plan_schema(profile, PersonModel.model_json_schema(), mode=OutputMode.TOOLS)
+    req = strategy.build_request(
+        model="openai/gpt-4o-mini",
+        messages=[LLMMessage(role="user", parts=[TextPart(text="Extract name")])],
+        response_model=PersonModel,
+        profile=profile,
+        plan=plan,
     )
-    assert "tools" in request
-    assert request["tools"][0]["function"]["name"] == "structured_output"
+    assert req.tool_choice == "structured_output"
+    assert req.tools and req.tools[0].name == "structured_output"
 
 # tests/test_llm_retry.py
 @pytest.mark.asyncio
@@ -2012,7 +2385,7 @@ async def test_retry_on_validation_failure():
 @pytest.mark.asyncio
 async def test_openai_structured_output():
     client = create_client("gpt-4o-mini")
-    result, cost = await client.call(
+    result, cost = await client.call_dict(
         [{"role": "user", "content": "What is 2+2? Return as JSON."}],
         MathResult,
     )
@@ -2022,7 +2395,7 @@ async def test_openai_structured_output():
 @pytest.mark.asyncio
 async def test_anthropic_structured_output():
     client = create_client("claude-3-5-haiku")
-    result, cost = await client.call(
+    result, cost = await client.call_dict(
         [{"role": "user", "content": "What is 2+2? Return as JSON."}],
         MathResult,
     )
@@ -2050,6 +2423,9 @@ client = create_client(
     "openrouter/anthropic/claude-3-5-sonnet",
     temperature=0.0,
 )
+
+# Calls from templates/back-compat can keep OpenAI-style dict messages:
+# result, cost = await client.call_dict([...], ResponseModel)
 ```
 
 ### For Templates

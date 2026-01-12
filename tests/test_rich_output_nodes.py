@@ -77,6 +77,20 @@ async def test_render_component_emits_artifact() -> None:
 
 
 @pytest.mark.asyncio
+async def test_render_component_validation_error_includes_schema_hint() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
+    )
+    ctx = DummyContext()
+    # report requires sections, so this should fail validation.
+    args = RenderComponentArgs(component="report", props={})
+    with pytest.raises(RuntimeError) as exc:
+        await render_component(args, ctx)
+    message = str(exc.value)
+    assert "describe_component" in message
+
+
+@pytest.mark.asyncio
 async def test_ui_form_pauses_with_payload() -> None:
     configure_rich_output(
         RichOutputConfig(enabled=True, allowlist=["form"], max_payload_bytes=2000, max_total_bytes=2000)

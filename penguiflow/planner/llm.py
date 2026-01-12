@@ -875,6 +875,7 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
     finish_repair_count = planner._finish_repair_history_count
     arg_fill_count = planner._arg_fill_repair_history_count
     multi_action_count = int(getattr(planner, "_multi_action_history_count", 0))
+    render_component_count = int(getattr(planner, "_render_component_failure_history_count", 0))
 
     logger.info(
         "build_messages_repair_counts",
@@ -882,6 +883,7 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
             "finish_repair_history_count": finish_repair_count,
             "arg_fill_history_count": arg_fill_count,
             "multi_action_history_count": multi_action_count,
+            "render_component_failure_history_count": render_component_count,
         },
     )
 
@@ -911,6 +913,15 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
         system_prompt = prompts.merge_prompt_extras(
             system_prompt,
             multi_action_guidance,
+        ) or system_prompt
+
+    render_component_guidance = prompts.render_render_component_guidance(render_component_count)
+    if render_component_guidance is not None:
+        tier = "critical" if render_component_count >= 3 else ("warning" if render_component_count >= 2 else "reminder")
+        logger.info("injecting_render_component_guidance", extra={"tier": tier, "count": render_component_count})
+        system_prompt = prompts.merge_prompt_extras(
+            system_prompt,
+            render_component_guidance,
         ) or system_prompt
 
     if proactive_report is not None:

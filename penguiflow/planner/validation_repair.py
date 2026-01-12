@@ -264,13 +264,24 @@ def _is_arg_fill_eligible(
     if trajectory.metadata.get(f"arg_fill_attempted_{spec.name}"):
         return False
 
+    # render_component is special: it has a generic `props` field, but the actual required
+    # keys are determined by the rich output component registry. Allow arg-fill to populate
+    # `props` even though it's a complex type.
+    if spec.name == "render_component":
+        allowed_complex = {"props", "metadata"}
+        remaining = [field for field in missing_fields if field not in allowed_complex]
+        if not remaining:
+            return True
+    else:
+        remaining = list(missing_fields)
+
     # Get schema to check field types
     schema = spec.args_model.model_json_schema()
     properties = schema.get("properties", {})
 
     # Only allow simple types (string, number, boolean, integer)
     allowed_types = {"string", "number", "integer", "boolean"}
-    for field in missing_fields:
+    for field in remaining:
         field_info = properties.get(field, {})
         if not isinstance(field_info, dict):
             return False
@@ -408,6 +419,23 @@ async def _attempt_arg_fill(
     # Get field descriptions for context
     field_descriptions = _extract_field_descriptions(spec)
 
+    # Improve guidance for render_component props when we already know which
+    # component/schema failed (e.g. report requires props.sections).
+    if spec.name == "render_component" and "props" in missing_fields:
+        schema_error = trajectory.metadata.get("render_component_schema_error")
+        if isinstance(schema_error, Mapping):
+            component = schema_error.get("component")
+            missing_required = schema_error.get("missing_required")
+            if isinstance(component, str) and isinstance(missing_required, list):
+                required_keys = [key for key in missing_required if isinstance(key, str) and key]
+                if required_keys:
+                    existing = field_descriptions.get("props") or "Component props"
+                    required_list = ", ".join(required_keys)
+                    field_descriptions["props"] = (
+                        f"{existing} | REQUIRED keys for '{component}': {required_list} "
+                        "| Provide a complete props object that satisfies the component schema."
+                    )
+
     # Get user query for context
     user_query = trajectory.resume_user_input or trajectory.query
 
@@ -478,7 +506,15 @@ async def _attempt_arg_fill(
         latency_ms = (time_source() - start_time) * 1000
 
         # Parse the response
-        filled = _parse_arg_fill_response(raw, missing_fields)
+        expected_fields = list(missing_fields)
+        # Special case: render_component often needs both component selection and valid props.
+        # Small models frequently respond with a full action payload containing args.props even
+        # when we only asked for the missing component. Preserve those fields when present.
+        if spec.name == "render_component":
+            for extra_field in ("props", "id", "title", "metadata"):
+                if extra_field not in expected_fields:
+                    expected_fields.append(extra_field)
+        filled = _parse_arg_fill_response(raw, expected_fields)
 
         if filled is not None:
             # Success! Record metrics
@@ -1114,6 +1150,69 @@ def _apply_arg_validation(
             source="autofill",
         )
         return error_summary
+
+    # Rich output schema validation for render_component.
+    #
+    # `RenderComponentArgs.props` is a free-form dict at the Pydantic layer, but
+    # the rich output registry enforces component-specific schemas (e.g. `report`
+    # requires `props.sections`). Small models frequently emit only `component`
+    # and rely on defaults, which leads to deterministic tool failures unless we
+    # treat missing required props as an arg-validation error and trigger arg-fill.
+    if spec.name == "render_component":
+        component = getattr(parsed_args, "component", None)
+        props = getattr(parsed_args, "props", None)
+        if isinstance(component, str):
+            try:
+                import re
+
+                from ..rich_output.runtime import get_runtime
+                from ..rich_output.validate import RichOutputValidationError, validate_component_payload
+
+                runtime = get_runtime()
+                validate_component_payload(
+                    component,
+                    props if isinstance(props, Mapping) else {},
+                    runtime.registry,
+                    allowlist=runtime.allowlist or None,
+                    limits=runtime.limits,
+                    tool_context=None,
+                    count_bytes=False,
+                )
+            except RichOutputValidationError as exc:
+                # Only treat schema validation errors as arg validation errors.
+                # Unknown component / allowlist violations should be handled by
+                # the normal repair flow so the model can pick a different component.
+                if exc.code == "schema_invalid":
+                    missing_required: list[str] = []
+                    match = re.search(r"'([^']+)' is a required property", str(exc))
+                    if match:
+                        missing_required.append(match.group(1))
+
+                    if isinstance(trajectory.metadata, dict):
+                        trajectory.metadata["render_component_schema_error"] = {
+                            "component": component,
+                            "code": exc.code,
+                            "message": str(exc),
+                            "missing_required": missing_required,
+                        }
+
+                    error_summary = str(exc)
+                    record_arg_event(
+                        trajectory,
+                        event_type="planner_args_invalid",
+                        spec=spec,
+                        error_summary=error_summary,
+                        placeholders=placeholders,
+                        placeholder_paths=(),
+                        autofilled_fields=autofilled_fields,
+                        source="rich_output_schema",
+                    )
+                    return error_summary
+            except Exception as exc:
+                logger.debug(
+                    "render_component_arg_validation_failed",
+                    extra={"error": str(exc)},
+                )
 
     # Custom validator (only runs if configured)
     if callable(validator):
