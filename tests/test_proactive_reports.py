@@ -362,7 +362,7 @@ class TestGenerateProactiveMessage:
         # Wait for collection with timeout
         try:
             await asyncio.wait_for(collect_task, timeout=1.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
         # Should have notification fallback
@@ -417,7 +417,7 @@ class TestGenerateProactiveMessage:
         # Wait for collection
         try:
             await asyncio.wait_for(collect_task, timeout=1.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
         # Should have notification fallback
@@ -1139,7 +1139,7 @@ class TestTaskGroupIsComplete:
 
     def test_is_complete_open_group(self) -> None:
         """Test is_complete returns False for open group."""
-        from penguiflow.sessions.models import TaskGroup, MergeStrategy
+        from penguiflow.sessions.models import MergeStrategy, TaskGroup
 
         group = TaskGroup(
             group_id="g1",
@@ -1153,7 +1153,7 @@ class TestTaskGroupIsComplete:
 
     def test_is_complete_sealed_with_pending(self) -> None:
         """Test is_complete returns False for sealed group with pending tasks."""
-        from penguiflow.sessions.models import TaskGroup, MergeStrategy
+        from penguiflow.sessions.models import MergeStrategy, TaskGroup
 
         group = TaskGroup(
             group_id="g1",
@@ -1170,7 +1170,7 @@ class TestTaskGroupIsComplete:
 
     def test_is_complete_sealed_all_complete(self) -> None:
         """Test is_complete returns True for sealed group with all tasks done."""
-        from penguiflow.sessions.models import TaskGroup, MergeStrategy
+        from penguiflow.sessions.models import MergeStrategy, TaskGroup
 
         group = TaskGroup(
             group_id="g1",
@@ -1187,7 +1187,7 @@ class TestTaskGroupIsComplete:
 
     def test_is_complete_complete_status(self) -> None:
         """Test is_complete returns True for group with complete status."""
-        from penguiflow.sessions.models import TaskGroup, MergeStrategy
+        from penguiflow.sessions.models import MergeStrategy, TaskGroup
 
         group = TaskGroup(
             group_id="g1",
@@ -1201,7 +1201,7 @@ class TestTaskGroupIsComplete:
 
     def test_is_complete_failed_status(self) -> None:
         """Test is_complete returns True for group with failed status."""
-        from penguiflow.sessions.models import TaskGroup, MergeStrategy
+        from penguiflow.sessions.models import MergeStrategy, TaskGroup
 
         group = TaskGroup(
             group_id="g1",
@@ -1219,7 +1219,7 @@ class TestTaskGroupPendingTasks:
 
     def test_pending_task_ids_all_pending(self) -> None:
         """Test pending_task_ids with all tasks pending."""
-        from penguiflow.sessions.models import TaskGroup, MergeStrategy
+        from penguiflow.sessions.models import MergeStrategy, TaskGroup
 
         group = TaskGroup(
             group_id="g1",
@@ -1236,7 +1236,7 @@ class TestTaskGroupPendingTasks:
 
     def test_pending_task_ids_some_complete(self) -> None:
         """Test pending_task_ids with some tasks complete."""
-        from penguiflow.sessions.models import TaskGroup, MergeStrategy
+        from penguiflow.sessions.models import MergeStrategy, TaskGroup
 
         group = TaskGroup(
             group_id="g1",
@@ -1253,7 +1253,7 @@ class TestTaskGroupPendingTasks:
 
     def test_pending_task_ids_none_pending(self) -> None:
         """Test pending_task_ids with no tasks pending."""
-        from penguiflow.sessions.models import TaskGroup, MergeStrategy
+        from penguiflow.sessions.models import MergeStrategy, TaskGroup
 
         group = TaskGroup(
             group_id="g1",

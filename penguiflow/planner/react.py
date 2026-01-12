@@ -310,6 +310,7 @@ class ReactPlanner:
     _artifact_registry: ArtifactRegistry
     _artifact_store: ArtifactStore
     _catalog_records: list[dict[str, Any]]
+    _tool_aliases: dict[str, str]
     _clarification_client: JSONLLMClient | None
     _client: JSONLLMClient
     _cost_tracker: _CostTracker
@@ -341,10 +342,14 @@ class ReactPlanner:
     _summarizer_client: JSONLLMClient | None
     _system_prompt: str
     _system_prompt_extra: str | None
+    _finish_repair_history_count: int
+    _arg_fill_repair_history_count: int
     _time_source: Callable[[], float]
     _token_budget: int | None
     _tool_policy: ToolPolicy | None
     _background_tasks: BackgroundTasksConfig
+    _use_native_reasoning: bool
+    _reasoning_effort: str | None
     _init_kwargs: dict[str, Any] | None
 
     def __init__(
@@ -375,6 +380,8 @@ class ReactPlanner:
         event_callback: PlannerEventCallback | None = None,
         llm_timeout_s: float = 60.0,
         llm_max_retries: int = 3,
+        use_native_reasoning: bool = True,
+        reasoning_effort: str | None = None,
         absolute_max_parallel: int = 50,
         reflection_config: ReflectionConfig | None = None,
         reflection_llm: str | Mapping[str, Any] | None = None,
@@ -412,6 +419,8 @@ class ReactPlanner:
             "event_callback": event_callback,
             "llm_timeout_s": llm_timeout_s,
             "llm_max_retries": llm_max_retries,
+            "use_native_reasoning": use_native_reasoning,
+            "reasoning_effort": reasoning_effort,
             "absolute_max_parallel": absolute_max_parallel,
             "reflection_config": reflection_config,
             "reflection_llm": reflection_llm,
@@ -448,6 +457,8 @@ class ReactPlanner:
             event_callback=event_callback,
             llm_timeout_s=llm_timeout_s,
             llm_max_retries=llm_max_retries,
+            use_native_reasoning=use_native_reasoning,
+            reasoning_effort=reasoning_effort,
             absolute_max_parallel=absolute_max_parallel,
             reflection_config=reflection_config,
             reflection_llm=reflection_llm,
@@ -788,33 +799,39 @@ class ReactPlanner:
         tracker: _ConstraintTracker,
     ) -> str | None:
         hints = self._planning_hints
-        node_name = action.next_node
-        if node_name and not tracker.has_budget_for_next_tool():
+        node_name = action.next_node if action.is_tool_call() else None
+        if node_name is not None and not tracker.has_budget_for_next_tool():
             limit = self._hop_budget if self._hop_budget is not None else 0
             return prompts.render_hop_budget_violation(limit)
-        if node_name and node_name in hints.disallow_nodes:
+        if node_name is not None and node_name in hints.disallow_nodes:
             return prompts.render_disallowed_node(node_name)
 
         # Check parallel execution limits
-        if action.plan:
+        if action.next_node == "parallel":
+            steps = action.args.get("steps")
+            plan_len = len(steps) if isinstance(steps, list) else 0
             # Absolute system-level safety limit
-            if len(action.plan) > self._absolute_max_parallel:
+            if plan_len > self._absolute_max_parallel:
                 logger.warning(
                     "parallel_limit_absolute",
                     extra={
-                        "requested": len(action.plan),
+                        "requested": plan_len,
                         "limit": self._absolute_max_parallel,
                     },
                 )
                 return prompts.render_parallel_limit(self._absolute_max_parallel)
             # Hint-based limit
-            if hints.max_parallel is not None and len(action.plan) > hints.max_parallel:
+            if hints.max_parallel is not None and plan_len > hints.max_parallel:
                 return prompts.render_parallel_limit(hints.max_parallel)
-        if hints.sequential_only and action.plan:
-            for item in action.plan:
-                candidate = item.node
-                if candidate in hints.sequential_only:
-                    return prompts.render_sequential_only(candidate)
+        if hints.sequential_only and action.next_node == "parallel":
+            steps = action.args.get("steps")
+            if isinstance(steps, list):
+                for item in steps:
+                    if not isinstance(item, Mapping):
+                        continue
+                    candidate = item.get("node")
+                    if isinstance(candidate, str) and candidate in hints.sequential_only:
+                        return prompts.render_sequential_only(candidate)
         if hints.ordering_hints and node_name is not None:
             state = trajectory.hint_state.setdefault(
                 "ordering_state",
@@ -1208,7 +1225,7 @@ class ReactPlanner:
             except (TypeError, ValueError):
                 tool_context_safe = None
 
-        metadata = {
+        metadata: dict[str, Any] = {
             "reason": reason,
             "thought": thought,
             "steps": trajectory.to_history(),
@@ -1242,8 +1259,8 @@ class ReactPlanner:
 
         # Accumulate repair counts for tiered guidance in future runs
         # These persist in the planner instance across runs
-        self._finish_repair_history_count += metadata["finish_repair_success_count"]
-        self._arg_fill_repair_history_count += metadata["arg_fill_success_count"]
+        self._finish_repair_history_count += int(metadata.get("finish_repair_success_count", 0) or 0)
+        self._arg_fill_repair_history_count += int(metadata.get("arg_fill_success_count", 0) or 0)
 
         # Emit finish event
         extra_data: dict[str, Any] = {

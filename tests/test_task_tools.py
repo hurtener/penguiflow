@@ -206,7 +206,7 @@ class DummyService(TaskService):
         status=None,
     ):
         _ = status
-        from penguiflow.sessions.models import TaskGroup, MergeStrategy
+        from penguiflow.sessions.models import MergeStrategy, TaskGroup
         return [
             TaskGroup(
                 group_id="g1",
@@ -227,7 +227,7 @@ class DummyService(TaskService):
         turn_id=None,
     ):
         _ = group_name, turn_id
-        from penguiflow.sessions.models import TaskGroup, MergeStrategy
+        from penguiflow.sessions.models import MergeStrategy, TaskGroup
         return TaskGroup(
             group_id=group_id or "g1",
             name="test-group",

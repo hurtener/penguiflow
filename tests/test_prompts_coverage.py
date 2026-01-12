@@ -118,7 +118,7 @@ def test_render_empty_parallel_plan():
     """render_empty_parallel_plan should indicate empty plan error."""
     result = prompts.render_empty_parallel_plan()
     assert "parallel" in result.lower()
-    assert "empty" in result.lower() or "plan" in result.lower()
+    assert "args.steps" in result
 
 
 def test_render_parallel_with_next_node():

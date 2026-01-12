@@ -1205,8 +1205,8 @@ async def test_react_planner_step_salvages_empty_json() -> None:
     trajectory = Trajectory(query="salvage test")
 
     action = await planner.step(trajectory)
-    # Empty JSON should be salvaged to a finish action (next_node=None)
-    assert action.next_node is None
+    # Empty JSON should be salvaged to a finish action.
+    assert action.next_node == "final_response"
     assert action.thought == "planning next step"
     assert len(client.calls) == 1  # No repair needed
 

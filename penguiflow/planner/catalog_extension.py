@@ -12,6 +12,7 @@ from collections.abc import Sequence
 
 from ..catalog import NodeSpec
 from . import prompts
+from .tool_aliasing import build_aliased_tool_catalog
 
 
 def extend_tool_catalog(planner: object, specs: Sequence[NodeSpec]) -> int:
@@ -34,9 +35,10 @@ def extend_tool_catalog(planner: object, specs: Sequence[NodeSpec]) -> int:
         return 0
 
     planner._specs = planner_specs  # type: ignore[attr-defined]
-    planner._spec_by_name = {spec.name: spec for spec in planner_specs}  # type: ignore[attr-defined]
-    catalog_records = [spec.to_tool_record() for spec in planner_specs]
+    spec_by_name, catalog_records, alias_to_real = build_aliased_tool_catalog(planner_specs)
+    planner._spec_by_name = spec_by_name  # type: ignore[attr-defined]
     planner._catalog_records = catalog_records  # type: ignore[attr-defined]
+    planner._tool_aliases = alias_to_real  # type: ignore[attr-defined]
 
     register_cb = getattr(planner, "_register_resource_callbacks", None)
     if callable(register_cb):

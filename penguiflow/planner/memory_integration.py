@@ -243,9 +243,9 @@ def _build_memory_turn(
         tools: list[str] = []
         obs_lines: list[str] = []
         for step in trajectory.steps:
-            tool_name = step.action.next_node
-            if tool_name is None:
+            if not step.action.is_tool_call():
                 continue
+            tool_name = step.action.next_node
             if step.error is not None or step.observation is None:
                 continue
             tools.append(tool_name)

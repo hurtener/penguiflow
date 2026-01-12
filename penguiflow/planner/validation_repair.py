@@ -12,6 +12,7 @@ from pydantic import BaseModel, ValidationError
 from ..catalog import NodeSpec
 from . import prompts
 from .llm import _coerce_llm_response
+from .migration import try_normalize_action
 from .models import PlannerAction, PlannerEvent
 from .trajectory import Trajectory
 
@@ -49,72 +50,14 @@ def _coerce_tool_context(
 
 
 def _salvage_action_payload(raw: str) -> PlannerAction | None:
-    """Attempt to coerce loosely-structured JSON into a PlannerAction."""
+    """Attempt to coerce loosely-structured JSON into a PlannerAction.
 
-    def _lenient_parse(payload: str) -> Mapping[str, Any] | None:
-        try:
-            return json.loads(payload)
-        except Exception:
-            try:
-                import ast
+    This is a best-effort salvage path used when strict parsing fails. It accepts
+    legacy, unified, and hybrid shapes and normalizes them into the current
+    PlannerAction model.
+    """
 
-                maybe = ast.literal_eval(payload)
-                if isinstance(maybe, Mapping):
-                    return maybe
-            except Exception:
-                return None
-        return None
-
-    data = _lenient_parse(raw)
-    if not isinstance(data, Mapping):
-        return None
-
-    patched = dict(data)
-    patched.setdefault("thought", "planning next step")
-    patched.setdefault("next_node", None)
-    patched.setdefault("args", None)
-    patched.setdefault("plan", None)
-    patched.setdefault("join", None)
-    if "action" in patched and isinstance(patched["action"], Mapping):
-        nested = patched["action"]
-        patched.update(
-            {
-                "thought": nested.get("thought", patched["thought"]),
-                "next_node": nested.get("next_node", patched["next_node"]),
-                "args": nested.get("args", patched["args"]),
-                "plan": nested.get("plan", patched["plan"]),
-                "join": nested.get("join", patched["join"]),
-            }
-        )
-
-    # Fill args when next_node is present but args missing
-    if patched.get("next_node") and patched.get("args") is None:
-        patched["args"] = {}
-
-    # Normalize plan entries
-    if isinstance(patched.get("plan"), Sequence) and not isinstance(patched.get("plan"), (str, bytes, bytearray)):
-        normalised_plan: list[dict[str, Any]] = []
-        for item in patched["plan"]:
-            if not isinstance(item, Mapping):
-                continue
-            entry = dict(item)
-            if "node" not in entry:
-                continue
-            entry.setdefault("args", {})
-            normalised_plan.append(entry)
-        patched["plan"] = normalised_plan if normalised_plan else None
-
-    # Normalize join shape
-    if isinstance(patched.get("join"), Mapping):
-        join = dict(patched["join"])
-        join.setdefault("inject", None)
-        join.setdefault("args", {})
-        patched["join"] = join
-
-    try:
-        return PlannerAction.model_validate(patched)
-    except ValidationError:
-        return None
+    return try_normalize_action(raw)
 
 
 def _summarize_validation_error(exc: ValidationError, *, limit: int = 240) -> str:

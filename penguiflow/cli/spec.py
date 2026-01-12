@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
-import yaml  # type: ignore[import-untyped]
+import yaml  # type: ignore[import-untyped,unused-ignore]
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode  # type: ignore[import-untyped]
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode  # type: ignore[import-untyped,unused-ignore]
 
 from .spec_errors import (
     SpecErrorDetail,

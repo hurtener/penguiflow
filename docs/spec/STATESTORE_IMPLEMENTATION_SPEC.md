@@ -1,10 +1,10 @@
 # StateStore Implementation Specification
 
-> **Version:** 2.7
+> **Version:** 2.8
 > **Audience:** Downstream teams implementing custom StateStore backends
-> **Last Updated:** December 2025
+> **Last Updated:** January 2026
 
-This document provides a complete specification for implementing a StateStore backend compatible with PenguiFlow. It covers the protocol definition, data types, method contracts, integration points, and production best practices.
+This document provides a complete specification for implementing a StateStore backend compatible with PenguiFlow. It covers the protocol definition, data types, method contracts, integration points, distributed deployment patterns, and production best practices.
 
 ---
 
@@ -15,14 +15,22 @@ This document provides a complete specification for implementing a StateStore ba
 3. [Data Types](#data-types)
 4. [Required Methods](#required-methods)
 5. [Optional Duck-Typed Methods](#optional-duck-typed-methods)
-6. [Integration Points](#integration-points)
-7. [Method Contracts & Semantics](#method-contracts--semantics)
-8. [Reference Implementations](#reference-implementations)
-9. [Database Schema Recommendations](#database-schema-recommendations)
-10. [Testing Your Implementation](#testing-your-implementation)
-11. [Error Handling](#error-handling)
-12. [Performance Considerations](#performance-considerations)
-13. [Checklist](#implementation-checklist)
+6. [Context Versioning & Divergence Detection](#context-versioning--divergence-detection)
+7. [Steering Payload Sanitization](#steering-payload-sanitization)
+8. [Merge Strategies](#merge-strategies)
+9. [Memory Health States & Recovery](#memory-health-states--recovery)
+10. [Artifact Store](#artifact-store)
+11. [Integration Points](#integration-points)
+12. [Distributed Deployment](#distributed-deployment)
+13. [Method Contracts & Semantics](#method-contracts--semantics)
+14. [Reference Implementations](#reference-implementations)
+15. [Compatibility Adapters](#compatibility-adapters)
+16. [Telemetry Integration](#telemetry-integration)
+17. [Database Schema Recommendations](#database-schema-recommendations)
+18. [Testing Your Implementation](#testing-your-implementation)
+19. [Error Handling](#error-handling)
+20. [Performance Considerations](#performance-considerations)
+21. [Implementation Checklist](#implementation-checklist)
 
 ---
 
@@ -36,6 +44,10 @@ This document provides a complete specification for implementing a StateStore ba
 - **Remote bindings** (A2A worker associations) for distributed flows
 - **Planner pause state** (OAuth/HITL flows) for distributed resume
 - **Memory state** (conversation history) for session persistence
+- **Task lifecycle** (foreground/background tasks) for session management
+- **Steering events** (user interventions) for bidirectional control
+- **Trajectories** (execution history) for replay and debugging
+- **Artifacts** (binary/large-text outputs) for rich tool results
 
 ### Why Implement a StateStore?
 
@@ -46,6 +58,8 @@ This document provides a complete specification for implementing a StateStore ba
 | Distributed resume (OAuth/HITL) | Single-worker only | Multi-worker support |
 | Session memory persistence | In-memory, per-instance | Shared across instances |
 | Remote binding tracking | Not tracked | Persisted for debugging |
+| Background task recovery | Lost on restart | Hydrated from storage |
+| Steering event history | Ephemeral | Full audit trail |
 
 ### Design Philosophy
 
@@ -54,6 +68,7 @@ This document provides a complete specification for implementing a StateStore ba
 3. **Fail-safe** - StateStore errors never crash the runtime; errors are logged and execution continues
 4. **Async-only** - All methods must be async/awaitable
 5. **Idempotent writes** - `save_event` may be called multiple times for the same event (retries)
+6. **Capability detection** - Optional features detected via `hasattr()` at runtime
 
 ---
 
@@ -62,9 +77,10 @@ This document provides a complete specification for implementing a StateStore ba
 **Location:** `penguiflow/state/protocol.py` (import path remains `penguiflow.state`)
 
 ```python
-from typing import Protocol, Sequence, Any, Mapping
+from typing import Protocol, Sequence, Any, Mapping, runtime_checkable
 from dataclasses import dataclass
 
+@runtime_checkable
 class StateStore(Protocol):
     """Protocol for durable state adapters used by PenguiFlow."""
 
@@ -81,6 +97,52 @@ class StateStore(Protocol):
         ...
 ```
 
+### Optional Capability Protocols
+
+PenguiFlow defines additional protocols for optional features:
+
+```python
+@runtime_checkable
+class SupportsPlannerState(Protocol):
+    async def save_planner_state(self, token: str, payload: dict[str, Any]) -> None: ...
+    async def load_planner_state(self, token: str) -> dict[str, Any]: ...
+
+@runtime_checkable
+class SupportsMemoryState(Protocol):
+    async def save_memory_state(self, key: str, state: dict[str, Any]) -> None: ...
+    async def load_memory_state(self, key: str) -> dict[str, Any] | None: ...
+
+@runtime_checkable
+class SupportsTasks(Protocol):
+    async def save_task(self, state: TaskState) -> None: ...
+    async def list_tasks(self, session_id: str) -> Sequence[TaskState]: ...
+    async def save_update(self, update: StateUpdate) -> None: ...
+    async def list_updates(self, session_id: str, *, task_id: str | None = None,
+                           since_id: str | None = None, limit: int = 500) -> Sequence[StateUpdate]: ...
+
+@runtime_checkable
+class SupportsSteering(Protocol):
+    async def save_steering(self, event: SteeringEvent) -> None: ...
+    async def list_steering(self, session_id: str, *, task_id: str | None = None,
+                            since_id: str | None = None, limit: int = 500) -> Sequence[SteeringEvent]: ...
+
+@runtime_checkable
+class SupportsTrajectories(Protocol):
+    async def save_trajectory(self, trace_id: str, session_id: str, trajectory: Trajectory) -> None: ...
+    async def get_trajectory(self, trace_id: str, session_id: str) -> Trajectory | None: ...
+    async def list_traces(self, session_id: str, limit: int = 50) -> list[str]: ...
+
+@runtime_checkable
+class SupportsPlannerEvents(Protocol):
+    async def save_planner_event(self, trace_id: str, event: PlannerEvent) -> None: ...
+    async def list_planner_events(self, trace_id: str) -> list[PlannerEvent]: ...
+
+@runtime_checkable
+class SupportsArtifacts(Protocol):
+    @property
+    def artifact_store(self) -> ArtifactStore | None: ...
+```
+
 ### Protocol Checking
 
 PenguiFlow validates StateStore implementations at runtime. The admin CLI (`penguiflow-admin`) uses this check:
@@ -89,6 +151,18 @@ PenguiFlow validates StateStore implementations at runtime. The admin CLI (`peng
 required = ("save_event", "load_history", "save_remote_binding")
 if not all(hasattr(instance, attr) for attr in required):
     raise TypeError("StateStore must implement required methods")
+```
+
+### Capability Detection Helpers
+
+```python
+from penguiflow.state import missing_capabilities, require_capabilities
+
+# Check which methods are missing
+missing = missing_capabilities(store, ["save_task", "list_tasks"])
+
+# Fail fast if critical methods are missing
+require_capabilities(store, feature="sessions", methods=["save_task", "list_tasks"])
 ```
 
 ---
@@ -128,6 +202,9 @@ class StoredEvent:
 | `cancel_begin` | Trace cancellation started | When `cancel()` called |
 | `cancel_end` | Trace cancellation completed | After cancel cleanup |
 | `timeout` | Deadline exceeded | When deadline/budget exhausted |
+| `session.task` | Task lifecycle event | On task state change |
+| `session.update` | Task progress update | On streaming update |
+| `session.steering` | Steering event | On steering received |
 
 #### Payload Structure
 
@@ -171,9 +248,149 @@ class RemoteBinding:
     agent_url: str          # Remote worker URL
 ```
 
+### TaskState
+
+Represents the complete state of a foreground or background task.
+
+```python
+@dataclass(slots=True)
+class TaskState:
+    task_id: str                           # Unique task identifier
+    session_id: str                        # Session this task belongs to
+    status: TaskStatus                     # Current lifecycle state
+    task_type: TaskType                    # FOREGROUND or BACKGROUND
+    priority: int                          # Scheduling priority (higher = more urgent)
+    context_snapshot: TaskContextSnapshot  # Full execution context at spawn time
+    trace_id: str | None = None            # Distributed tracing ID
+    result: Any | None = None              # Task result payload
+    error: str | None = None               # Error message if failed
+    description: str | None = None         # Human-readable task description
+    progress: dict[str, Any] | None = None # Progress tracking metadata
+    created_at: datetime = field(default_factory=_utc_now)
+    updated_at: datetime = field(default_factory=_utc_now)
+
+    def update_status(self, status: TaskStatus) -> None:
+        """Update status and refresh updated_at timestamp."""
+        self.status = status
+        self.updated_at = _utc_now()
+```
+
+#### TaskStatus Enum
+
+```python
+class TaskStatus(str, Enum):
+    PENDING = "PENDING"       # Awaiting execution
+    RUNNING = "RUNNING"       # Currently executing
+    PAUSED = "PAUSED"         # Paused for approval
+    COMPLETE = "COMPLETE"     # Completed successfully
+    FAILED = "FAILED"         # Execution failed
+    CANCELLED = "CANCELLED"   # Cancelled by user/parent
+```
+
+#### TaskType Enum
+
+```python
+class TaskType(str, Enum):
+    FOREGROUND = "FOREGROUND"  # Interactive, blocks session
+    BACKGROUND = "BACKGROUND"  # Async, runs in parallel
+```
+
+### TaskContextSnapshot
+
+Captures the full execution context at task spawn time. Used for context isolation and divergence detection.
+
+```python
+class TaskContextSnapshot(BaseModel):
+    session_id: str                                    # Session identifier
+    task_id: str                                       # Task identifier
+    trace_id: str | None = None                        # Distributed tracing ID
+    spawned_from_task_id: str = "foreground"           # Parent task ID
+    spawned_from_event_id: str | None = None           # Triggering event ID
+    spawned_at: datetime = Field(default_factory=_utc_now)
+    spawn_reason: str | None = None                    # Why task was created
+    query: str | None = None                           # User query if applicable
+    propagate_on_cancel: str = "cascade"               # "cascade" or "isolate"
+    notify_on_complete: bool = True                    # Emit notification on completion
+
+    # Context versioning for divergence detection
+    context_version: int | None = None                 # Version at spawn time
+    context_hash: str | None = None                    # SHA256 hash at spawn time
+
+    # Deep copies of context at spawn time
+    llm_context: dict[str, Any] = Field(default_factory=dict)
+    tool_context: dict[str, Any] = Field(default_factory=dict)
+    memory: dict[str, Any] = Field(default_factory=dict)
+    artifacts: list[dict[str, Any]] = Field(default_factory=list)
+```
+
+### StateUpdate
+
+Represents a streaming progress update from a task.
+
+```python
+class StateUpdate(BaseModel):
+    session_id: str                        # Session identifier
+    task_id: str                           # Task identifier
+    trace_id: str | None = None            # Distributed tracing ID
+    update_id: str                         # UUID for deduplication
+    update_type: UpdateType                # Type of update
+    content: Any                           # Dynamic payload
+    step_index: int | None = None          # Current step number
+    total_steps: int | None = None         # Total expected steps
+    created_at: datetime = Field(default_factory=_utc_now)
+```
+
+#### UpdateType Enum
+
+```python
+class UpdateType(str, Enum):
+    THINKING = "THINKING"           # Internal agent reasoning
+    PROGRESS = "PROGRESS"           # Step-by-step progress
+    TOOL_CALL = "TOOL_CALL"         # Tool invocation events
+    RESULT = "RESULT"               # Final results or answer chunks
+    ERROR = "ERROR"                 # Error occurred
+    CHECKPOINT = "CHECKPOINT"       # Approval/pause points
+    STATUS_CHANGE = "STATUS_CHANGE" # Task status transitions
+    NOTIFICATION = "NOTIFICATION"   # UI notifications
+```
+
+### SteeringEvent
+
+Represents a bidirectional control event (user intervention).
+
+```python
+class SteeringEvent(BaseModel):
+    session_id: str                                   # Session identifier
+    task_id: str                                      # Target task
+    event_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    event_type: SteeringEventType                     # Type of steering
+    payload: dict[str, Any] = Field(default_factory=dict)
+    trace_id: str | None = None                       # Distributed tracing ID
+    source: str = "user"                              # Event origin ("user", "system", "agent")
+    created_at: datetime = Field(default_factory=_utc_now)
+
+    def to_injection(self) -> str:
+        """Convert to JSON injection for LLM prompt context."""
+```
+
+#### SteeringEventType Enum
+
+```python
+class SteeringEventType(str, Enum):
+    INJECT_CONTEXT = "INJECT_CONTEXT"   # Inject contextual information
+    REDIRECT = "REDIRECT"               # Change execution goal/instruction
+    CANCEL = "CANCEL"                   # Cancel execution with optional reason
+    PRIORITIZE = "PRIORITIZE"           # Adjust task priority
+    PAUSE = "PAUSE"                     # Pause execution
+    RESUME = "RESUME"                   # Resume paused execution
+    APPROVE = "APPROVE"                 # Approve pending decision/patch
+    REJECT = "REJECT"                   # Reject pending decision/patch
+    USER_MESSAGE = "USER_MESSAGE"       # User sends message while task is working
+```
+
 ### FlowEvent (Source Type)
 
-The runtime emits `FlowEvent` objects which are converted to `StoredEvent` via the factory method. You don't directly interact with `FlowEvent` in your StateStore, but understanding it helps with schema design:
+The runtime emits `FlowEvent` objects which are converted to `StoredEvent` via the factory method:
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -333,7 +550,7 @@ These methods are **not part of the Protocol** but are detected at runtime via `
 {
     "trajectory": [...],           # List of planner steps
     "payload": {...},              # Original request payload
-    "constraints": {...},          # Planning constraints
+    "constraints": {...},          # Planning constraints (deadline, hop budget)
     "tool_context": {...},         # Tool execution context
     "llm_context": {...},          # LLM context (optional)
     "short_term_memory": {...},    # Memory snapshot (optional)
@@ -410,12 +627,20 @@ async def load_planner_state(self, token: str) -> dict:
 **State Structure:**
 ```python
 {
-    "turn_history": [
-        {"role": "user", "content": "..."},
-        {"role": "assistant", "content": "..."},
+    "version": 1,                  # Schema version
+    "health": "healthy",           # Memory health state
+    "summary": "...",              # Rolling summary (if using rolling_summary strategy)
+    "turns": [                     # Recent conversation turns
+        {
+            "user_message": "...",
+            "assistant_response": "...",
+            "trajectory_digest": {...},
+            "ts": 1702857600.0
+        }
     ],
-    "summary": "Previous conversation summary...",
-    "metadata": {...},
+    "pending": [...],              # Turns awaiting summarization
+    "backlog": [...],              # Recovery buffer during degradation
+    "config_snapshot": {...}       # Configuration at save time
 }
 ```
 
@@ -477,7 +702,7 @@ async def load_memory_state(self, key: str) -> dict[str, Any] | None:
 - `list_tasks()` MUST return all tasks for the session (order not important).
 - `save_update()` SHOULD be append-only, idempotent via `update_id` if possible.
 - `list_updates()` SHOULD return updates in stable order and treat `since_id` as an *exclusive* cursor.
-- Reads MUST return an empty sequence on “not found” (do not raise).
+- Reads MUST return an empty sequence on "not found" (do not raise).
 
 **Signature:**
 ```python
@@ -496,7 +721,7 @@ async def list_updates(
 
 **Notes:**
 - `StateUpdate.update_id` is generated client-side; use it as the natural idempotency key.
-- If `since_id` is unknown, treat it as “no cursor”.
+- If `since_id` is unknown, treat it as "no cursor".
 - To preserve cursor semantics, avoid filtering after applying limit.
 
 ### 9. Steering Persistence (`save_steering`, `list_steering`)
@@ -506,7 +731,7 @@ async def list_updates(
 **Location (integration):** `penguiflow/sessions/session.py`
 
 **Contracts:**
-- Steering payloads are untrusted; persist the sanitized form (see `penguiflow/steering.py`).
+- Steering payloads are untrusted; persist the sanitized form (see [Steering Payload Sanitization](#steering-payload-sanitization)).
 - `list_steering()` SHOULD return events in stable order and treat `since_id` as an *exclusive* cursor.
 
 **Signature:**
@@ -553,19 +778,367 @@ async def save_planner_event(self, trace_id: str, event: PlannerEvent) -> None: 
 async def list_planner_events(self, trace_id: str) -> list[PlannerEvent]: ...
 ```
 
-### 12. Artifact Storage (`artifact_store` property)
+---
 
-**Purpose:** Provide binary/large-text storage for rich tool outputs without polluting LLM context.
+## Context Versioning & Divergence Detection
 
-**Contract:**
-- Return an `ArtifactStore` instance, or `None` if artifacts are not supported.
-- Prefer session-scoped access patterns for HTTP retrieval (see `ArtifactScope.session_id`).
+Background tasks receive a **snapshot** of the session context at spawn time. During execution, the foreground may modify the context. PenguiFlow detects this divergence when merging results.
 
-**Signature:**
+### SessionContext Fields
+
+```python
+@dataclass(slots=True)
+class SessionContext:
+    llm_context: dict[str, Any] = field(default_factory=dict)
+    tool_context: dict[str, Any] = field(default_factory=dict)
+    memory: dict[str, Any] = field(default_factory=dict)
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    version: int = 0                # Incremented on every update
+    context_hash: str | None = None # SHA256 of llm_context
+```
+
+### Context Hash Computation
+
+```python
+def _hash_context(payload: dict[str, Any]) -> str | None:
+    try:
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+```
+
+### ContextPatch for Background Task Results
+
+When a background task completes, it creates a `ContextPatch`:
+
+```python
+class ContextPatch(BaseModel):
+    task_id: str
+    spawned_from_event_id: str | None = None
+    source_context_version: int | None = None   # Version at spawn time
+    source_context_hash: str | None = None      # Hash at spawn time
+    context_diverged: bool = False              # Set if divergence detected
+    completed_at: datetime = Field(default_factory=_utc_now)
+
+    # Patch content
+    digest: list[str] = Field(default_factory=list)          # Summary text
+    facts: dict[str, Any] = Field(default_factory=dict)      # Extracted facts
+    artifacts: list[dict[str, Any]] = Field(default_factory=list)
+    sources: list[dict[str, Any]] = Field(default_factory=list)
+    recommended_next_steps: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+```
+
+### Divergence Detection Logic
+
+```python
+async def apply_context_patch(self, *, patch: ContextPatch, strategy: MergeStrategy) -> str | None:
+    diverged = False
+
+    # Check version mismatch
+    if patch.source_context_version is not None:
+        if patch.source_context_version != self._context.version:
+            diverged = True
+
+    # Check hash mismatch
+    if patch.source_context_hash:
+        if patch.source_context_hash != self._context.context_hash:
+            diverged = True
+
+    if diverged and not patch.context_diverged:
+        patch = patch.model_copy(update={"context_diverged": True})
+        # Emit warning notification to user
+        self._emit_notification("Context changed during background task execution")
+```
+
+### Implications for StateStore
+
+When persisting `TaskState`, ensure:
+- `TaskContextSnapshot.context_version` and `context_hash` are preserved
+- Deep copies of `llm_context`, `tool_context`, `memory`, `artifacts` are stored
+- These fields enable divergence detection on resume/hydration
+
+---
+
+## Steering Payload Sanitization
+
+Steering payloads are **untrusted user input**. PenguiFlow sanitizes them before processing and persistence.
+
+### Size Limits
+
+```python
+MAX_STEERING_PAYLOAD_BYTES = 16_384  # 16 KB
+MAX_STEERING_DEPTH = 6               # Nesting depth
+MAX_STEERING_KEYS = 64               # Dict keys per level
+MAX_STEERING_LIST_ITEMS = 50         # List items
+MAX_STEERING_STRING = 4_096          # String character length
+```
+
+### Sanitization Process
+
+1. **Validate JSON serializability**
+2. **Truncate nested structures** at configurable depth
+3. **Drop keys** beyond limit
+4. **Truncate long strings**
+5. **Return truncated summary** if final size exceeds bytes limit
+
+### Event-Specific Payload Validation
+
+| Event Type | Required Fields | Optional Fields |
+|------------|-----------------|-----------------|
+| `INJECT_CONTEXT` | `text` (non-empty string) | `scope` ("foreground"/"task_only"), `severity` ("note"/"correction") |
+| `REDIRECT` | `instruction\|goal\|query` (non-empty string) | `constraints` (dict) |
+| `CANCEL` | - | `reason` (string), `hard` (bool) |
+| `PRIORITIZE` | `priority` (int) | - |
+| `APPROVE/REJECT` | `resume_token\|patch_id\|event_id` | `decision` (string) |
+| `PAUSE/RESUME` | - | `reason` (string) |
+| `USER_MESSAGE` | `text` (non-empty string) | `active_tasks` (list of task_ids) |
+
+### StateStore Implications
+
+- **Always persist sanitized payloads** - never raw user input
+- The `InMemoryStateStore` reference implementation sanitizes in `save_steering()`
+- Failed validation raises `SteeringValidationError` before persistence
+
+---
+
+## Merge Strategies
+
+When background tasks complete, their results can be merged into the session context using different strategies.
+
+### MergeStrategy Enum
+
+```python
+class MergeStrategy(str, Enum):
+    APPEND = "append"           # Add to background_results[] list
+    REPLACE = "replace"         # Overwrite background_result key
+    HUMAN_GATED = "human_gated" # Queue for user approval
+```
+
+### APPEND Strategy
+
+Results are appended to `llm_context["background_results"]` as a list:
+
+```python
+if "background_results" not in llm_context:
+    llm_context["background_results"] = []
+llm_context["background_results"].append(patch_content)
+```
+
+### REPLACE Strategy
+
+Results overwrite `llm_context["background_result"]` as a single value:
+
+```python
+llm_context["background_result"] = patch_content
+```
+
+### HUMAN_GATED Strategy
+
+Results are queued for user approval via a `CHECKPOINT` update:
+
+```python
+# Store pending patch
+self._pending_patches[patch_id] = PendingContextPatch(
+    patch=patch,
+    strategy=strategy,
+    queued_at=datetime.now(UTC),
+)
+
+# Emit checkpoint for user approval
+self._emit_update(
+    update_type=UpdateType.CHECKPOINT,
+    content={
+        "type": "context_patch_approval",
+        "patch_id": patch_id,
+        "digest": patch.digest,
+        "options": ["approve", "reject"],
+    }
+)
+```
+
+### Handling Approval/Rejection
+
+```python
+async def apply_pending_patch(self, patch_id: str, strategy: MergeStrategy | None = None) -> bool:
+    pending = self._pending_patches.pop(patch_id, None)
+    if pending is None:
+        return False
+    await self.apply_context_patch(patch=pending.patch, strategy=strategy or MergeStrategy.APPEND)
+    return True
+
+async def reject_pending_patch(self, patch_id: str) -> bool:
+    pending = self._pending_patches.pop(patch_id, None)
+    if pending is None:
+        return False
+    self._emit_notification(f"Context patch {patch_id} rejected")
+    return True
+```
+
+---
+
+## Memory Health States & Recovery
+
+The short-term memory system tracks health and supports graceful degradation.
+
+### MemoryHealth Enum
+
+```python
+class MemoryHealth(str, Enum):
+    HEALTHY = "healthy"       # Summarization working normally
+    RETRY = "retry"           # Attempting recovery with backoff
+    DEGRADED = "degraded"     # Fallback to truncation only
+    RECOVERING = "recovering" # Recovering from backlog
+```
+
+### Health Transitions
+
+```
+HEALTHY → RETRY (on summarizer failure)
+RETRY → DEGRADED (after max retries exceeded)
+DEGRADED → RECOVERING (on periodic recovery attempt)
+RECOVERING → HEALTHY (on successful backlog summarization)
+RECOVERING → DEGRADED (on recovery failure)
+```
+
+### Memory Strategies
+
+| Strategy | Description | When to Use |
+|----------|-------------|-------------|
+| `"none"` | No memory persistence | Stateless agents |
+| `"truncation"` | Keep N recent turns, discard older | Simple use cases |
+| `"rolling_summary"` | Summarize old turns + keep recent | Long conversations |
+
+### MemoryBudget Configuration
+
+```python
+@dataclass
+class MemoryBudget:
+    full_zone_turns: int = 5          # Recent turns kept in full
+    summary_max_tokens: int = 1000    # Summary size limit
+    total_max_tokens: int = 10000     # Total memory budget
+    overflow_policy: Literal[
+        "truncate_summary",           # Drop oldest from summary
+        "truncate_oldest",            # Drop oldest turn
+        "error"                       # Raise MemoryBudgetExceeded
+    ] = "truncate_oldest"
+```
+
+### MemoryIsolation (Multi-Tenant)
+
+```python
+@dataclass
+class MemoryIsolation:
+    tenant_key: str = "tenant_id"     # Dot-path in tool_context
+    user_key: str = "user_id"
+    session_key: str = "session_id"
+    require_explicit_key: bool = True  # Fail if key not found
+```
+
+Memory key format: `{tenant_id}:{user_id}:{session_id}`
+
+### StateStore Implications
+
+When implementing `save_memory_state`/`load_memory_state`:
+- Store the `health` field to track state across sessions
+- Preserve `pending` and `backlog` lists for recovery
+- Store `config_snapshot` for debugging
+
+---
+
+## Artifact Store
+
+### ArtifactStore Protocol
+
+```python
+@runtime_checkable
+class ArtifactStore(Protocol):
+    async def put_bytes(
+        self,
+        data: bytes,
+        *,
+        mime_type: str = "application/octet-stream",
+        filename: str | None = None,
+        namespace: str = "default",
+        scope: ArtifactScope | None = None,
+    ) -> ArtifactRef: ...
+
+    async def put_text(
+        self,
+        text: str,
+        *,
+        mime_type: str = "text/plain",
+        filename: str | None = None,
+        namespace: str = "default",
+        scope: ArtifactScope | None = None,
+    ) -> ArtifactRef: ...
+
+    async def get(self, artifact_id: str) -> bytes | None: ...
+    async def get_ref(self, artifact_id: str) -> ArtifactRef | None: ...
+    async def delete(self, artifact_id: str) -> bool: ...
+    async def exists(self, artifact_id: str) -> bool: ...
+```
+
+### ArtifactRef (Compact Reference)
+
+Only `ArtifactRef` objects (~100 bytes) are passed to LLMs, never raw binary data:
+
+```python
+class ArtifactRef(BaseModel):
+    id: str                            # Format: {namespace}_{sha256[:12]}
+    mime_type: str                     # Content type
+    size_bytes: int                    # Original content size
+    filename: str | None = None        # Suggested download name
+    sha256: str                        # Full content hash
+    scope: ArtifactScope | None = None # Access control metadata
+    source: dict[str, Any] = Field(default_factory=dict)  # Tool name, warnings
+```
+
+### ArtifactScope (Access Control)
+
+```python
+class ArtifactScope(BaseModel):
+    tenant_id: str | None = None
+    user_id: str | None = None
+    session_id: str | None = None
+    trace_id: str | None = None
+```
+
+**Note:** Scope is stored by ArtifactStore but **enforcement happens at HTTP layer**.
+
+### ArtifactRetentionConfig
+
+```python
+class ArtifactRetentionConfig(BaseModel):
+    ttl_seconds: int = 3600              # 1-hour default expiration
+    max_artifact_bytes: int = 50_000_000 # 50MB per artifact
+    max_session_bytes: int = 500_000_000 # 500MB per session
+    max_trace_bytes: int = 100_000_000   # 100MB per trace
+    max_artifacts_per_trace: int = 100
+    max_artifacts_per_session: int = 1000
+    cleanup_strategy: Literal["lru", "fifo", "none"] = "lru"
+```
+
+### StateStore Integration
+
+The `artifact_store` property provides access to the underlying store:
+
 ```python
 @property
-def artifact_store(self) -> ArtifactStore | None: ...
+def artifact_store(self) -> ArtifactStore | None:
+    return self._artifact_store
 ```
+
+Discovery helper:
+
+```python
+from penguiflow.state import discover_artifact_store
+
+store = discover_artifact_store(state_store)  # Returns ArtifactStore or None
+```
+
+---
 
 ## Integration Points
 
@@ -618,7 +1191,32 @@ planner = ReactPlanner(
 - `list_tasks()` used to hydrate a session on startup
 - `list_updates()` / `list_steering()` used for polling and UI backfills
 
-### 3. Admin CLI
+### 4. Session Hydration Flow
+
+When a session is created or resumed:
+
+```python
+async def hydrate(self) -> None:
+    """Restore session state from persistence."""
+    if self._hydrated:
+        return
+
+    # Load all persisted tasks
+    tasks = await self._state_store.list_tasks(self.session_id)
+
+    # Seed task registry
+    await self._registry.seed_tasks(tasks)
+
+    # Restore foreground task ID
+    for task in tasks:
+        if task.task_type == TaskType.FOREGROUND and task.status == TaskStatus.RUNNING:
+            self._foreground_task_id = task.task_id
+            break
+
+    self._hydrated = True
+```
+
+### 5. Admin CLI
 
 **Location:** `penguiflow/admin.py`
 
@@ -634,6 +1232,115 @@ penguiflow-admin replay --state-store mypackage.stores:create_store trace_abc123
 - Format: `"module.path:callable_name"`
 - Callable must return a StateStore instance (sync or async)
 - Example: `"myapp.infrastructure.stores:create_postgres_store"`
+
+---
+
+## Distributed Deployment
+
+### Stateless Worker Pool (Recommended)
+
+For horizontal scaling, use a stateless worker pool pattern:
+
+```python
+async def worker_loop(job_queue: JobQueue, state_store: StateStore):
+    while True:
+        job = await job_queue.dequeue()
+
+        # Fresh flow instance per job
+        flow = PenguiFlow(
+            build_graph(),
+            state_store=state_store,
+        )
+
+        try:
+            result = await flow.run_once(job.input, trace_id=job.trace_id)
+            await job_queue.ack(job.id)
+        except Exception as e:
+            await job_queue.nack(job.id, error=str(e))
+```
+
+**Benefits:**
+- Horizontal scalability (10+ workers)
+- Easy failure isolation
+- No shared state between jobs
+- Simple container orchestration
+
+### Long-Lived Flow Worker (Advanced)
+
+For expensive initialization or shared resources:
+
+```python
+class FlowWorker:
+    def __init__(self, state_store: StateStore):
+        self._flow = PenguiFlow(
+            build_graph(),
+            state_store=state_store,
+        )
+        self._failure_count = 0
+        self._max_failures = 5
+
+    async def process(self, job: Job) -> Result:
+        try:
+            result = await self._flow.run_once(job.input, trace_id=job.trace_id)
+            self._failure_count = 0
+            return result
+        except Exception:
+            self._failure_count += 1
+            if self._failure_count >= self._max_failures:
+                await self._restart_flow()
+            raise
+
+    async def _restart_flow(self) -> None:
+        await self._flow.stop()
+        self._flow = PenguiFlow(build_graph(), state_store=self._state_store)
+        self._failure_count = 0
+```
+
+### Multi-Worker Consistency Model
+
+| Data Type | Consistency | Notes |
+|-----------|-------------|-------|
+| Events (`save_event`) | Eventual | Events may arrive out of order |
+| Remote bindings | Eventual | Upsert semantics handle conflicts |
+| Planner state (`pause/resume`) | Strong | Must be consistent for distributed resume |
+| Memory state | Eventual | Last-write-wins acceptable |
+| Task state | Strong | For accurate UI status |
+| Steering events | Strong | For real-time interventions |
+
+### Trace-Based Causality
+
+All distributed work is associated via `trace_id`:
+
+```python
+# Worker A: Process initial request
+result = await flow.run_once(input, trace_id="trace_abc123")
+
+# Worker B: Resume after OAuth callback
+result = await planner.resume(token, user_input=oauth_token)
+# Internally uses same trace_id from pause record
+```
+
+### Cascade Cancellation
+
+Parent task cancellation propagates to children:
+
+```python
+async def _cascade_cancel_children(self, parent_task_id: str, reason: str) -> None:
+    children = await self._registry.list_children(parent_task_id)
+    for child_id in children:
+        task = await self._registry.get_task(child_id)
+        if task and task.context_snapshot.propagate_on_cancel != "isolate":
+            # Create cancellation event
+            event = SteeringEvent(
+                session_id=self.session_id,
+                task_id=child_id,
+                event_type=SteeringEventType.CANCEL,
+                payload={"reason": reason, "cascaded_from": parent_task_id},
+            )
+            await self._steer(event)
+            # Recurse to grandchildren
+            await self._cascade_cancel_children(child_id, reason)
+```
 
 ---
 
@@ -765,6 +1472,140 @@ class HybridStateStore:
 
 ---
 
+## Compatibility Adapters
+
+PenguiFlow provides compatibility adapters to bridge legacy method names during migration.
+
+### Legacy Method Mappings
+
+| New Method | Legacy Alternative | Used By |
+|------------|-------------------|---------|
+| `save_update()` | `save_task_update()` | Task service |
+| `list_updates()` | `list_task_updates()` | Task service |
+| `save_planner_event()` | `save_event(trace_id, event)` | Playground |
+| `list_planner_events()` | `get_events()` | Playground |
+
+### Using Compatibility Functions
+
+```python
+from penguiflow.state.adapters import (
+    save_update_compat,
+    list_updates_compat,
+    save_planner_event_compat,
+    list_planner_events_compat,
+    maybe_save_remote_binding,
+)
+
+# These try new method name first, fall back to legacy
+await save_update_compat(store, update)
+updates = await list_updates_compat(store, session_id, since_id=cursor)
+
+# Safe None-guard for optional stores
+await maybe_save_remote_binding(store, binding)  # No-op if store is None
+```
+
+### Implementing Both Interfaces
+
+For gradual migration, implement both method names:
+
+```python
+class MyStateStore:
+    # New interface
+    async def save_update(self, update: StateUpdate) -> None:
+        await self._persist_update(update)
+
+    # Legacy interface (deprecated)
+    async def save_task_update(self, update: StateUpdate) -> None:
+        await self.save_update(update)  # Delegate to new method
+```
+
+---
+
+## Telemetry Integration
+
+### TaskTelemetrySink Protocol
+
+```python
+class TaskTelemetrySink(Protocol):
+    async def emit(self, event: TaskTelemetryEvent) -> None: ...
+```
+
+### TaskTelemetryEvent
+
+```python
+class TaskTelemetryEvent(BaseModel):
+    event_type: Literal[
+        "task_spawned",
+        "task_completed",
+        "task_failed",
+        "task_cancelled",
+        "task_group_completed",
+        "task_group_failed",
+    ]
+    outcome: Literal["spawned", "completed", "failed", "cancelled"]
+    session_id: str
+    task_id: str
+    parent_task_id: str | None = None
+    trace_id: str | None = None
+    task_type: TaskType
+    status: TaskStatus
+    mode: Literal["foreground", "subagent", "job"] | None = None
+    spawn_reason: str | None = None
+    duration_ms: float | None = None
+    created_at_s: float = Field(default_factory=time.time)
+    extra: dict[str, Any] = Field(default_factory=dict)
+```
+
+### Built-in Implementations
+
+```python
+from penguiflow.sessions.telemetry import (
+    NoOpTaskTelemetrySink,    # Silent (default)
+    LoggingTaskTelemetrySink, # Routes to Python logger
+)
+```
+
+### Custom Telemetry Sink
+
+```python
+class PrometheusTaskSink:
+    def __init__(self, registry: CollectorRegistry):
+        self._counter = Counter(
+            "penguiflow_tasks_total",
+            "Total tasks by outcome",
+            ["outcome", "task_type"],
+            registry=registry,
+        )
+
+    async def emit(self, event: TaskTelemetryEvent) -> None:
+        self._counter.labels(
+            outcome=event.outcome,
+            task_type=event.task_type.value,
+        ).inc()
+```
+
+### Integration with Session
+
+```python
+session = StreamingSession(
+    session_id="...",
+    state_store=your_store,
+    telemetry_sink=PrometheusTaskSink(registry),
+)
+```
+
+### Telemetry vs. StateStore
+
+| Aspect | TaskTelemetrySink | StateStore |
+|--------|-------------------|------------|
+| Purpose | Observability/monitoring | Durability/auditability |
+| Emission | Async fire-and-forget | Persistent storage |
+| Data | High-level event semantics | Full task/update payloads |
+| Scope | Task lifecycle only | Complete execution history |
+| Use Case | Metrics, alerts, dashboards | Recovery, replay, audit |
+
+---
+
 ## Database Schema Recommendations
 
 ### PostgreSQL Schema
@@ -813,8 +1654,110 @@ CREATE TABLE memory_states (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Cleanup job for expired pauses (run periodically)
+-- Task state (new)
+CREATE TABLE task_states (
+    task_id VARCHAR(64) PRIMARY KEY,
+    session_id VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    task_type VARCHAR(32) NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    context_snapshot JSONB NOT NULL,
+    trace_id VARCHAR(64),
+    result JSONB,
+    error TEXT,
+    description TEXT,
+    progress JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_tasks_session ON task_states(session_id);
+CREATE INDEX idx_tasks_status ON task_states(session_id, status);
+
+-- State updates (new)
+CREATE TABLE state_updates (
+    id BIGSERIAL PRIMARY KEY,
+    session_id VARCHAR(64) NOT NULL,
+    task_id VARCHAR(64) NOT NULL,
+    trace_id VARCHAR(64),
+    update_id VARCHAR(64) NOT NULL UNIQUE,
+    update_type VARCHAR(32) NOT NULL,
+    content JSONB,
+    step_index INTEGER,
+    total_steps INTEGER,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_updates_session ON state_updates(session_id);
+CREATE INDEX idx_updates_task ON state_updates(session_id, task_id);
+CREATE INDEX idx_updates_cursor ON state_updates(session_id, id);
+
+-- Steering events (new)
+CREATE TABLE steering_events (
+    id BIGSERIAL PRIMARY KEY,
+    session_id VARCHAR(64) NOT NULL,
+    task_id VARCHAR(64) NOT NULL,
+    event_id VARCHAR(64) NOT NULL UNIQUE,
+    event_type VARCHAR(32) NOT NULL,
+    payload JSONB,
+    trace_id VARCHAR(64),
+    source VARCHAR(32) DEFAULT 'user',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_steering_session ON steering_events(session_id);
+CREATE INDEX idx_steering_task ON steering_events(session_id, task_id);
+
+-- Trajectories (new)
+CREATE TABLE trajectories (
+    trace_id VARCHAR(64) NOT NULL,
+    session_id VARCHAR(64) NOT NULL,
+    trajectory JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (trace_id, session_id)
+);
+
+CREATE INDEX idx_trajectories_session ON trajectories(session_id, created_at DESC);
+
+-- Planner events (new)
+CREATE TABLE planner_events (
+    id BIGSERIAL PRIMARY KEY,
+    trace_id VARCHAR(64) NOT NULL,
+    event_type VARCHAR(64) NOT NULL,
+    ts DOUBLE PRECISION NOT NULL,
+    trajectory_step INTEGER,
+    thought TEXT,
+    node_name VARCHAR(128),
+    latency_ms DOUBLE PRECISION,
+    token_estimate INTEGER,
+    error TEXT,
+    extra JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_planner_events_trace ON planner_events(trace_id, id);
+
+-- Artifacts (new)
+CREATE TABLE artifacts (
+    artifact_id VARCHAR(128) PRIMARY KEY,
+    session_id VARCHAR(64),
+    trace_id VARCHAR(64),
+    mime_type VARCHAR(128) NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    filename VARCHAR(256),
+    sha256 VARCHAR(64) NOT NULL,
+    scope JSONB,
+    data BYTEA NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_artifacts_session ON artifacts(session_id);
+CREATE INDEX idx_artifacts_expires ON artifacts(expires_at);
+
+-- Cleanup jobs (run periodically)
 -- DELETE FROM planner_pauses WHERE expires_at < NOW();
+-- DELETE FROM artifacts WHERE expires_at < NOW();
 ```
 
 ### Redis Key Patterns
@@ -828,6 +1771,12 @@ memory:{tenant}:{user}:{session}  -> JSON state (no TTL or long TTL)
 
 # Event streams (optional, for real-time)
 events:{trace_id}       -> Redis Stream
+
+# Task state (optional, for fast lookups)
+task:{session_id}:{task_id}  -> JSON TaskState
+
+# Steering queue (optional, for pub/sub)
+steering:{session_id}   -> Redis Stream
 ```
 
 ---
@@ -839,7 +1788,7 @@ events:{trace_id}       -> Redis Stream
 ```python
 import pytest
 from your_module import YourStateStore
-from penguiflow.state import StoredEvent, RemoteBinding
+from penguiflow.state import StoredEvent, RemoteBinding, TaskState, StateUpdate, SteeringEvent
 
 @pytest.fixture
 async def store():
@@ -959,6 +1908,86 @@ async def test_memory_state_unknown_key(store):
 
     result = await store.load_memory_state("nonexistent:key")
     assert result is None
+
+# 10. Task state (if implemented)
+async def test_task_state_roundtrip(store):
+    if not hasattr(store, "save_task"):
+        pytest.skip("Task persistence not implemented")
+
+    from penguiflow.state import TaskState, TaskStatus, TaskType, TaskContextSnapshot
+
+    snapshot = TaskContextSnapshot(
+        session_id="test-session",
+        task_id="test-task",
+        context_version=1,
+        context_hash="abc123",
+    )
+    task = TaskState(
+        task_id="test-task",
+        session_id="test-session",
+        status=TaskStatus.PENDING,
+        task_type=TaskType.BACKGROUND,
+        priority=5,
+        context_snapshot=snapshot,
+        description="Test task",
+    )
+
+    await store.save_task(task)
+    tasks = await store.list_tasks("test-session")
+
+    assert len(tasks) == 1
+    assert tasks[0].task_id == "test-task"
+    assert tasks[0].priority == 5
+
+# 11. State update with cursor (if implemented)
+async def test_state_update_cursor(store):
+    if not hasattr(store, "save_update"):
+        pytest.skip("Update persistence not implemented")
+
+    from penguiflow.state import StateUpdate, UpdateType
+
+    updates = [
+        StateUpdate(
+            session_id="test-session",
+            task_id="test-task",
+            update_id=f"update-{i}",
+            update_type=UpdateType.PROGRESS,
+            content={"step": i},
+        )
+        for i in range(5)
+    ]
+
+    for update in updates:
+        await store.save_update(update)
+
+    # Get all updates
+    all_updates = await store.list_updates("test-session")
+    assert len(all_updates) == 5
+
+    # Get updates after cursor
+    partial = await store.list_updates("test-session", since_id="update-2")
+    assert len(partial) == 2  # update-3, update-4
+
+# 12. Steering event sanitization (if implemented)
+async def test_steering_sanitized(store):
+    if not hasattr(store, "save_steering"):
+        pytest.skip("Steering persistence not implemented")
+
+    from penguiflow.state import SteeringEvent, SteeringEventType
+
+    event = SteeringEvent(
+        session_id="test-session",
+        task_id="test-task",
+        event_type=SteeringEventType.USER_MESSAGE,
+        payload={"text": "Hello"},
+        source="user",
+    )
+
+    await store.save_steering(event)
+    events = await store.list_steering("test-session")
+
+    assert len(events) == 1
+    assert events[0].source == "user"
 ```
 
 ### Integration Test with PenguiFlow
@@ -1091,8 +2120,9 @@ class BatchingStateStore:
 
 Essential indexes:
 - `(trace_id, ts)` - for `load_history()`
-- `(expires_at)` - for pause cleanup
-- `(kind)` - for event type filtering (optional)
+- `(session_id)` - for `list_tasks()`, `list_updates()`
+- `(session_id, id)` - for cursor-based pagination
+- `(expires_at)` - for pause/artifact cleanup
 
 Avoid:
 - Indexes on `payload` JSONB (expensive to maintain)
@@ -1137,6 +2167,29 @@ Use this checklist to verify your implementation is complete:
 - [ ] `load_memory_state(key)` implemented
 - [ ] `load_memory_state` returns `None` for missing keys
 
+### Task & Session Methods (if applicable)
+
+- [ ] `save_task(state: TaskState)` implemented
+- [ ] `list_tasks(session_id)` implemented
+- [ ] `save_update(update: StateUpdate)` implemented
+- [ ] `list_updates(session_id, task_id, since_id, limit)` implemented
+- [ ] `save_steering(event: SteeringEvent)` implemented
+- [ ] `list_steering(session_id, task_id, since_id, limit)` implemented
+
+### Trajectory & Planner Events (if applicable)
+
+- [ ] `save_trajectory(trace_id, session_id, trajectory)` implemented
+- [ ] `get_trajectory(trace_id, session_id)` implemented
+- [ ] `list_traces(session_id, limit)` implemented
+- [ ] `save_planner_event(trace_id, event)` implemented
+- [ ] `list_planner_events(trace_id)` implemented
+
+### Artifact Store (if applicable)
+
+- [ ] `artifact_store` property returns `ArtifactStore` or `None`
+- [ ] Retention config honored (TTL, max sizes)
+- [ ] Session-scoped access patterns supported
+
 ### Production Readiness
 
 - [ ] Connection pooling configured
@@ -1145,8 +2198,16 @@ Use this checklist to verify your implementation is complete:
 - [ ] TTL/expiration on pause records
 - [ ] Cleanup job for expired data
 - [ ] Indexes on frequently queried columns
+- [ ] Steering payloads sanitized before storage
 - [ ] Unit tests passing
 - [ ] Integration test with PenguiFlow passing
+
+### Distributed Deployment
+
+- [ ] Idempotency verified for all write methods
+- [ ] Cursor semantics work correctly for list methods
+- [ ] Context versioning preserved in TaskContextSnapshot
+- [ ] Session hydration tested
 
 ### Documentation
 
@@ -1158,7 +2219,7 @@ Use this checklist to verify your implementation is complete:
 
 ## See Also
 
-- [StateStore Production Guide](./tools/statestore-guide.md) - PostgreSQL/Redis examples
-- [ReactPlanner Integration](./REACT_PLANNER_INTEGRATION_GUIDE.md) - Pause/resume flows
-- [A2A Protocol](./A2A_PROTOCOL.md) - Remote binding details
-- [Observability](./OBSERVABILITY.md) - Event types and metrics
+- [StateStore Production Guide](../tools/statestore-guide.md) - PostgreSQL/Redis examples
+- [ReactPlanner Integration](../REACT_PLANNER_INTEGRATION_GUIDE.md) - Pause/resume flows
+- [A2A Protocol](../A2A_PROTOCOL.md) - Remote binding details
+- [Observability](../OBSERVABILITY.md) - Event types and metrics

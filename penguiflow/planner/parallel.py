@@ -13,7 +13,7 @@ from pydantic import BaseModel, ValidationError
 
 from . import prompts
 from .llm import _redact_artifacts
-from .models import PlannerAction, PlannerPause
+from .models import ParallelCall, ParallelJoin, PlannerAction, PlannerPause
 from .pause import _PlannerPauseSignal
 from .trajectory import Trajectory, TrajectoryStep
 
@@ -58,21 +58,42 @@ async def execute_parallel_plan(
     artifact_collector: Any | None = None,
     source_collector: Any | None = None,
 ) -> tuple[Any | None, PlannerPause | None]:
-    if action.next_node is not None:
+    if action.next_node != "parallel":
         error = prompts.render_parallel_with_next_node(action.next_node)
         trajectory.steps.append(TrajectoryStep(action=action, error=error))
         trajectory.summary = None
         return None, None
 
-    if not action.plan:
+    steps_payload = action.args.get("steps")
+    if not isinstance(steps_payload, list) or not steps_payload:
         error = prompts.render_empty_parallel_plan()
         trajectory.steps.append(TrajectoryStep(action=action, error=error))
         trajectory.summary = None
         return None, None
 
+    join_spec_payload = action.args.get("join")
+    join_model: ParallelJoin | None = None
+    if isinstance(join_spec_payload, Mapping):
+        try:
+            join_model = ParallelJoin.model_validate(join_spec_payload)
+        except ValidationError:
+            join_model = None
+
     validation_errors: list[str] = []
     entries: list[tuple[Any, Any, BaseModel]] = []
-    for plan_item in action.plan:
+    plan: list[ParallelCall] = []
+    for item in steps_payload:
+        try:
+            plan.append(ParallelCall.model_validate(item))
+        except ValidationError:
+            continue
+    if not plan:
+        error = prompts.render_empty_parallel_plan()
+        trajectory.steps.append(TrajectoryStep(action=action, error=error))
+        trajectory.summary = None
+        return None, None
+
+    for plan_item in plan:
         spec = planner._spec_by_name.get(plan_item.node)
         if spec is None:
             validation_errors.append(prompts.render_invalid_node(plan_item.node, list(planner._spec_by_name.keys())))
@@ -188,10 +209,10 @@ async def execute_parallel_plan(
     join_args_template: dict[str, Any] | None = None
     implicit_join_injection = False
 
-    if action.join is not None:
-        join_spec = planner._spec_by_name.get(action.join.node)
+    if join_model is not None:
+        join_spec = planner._spec_by_name.get(join_model.node)
         if join_spec is None:
-            join_error = prompts.render_invalid_node(action.join.node, list(planner._spec_by_name.keys()))
+            join_error = prompts.render_invalid_node(join_model.node, list(planner._spec_by_name.keys()))
         elif failure_entries:
             join_payload = {
                 "node": join_spec.name,
@@ -200,8 +221,8 @@ async def execute_parallel_plan(
                 "failures": list(failure_entries),
             }
         else:
-            join_args_template = dict(action.join.args or {})
-            injection_mapping = action.join.inject.mapping if action.join.inject else {}
+            join_args_template = dict(join_model.args or {})
+            injection_mapping = join_model.inject.mapping if join_model.inject else {}
             explicit_injection = bool(injection_mapping)
             if explicit_injection:
                 injection_sources = {
@@ -222,7 +243,7 @@ async def execute_parallel_plan(
                         exc.args[0] if exc.args else str(exc),
                         sorted(injection_sources),
                     )
-            elif action.join.inject is None:
+            elif join_model.inject is None:
                 implicit_join_injection = True
                 logger.warning(
                     "Implicit join injection is deprecated. Use explicit 'inject' mapping for join tool '%s'.",
@@ -312,13 +333,13 @@ async def execute_parallel_plan(
                                 "observation": _redact_artifacts(join_spec.out_model, join_json),
                             }
 
-    if action.join is not None and "join" not in observation:
+    if join_model is not None and "join" not in observation:
         if join_payload is not None:
             observation["join"] = join_payload
             llm_observation["join"] = join_llm_payload or join_payload
         else:
             join_name = (
-                join_spec.name if join_spec is not None else action.join.node if action.join is not None else "join"
+                join_spec.name if join_spec is not None else join_model.node if join_model is not None else "join"
             )
             join_entry: dict[str, Any] = {"node": join_name}
             if join_error is not None:
@@ -328,7 +349,7 @@ async def execute_parallel_plan(
             if "error" in join_entry or "failure" in join_entry:
                 observation["join"] = join_entry
                 llm_observation["join"] = join_entry
-            elif action.join is not None and join_spec is None:
+            elif join_model is not None and join_spec is None:
                 observation["join"] = join_entry
                 llm_observation["join"] = join_entry
 

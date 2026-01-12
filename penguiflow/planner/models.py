@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from .context import PlannerPauseReason
 
@@ -162,11 +163,41 @@ class FinalPayload(BaseModel):
 
 
 class PlannerAction(BaseModel):
-    thought: str
-    next_node: str | None = None
-    args: dict[str, Any] | None = None
-    plan: list[ParallelCall] | None = None
-    join: ParallelJoin | None = None
+    """Unified action format (RFC_UNIFIED_ACTION_SCHEMA).
+
+    The LLM-facing schema is always:
+    - ``next_node``: non-null string opcode or tool name
+    - ``args``: object payload (defaults to {})
+
+    Internally, we keep a best-effort ``thought`` field for trajectory logging and
+    repair prompts, but it is excluded from the JSON schema so it is not required
+    (or encouraged) in structured outputs.
+    """
+
+    next_node: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    thought: SkipJsonSchema[str] = ""
+
+    def is_terminal(self) -> bool:
+        return self.next_node == "final_response"
+
+    def is_parallel(self) -> bool:
+        return self.next_node == "parallel"
+
+    def is_tool_call(self) -> bool:
+        return self.next_node not in RESERVED_NEXT_NODES
+
+    def answer_text(self) -> str | None:
+        value = self.args.get("answer")
+        if isinstance(value, str):
+            return value
+        legacy = self.args.get("raw_answer")
+        if isinstance(legacy, str):
+            return legacy
+        return None
+
+
+RESERVED_NEXT_NODES = frozenset({"parallel", "task.subagent", "task.tool", "final_response"})
 
 
 class PlannerPause(BaseModel):

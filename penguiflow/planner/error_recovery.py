@@ -272,8 +272,12 @@ def _create_graceful_failure_action(
 
     return PlannerAction(
         thought=thought,
-        next_node=None,
+        next_node="final_response",
         args={
+            "answer": (
+                f"I'm sorry, but I encountered an issue while processing your request: "
+                f"{user_msg}. Please try again or rephrase your question."
+            ),
             "raw_answer": (
                 f"I'm sorry, but I encountered an issue while processing your request: "
                 f"{user_msg}. Please try again or rephrase your question."

@@ -274,63 +274,20 @@ def _sanitize_json_schema(
 
 
 def _build_minimal_planner_schema() -> dict[str, Any]:
-    """OpenAI-strict-friendly PlannerAction schema without $refs or advanced features."""
+    """OpenAI-strict-friendly PlannerAction schema without $refs or advanced features.
 
-    join_injection = {
-        "type": "object",
-        "properties": {
-            "mapping": {
-                "type": "object",
-                "additionalProperties": False,
-            },
-        },
-        "required": ["mapping"],
-        "additionalProperties": False,
-    }
-
-    join_obj = {
-        "type": "object",
-        "properties": {
-            "node": {"type": "string"},
-            "args": {"type": "object", "additionalProperties": False},
-            "inject": {"anyOf": [join_injection, {"type": "null"}], "default": None},
-        },
-        "required": ["node", "args", "inject"],
-        "additionalProperties": False,
-    }
-
-    parallel_call = {
-        "type": "object",
-        "properties": {
-            "node": {"type": "string"},
-            "args": {"type": "object", "additionalProperties": False},
-        },
-        "required": ["node", "args"],
-        "additionalProperties": False,
-    }
+    This mirrors the unified action format (only ``next_node`` + ``args``). We keep
+    ``args`` permissive (additional properties allowed) because tool arg shapes are
+    tool-dependent and cannot be exhaustively listed here.
+    """
 
     schema: dict[str, Any] = {
         "type": "object",
         "properties": {
-            "thought": {"type": "string"},
-            "next_node": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
-            "args": {
-                "anyOf": [{"type": "object", "additionalProperties": False}, {"type": "null"}],
-                "default": None,
-            },
-            "plan": {
-                "anyOf": [
-                    {
-                        "type": "array",
-                        "items": parallel_call,
-                    },
-                    {"type": "null"},
-                ],
-                "default": None,
-            },
-            "join": {"anyOf": [join_obj, {"type": "null"}], "default": None},
+            "next_node": {"type": "string"},
+            "args": {"type": "object"},
         },
-        "required": ["thought", "next_node", "args", "plan", "join"],
+        "required": ["next_node", "args"],
         "additionalProperties": False,
     }
     return schema
@@ -476,6 +433,8 @@ class _LiteLLMJSONClient:
         max_retries: int = 3,
         timeout_s: float = 60.0,
         streaming_enabled: bool = False,
+        use_native_reasoning: bool = True,
+        reasoning_effort: str | None = None,
     ) -> None:
         self._llm = llm
         self._temperature = temperature
@@ -483,6 +442,8 @@ class _LiteLLMJSONClient:
         self._max_retries = max_retries
         self._timeout_s = timeout_s
         self._streaming_enabled = streaming_enabled
+        self._use_native_reasoning = use_native_reasoning
+        self._reasoning_effort = reasoning_effort
 
     async def complete(
         self,
@@ -491,6 +452,7 @@ class _LiteLLMJSONClient:
         response_format: Mapping[str, Any] | None = None,
         stream: bool = False,
         on_stream_chunk: Callable[[str, bool], None] | None = None,
+        on_reasoning_chunk: Callable[[str, bool], None] | None = None,
     ) -> tuple[str, float]:
         try:
             import litellm
@@ -506,6 +468,10 @@ class _LiteLLMJSONClient:
             params = dict(self._llm)
         params.setdefault("temperature", self._temperature)
         params["messages"] = list(messages)
+        if self._use_native_reasoning and self._reasoning_effort is not None:
+            params["reasoning_effort"] = self._reasoning_effort
+            # Providers vary in support; drop unsupported params instead of failing.
+            params.setdefault("drop_params", True)
         if self._json_schema_mode and response_format is not None:
             model_name = self._llm if isinstance(self._llm, str) else self._llm.get("model", "")
             policy = _response_format_policy(model_name)
@@ -622,10 +588,45 @@ class _LiteLLMJSONClient:
                                 except Exception:
                                     logger.exception("llm_stream_chunk_callback_error")
 
+                            if on_reasoning_chunk is not None:
+                                delta_reasoning: str | None = None
+                                if isinstance(chunk, Mapping):
+                                    choices = chunk.get("choices") or []
+                                    if choices:
+                                        delta = choices[0].get("delta") or {}
+                                        if isinstance(delta, Mapping):
+                                            delta_reasoning = (
+                                                delta.get("reasoning_content")
+                                                or delta.get("reasoning")
+                                                or delta.get("thinking")
+                                            )
+                                else:
+                                    try:
+                                        delta = getattr(getattr(chunk, "choices", [])[0], "delta", None)
+                                        if delta is not None:
+                                            delta_reasoning = (
+                                                getattr(delta, "reasoning_content", None)
+                                                or getattr(delta, "reasoning", None)
+                                                or getattr(delta, "thinking", None)
+                                            )
+                                    except Exception:
+                                        delta_reasoning = None
+
+                                if delta_reasoning:
+                                    try:
+                                        on_reasoning_chunk(str(delta_reasoning), False)
+                                    except Exception:
+                                        logger.exception("llm_reasoning_chunk_callback_error")
+
                         try:
                             on_stream_chunk("", True)
                         except Exception:
                             logger.exception("llm_stream_chunk_callback_error")
+                        if on_reasoning_chunk is not None:
+                            try:
+                                on_reasoning_chunk("", True)
+                            except Exception:
+                                logger.exception("llm_reasoning_chunk_callback_error")
 
                         content = "".join(pieces)
                         cost = 0.0
@@ -645,22 +646,50 @@ class _LiteLLMJSONClient:
                         return content, cost
 
                     response = await litellm.acompletion(**params)
-                    choice = response["choices"][0]
-                    content = choice["message"]["content"]
-                    if content is None:
+                    content_text: str | None = None
+                    reasoning_content: str | None = None
+                    if isinstance(response, Mapping):
+                        choice = response.get("choices", [{}])[0]
+                        message = choice.get("message", {}) if isinstance(choice, Mapping) else {}
+                        content_val = message.get("content")
+                        content_text = content_val if isinstance(content_val, str) else None
+                        reasoning_val = message.get("reasoning_content")
+                        reasoning_content = reasoning_val if isinstance(reasoning_val, str) else None
+                    else:  # pragma: no cover - defensive for non-mapping clients
+                        content_val = getattr(response.choices[0].message, "content", None)
+                        content_text = content_val if isinstance(content_val, str) else None
+                        reasoning_val = getattr(response.choices[0].message, "reasoning_content", None)
+                        reasoning_content = reasoning_val if isinstance(reasoning_val, str) else None
+
+                    if content_text is None:
                         raise RuntimeError("LiteLLM returned empty content")
 
-                    cost = float(response.get("_hidden_params", {}).get("response_cost", 0.0) or 0.0)
+                    if on_reasoning_chunk is not None and reasoning_content:
+                        try:
+                            on_reasoning_chunk(str(reasoning_content), False)
+                            on_reasoning_chunk("", True)
+                        except Exception:
+                            logger.exception("llm_reasoning_chunk_callback_error")
+
+                    cost = (
+                        float(response.get("_hidden_params", {}).get("response_cost", 0.0) or 0.0)
+                        if isinstance(response, Mapping)
+                        else 0.0
+                    )
                     logger.debug(
                         "llm_call_success",
                         extra={
                             "attempt": attempt + 1,
                             "cost_usd": cost,
-                            "tokens": response.get("usage", {}).get("total_tokens", 0),
+                            "tokens": (
+                                response.get("usage", {}).get("total_tokens", 0)
+                                if isinstance(response, Mapping)
+                                else 0
+                            ),
                         },
                     )
 
-                    return content, cost
+                    return content_text, cost
             except TimeoutError as exc:
                 last_error = exc
                 logger.warning(
@@ -786,14 +815,18 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
 
     history_messages: list[dict[str, str]] = []
     for step in trajectory.steps:
+        action_for_llm = {
+            "next_node": step.action.next_node,
+            "args": dict(step.action.args),
+        }
         action_payload = json.dumps(
-            step.action.model_dump(mode="json"),
+            action_for_llm,
             ensure_ascii=False,
             sort_keys=True,
         )
         history_messages.append({"role": "assistant", "content": action_payload})
         observation_payload = step.serialise_for_llm()
-        if step.llm_observation is None and step.action.next_node and isinstance(observation_payload, Mapping):
+        if step.llm_observation is None and step.action.is_tool_call() and isinstance(observation_payload, Mapping):
             spec = getattr(planner, "_spec_by_name", {}).get(step.action.next_node)
             if spec is not None:
                 observation_payload = _redact_artifacts(spec.out_model, observation_payload)
@@ -841,11 +874,15 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
     condensed: list[dict[str, str]] = messages + [summary_message]
     if trajectory.steps:
         last_step = trajectory.steps[-1]
+        last_action_for_llm = {
+            "next_node": last_step.action.next_node,
+            "args": dict(last_step.action.args),
+        }
         condensed.append(
             {
                 "role": "assistant",
                 "content": json.dumps(
-                    last_step.action.model_dump(mode="json"),
+                    last_action_for_llm,
                     ensure_ascii=False,
                     sort_keys=True,
                 ),
@@ -854,7 +891,7 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
         last_observation_payload = last_step.serialise_for_llm()
         if (
             last_step.llm_observation is None
-            and last_step.action.next_node
+            and last_step.action.is_tool_call()
             and isinstance(last_observation_payload, Mapping)
         ):
             spec = getattr(planner, "_spec_by_name", {}).get(last_step.action.next_node)
@@ -1016,7 +1053,9 @@ async def request_revision(
     )
     raw, cost = _coerce_llm_response(llm_result)
     planner._cost_tracker.record_main_call(cost)
-    return PlannerAction.model_validate_json(raw)
+    from .migration import normalize_action
+
+    return normalize_action(raw)
 
 
 async def generate_clarification(
@@ -1035,7 +1074,7 @@ When you cannot satisfactorily answer a query with available tools/data, you sho
 
 Your goal is to guide the user toward providing what you need to answer their query properly."""
 
-    attempted_tools = [step.action.next_node for step in trajectory.steps if step.action.next_node]
+    attempted_tools = [step.action.next_node for step in trajectory.steps if step.action.is_tool_call()]
     attempts_summary = "\n".join([f"- {tool}" for tool in attempted_tools]) if attempted_tools else "None recorded"
 
     user_prompt = f"""The query was: "{trajectory.query}"

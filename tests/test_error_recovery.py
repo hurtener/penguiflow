@@ -148,8 +148,9 @@ def test_create_graceful_failure_action():
     exc = Exception("Test error message")
     action = _create_graceful_failure_action(exc, LLMErrorType.BAD_REQUEST_OTHER)
 
-    assert action.next_node is None  # finish action
+    assert action.next_node == "final_response"  # finish action
     assert "raw_answer" in action.args
+    assert "answer" in action.args
     assert "sorry" in action.args["raw_answer"].lower()
     assert "_recovery" in action.args
     assert action.args["_recovery"]["error_type"] == "bad_request_other"
@@ -160,7 +161,7 @@ def test_create_graceful_failure_action_context_length():
     exc = Exception("Context too long")
     action = _create_graceful_failure_action(exc, LLMErrorType.CONTEXT_LENGTH_EXCEEDED)
 
-    assert action.next_node is None
+    assert action.next_node == "final_response"
     assert action.args["_recovery"]["error_type"] == "context_length_exceeded"
 
 
@@ -359,7 +360,7 @@ async def test_compress_trajectory_no_client():
 async def test_step_with_recovery_success():
     """Test step_with_recovery passes through on success."""
     planner = MagicMock()
-    expected_action = PlannerAction(thought="success", next_node=None)
+    expected_action = PlannerAction(thought="success", next_node="final_response")
     planner.step = AsyncMock(return_value=expected_action)
 
     trajectory = Trajectory(query="test")
@@ -374,7 +375,7 @@ async def test_step_with_recovery_success():
 async def test_step_with_recovery_disabled():
     """Test step_with_recovery passes through when disabled."""
     planner = MagicMock()
-    expected_action = PlannerAction(thought="success", next_node=None)
+    expected_action = PlannerAction(thought="success", next_node="final_response")
     planner.step = AsyncMock(return_value=expected_action)
 
     trajectory = Trajectory(query="test")
@@ -401,7 +402,7 @@ async def test_step_with_recovery_bad_request_graceful_failure():
 
     result = await step_with_recovery(planner, trajectory)
 
-    assert result.next_node is None  # finish action
+    assert result.next_node == "final_response"  # finish action
     assert "sorry" in result.args["raw_answer"].lower()
 
 
@@ -443,7 +444,7 @@ async def test_step_with_recovery_context_length_compresses_and_retries():
     planner = MagicMock()
 
     # First call raises context length error, second succeeds
-    expected_action = PlannerAction(thought="success after compression", next_node=None)
+    expected_action = PlannerAction(thought="success after compression", next_node="final_response")
     planner.step = AsyncMock(
         side_effect=[
             Exception("input is too long for this model"),
@@ -502,7 +503,7 @@ async def test_step_with_recovery_context_length_max_retries_exceeded():
     result = await step_with_recovery(planner, trajectory, config=config)
 
     # Should return graceful failure after max retries
-    assert result.next_node is None
+    assert result.next_node == "final_response"
     assert "_recovery" in result.args
 
 
@@ -532,7 +533,7 @@ async def test_step_with_recovery_compression_failure():
     result = await step_with_recovery(planner, trajectory, config=config)
 
     # Should return graceful failure when compression fails
-    assert result.next_node is None
+    assert result.next_node == "final_response"
     assert "_recovery" in result.args
 
 
@@ -562,7 +563,7 @@ async def test_step_with_recovery_compression_ineffective():
     result = await step_with_recovery(planner, trajectory, config=config)
 
     # Should return graceful failure when nothing to compress
-    assert result.next_node is None
+    assert result.next_node == "final_response"
     assert "_recovery" in result.args
 
 
@@ -732,7 +733,7 @@ async def test_compress_trajectory_uses_main_client_fallback():
 
 @pytest.mark.asyncio
 async def test_compress_trajectory_finish_action():
-    """Test compression handles finish actions (next_node=None)."""
+    """Test compression handles finish actions (next_node=final_response)."""
     planner = MagicMock()
     mock_client = AsyncMock()
     mock_client.complete.return_value = ("Summary", 0.01)
@@ -741,7 +742,7 @@ async def test_compress_trajectory_finish_action():
     trajectory = Trajectory(query="test")
     trajectory.steps.append(
         TrajectoryStep(
-            action=PlannerAction(thought="finish", next_node=None),  # Finish action
+            action=PlannerAction(thought="finish", next_node="final_response"),  # Finish action
             llm_observation={"large": "x" * 3000},
         )
     )

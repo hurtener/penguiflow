@@ -29,6 +29,7 @@ from .models import (
     ReflectionCritique,
     ToolPolicy,
 )
+from .tool_aliasing import build_aliased_tool_catalog
 from .trajectory import TrajectorySummary
 
 logger = logging.getLogger("penguiflow.planner")
@@ -62,6 +63,8 @@ def init_react_planner(
     event_callback: Any | None = None,
     llm_timeout_s: float = 60.0,
     llm_max_retries: int = 3,
+    use_native_reasoning: bool = True,
+    reasoning_effort: str | None = None,
     absolute_max_parallel: int = 50,
     reflection_config: ReflectionConfig | None = None,
     reflection_llm: str | Mapping[str, Any] | None = None,
@@ -105,8 +108,10 @@ def init_react_planner(
         specs = filtered_specs
 
     planner._specs = specs
-    planner._spec_by_name = {spec.name: spec for spec in planner._specs}
-    planner._catalog_records = [spec.to_tool_record() for spec in planner._specs]
+    spec_by_name, catalog_records, alias_to_real = build_aliased_tool_catalog(planner._specs)
+    planner._spec_by_name = spec_by_name
+    planner._catalog_records = catalog_records
+    planner._tool_aliases = alias_to_real
     planner._register_resource_callbacks()
     planner._planning_hints = _PlanningHints.from_mapping(planning_hints)
     hints_payload = planner._planning_hints.to_prompt_payload() if not planner._planning_hints.empty() else None
@@ -168,6 +173,8 @@ def init_react_planner(
     planner._time_source = time_source or time.monotonic
     planner._event_callback = event_callback
     planner._absolute_max_parallel = absolute_max_parallel
+    planner._use_native_reasoning = use_native_reasoning
+    planner._reasoning_effort = reasoning_effort
     action_schema = {
         "type": "json_schema",
         "json_schema": {
@@ -265,6 +272,8 @@ def init_react_planner(
             max_retries=llm_max_retries,
             timeout_s=llm_timeout_s,
             streaming_enabled=stream_final_response,
+            use_native_reasoning=use_native_reasoning,
+            reasoning_effort=reasoning_effort,
         )
 
     if (

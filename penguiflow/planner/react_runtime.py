@@ -236,25 +236,17 @@ def _log_action_received(planner: Any, action: PlannerAction, trajectory: Trajec
         "step": len(trajectory.steps),
         "thought": action.thought,
         "next_node": action.next_node,
-        "has_plan": action.plan is not None,
+        "has_plan": action.next_node == "parallel",
     }
     # For finish actions, log the args to help debug answer extraction issues
-    if action.next_node is None:
-        if action.args:
-            args_preview = str(action.args)
-            if len(args_preview) > 500:
-                args_preview = args_preview[:500] + "..."
-            action_extra["args_preview"] = args_preview
-            if isinstance(action.args, dict):
-                action_extra["args_keys"] = list(action.args.keys())
-                action_extra["has_raw_answer"] = "raw_answer" in action.args
-            else:
-                action_extra["args_keys"] = None
-                action_extra["has_raw_answer"] = False
-        else:
-            action_extra["args_preview"] = "None"
-            action_extra["args_keys"] = None
-            action_extra["has_raw_answer"] = False
+    if action.next_node == "final_response":
+        args_preview = str(action.args)
+        if len(args_preview) > 500:
+            args_preview = args_preview[:500] + "..."
+        action_extra["args_preview"] = args_preview
+        action_extra["args_keys"] = list(action.args.keys())
+        action_extra["has_raw_answer"] = "raw_answer" in action.args
+        action_extra["has_answer"] = "answer" in action.args
     logger.info("planner_action", extra=action_extra)
 
 
@@ -294,19 +286,15 @@ async def _handle_finish_action(
     action_seq: int,
 ) -> PlannerFinish:
     # Check if raw_answer is missing and attempt finish repair
-    has_raw_answer = (
-        isinstance(action.args, dict)
-        and action.args.get("raw_answer")
-        and action.args["raw_answer"] not in {"", None, "<auto>"}
-    )
+    answer = action.answer_text()
+    has_answer = answer is not None and answer not in {"", "<auto>"} and answer.strip() != ""
 
-    if not has_raw_answer and not trajectory.metadata.get("finish_repair_attempted"):
-        # Model tried to finish without raw_answer - attempt repair
+    if not has_answer and not trajectory.metadata.get("finish_repair_attempted"):
+        # Model tried to finish without an answer - attempt repair
         logger.info(
             "finish_repair_attempt",
             extra={
-                "has_args": action.args is not None,
-                "args_keys": list(action.args.keys()) if isinstance(action.args, dict) else None,
+                "args_keys": list(action.args.keys()),
                 "thought": action.thought,
             },
         )
@@ -318,16 +306,14 @@ async def _handle_finish_action(
         )
 
         if filled_answer is not None:
-            # Success! Update action.args with the raw_answer
-            if action.args is None:
-                action.args = {}
-            if isinstance(action.args, dict):
-                action.args["raw_answer"] = filled_answer
+            # Success! Update action args with both canonical + legacy keys.
+            action.args["answer"] = filled_answer
+            action.args["raw_answer"] = filled_answer
             logger.info(
                 "finish_repair_success",
                 extra={
                     "answer_len": len(filled_answer),
-                    "args_keys": list(action.args.keys()) if isinstance(action.args, dict) else None,
+                    "args_keys": list(action.args.keys()),
                 },
             )
         else:
@@ -336,7 +322,7 @@ async def _handle_finish_action(
                 extra={"thought": action.thought},
             )
 
-    candidate_answer = action.args or last_observation
+    candidate_answer = action.args if action.args else last_observation
     # Trace: Log candidate_answer state (helps debug answer loss issues)
     _ca_raw = candidate_answer.get("raw_answer") if isinstance(candidate_answer, dict) else None
     logger.info(
@@ -660,7 +646,7 @@ async def run_loop(
                 trajectory.summary = None
                 continue
 
-            if action.plan:
+            if action.next_node == "parallel":
                 last_observation, pause = await _handle_parallel_plan(
                     planner,
                     action,
@@ -673,7 +659,7 @@ async def run_loop(
                     return pause
                 continue
 
-            if action.next_node is None:
+            if action.next_node == "final_response":
                 # Before finishing, check if there are pending steering events
                 # that arrived while the LLM was generating this finish action.
                 # If so, process them and continue instead of finishing.
@@ -710,6 +696,15 @@ async def run_loop(
                     action_seq=current_action_seq,
                 )
 
+            if not action.is_tool_call():
+                error = prompts.render_invalid_node(
+                    action.next_node,
+                    list(planner._spec_by_name.keys()),
+                )
+                trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                trajectory.summary = None
+                continue
+
             spec = planner._spec_by_name.get(action.next_node)
             if spec is None:
                 error = prompts.render_invalid_node(
@@ -722,7 +717,7 @@ async def run_loop(
 
             autofilled_fields: tuple[str, ...] = ()
             try:
-                parsed_args = spec.args_model.model_validate(action.args or {})
+                parsed_args = spec.args_model.model_validate(action.args)
             except ValidationError as exc:
                 autofilled = _autofill_missing_args(spec, action.args)
                 if autofilled is not None:

@@ -336,6 +336,137 @@ class TestLiteLLMJSONClient:
         assert cost == pytest.approx(0.123)
 
     @pytest.mark.asyncio
+    async def test_non_streaming_emits_reasoning_content_when_available(self, mock_litellm: MagicMock) -> None:
+        mock_litellm.acompletion = AsyncMock(
+            return_value={
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"result": "ok"}',
+                            "reasoning_content": "I reasoned about it.",
+                        }
+                    }
+                ],
+                "usage": {"total_tokens": 10},
+                "_hidden_params": {"response_cost": 0.01},
+            }
+        )
+
+        reasoning_chunks: list[tuple[str, bool]] = []
+
+        def on_reasoning(text: str, done: bool) -> None:
+            reasoning_chunks.append((text, done))
+
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                "gpt-4o",
+                temperature=0.0,
+                json_schema_mode=False,
+                use_native_reasoning=True,
+            )
+            content, _ = await client.complete(
+                messages=[{"role": "user", "content": "hello"}],
+                on_reasoning_chunk=on_reasoning,
+            )
+
+        assert content == '{"result": "ok"}'
+        assert reasoning_chunks == [("I reasoned about it.", False), ("", True)]
+
+    @pytest.mark.asyncio
+    async def test_streaming_emits_reasoning_delta_when_available(self, mock_litellm: MagicMock) -> None:
+        async def _stream() -> AsyncIterator[dict[str, Any]]:
+            yield {"choices": [{"delta": {"reasoning_content": "think-"}}], "usage": None}
+            yield {
+                "choices": [{"delta": {"content": '{"answer": "hi"}'}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            }
+
+        mock_litellm.acompletion = AsyncMock(return_value=_stream())
+
+        def completion_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+            return 0.0
+
+        mock_litellm.completion_cost = completion_cost  # type: ignore[attr-defined]
+
+        answer_chunks: list[tuple[str, bool]] = []
+        reasoning_chunks: list[tuple[str, bool]] = []
+
+        def on_chunk(text: str, done: bool) -> None:
+            answer_chunks.append((text, done))
+
+        def on_reasoning(text: str, done: bool) -> None:
+            reasoning_chunks.append((text, done))
+
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                "gpt-4o",
+                temperature=0.0,
+                json_schema_mode=False,
+                streaming_enabled=True,
+                use_native_reasoning=True,
+            )
+            content, _ = await client.complete(
+                messages=[{"role": "user", "content": "hello"}],
+                stream=True,
+                on_stream_chunk=on_chunk,
+                on_reasoning_chunk=on_reasoning,
+            )
+
+        assert content == '{"answer": "hi"}'
+        assert answer_chunks[-1] == ("", True)
+        assert reasoning_chunks == [("think-", False), ("", True)]
+
+    @pytest.mark.asyncio
+    async def test_reasoning_effort_passed_with_drop_params(self, mock_litellm: MagicMock) -> None:
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                "gpt-4o",
+                temperature=0.0,
+                json_schema_mode=False,
+                use_native_reasoning=True,
+                reasoning_effort="medium",
+            )
+            await client.complete(messages=[{"role": "user", "content": "test"}])
+            call_kwargs = mock_litellm.acompletion.call_args[1]
+            assert call_kwargs["reasoning_effort"] == "medium"
+            assert call_kwargs["drop_params"] is True
+
+    @pytest.mark.asyncio
+    async def test_reasoning_callback_errors_are_swallowed(self, mock_litellm: MagicMock) -> None:
+        mock_litellm.acompletion = AsyncMock(
+            return_value={
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"result": "ok"}',
+                            "reasoning_content": "I reasoned about it.",
+                        }
+                    }
+                ],
+                "usage": {"total_tokens": 10},
+                "_hidden_params": {"response_cost": 0.01},
+            }
+        )
+
+        def on_reasoning(_: str, __: bool) -> None:
+            raise RuntimeError("boom")
+
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                "gpt-4o",
+                temperature=0.0,
+                json_schema_mode=False,
+                use_native_reasoning=True,
+            )
+            content, cost = await client.complete(
+                messages=[{"role": "user", "content": "hello"}],
+                on_reasoning_chunk=on_reasoning,
+            )
+
+        assert content == '{"result": "ok"}'
+        assert cost == 0.01
+
+    @pytest.mark.asyncio
     async def test_sanitized_schema_policy(self, mock_litellm: MagicMock) -> None:
         """Test that unknown models use sanitized_schema policy."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
@@ -370,11 +501,8 @@ class TestBuildMinimalPlannerSchema:
     def test_builds_valid_schema(self) -> None:
         schema = _build_minimal_planner_schema()
         assert schema["type"] == "object"
-        assert "thought" in schema["properties"]
         assert "next_node" in schema["properties"]
         assert "args" in schema["properties"]
-        assert "plan" in schema["properties"]
-        assert "join" in schema["properties"]
         assert "required" in schema
         assert schema["additionalProperties"] is False
 

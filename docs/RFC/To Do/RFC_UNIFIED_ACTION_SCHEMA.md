@@ -3,7 +3,7 @@
 **Status**: Draft  
 **Author**: Penguiflow Team  
 **Created**: 2026-01-09  
-**Target Version**: v2.0.0
+**Target Version**: v2.10.2
 
 ---
 
@@ -144,14 +144,16 @@ The `_StreamingArgsExtractor` detects streaming by looking for:
 2. **Explicit Types**: `next_node` is always a non-null string indicating action type
 3. **Native Reasoning**: Use LiteLLM `reasoning_content` instead of JSON `thought`
 4. **Nested Complexity**: Complex structures (parallel, tasks) nest inside `args`
+5. **No Ambiguity**: Reserve control `next_node` values; tools are auto-aliased if they collide
 
 ### New Action Types
 
 | `next_node` Value | Description | Streams to User |
 |-------------------|-------------|-----------------|
 | `"<tool_name>"` | Call a specific tool | No |
-| `"plan"` | Execute tools in parallel | No |
-| `"task"` | Spawn background task | No |
+| `"parallel"` | Execute tools in parallel | No |
+| `"task.subagent"` | Spawn background subagent task | No |
+| `"task.tool"` | Spawn background single-tool job | No |
 | `"final_response"` | Terminal - answer user | **Yes** |
 
 ### PlannerAction Model (Proposed)
@@ -170,18 +172,37 @@ class PlannerAction(BaseModel):
     
     @property
     def is_parallel(self) -> bool:
-        return self.next_node == "plan"
+        return self.next_node == "parallel"
     
     @property
     def is_background_task(self) -> bool:
-        return self.next_node == "task"
+        return self.next_node in {"task.subagent", "task.tool"}
     
     @property
     def is_terminal(self) -> bool:
         return self.next_node == "final_response"
 
-SPECIAL_NODE_TYPES = frozenset({"plan", "task", "final_response"})
+SPECIAL_NODE_TYPES = frozenset({"parallel", "task.subagent", "task.tool", "final_response"})
 ```
+
+### Reserved `next_node` Values and Tool Name Collisions
+
+Because `next_node` can represent either a tool name **or** a control opcode, we reserve these values:
+- `parallel`
+- `task.subagent`
+- `task.tool`
+- `final_response`
+
+**Rule:** tools (including ToolNode-provided tools) must not be addressed by these reserved strings in planner JSON.
+
+**Collision handling (automatic):**
+- When building the tool catalog provided to the LLM, if any tool name collides with a reserved value, the runtime assigns an alias by appending a suffix:
+  - Example: tool name `parallel` becomes `parallel__tool`
+  - Example: tool name `final_response` becomes `final_response__tool`
+- The planner/runner maintains an internal alias→real-name mapping and executes the real tool when the alias is selected.
+- The LLM only ever sees the aliased names in the catalog, so it can never accidentally pick a reserved opcode when it intends a tool call.
+
+This preserves explicitness and prevents ambiguous routing without forbidding any upstream tool ecosystems from using those names.
 
 ---
 
@@ -213,7 +234,7 @@ class FinalResponseArgs(TypedDict, total=False):
 
 ```json
 {
-  "next_node": "plan",
+  "next_node": "parallel",
   "args": {
     "steps": [
       {"node": "search_a", "args": {"query": "topic A"}},
@@ -247,10 +268,9 @@ class PlanArgs(TypedDict):
 
 ```json
 {
-  "next_node": "task",
+  "next_node": "task.subagent",
   "args": {
     "name": "Generate Monthly Report",
-    "mode": "subagent",
     "query": "Generate the monthly report for 2024-12 as a PDF and summarize key findings",
     "merge_strategy": "HUMAN_GATED"
   }
@@ -261,12 +281,11 @@ class PlanArgs(TypedDict):
 ```python
 class TaskArgs(TypedDict, total=False):
     name: str
-    mode: Literal["subagent", "job"]
 
     # subagent mode (recommended): a background agent runs the query and may call tools internally.
     query: str
 
-    # job mode (single-tool execution): spawn a tool job in the background.
+    # tool job mode (single-tool execution): spawn a tool job in the background.
     tool: str
     tool_args: dict[str, Any]
 
@@ -281,6 +300,25 @@ class TaskArgs(TypedDict, total=False):
     group_merge_strategy: Literal["HUMAN_GATED", "APPEND", "REPLACE"]
     retain_turn: bool          # If True, wait for group completion before yielding
 ```
+
+#### Task Spawn Mapping (Runtime Semantics)
+
+The unified `"task.*"` actions are a thin declarative layer over the existing `tasks.*` meta-tools and session runtime:
+
+- `next_node="task.subagent"` maps to `tasks.spawn(query=..., mode="subagent", ...)`
+  - `args.query` is required
+  - The subagent may call tools internally; it is not limited to a single tool
+
+- `next_node="task.tool"` maps to `tasks.spawn_tool_job(tool_name=..., tool_args=..., mode="job", ...)`
+  - `args.tool` and `args.tool_args` are required
+  - This is a single-tool background execution (lighter-weight than a subagent)
+
+If we decide to accept `next_node="task"` as a salvage alias, it must include either `args.query` (treat as `task.subagent`) or `args.tool`/`args.tool_args` (treat as `task.tool`).
+
+**Interaction with `tasks.*` tools in the catalog**
+- Implementations may keep `tasks.spawn` / `tasks.spawn_tool_job` in the tool catalog for transparency and manual control.
+- For planner output, prefer `"task.subagent"` / `"task.tool"` to reduce schema branching and improve weak-model compliance.
+- The runtime should tolerate both: a direct `"task.*"` action **or** a normal tool call to `tasks.spawn(...)` / `tasks.spawn_tool_job(...)`.
 
 ### Task Groups (Semantics)
 
@@ -317,15 +355,46 @@ This maps directly to the existing `tasks.*` tool semantics already used by Peng
 
 Spawn 3 research tasks and seal on the last one:
 ```json
-{"next_node":"task","args":{"name":"Sales analysis","mode":"subagent","query":"Analyze Q4 sales drivers","group":"q4_analysis","merge_strategy":"HUMAN_GATED"}}
-{"next_node":"task","args":{"name":"Marketing analysis","mode":"subagent","query":"Analyze Q4 marketing performance","group":"q4_analysis","merge_strategy":"HUMAN_GATED"}}
-{"next_node":"task","args":{"name":"Ops analysis","mode":"subagent","query":"Analyze Q4 operations efficiency","group":"q4_analysis","group_sealed":true,"merge_strategy":"HUMAN_GATED"}}
+{"next_node":"task.subagent","args":{"name":"Sales analysis","query":"Analyze Q4 sales drivers","group":"q4_analysis","merge_strategy":"HUMAN_GATED"}}
+{"next_node":"task.subagent","args":{"name":"Marketing analysis","query":"Analyze Q4 marketing performance","group":"q4_analysis","merge_strategy":"HUMAN_GATED"}}
+{"next_node":"task.subagent","args":{"name":"Ops analysis","query":"Analyze Q4 operations efficiency","group":"q4_analysis","group_sealed":true,"merge_strategy":"HUMAN_GATED"}}
 ```
 
 Wait for group completion before answering:
 ```json
-{"next_node":"task","args":{"name":"Deep report","mode":"subagent","query":"Run full investigation and return a single synthesis","group":"investigation","group_sealed":true,"retain_turn":true,"merge_strategy":"APPEND","group_report":"all"}}
+{"next_node":"task.subagent","args":{"name":"Deep report","query":"Run full investigation and return a single synthesis","group":"investigation","group_sealed":true,"retain_turn":true,"merge_strategy":"APPEND","group_report":"all"}}
 ```
+
+---
+
+## External Surface Compatibility (Required)
+
+Although this RFC changes the planner's *internal action JSON shape*, Penguiflow must preserve the same external surfaces:
+
+### Planner Events
+
+- Event types remain unchanged (e.g. `step_start`, `step_complete`, `pause`, `resume`, `finish`, `llm_stream_chunk`, etc.).
+- Streaming events remain:
+  - `event_type="llm_stream_chunk"`, `channel="answer"`, `phase="answer"` for user-visible streaming
+  - `event_type="llm_stream_chunk"`, `channel="thinking"` for internal reasoning/status
+- The only change is what triggers streaming extraction:
+  - unified: stream `args.answer` when `next_node == "final_response"`
+  - salvage: also accept legacy `"next_node": null` and/or legacy `args.raw_answer`
+
+### Final Answer Payload
+
+The planner's terminal return value remains `FinalPayload` with `raw_answer` as the canonical user-facing field.
+
+Mapping from unified action → final payload:
+- `final_response.args.answer` → `FinalPayload.raw_answer`
+- `final_response.args.sources` → `FinalPayload.sources`
+- `final_response.args.suggested_actions` → `FinalPayload.suggested_actions`
+- `final_response.args.confidence` → `FinalPayload.confidence`
+- `final_response.args.language` → `FinalPayload.language`
+- `final_response.args.artifacts` → `FinalPayload.artifacts`
+- Unknown keys under `final_response.args` should flow into `FinalPayload.extra` (or be preserved in metadata) to avoid data loss.
+
+This lets us simplify action parsing while keeping the same output contract for callers and the Playground UI.
 
 ---
 
@@ -491,9 +560,11 @@ LLM generates JSON
          │
          ├── "final_response" ──▶ Stream args.answer to user
          │
-         ├── "plan" ──▶ Execute parallel, no streaming
+         ├── "parallel" ──▶ Execute parallel, no streaming
          │
-         ├── "task" ──▶ Spawn background, no streaming
+         ├── "task.subagent" ──▶ Spawn background subagent, no streaming
+         │
+         ├── "task.tool" ──▶ Spawn background tool job, no streaming
          │
          └── "<tool_name>" ──▶ Execute tool, no streaming
 ```
@@ -540,6 +611,15 @@ async def get_planner_action(
     
     return action, reasoning
 ```
+
+### Reasoning Is Optional (Contract)
+
+`reasoning_content` (and any provider-specific “thinking” tokens) must be treated as **optional telemetry**:
+- If present, it populates Penguiflow's internal “thinking” channel/events.
+- If absent, nothing breaks; the model either does not support reasoning extraction or did not emit reasoning.
+- Planner correctness must never depend on reasoning being present.
+
+This preserves compatibility across providers and model tiers.
 
 ### Supported Models for Reasoning Content
 
@@ -663,7 +743,7 @@ def _migrate_old_format(data: dict) -> PlannerAction:
     # Case 1: Parallel plan
     if data.get("plan") is not None:
         return PlannerAction(
-            next_node="plan",
+            next_node="parallel",
             args={
                 "steps": data["plan"],
                 "join": data.get("join"),
@@ -799,7 +879,7 @@ from typing import Any, Literal, Protocol, TypedDict, NotRequired
 from pydantic import BaseModel, Field, computed_field
 
 # Special node types that aren't tool names
-SPECIAL_NODE_TYPES = frozenset({"plan", "task", "final_response"})
+SPECIAL_NODE_TYPES = frozenset({"parallel", "task.subagent", "task.tool", "final_response"})
 
 
 # --- Typed Args Schemas ---
@@ -818,15 +898,14 @@ class PlanJoin(TypedDict, total=False):
 
 
 class PlanArgs(TypedDict):
-    """Args schema for next_node="plan"."""
+    """Args schema for next_node="parallel"."""
     steps: list[PlanStep]
     join: NotRequired[PlanJoin]
 
 
 class TaskArgs(TypedDict, total=False):
-    """Args schema for next_node="task"."""
+    """Args schema for next_node="task.subagent" and next_node="task.tool"."""
     name: str
-    mode: Literal["subagent", "job"]
     query: str
     tool: str
     tool_args: dict[str, Any]
@@ -861,13 +940,14 @@ class PlannerAction(BaseModel):
     
     Special next_node values:
     - "final_response": Terminal action, args.answer streams to user
-    - "plan": Parallel execution, args contains steps and join config
-    - "task": Background task, args contains task configuration
+    - "parallel": Parallel execution, args contains steps and join config
+    - "task.subagent": Background subagent task, args contains query and group config
+    - "task.tool": Background single-tool job, args contains tool/tool_args and group config
     - Any other value: Tool call, args passed to the tool
     """
     
     next_node: str = Field(
-        description="Tool name or special action type (plan, task, final_response)"
+        description="Tool name or special action type (plan, task.subagent, task.tool, final_response)"
     )
     args: dict[str, Any] = Field(
         default_factory=dict,
@@ -884,13 +964,13 @@ class PlannerAction(BaseModel):
     @property
     def is_parallel(self) -> bool:
         """True if this is a parallel execution plan."""
-        return self.next_node == "plan"
+        return self.next_node == "parallel"
     
     @computed_field
     @property
     def is_background_task(self) -> bool:
         """True if this is a background task spawn."""
-        return self.next_node == "task"
+        return self.next_node in {"task.subagent", "task.tool"}
     
     @computed_field
     @property
@@ -1107,11 +1187,14 @@ Where  is one of:
 1. **Tool name** - Call a tool from the catalog
    {"next_node": "search_web", "args": {"query": "..."}}
 
-2. **"plan"** - Execute multiple tools in parallel
-   {"next_node": "plan", "args": {"steps": [{"node": "tool_a", "args": {...}}, ...], "join": {"node": "aggregator", "inject": {...}}}}
+2. **"parallel"** - Execute multiple tools in parallel
+   {"next_node": "parallel", "args": {"steps": [{"node": "tool_a", "args": {...}}, ...], "join": {"node": "aggregator", "inject": {...}}}}
 
-3. **"task"** - Spawn a background task
-   {"next_node": "task", "args": {"name": "Task Name", "mode": "subagent", "query": "Do X in the background", "merge_strategy": "HUMAN_GATED"}}
+3. **"task.subagent"** - Spawn a background subagent task
+   {"next_node": "task.subagent", "args": {"name": "Task Name", "query": "Do X in the background", "merge_strategy": "HUMAN_GATED"}}
+
+   **"task.tool"** - Spawn a background single-tool job
+   {"next_node": "task.tool", "args": {"name": "Task Name", "tool": "tool_name", "tool_args": {...}, "merge_strategy": "HUMAN_GATED"}}
 
 4. **"final_response"** - Respond to the user (ONLY when you have the complete answer)
    {"next_node": "final_response", "args": {"answer": "Your response to the user..."}}
@@ -1129,7 +1212,7 @@ Single tool call:
 {"next_node": "search_web", "args": {"query": "latest AI developments 2024"}}
 
 Parallel execution:
-{"next_node": "plan", "args": {"steps": [{"node": "search_news", "args": {"topic": "AI"}}, {"node": "search_papers", "args": {"topic": "AI"}}]}}
+{"next_node": "parallel", "args": {"steps": [{"node": "search_news", "args": {"topic": "AI"}}, {"node": "search_papers", "args": {"topic": "AI"}}]}}
 
 Final response:
 {"next_node": "final_response", "args": {"answer": "Based on my research, here are the key findings..."}}
@@ -1181,6 +1264,10 @@ def normalize_action(raw: str | dict[str, Any]) -> PlannerAction:
         return _migrate_legacy_format(data)
     
     # Unified format - validate and return
+    # Salvage: tolerate earlier drafts that used next_node="plan"
+    if data.get("next_node") == "plan":
+        data = dict(data)
+        data["next_node"] = "parallel"
     return PlannerAction.model_validate(data)
 
 
@@ -1202,7 +1289,7 @@ def _migrate_legacy_format(data: dict[str, Any]) -> PlannerAction:
         if join is not None:
             args["join"] = join
         
-        return PlannerAction(next_node="plan", args=args)
+        return PlannerAction(next_node="parallel", args=args)
     
     # Case 2: Terminal action (legacy: next_node = null)
     if data.get("next_node") is None:
@@ -1314,6 +1401,9 @@ These amendments are intended to preserve current behavior, reduce repair loops,
 5. **Keep current event types and channels**  
    `llm_stream_chunk` with `phase=answer` and `phase=thinking` should remain unchanged; only the extractor logic shifts to unified format.
 
+6. **Reserved opcode collision handling**  
+   Reserve control `next_node` values (`parallel`, `task.subagent`, `task.tool`, `final_response`) and auto-alias any colliding tool names (e.g. `parallel` → `parallel__tool`) so routing is never ambiguous.
+
 ---
 
 ## References
@@ -1340,11 +1430,13 @@ The normalization layer is included primarily for weak-model robustness (handlin
 
 ### Phase 2: Unified Schema + Streaming (3-4 days)
 - Update `models.py` for unified `PlannerAction` (two-field schema).
+- Implement reserved-opcode collision handling (auto-alias tools that collide with `parallel`, `task.subagent`, `task.tool`, `final_response`).
 - Update `_StreamingArgsExtractor` to support both terminal indicators during migration.
 - Keep `llm_stream_chunk` event types and channels unchanged.
 
 ### Phase 3: Prompts + Response Format (2-3 days)
 - Add unified prompt instructions behind `action_format` flag.
+- Update task instructions to use `"task.subagent"` and `"task.tool"` and document mapping to `tasks.spawn` / `tasks.spawn_tool_job`.
 - Update response schema generation to emit the unified schema when `action_format != legacy`.
 - Ensure weak-model path stays in `json_object` mode to avoid stricter schema failures.
 

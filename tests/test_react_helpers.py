@@ -89,7 +89,7 @@ def test_salvage_action_payload_minimal():
     result = _salvage_action_payload(raw)
     assert result is not None
     assert result.thought == "thinking"
-    assert result.next_node is None
+    assert result.next_node == "final_response"
 
 
 def test_salvage_action_payload_no_thought():
@@ -114,8 +114,8 @@ def test_salvage_action_payload_with_plan():
     raw = '{"thought": "parallel", "plan": [{"node": "tool_a"}, {"node": "tool_b", "args": {"x": 1}}]}'
     result = _salvage_action_payload(raw)
     assert result is not None
-    assert result.plan is not None
-    assert len(result.plan) == 2
+    assert result.next_node == "parallel"
+    assert len(result.args["steps"]) == 2
 
 
 def test_salvage_action_payload_invalid_plan_entries():
@@ -123,16 +123,8 @@ def test_salvage_action_payload_invalid_plan_entries():
     raw = '{"thought": "parallel", "plan": ["invalid", {"no_node": true}, {"node": "valid"}]}'
     result = _salvage_action_payload(raw)
     assert result is not None
-    assert result.plan is not None
-    assert len(result.plan) == 1
-
-
-def test_salvage_action_payload_with_join():
-    """_salvage_action_payload should normalize join dict."""
-    raw = '{"thought": "join", "join": {"node": "join_tool"}}'
-    result = _salvage_action_payload(raw)
-    assert result is not None
-    assert result.join is not None
+    assert result.next_node == "parallel"
+    assert len(result.args["steps"]) == 1
 
 
 def test_salvage_action_payload_python_literal():
@@ -819,7 +811,7 @@ class TestRenderFinishGuidance:
         result = render_finish_guidance(1)
         assert result is not None
         assert "REMINDER" in result
-        assert "raw_answer" in result
+        assert "args.answer" in result
 
     def test_firm_warning_for_two(self):
         """Should return firm warning for count=2."""
@@ -827,7 +819,7 @@ class TestRenderFinishGuidance:
         result = render_finish_guidance(2)
         assert result is not None
         assert "IMPORTANT" in result
-        assert "raw_answer" in result
+        assert "args.answer" in result
 
     def test_critical_for_three_plus(self):
         """Should return critical warning for count>=3."""

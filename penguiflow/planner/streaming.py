@@ -157,10 +157,15 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
             next_node_match = re.search(r'"next_node"\s*:\s*(null|"[^"]*")', self._buffer)
             if next_node_match:
                 self._next_node_seen = True
-                if next_node_match.group(1) == "null":
+                token = next_node_match.group(1)
+                if token == "null":
                     self._is_finish_action = True
                 else:
-                    self._next_node_is_non_null = True
+                    # Unified schema: next_node="final_response" streams args.answer
+                    if token.strip('"') == "final_response":
+                        self._is_finish_action = True
+                    else:
+                        self._next_node_is_non_null = True
 
         # Incremental pattern matching for args content
         # This allows streaming to start as soon as we find the opening quote

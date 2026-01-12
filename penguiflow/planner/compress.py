@@ -181,7 +181,7 @@ async def compress_trajectory(
         if step.llm_observation is not None and _is_large_observation(
             step.llm_observation, threshold
         ):
-            tool_name = (step.action.next_node if step.action else None) or "unknown_tool"
+            tool_name = step.action.next_node if step.action.is_tool_call() else "unknown_tool"
             summary = await _summarise_single_observation(client, tool_name, step.llm_observation)
 
             # Replace with compressed marker

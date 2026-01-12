@@ -67,11 +67,14 @@ def render_parallel_setup_error(errors: Sequence[str]) -> str:
 
 
 def render_empty_parallel_plan() -> str:
-    return "Parallel plan must include at least one branch in 'plan'."
+    return "Parallel action must include at least one branch in args.steps."
 
 
 def render_parallel_with_next_node(next_node: str) -> str:
-    return f"Parallel plan cannot set next_node='{next_node}'. Use 'join' to continue or finish the run explicitly."
+    return (
+        f"Parallel action must set next_node='parallel'. Received next_node='{next_node}'. "
+        "Revise the action and retry."
+    )
 
 
 def render_parallel_unknown_failure(node_name: str) -> str:
@@ -544,15 +547,15 @@ Current date: {current_date}
     # OUTPUT FORMAT (NON-NEGOTIABLE)
     # ─────────────────────────────────────────────────────────────
     prompt_sections.append("""<output_format>
-Think briefly in plain text, then respond with a single JSON object that matches the PlannerAction schema.
-If a tool would help, set "next_node" to the tool name and provide "args" in first turn.
+Think briefly (internally), then respond with a single JSON object that matches the PlannerAction schema.
+If a tool would help, set "next_node" to the tool name and provide "args".
 Write your JSON inside one markdown code block (```json ... ```).
 Do not emit multiple JSON objects or extra commentary after the code block.
 
 Important:
-- Emit keys in this order for stability: thought, next_node, args, plan, join.
-- User-facing answers go ONLY in args.raw_answer when next_node is null (finished).
-- During intermediate steps (when calling tools), the user sees nothing - only the thought is logged internally.
+- Emit keys in this order for stability: next_node, args.
+- User-facing answers go ONLY in args.answer when next_node is "final_response" (finished).
+- During intermediate steps (when calling tools), the user sees nothing; only tool outputs are recorded internally.
 
 </output_format>""")
 
@@ -563,23 +566,23 @@ Important:
 Every response follows this structure:
 
 {
-  "thought": "Internal status only - NOT user-facing (required)",
-  "next_node": "tool_name" | null,
-  "args": { ... } | null,
-  "plan": [...] | null,
-  "join": { ... } | null
+  "next_node": "tool_name" | "parallel" | "task.subagent" | "task.tool" | "final_response",
+  "args": { ... }
 }
 
 Field meanings:
-- thought: Internal execution status (1-2 sentences). NOT user-facing prose.
-                           Examples: "Calling tool X with Y", "Got result, extracting Z"
-- next_node: Name of the tool to call, or null when finished
-- args: Tool arguments (when next_node is set) OR final answer with raw_answer (when next_node is null)
-- plan: For parallel execution - list of {node, args} to run concurrently
-- join: For parallel execution - how to combine results. If there is no join/aggregator tool in \
-the catalog, combine the parallel outputs yourself in the final answer instead of calling a missing tool.
+- next_node:
+  - Tool call: a tool name from the catalog
+  - Parallel: "parallel" (executes tools concurrently)
+  - Background tasks: "task.subagent" or "task.tool" (spawns a task via tasks.spawn; only use if tasks.spawn exists)
+  - Terminal: "final_response" (streams args.answer to the user)
+- args:
+  - Tool call: tool arguments matching args_schema
+  - Parallel: {"steps": [{"node": "...", "args": {...}}, ...], "join": {...} | null}
+  - Task: see background task section below
+  - Final: {"answer": "..."} plus optional metadata fields
 
-Remember: The ONLY place for user-facing text is args.raw_answer when next_node is null.
+Remember: The ONLY place for user-facing text is args.answer when next_node is "final_response".
 </action_schema>""")
 
     # ─────────────────────────────────────────────────────────────
@@ -588,14 +591,14 @@ Remember: The ONLY place for user-facing text is args.raw_answer when next_node 
     prompt_sections.append("""<finishing>
 When you have gathered enough information to answer the query:
 
-1. Set "next_node" to null
+1. Set "next_node" to "final_response"
 2. Provide "args" with this structure:
 
 {
-  "raw_answer": "Your complete, human-readable answer to the user's query"
+  "answer": "Your complete, human-readable answer to the user's query"
 }
 
-The raw_answer field is REQUIRED. Write a full, helpful response - not a summary or fragment.
+The answer field is REQUIRED. Write a full, helpful response - not a summary or fragment.
 Focus on solving the user query, going to the point of answering what they asked.
 
 Optional fields you may include in args:
@@ -608,10 +611,9 @@ Do NOT include heavy data (charts, files, large JSON) in args - artifacts from t
 
 Example finish:
 {
-  "thought": "I have analyzed the sales data and generated the chart. Ready to answer.",
-  "next_node": null,
+  "next_node": "final_response",
   "args": {
-    "raw_answer": "Q4 2024 revenue increased 15% YoY to $1.2M. December was strongest.",
+    "answer": "Q4 2024 revenue increased 15% YoY to $1.2M. December was strongest.",
     "confidence": 0.92,
     "route": "analytics"
   }
@@ -642,20 +644,21 @@ Rules for using tools:
 For tasks that benefit from concurrent execution, use parallel plans:
 
 {
-  "thought": "I need data from multiple independent sources",
-  "next_node": null,
-  "plan": [
-    {"node": "tool_a", "args": {...}},
-    {"node": "tool_b", "args": {...}}
-  ],
-  "join": {
-    "node": "aggregator_tool",
-    "args": {},
-    "inject": {"results": "$results", "count": "$success_count"}
+  "next_node": "parallel",
+  "args": {
+    "steps": [
+      {"node": "tool_a", "args": {...}},
+      {"node": "tool_b", "args": {...}}
+    ],
+    "join": {
+      "node": "aggregator_tool",
+      "args": {},
+      "inject": {"results": "$results", "count": "$success_count"}
+    }
   }
 }
 
-Available injection sources for join.inject:
+Available injection sources for args.join.inject:
 - $results: List of successful outputs
 - $branches: Full branch details with node names
 - $failures: List of failed branches with errors
@@ -681,20 +684,20 @@ Approach problems systematically:
 1. Understand first: Parse the query to identify what's actually being asked
 2. Plan before acting: Consider which tools will help and in what order
 3. Gather evidence: Use tools to collect relevant information
-4. Synthesize: Combine observations into a coherent answer (in raw_answer when done)
+4. Synthesize: Combine observations into a coherent answer (in args.answer when done)
 5. Verify: Check if your answer actually addresses the query
 
 When uncertain:
-- If you lack information to answer confidently, note it in your final raw_answer
-- If multiple interpretations exist, address the most likely one and note alternatives in raw_answer
-- If a tool fails, try alternatives - explain in raw_answer only when finished
-- If you cannot complete the task, explain why in raw_answer when finished
+- If you lack information to answer confidently, note it in your final answer
+- If multiple interpretations exist, address the most likely one and note alternatives in the final answer
+- If a tool fails, try alternatives - explain in the final answer only when finished
+- If you cannot complete the task, explain why in the final answer when finished
 
 Avoid:
 - Making up information not supported by tool observations
 - Calling the same tool repeatedly with identical arguments
 - Ignoring errors or unexpected results
-- Writing user-facing text during intermediate steps (save it for raw_answer)
+- Writing user-facing text during intermediate steps (save it for args.answer)
 - Generating "preview" answers before you're done gathering information
 </reasoning>""")
 
@@ -702,7 +705,7 @@ Avoid:
     # TONE & STYLE
     # ─────────────────────────────────────────────────────────────
     prompt_sections.append("""<tone>
-In your raw_answer (ONLY when next_node is null):
+In your answer (ONLY when next_node is "final_response"):
 - Be direct and informative - get to the point
 - Use clear, professional language
 - Acknowledge limitations honestly rather than hedging excessively
@@ -712,17 +715,9 @@ In your raw_answer (ONLY when next_node is null):
 - These are safe defaults. Your tone or voice can be changed in the additional_guidance section.
 - You can use markdown formatting if suggested in additional_guidance.
 
-In your thought field (EVERY response):
-- ONLY internal execution status - never user-facing prose
-- Examples: "Calling data_source_info to get available metrics", "Got 3 dimensions, need to filter by date"
-- Bad examples: "I'll help you find...", "Let me explain...", "Here's what I found..."
-- Do NOT address the user, ask questions, or preview the answer
-- Do NOT generate user-facing text - that goes ONLY in raw_answer when finished
-- 1-2 sentences maximum, purely factual
-
 CRITICAL:
-- During intermediate steps, the thought field is the ONLY text you produce.
-    No prose, no explanations, no user-facing content until you set next_node to null and write raw_answer.
+- During intermediate steps, produce ONLY the JSON action object. Do not add commentary.
+- Do not include a "thought" field in the JSON.
 </tone>""")
 
     # ─────────────────────────────────────────────────────────────
@@ -850,13 +845,13 @@ def render_invalid_node(node_name: str, available: Sequence[str]) -> str:
 
 def render_invalid_join_injection_source(source: str, available: Sequence[str]) -> str:
     options = ", ".join(available)
-    return f"join.inject uses unknown source '{source}'. Choose one of: {options}."
+    return f"args.join.inject uses unknown source '{source}'. Choose one of: {options}."
 
 
 def render_join_validation_error(node_name: str, error: str, *, suggest_inject: bool) -> str:
     message = f"args for join tool '{node_name}' did not validate: {error}. Return corrected JSON."
     if suggest_inject:
-        message += " Provide 'join.inject' to map parallel outputs to this join tool."
+        message += " Provide 'args.join.inject' to map parallel outputs to this join tool."
     return message
 
 
@@ -864,7 +859,7 @@ def render_repair_message(error: str) -> str:
     return (
         "Previous response was invalid JSON or schema mismatch: "
         f"{error}. Reply with corrected JSON only. "
-        "When finishing, set next_node to null and include raw_answer in args."
+        'When finishing, set next_node to "final_response" and include args.answer.'
     )
 
 
@@ -878,8 +873,8 @@ def render_arg_repair_message(tool_name: str, error: str) -> str:
         "- Do NOT use placeholders like '<auto>', 'unknown', 'n/a', or empty strings\n"
         "- Match the exact schema types (strings, numbers, booleans, arrays)\n\n"
         "OPTION 2 - If you cannot provide valid args, FINISH instead:\n"
-        '- Set "next_node": null\n'
-        '- Set "args": {"raw_answer": "I cannot proceed because...", "requires_followup": true}\n\n'
+        '- Set "next_node": "final_response"\n'
+        '- Set "args": {"answer": "I cannot proceed because...", "requires_followup": true}\n\n'
         "Respond with a single JSON object. No prose or markdown."
     )
 
@@ -898,7 +893,6 @@ def render_missing_args_message(
             if field in {"query", "question", "prompt", "input"}:
                 example_args[field] = user_query
     example_payload = {
-        "thought": "fix missing tool args",
         "next_node": tool_name,
         "args": example_args if example_args else {missing_fields[0]: "<FILL_VALUE>"},
     }
@@ -916,7 +910,7 @@ def render_missing_args_message(
         "Example (replace values as needed):\n"
         f"{example_json}\n\n"
         "2) If you cannot supply valid values, FINISH instead with:\n"
-        '   {"next_node": null, "args": {"raw_answer": "I need more information: ...", '
+        '   {"next_node": "final_response", "args": {"answer": "I need more information: ...", '
         '"requires_followup": true}}\n\n'
         "This is your LAST chance. Missing args again will force termination."
     )
@@ -1037,10 +1031,10 @@ def render_finish_repair_prompt(
     voice_context: str | None = None,
 ) -> str:
     """
-    Generate a prompt asking the model to provide the raw_answer it forgot.
+    Generate a prompt asking the model to provide the answer it forgot.
 
-    This is used when the model tries to finish (next_node: null) but doesn't
-    include raw_answer in the args.
+    This is used when the model tries to finish (next_node="final_response") but doesn't
+    include args.answer.
 
     Parameters
     ----------
@@ -1071,11 +1065,11 @@ def render_finish_repair_prompt(
         )
 
     return (
-        "FINISH INCOMPLETE: You set next_node to null but didn't provide raw_answer.\n\n"
+        'FINISH INCOMPLETE: You set next_node to "final_response" but did not provide args.answer.\n\n'
         f"{context}\n"
         f"{voice_section}\n"
         "You MUST provide your answer. Reply with ONLY a JSON object:\n"
-        '{"raw_answer": "Your complete answer to the user here"}\n\n'
+        '{"answer": "Your complete answer to the user here"}\n\n'
         "Rules:\n"
         "- Write a full, helpful response to the user's query\n"
         "- Follow the voice and style specified above\n"
@@ -1086,10 +1080,10 @@ def render_finish_repair_prompt(
 
 def render_finish_guidance(repair_count: int) -> str | None:
     """
-    Generate tiered guidance about including raw_answer based on past repair count.
+    Generate tiered guidance about including args.answer based on past repair count.
 
     This is injected into the system prompt when the model has previously forgotten
-    to include raw_answer and required finish_repair. The tone escalates with the count.
+    to include args.answer and required finish_repair. The tone escalates with the count.
 
     Parameters
     ----------
@@ -1111,17 +1105,17 @@ def render_finish_guidance(repair_count: int) -> str | None:
     if repair_count == 1:
         return (
             "<finish_reminder>\n"
-            "REMINDER: When finishing (next_node: null), always include your complete answer "
-            "in args.raw_answer. Do not leave args empty or use placeholders.\n"
+            'REMINDER: When finishing (next_node: "final_response"), always include your complete answer '
+            "in args.answer. Do not leave args empty or use placeholders.\n"
             "</finish_reminder>"
         )
 
     if repair_count == 2:
         return (
             "<finish_warning>\n"
-            "IMPORTANT: You have previously forgotten to include raw_answer when finishing.\n"
-            "When you set next_node to null, you MUST provide:\n"
-            '{"thought": "...", "next_node": null, "args": {"raw_answer": "Your complete answer here"}}\n'
+            "IMPORTANT: You have previously forgotten to include args.answer when finishing.\n"
+            'When you set next_node to "final_response", you MUST provide:\n'
+            '{"next_node": "final_response", "args": {"answer": "Your complete answer here"}}\n'
             "Do NOT leave args empty. Do NOT use placeholders like <auto>.\n"
             "</finish_warning>"
         )
@@ -1129,15 +1123,15 @@ def render_finish_guidance(repair_count: int) -> str | None:
     # repair_count >= 3
     return (
         "<finish_critical>\n"
-        "CRITICAL: You have repeatedly failed to include raw_answer when finishing.\n"
+        "CRITICAL: You have repeatedly failed to include args.answer when finishing.\n"
         "This is causing performance issues. You MUST follow this exact pattern:\n\n"
-        "When next_node is null (finishing), args MUST contain raw_answer:\n"
-        '{"thought": "Answering user query", "next_node": null, "args": {"raw_answer": "Your full answer"}}\n\n'
+        'When next_node is "final_response" (finishing), args MUST contain answer:\n'
+        '{"next_node": "final_response", "args": {"answer": "Your full answer"}}\n\n'
         "NEVER:\n"
         "- Leave args as null or empty {}\n"
         "- Use placeholder values like <auto>, unknown, or <fill_value>\n"
-        "- Omit the raw_answer field\n\n"
-        "Your response to the user goes in raw_answer. This is mandatory.\n"
+        "- Omit the answer field\n\n"
+        "Your response to the user goes in args.answer. This is mandatory.\n"
         "</finish_critical>"
     )
 
@@ -1195,7 +1189,7 @@ def render_arg_fill_guidance(repair_count: int) -> str | None:
         "RULES:\n"
         "- Check the tool's field descriptions for 'Valid options:' - you MUST use one of those\n"
         "- Do NOT invent values - use only what's documented\n"
-        "- If unsure, FINISH with next_node: null instead of calling the tool\n"
+        '- If unsure, FINISH with next_node: "final_response" instead of calling the tool\n'
         "- Every field must have a real, valid value - no '<auto>', 'unknown', or empty\n\n"
         "If you cannot provide valid arguments, explain to the user what information you need.\n"
         "</arg_critical>"
@@ -1331,7 +1325,7 @@ def render_graceful_failure_prompt(
         "- Offer to help in another way or ask if they'd like to try something different\n"
         "- Keep the response brief and conversational\n\n"
         "Reply with ONLY a JSON object:\n"
-        '{"raw_answer": "Your friendly response to the user here"}\n\n'
+        '{"answer": "Your friendly response to the user here"}\n\n'
         "Rules:\n"
         "- Be helpful and apologetic without being overly formal\n"
         "- Do NOT expose internal system details\n"

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from . import prompts
 from .llm import _coerce_llm_response, _LiteLLMJSONClient
+from .migration import normalize_action
 from .models import PlannerAction, PlannerEvent
 from .streaming import _StreamingArgsExtractor, _StreamingThoughtExtractor
 from .trajectory import Trajectory
@@ -137,6 +138,26 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                     )
                 )
 
+        def _emit_llm_reasoning_chunk(text: str, done: bool, *, _action_seq: int = current_action_seq) -> None:
+            if planner._event_callback is None:
+                return
+            if not text and not done:
+                return
+            planner._emit_event(
+                PlannerEvent(
+                    event_type="llm_stream_chunk",
+                    ts=planner._time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    extra={
+                        "text": text,
+                        "done": done,
+                        "phase": "thinking",
+                        "channel": "thinking",
+                        "action_seq": _action_seq,
+                    },
+                )
+            )
+
         if planner._event_callback is not None:
             planner._emit_event(
                 PlannerEvent(
@@ -153,12 +174,21 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                 )
             )
         try:
-            llm_result = await planner._client.complete(
-                messages=messages,
-                response_format=response_format,
-                stream=stream_allowed,
-                on_stream_chunk=_emit_llm_chunk if stream_allowed else None,
-            )
+            if isinstance(planner._client, _LiteLLMJSONClient) and getattr(planner, "_use_native_reasoning", True):
+                llm_result = await planner._client.complete(
+                    messages=messages,
+                    response_format=response_format,
+                    stream=stream_allowed,
+                    on_stream_chunk=_emit_llm_chunk if stream_allowed else None,
+                    on_reasoning_chunk=_emit_llm_reasoning_chunk,
+                )
+            else:
+                llm_result = await planner._client.complete(
+                    messages=messages,
+                    response_format=response_format,
+                    stream=stream_allowed,
+                    on_stream_chunk=_emit_llm_chunk if stream_allowed else None,
+                )
         finally:
             if planner._event_callback is not None:
                 planner._emit_event(
@@ -184,18 +214,11 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
         )
 
         try:
-            action = PlannerAction.model_validate_json(raw)
-            # Log successful parse with args info for finish actions
-            if action.next_node is None:
-                logger.debug(
-                    "finish_action_parsed",
-                    extra={
-                        "has_args": action.args is not None,
-                        "args_keys": list(action.args.keys()) if isinstance(action.args, dict) else None,
-                        "raw_answer_present": "raw_answer" in (action.args or {}),
-                    },
-                )
-            return action
+            action = normalize_action(raw)
+        except ValueError as exc:
+            # Unparseable JSON (e.g. weak model emitted non-JSON). Treat as repairable.
+            last_error = str(exc)
+            continue
         except ValidationError as exc:
             salvaged = _salvage_action_payload(raw)
             will_retry = salvaged is None and attempt < planner._repair_attempts
@@ -215,6 +238,18 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                 return salvaged
             last_error = json.dumps(exc.errors(), ensure_ascii=False)
             continue
+
+        # Log successful parse with args info for finish actions
+        if action.next_node == "final_response":
+            logger.debug(
+                "finish_action_parsed",
+                extra={
+                    "args_keys": list(action.args.keys()),
+                    "raw_answer_present": "raw_answer" in action.args,
+                    "answer_present": "answer" in action.args,
+                },
+            )
+        return action
 
     if last_raw is not None:
         # Try to extract raw_answer/answer content using regex before naive truncation
@@ -238,9 +273,9 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                     extra={"length": len(extracted_answer)},
                 )
                 return PlannerAction(
+                    next_node="final_response",
+                    args={"answer": extracted_answer, "raw_answer": extracted_answer},
                     thought="Extracted answer from malformed JSON",
-                    next_node=None,
-                    args={"raw_answer": extracted_answer},
                 )
 
         # If no answer extracted, fall back to truncation
@@ -255,14 +290,14 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
             },
         )
         return PlannerAction(
+            next_node="final_response",
+            args={"answer": last_raw, "raw_answer": last_raw},
             thought=error,
-            next_node=None,
-            args={"raw_answer": last_raw},
         )
 
     # Should not reach here, but return a fail-safe action
     return PlannerAction(
+        next_node="final_response",
+        args={"answer": "LLM response parsing failed", "raw_answer": "LLM response parsing failed"},
         thought="Failed to parse LLM response",
-        next_node=None,
-        args={"raw_answer": "LLM response parsing failed"},
     )

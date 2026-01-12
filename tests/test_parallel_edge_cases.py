@@ -100,46 +100,44 @@ class TestParallelModels:
 
 
 class TestPlannerActionParallel:
-    """Tests for PlannerAction with parallel plans."""
+    """Tests for PlannerAction with unified parallel opcode."""
 
     def test_action_with_parallel_plan(self) -> None:
         """Test PlannerAction with parallel plan."""
         action = PlannerAction(
+            next_node="parallel",
+            args={
+                "steps": [
+                    {"node": "fetch1", "args": {"id": 1}},
+                    {"node": "fetch2", "args": {"id": 2}},
+                ]
+            },
             thought="Fetching data in parallel",
-            plan=[
-                ParallelCall(node="fetch1", args={"id": 1}),
-                ParallelCall(node="fetch2", args={"id": 2}),
-            ],
         )
-        assert action.plan is not None
-        assert len(action.plan) == 2
-        assert action.next_node is None
+        assert action.next_node == "parallel"
+        assert len(action.args["steps"]) == 2
 
     def test_action_with_plan_and_join(self) -> None:
         """Test PlannerAction with plan and join."""
         action = PlannerAction(
+            next_node="parallel",
+            args={
+                "steps": [{"node": "fetch", "args": {"id": 1}}],
+                "join": {
+                    "node": "merge",
+                    "args": {},
+                    "inject": {"mapping": {"results": "$results"}},
+                },
+            },
             thought="Parallel with join",
-            plan=[
-                ParallelCall(node="fetch", args={"id": 1}),
-            ],
-            join=ParallelJoin(
-                node="merge",
-                args={},
-                inject=JoinInjection(mapping={"results": "$results"}),
-            ),
         )
-        assert action.plan is not None
-        assert action.join is not None
-        assert action.join.node == "merge"
+        assert action.args["join"]["node"] == "merge"
 
     def test_action_with_next_node_and_plan_invalid(self) -> None:
-        """Test that action can technically have both, but this is invalid at runtime."""
-        # The model allows this, but execute_parallel_plan will reject it
+        """Test that non-parallel next_node does not imply a parallel plan."""
         action = PlannerAction(
+            next_node="other_node",
+            args={},
             thought="Invalid combo",
-            plan=[ParallelCall(node="fetch", args={})],
-            next_node="other_node",  # This is invalid with plan
         )
-        # Model validates, but runtime will error
-        assert action.plan is not None
-        assert action.next_node is not None
+        assert action.next_node == "other_node"
