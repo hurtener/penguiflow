@@ -1133,18 +1133,141 @@ PenguiFlow already depends on a JSON-only client protocol in planner code. The n
 - **Cancellation**: cancel propagation from PenguiFlow runtime into provider calls
 - **Outputs**: parsed Pydantic model + accumulated cost across attempts
 
+**Note:** Like all of PenguiFlow, this adapter is **async-first**. All provider calls are `async def` methods, streaming uses async callbacks, and cancellation leverages `asyncio.CancelledError` propagation.
+
 Implementation sketch:
 
 ```python
 # penguiflow/llm/protocol.py
 
 class JSONLLMClientAdapter:
+    """Async-first adapter for backward compatibility with OpenAI-style dict messages.
+
+    Wraps the native LLMClient to accept the legacy message format while
+    preserving all async capabilities (streaming, cancellation, timeouts).
+    """
+
     def __init__(self, client: LLMClient):
         self._client = client
 
-    async def __call__(self, messages: list[dict], response_model: type[BaseModel], **kwargs):
+    async def __call__(
+        self,
+        messages: list[dict],
+        response_model: type[BaseModel],
+        *,
+        on_stream_chunk: StreamCallback | None = None,
+        cancel: CancelToken | None = None,
+        timeout_s: float | None = None,
+        **kwargs,
+    ) -> tuple[BaseModel, Cost]:
+        """Async call with OpenAI-style messages.
+
+        Args:
+            messages: OpenAI-format messages [{"role": ..., "content": ...}]
+            response_model: Pydantic model for structured output
+            on_stream_chunk: Optional async callback for streaming tokens
+            cancel: Optional cancellation token
+            timeout_s: Optional timeout in seconds
+            **kwargs: Additional provider-specific parameters
+
+        Returns:
+            Tuple of (parsed_model, accumulated_cost)
+        """
         typed = adapt_openai_dict_messages(messages)  # -> list[LLMMessage]
-        return await self._client.call(typed, response_model, **kwargs)
+        return await self._client.call(
+            typed,
+            response_model,
+            on_stream_chunk=on_stream_chunk,
+            cancel=cancel,
+            timeout_s=timeout_s,
+            **kwargs,
+        )
+```
+
+#### 5.3 Telemetry Hooks
+
+The native layer integrates with PenguiFlow's observability system via pluggable telemetry hooks:
+
+```python
+# penguiflow/llm/telemetry.py
+
+from dataclasses import dataclass
+from typing import Callable, Any
+from datetime import datetime
+
+
+@dataclass
+class LLMEvent:
+    """Event emitted during LLM operations for observability."""
+    event_type: str  # "request_start", "request_end", "stream_chunk", "retry", "error"
+    timestamp: datetime
+    provider: str
+    model: str
+    trace_id: str | None = None
+    extra: dict[str, Any] | None = None
+
+
+# Type alias for event callbacks
+TelemetryCallback = Callable[[LLMEvent], None]
+
+
+class TelemetryHooks:
+    """Pluggable telemetry for LLM operations.
+
+    Integrates with PenguiFlow's metrics system and supports external
+    observability platforms (MLflow, Prometheus, OpenTelemetry).
+    """
+
+    def __init__(self):
+        self._callbacks: list[TelemetryCallback] = []
+
+    def register(self, callback: TelemetryCallback) -> None:
+        """Register a telemetry callback."""
+        self._callbacks.append(callback)
+
+    def emit(self, event: LLMEvent) -> None:
+        """Emit event to all registered callbacks (non-blocking)."""
+        for cb in self._callbacks:
+            try:
+                cb(event)
+            except Exception:
+                pass  # Telemetry should never break the main flow
+
+
+# Global hooks instance (can be replaced for testing)
+_hooks = TelemetryHooks()
+
+
+def get_telemetry_hooks() -> TelemetryHooks:
+    return _hooks
+
+
+# Example: MLflow integration
+def mlflow_telemetry_callback(event: LLMEvent) -> None:
+    """Example callback that logs to MLflow."""
+    import mlflow
+
+    if event.event_type == "request_end":
+        mlflow.log_metrics({
+            f"llm.{event.provider}.latency_ms": event.extra.get("latency_ms", 0),
+            f"llm.{event.provider}.input_tokens": event.extra.get("input_tokens", 0),
+            f"llm.{event.provider}.output_tokens": event.extra.get("output_tokens", 0),
+        })
+
+
+# Example: Prometheus integration
+def prometheus_telemetry_callback(event: LLMEvent) -> None:
+    """Example callback that updates Prometheus metrics."""
+    from prometheus_client import Counter, Histogram
+
+    REQUEST_COUNT = Counter("llm_requests_total", "Total LLM requests", ["provider", "model"])
+    REQUEST_LATENCY = Histogram("llm_request_latency_seconds", "LLM request latency", ["provider"])
+
+    if event.event_type == "request_end":
+        REQUEST_COUNT.labels(provider=event.provider, model=event.model).inc()
+        REQUEST_LATENCY.labels(provider=event.provider).observe(
+            event.extra.get("latency_ms", 0) / 1000
+        )
 ```
 
 #### 6. Provider Implementations
@@ -1439,6 +1562,182 @@ class BedrockProvider(Provider):
             message=LLMMessage(role="assistant", parts=parts),
             usage=usage,
             raw_response=response,
+        )
+```
+
+**Google (Gemini) Provider:**
+
+Google Gemini supports structured output via response schemas and function calling. Key capabilities from the [official documentation](https://ai.google.dev/gemini-api/docs/structured-output):
+
+**Structured Outputs Support:**
+- Native JSON schema support via `response_schema` parameter
+- `response_mime_type: "application/json"` for JSON mode
+- Supports enum constraints via `const` → `enum` conversion
+- Function calling with tool definitions
+
+**Schema Handling:**
+- Google uses `const` instead of `enum` for single values - requires conversion
+- Supports `properties`, `required`, `type`, `items`, `enum`
+- Limited support for complex compositions (`anyOf`/`oneOf`)
+
+```python
+import asyncio
+from google import genai
+from google.genai import types as genai_types
+
+
+class GoogleJsonSchemaTransformer(JsonSchemaTransformer):
+    """Google Gemini schema transformer.
+
+    Google has specific JSON schema requirements:
+    - Uses 'enum' for single-value constraints (OpenAI uses 'const')
+    - Requires explicit type annotations
+    - Limited composition support
+
+    Reference: https://ai.google.dev/gemini-api/docs/structured-output
+    """
+
+    def _transform_node(self, node: dict[str, Any]) -> dict[str, Any]:
+        # Google doesn't support 'const', convert to single-element enum
+        if "const" in node:
+            const_value = node.pop("const")
+            node["enum"] = [const_value]
+
+        # Google requires explicit nullable handling
+        if node.get("type") == "null":
+            # Convert null type to nullable in parent
+            pass  # Handled at composition level
+
+        # Handle anyOf with null for optional fields
+        if "anyOf" in node:
+            options = node.get("anyOf", [])
+            if len(options) == 2:
+                types = [o.get("type") for o in options]
+                if "null" in types:
+                    non_null = [o for o in options if o.get("type") != "null"][0]
+                    node.pop("anyOf")
+                    node.update(non_null)
+                    node["nullable"] = True
+
+        # Remove unsupported keywords
+        for keyword in ("$ref", "$defs", "pattern", "minLength", "maxLength"):
+            node.pop(keyword, None)
+
+        return node
+
+
+class GoogleProvider(Provider):
+    """Google Gemini provider using the google-genai SDK.
+
+    Uses the Gemini API with native structured output support.
+    Supports streaming, function calling, and JSON schema validation.
+
+    Reference: https://ai.google.dev/gemini-api/docs/structured-output
+    """
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        api_key: str | None = None,
+        profile: ModelProfile | None = None,
+    ):
+        self.model = model
+        self.profile = profile or get_profile(model)
+        self._client = genai.Client(api_key=api_key)
+
+    async def complete(
+        self,
+        request: LLMRequest,
+        *,
+        timeout_s: float | None = None,
+        cancel: CancelToken | None = None,
+        stream: bool = False,
+        on_stream_event: StreamCallback | None = None,
+    ) -> CompletionResponse:
+        # Build Google-specific content format
+        contents = adapt_messages_to_google(request.messages)
+
+        config: dict[str, Any] = {
+            "temperature": request.temperature,
+        }
+
+        if request.max_tokens:
+            config["max_output_tokens"] = request.max_tokens
+
+        # Handle structured output via response_schema
+        if request.response_schema:
+            transformer = GoogleJsonSchemaTransformer(
+                request.response_schema,
+                strict=self.profile.supports_strict_mode,
+            )
+            config["response_mime_type"] = "application/json"
+            config["response_schema"] = transformer.transform()
+
+        # Handle function calling
+        if request.tools:
+            config["tools"] = adapt_tools_to_google(request.tools)
+
+        generate_config = genai_types.GenerateContentConfig(**config)
+
+        if stream and on_stream_event:
+            return await self._stream(contents, generate_config, on_stream_event)
+
+        # google-genai has async support
+        response = await self._client.aio.models.generate_content(
+            model=self.model,
+            contents=contents,
+            config=generate_config,
+        )
+
+        usage = Usage(
+            input_tokens=response.usage_metadata.prompt_token_count,
+            output_tokens=response.usage_metadata.candidates_token_count,
+            total_tokens=response.usage_metadata.total_token_count,
+        )
+
+        parts = adapt_google_output_to_parts(response)
+        return CompletionResponse(
+            message=LLMMessage(role="assistant", parts=parts),
+            usage=usage,
+            raw_response=response,
+        )
+
+    async def _stream(
+        self,
+        contents: list,
+        config: genai_types.GenerateContentConfig,
+        on_stream_event: StreamCallback,
+    ) -> CompletionResponse:
+        """Handle streaming responses from Gemini."""
+        collected_text = ""
+        usage = Usage(input_tokens=0, output_tokens=0, total_tokens=0)
+
+        async for chunk in await self._client.aio.models.generate_content_stream(
+            model=self.model,
+            contents=contents,
+            config=config,
+        ):
+            if chunk.text:
+                collected_text += chunk.text
+                await on_stream_event(StreamEvent(
+                    event_type="text_delta",
+                    text=chunk.text,
+                ))
+
+            if chunk.usage_metadata:
+                usage = Usage(
+                    input_tokens=chunk.usage_metadata.prompt_token_count or 0,
+                    output_tokens=chunk.usage_metadata.candidates_token_count or 0,
+                    total_tokens=chunk.usage_metadata.total_token_count or 0,
+                )
+
+        await on_stream_event(StreamEvent(event_type="done"))
+
+        return CompletionResponse(
+            message=LLMMessage(role="assistant", parts=[TextPart(text=collected_text)]),
+            usage=usage,
+            raw_response=None,
         )
 ```
 
@@ -2457,11 +2756,53 @@ Templates using `config.py.jinja` will be updated to import from `penguiflow.llm
 
 ## References
 
-- [PydanticAI Source](https://github.com/pydantic/pydantic-ai) (MIT License)
-- [OpenAI Structured Outputs](https://platform.openai.com/docs/guides/structured-outputs)
-- [Anthropic Tool Use](https://docs.anthropic.com/en/docs/tool-use)
-- [AWS Bedrock Converse API](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html)
-- [Databricks Foundation Model APIs](https://docs.databricks.com/en/machine-learning/foundation-models/index.html)
+### Libraries Evaluated
+
+- [PydanticAI](https://github.com/pydantic/pydantic-ai) (MIT License) - Primary pattern source
+- [Instructor](https://github.com/567-labs/instructor) (MIT License) - Structured output extraction
+- [LiteLLM](https://github.com/BerriAI/litellm) - Current dependency (being replaced)
+
+### Provider Documentation
+
+**OpenAI:**
+- [Structured Outputs Guide](https://platform.openai.com/docs/guides/structured-outputs)
+- [Function Calling Guide](https://platform.openai.com/docs/guides/function-calling)
+- [Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
+- [JSON Mode](https://platform.openai.com/docs/guides/json-mode)
+
+**Anthropic:**
+- [Tool Use Guide](https://docs.anthropic.com/en/docs/tool-use)
+- [Messages API](https://docs.anthropic.com/en/api/messages)
+- [Streaming](https://docs.anthropic.com/en/api/streaming)
+
+**Google (Gemini):**
+- [Structured Output](https://ai.google.dev/gemini-api/docs/structured-output)
+- [Function Calling](https://ai.google.dev/gemini-api/docs/function-calling)
+- [JSON Mode](https://ai.google.dev/gemini-api/docs/json-mode)
+- [API Reference](https://ai.google.dev/api/generate-content)
+
+**AWS Bedrock:**
+- [Converse API](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html)
+- [Supported Models](https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html)
+- [Tool Use](https://docs.aws.amazon.com/bedrock/latest/userguide/tool-use.html)
+
+**Databricks:**
+- [Foundation Model APIs Overview](https://docs.databricks.com/en/machine-learning/foundation-models/index.html)
+- [Structured Outputs (Constrained Decoding)](https://docs.databricks.com/aws/en/machine-learning/model-serving/structured-outputs)
+- [Function Calling](https://docs.databricks.com/aws/en/machine-learning/model-serving/function-calling.html)
+- [Query Chat Models](https://docs.databricks.com/aws/en/machine-learning/model-serving/score-foundation-models)
+- [Use Foundation Models](https://docs.databricks.com/aws/en/machine-learning/foundation-models/use-foundation-models.html)
+- [OpenAI SDK Compatibility Example](https://docs.databricks.com/en/_extras/notebooks/source/machine-learning/foundation-models/openai-sdk-example.html)
+
+**OpenRouter:**
+- [API Documentation](https://openrouter.ai/docs/quick-start)
+- [Supported Models](https://openrouter.ai/models)
+- [Provider Routing](https://openrouter.ai/docs/provider-routing)
+
+### Internal References
+
+- `penguiflow/planner/llm.py` - Current LiteLLM integration, schema sanitization patterns
+- `penguiflow/planner/error_recovery.py` - Databricks error extraction, context length recovery
 
 ## Appendix: PydanticAI Code References
 
