@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import warnings
@@ -17,13 +16,10 @@ from .artifact_handling import _ArtifactCollector, _SourceCollector
 from .artifact_registry import ArtifactRegistry
 from .constraints import _ConstraintTracker, _CostTracker
 from .error_recovery import ErrorRecoveryConfig, step_with_recovery
-from .llm import _redact_artifacts
 from .models import PlannerAction, PlannerEvent, PlannerFinish, PlannerPause, ReflectionCritique
-from .pause import _PlannerPauseSignal
-from .planner_context import _PlannerContext
-from .react_utils import _safe_json_dumps
 from .streaming import _StreamingArgsExtractor
 from .tool_aliasing import rewrite_action_node
+from .tool_calls import execute_tool_call
 from .trajectory import Trajectory, TrajectoryStep
 from .validation_repair import _autofill_missing_args, _coerce_tool_context, _validate_llm_context
 
@@ -334,6 +330,8 @@ async def _handle_parallel_plan(
     tracker: _ConstraintTracker,
     artifact_collector: _ArtifactCollector,
     source_collector: _SourceCollector,
+    *,
+    action_seq: int,
 ) -> tuple[Any | None, PlannerPause | None]:
     parallel_observation, pause = await planner._execute_parallel_plan(
         action,
@@ -341,6 +339,7 @@ async def _handle_parallel_plan(
         tracker,
         artifact_collector,
         source_collector,
+        action_seq=action_seq,
     )
     if pause is not None:
         return None, pause
@@ -802,6 +801,7 @@ async def run_loop(
                     tracker,
                     artifact_collector,
                     source_collector,
+                    action_seq=current_action_seq,
                 )
                 if pause is not None:
                     return pause
@@ -1195,322 +1195,82 @@ async def run_loop(
                     continue
 
             tool_call_id = f"call_{current_action_seq}_{len(trajectory.steps)}"
-            try:
-                args_payload = parsed_args.model_dump(mode="json")
-            except Exception:  # pragma: no cover - defensive
-                args_payload = parsed_args.model_dump()
-            args_json = _safe_json_dumps(args_payload)
-
-            planner._emit_event(
-                PlannerEvent(
-                    event_type="tool_call_start",
-                    ts=planner._time_source(),
-                    trajectory_step=len(trajectory.steps),
-                    extra={
-                        "tool_call_id": tool_call_id,
-                        "tool_name": spec.name,
-                        "args_json": args_json,
-                        "action_seq": current_action_seq,
-                    },
-                )
-            )
-            planner._emit_event(
-                PlannerEvent(
-                    event_type="tool_call_end",
-                    ts=planner._time_source(),
-                    trajectory_step=len(trajectory.steps),
-                    extra={
-                        "tool_call_id": tool_call_id,
-                        "tool_name": spec.name,
-                        "action_seq": current_action_seq,
-                    },
-                )
+            step_index = len(trajectory.steps)
+            outcome = await execute_tool_call(
+                planner,
+                trajectory=trajectory,
+                spec=spec,
+                parsed_args=parsed_args,
+                tool_call_id=tool_call_id,
+                action_seq=current_action_seq,
+                step_index=step_index,
+                artifact_collector=artifact_collector,
+                source_collector=source_collector,
+                steering=steering,
             )
 
-            ctx = _PlannerContext(planner, trajectory)
-            try:
-                extra = spec.extra if isinstance(spec.extra, Mapping) else {}
-                background_cfg = extra.get("background") if isinstance(extra, Mapping) else None
-                background_allowed = bool(
-                    getattr(
-                        getattr(planner, "_background_tasks", None),
-                        "allow_tool_background",
-                        False,
-                    )
-                )
-                if (
-                    background_allowed
-                    and isinstance(background_cfg, Mapping)
-                    and background_cfg.get("enabled") is True
-                ):
-                    service = ctx.tool_context.get(_TASK_SERVICE_KEY)
-                    if service is not None:
-                        session_id = ctx.tool_context.get("session_id")
-                        parent_task_id = ctx.tool_context.get("task_id")
-                        if isinstance(session_id, str):
-                            from penguiflow.sessions.models import MergeStrategy
-
-                            mode = background_cfg.get("mode") if isinstance(background_cfg, Mapping) else None
-                            mode_value = str(mode).lower().strip() if mode is not None else "job"
-                            merge_raw = background_cfg.get("default_merge_strategy")
-                            merge_value = (
-                                str(merge_raw).lower().strip()
-                                if merge_raw is not None
-                                else MergeStrategy.HUMAN_GATED.value
-                            )
-                            merge_strategy = {
-                                "append": MergeStrategy.APPEND,
-                                "replace": MergeStrategy.REPLACE,
-                                "human_gated": MergeStrategy.HUMAN_GATED,
-                                "human-gated": MergeStrategy.HUMAN_GATED,
-                                "human": MergeStrategy.HUMAN_GATED,
-                            }.get(merge_value, MergeStrategy.HUMAN_GATED)
-                            notify_on_complete = background_cfg.get("notify_on_complete", True) is not False
-
-                            if mode_value == "subagent":
-                                tool_query = (
-                                    f"Run tool {spec.name} with args {args_json}. "
-                                    "Return the tool output and a brief digest."
-                                )
-                                spawned = await service.spawn(
-                                    session_id=session_id,
-                                    query=tool_query,
-                                    parent_task_id=parent_task_id
-                                    if isinstance(parent_task_id, str)
-                                    else None,
-                                    priority=0,
-                                    merge_strategy=merge_strategy,
-                                    propagate_on_cancel="cascade",
-                                    notify_on_complete=notify_on_complete,
-                                    context_depth="full",
-                                )
-                            else:
-                                spawned = await service.spawn_tool_job(
-                                    session_id=session_id,
-                                    tool_name=spec.name,
-                                    tool_args=args_payload,
-                                    parent_task_id=parent_task_id
-                                    if isinstance(parent_task_id, str)
-                                    else None,
-                                    priority=0,
-                                    merge_strategy=merge_strategy,
-                                    propagate_on_cancel="cascade",
-                                    notify_on_complete=notify_on_complete,
-                                )
-                            from .models import BackgroundTaskHandle
-
-                            status_obj = getattr(spawned, "status", None)
-                            status_value = getattr(status_obj, "value", None)
-                            status = status_value if status_value is not None else status_obj
-                            handle = BackgroundTaskHandle(
-                                task_id=str(getattr(spawned, "task_id", "")),
-                                status=str(status or "PENDING"),
-                                message=f"spawned:{mode_value}",
-                            )
-                            observation_json = handle.model_dump(mode="json")
-                            result_json = _safe_json_dumps(observation_json)
-                            planner._emit_event(
-                                PlannerEvent(
-                                    event_type="tool_call_result",
-                                    ts=planner._time_source(),
-                                    trajectory_step=len(trajectory.steps),
-                                    extra={
-                                        "tool_call_id": tool_call_id,
-                                        "tool_name": spec.name,
-                                        "result_json": result_json,
-                                        "action_seq": current_action_seq,
-                                    },
-                                )
-                            )
-                            trajectory.steps.append(
-                                TrajectoryStep(
-                                    action=action,
-                                    observation=observation_json,
-                                    llm_observation=observation_json,
-                                )
-                            )
-                            tracker.record_hop()
-                            trajectory.summary = None
-                            last_observation = observation_json
-                            trajectory.resume_user_input = None
-                            continue
-
-                if steering is not None:
-                    tool_task = asyncio.create_task(spec.node.func(parsed_args, ctx))
-                    cancel_task = asyncio.create_task(steering.cancel_event.wait())
-                    done, _pending = await asyncio.wait(
-                        {tool_task, cancel_task},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if cancel_task in done and steering.cancelled:
-                        tool_task.cancel()
-                        await asyncio.gather(tool_task, return_exceptions=True)
-                        raise SteeringCancelled(steering.cancel_reason)
-                    cancel_task.cancel()
-                    await asyncio.gather(cancel_task, return_exceptions=True)
-                    result = await tool_task
-                else:
-                    result = await spec.node.func(parsed_args, ctx)
-            except _PlannerPauseSignal as signal:
+            if outcome.pause is not None:
                 tracker.record_hop()
-                pause_chunks = ctx._collect_chunks()
                 trajectory.steps.append(
                     TrajectoryStep(
                         action=action,
                         observation={
-                            "pause": signal.pause.reason,
-                            "payload": signal.pause.payload,
+                            "pause": outcome.pause.reason,
+                            "payload": outcome.pause.payload,
                         },
-                        streams=pause_chunks or None,
+                        streams=outcome.streams or None,
                     )
                 )
                 trajectory.summary = None
-                await planner._record_pause(signal.pause, trajectory, tracker)
-                planner._emit_event(
-                    PlannerEvent(
-                        event_type="tool_call_result",
-                        ts=planner._time_source(),
-                        trajectory_step=len(trajectory.steps),
-                        extra={
-                            "tool_call_id": tool_call_id,
-                            "tool_name": spec.name,
-                            "result_json": _safe_json_dumps(
-                                {"pause": signal.pause.reason, "payload": dict(signal.pause.payload)}
-                            ),
-                            "action_seq": current_action_seq,
-                        },
-                    )
-                )
-                return signal.pause
-            except Exception as exc:
-                failure_payload = planner._build_failure_payload(spec, parsed_args, exc)
-                error = f"tool '{spec.name}' raised {exc.__class__.__name__}: {exc}"
-                failure_chunks = ctx._collect_chunks()
+                await planner._record_pause(outcome.pause, trajectory, tracker)
+                return outcome.pause
+
+            if outcome.error is not None:
                 trajectory.steps.append(
                     TrajectoryStep(
                         action=action,
-                        error=error,
-                        failure=failure_payload,
-                        streams=failure_chunks or None,
+                        error=outcome.error,
+                        failure=outcome.failure,
+                        streams=outcome.streams or None,
                     )
                 )
                 tracker.record_hop()
                 trajectory.summary = None
                 last_observation = None
-                planner._emit_event(
-                    PlannerEvent(
-                        event_type="tool_call_result",
-                        ts=planner._time_source(),
-                        trajectory_step=len(trajectory.steps),
-                        extra={
-                            "tool_call_id": tool_call_id,
-                            "tool_name": spec.name,
-                            "result_json": _safe_json_dumps({"error": error, "failure": failure_payload}),
-                            "action_seq": current_action_seq,
-                        },
-                    )
-                )
                 continue
 
-            step_chunks = ctx._collect_chunks()
-
-            try:
-                observation = spec.out_model.model_validate(result)
-            except ValidationError as exc:
-                error = prompts.render_output_validation_error(
-                    spec.name,
-                    json.dumps(exc.errors(), ensure_ascii=False),
-                )
-                tracker.record_hop()
-                trajectory.steps.append(
-                    TrajectoryStep(
-                        action=action,
-                        error=error,
-                        streams=step_chunks or None,
-                    )
-                )
-                trajectory.summary = None
-                last_observation = None
-                planner._emit_event(
-                    PlannerEvent(
-                        event_type="tool_call_result",
-                        ts=planner._time_source(),
-                        trajectory_step=len(trajectory.steps),
-                        extra={
-                            "tool_call_id": tool_call_id,
-                            "tool_name": spec.name,
-                            "result_json": _safe_json_dumps({"error": error}),
-                            "action_seq": current_action_seq,
-                        },
-                    )
-                )
-                continue
-
-            observation_json = observation.model_dump(mode="json")
-
-            planner._artifact_registry.register_tool_artifacts(
-                spec.name,
-                spec.out_model,
-                observation_json,
-                step_index=len(trajectory.steps),
-            )
-            if isinstance(trajectory.metadata, MutableMapping):
-                planner._artifact_registry.write_snapshot(trajectory.metadata)
-
-            # Apply observation size guardrails
-            observation_json, was_clamped = await planner._clamp_observation(
-                observation_json,
-                spec.name,
-                len(trajectory.steps),
-            )
-
-            artifact_collector.collect(spec.name, spec.out_model, observation_json)
-            source_collector.collect(spec.out_model, observation_json)
-
-            # If observation was clamped, use it directly; otherwise apply artifact redaction
-            llm_obs = observation_json if was_clamped else _redact_artifacts(spec.out_model, observation_json)
-            result_json = _safe_json_dumps(llm_obs)
-            planner._emit_event(
-                PlannerEvent(
-                    event_type="tool_call_result",
-                    ts=planner._time_source(),
-                    trajectory_step=len(trajectory.steps),
-                    extra={
-                        "tool_call_id": tool_call_id,
-                        "tool_name": spec.name,
-                        "result_json": result_json,
-                        "action_seq": current_action_seq,
-                    },
-                )
-            )
+            observation_json = outcome.observation or {}
+            llm_obs = outcome.llm_observation or observation_json
             trajectory.steps.append(
                 TrajectoryStep(
                     action=action,
                     observation=observation_json,
                     llm_observation=llm_obs,
-                    streams=step_chunks or None,
+                    streams=outcome.streams or None,
                 )
             )
             tracker.record_hop()
             trajectory.summary = None
             last_observation = observation_json
-            trajectory.artifacts = artifact_collector.snapshot()
-            trajectory.sources = source_collector.snapshot()
-            planner._record_hint_progress(spec.name, trajectory)
             trajectory.resume_user_input = None
 
-            # Emit step complete event
-            step_latency = (planner._time_source() - step_start_ts) * 1000  # ms
-            planner._emit_event(
-                PlannerEvent(
-                    event_type="step_complete",
-                    ts=planner._time_source(),
-                    trajectory_step=len(trajectory.steps) - 1,
-                    thought=action.thought,
-                    node_name=spec.name,
-                    latency_ms=step_latency,
+            # Preserve legacy behavior: background-spawned tools did not emit step_complete.
+            if not outcome.background_spawned:
+                trajectory.artifacts = artifact_collector.snapshot()
+                trajectory.sources = source_collector.snapshot()
+
+                # Emit step complete event
+                step_latency = (planner._time_source() - step_start_ts) * 1000  # ms
+                planner._emit_event(
+                    PlannerEvent(
+                        event_type="step_complete",
+                        ts=planner._time_source(),
+                        trajectory_step=len(trajectory.steps) - 1,
+                        thought=action.thought,
+                        node_name=spec.name,
+                        latency_ms=step_latency,
+                    )
                 )
-            )
 
             # Reset consecutive arg failure counters on successful tool execution
             if trajectory.metadata.get("consecutive_arg_failures"):

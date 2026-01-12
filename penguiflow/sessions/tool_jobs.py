@@ -151,18 +151,24 @@ async def _extract_artifacts_from_observation(
         if value is None:
             continue
 
-        async def _store(item: Any, *, item_index: int | None) -> None:
+        async def _store(
+            item: Any,
+            *,
+            item_index: int | None,
+            _field_name: str = field_name,
+            _node_name: str = node_name,
+        ) -> None:
             serialized = json.dumps(item, ensure_ascii=False)
             scope = ArtifactScope(session_id=session_id) if session_id else None
             ref = await artifact_store.put_text(
                 serialized,
                 mime_type="application/json",
-                filename=f"{node_name}.{field_name}.json",
-                namespace=f"tool_artifact.{node_name}.{field_name}",
+                filename=f"{_node_name}.{_field_name}.json",
+                namespace=f"tool_artifact.{_node_name}.{_field_name}",
                 scope=scope,
                 meta={
-                    "node": node_name,
-                    "field": field_name,
+                    "node": _node_name,
+                    "field": _field_name,
                     "item_index": item_index,
                 },
             )
@@ -175,8 +181,8 @@ async def _extract_artifacts_from_observation(
             if artifact_type:
                 stub["type"] = artifact_type
             entry: dict[str, Any] = {
-                "node": node_name,
-                "field": field_name,
+                "node": _node_name,
+                "field": _field_name,
                 "artifact": stub,
             }
             if item_index is not None:

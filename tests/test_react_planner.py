@@ -1840,6 +1840,102 @@ async def test_react_planner_parallel_plan_executes_concurrently() -> None:
 
 
 @pytest.mark.asyncio()
+async def test_parallel_plan_emits_tool_call_events_for_branches_and_join() -> None:
+    """Parallel branches should emit tool_call_* events for live UI feedback."""
+
+    client = StubClient(
+        [
+            {
+                "thought": "fan out",
+                "plan": [
+                    {"node": "fetch_primary", "args": {"topic": "topic", "shard": 0}},
+                    {"node": "fetch_secondary", "args": {"topic": "topic", "shard": 1}},
+                ],
+                "join": {"node": "merge_results"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "done"},
+            },
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("fetch_primary", ShardRequest, ShardPayload)
+    registry.register("fetch_secondary", ShardRequest, ShardPayload)
+    registry.register("merge_results", MergeArgs, Documents)
+
+    nodes = [
+        Node(fetch_primary, name="fetch_primary"),
+        Node(fetch_secondary, name="fetch_secondary"),
+        Node(merge_results, name="merge_results"),
+    ]
+
+    events: list[PlannerEvent] = []
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog(nodes, registry),
+        event_callback=events.append,
+    )
+
+    result = await planner.run("parallel fan out")
+    assert result.reason == "answer_complete"
+
+    tool_starts = [evt for evt in events if evt.event_type == "tool_call_start"]
+    tool_results = [evt for evt in events if evt.event_type == "tool_call_result"]
+    assert len(tool_starts) == 3
+    assert len(tool_results) == 3
+    assert {evt.extra.get("tool_name") for evt in tool_starts} == {"fetch_primary", "fetch_secondary", "merge_results"}
+
+
+@pytest.mark.asyncio()
+async def test_parallel_plan_without_join_emits_tool_call_events_for_branches() -> None:
+    client = StubClient(
+        [
+            {
+                "thought": "fan out",
+                "plan": [
+                    {"node": "fetch_primary", "args": {"topic": "topic", "shard": 0}},
+                    {"node": "fetch_secondary", "args": {"topic": "topic", "shard": 1}},
+                ],
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "done"},
+            },
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("fetch_primary", ShardRequest, ShardPayload)
+    registry.register("fetch_secondary", ShardRequest, ShardPayload)
+
+    nodes = [
+        Node(fetch_primary, name="fetch_primary"),
+        Node(fetch_secondary, name="fetch_secondary"),
+    ]
+
+    events: list[PlannerEvent] = []
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog(nodes, registry),
+        event_callback=events.append,
+    )
+
+    result = await planner.run("parallel fan out")
+    assert result.reason == "answer_complete"
+
+    tool_starts = [evt for evt in events if evt.event_type == "tool_call_start"]
+    tool_results = [evt for evt in events if evt.event_type == "tool_call_result"]
+    assert len(tool_starts) == 2
+    assert len(tool_results) == 2
+    assert {evt.extra.get("tool_name") for evt in tool_starts} == {"fetch_primary", "fetch_secondary"}
+    assert "join" not in result.metadata["steps"][0]["observation"]
+
+
+@pytest.mark.asyncio()
 async def test_react_planner_parallel_join_explicit_inject_mapping() -> None:
     client = StubClient(
         [

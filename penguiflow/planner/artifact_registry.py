@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeGuard, cast
 
 from pydantic import BaseModel
 
@@ -481,7 +481,7 @@ def has_artifact_refs(value: Any) -> bool:
     return False
 
 
-def _is_artifact_ref_dict(value: Any) -> bool:
+def _is_artifact_ref_dict(value: Any) -> TypeGuard[Mapping[str, Any]]:
     return isinstance(value, Mapping) and isinstance(value.get("id"), str)
 
 

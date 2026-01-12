@@ -704,6 +704,8 @@ class ReactPlanner:
         tracker: _ConstraintTracker,
         artifact_collector: _ArtifactCollector,
         source_collector: _SourceCollector,
+        *,
+        action_seq: int,
     ) -> tuple[Any | None, PlannerPause | None]:
         return await _handle_parallel_plan_impl(
             self,
@@ -712,6 +714,7 @@ class ReactPlanner:
             tracker,
             artifact_collector,
             source_collector,
+            action_seq=action_seq,
         )
 
     async def _handle_finish_action(
@@ -758,14 +761,17 @@ class ReactPlanner:
         tracker: _ConstraintTracker,
         artifact_collector: _ArtifactCollector,
         source_collector: _SourceCollector,
+        *,
+        action_seq: int,
     ) -> tuple[Any | None, PlannerPause | None]:
         return await execute_parallel_plan(
             self,
             action,
             trajectory,
             tracker,
-            artifact_collector,
-            source_collector,
+            action_seq=action_seq,
+            artifact_collector=artifact_collector,
+            source_collector=source_collector,
         )
 
     def _make_context(self, trajectory: Trajectory) -> _PlannerContext:
