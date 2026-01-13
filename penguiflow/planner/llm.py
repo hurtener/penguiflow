@@ -36,6 +36,7 @@ class LLMErrorType(Enum):
     CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded"
     RATE_LIMIT = "rate_limit"
     SERVICE_UNAVAILABLE = "service_unavailable"
+    TIMEOUT = "timeout"
     BAD_REQUEST_OTHER = "bad_request_other"
     UNKNOWN = "unknown"
 
@@ -65,12 +66,16 @@ def classify_llm_error(exc: Exception) -> LLMErrorType:
     error_str = str(exc).lower()
     error_type_name = exc.__class__.__name__
 
+    # Check for timeout errors (LLMTimeoutError, TimeoutError, asyncio.TimeoutError)
+    if "Timeout" in error_type_name or isinstance(exc, TimeoutError):
+        return LLMErrorType.TIMEOUT
+
     # Check for rate limiting errors
     if "RateLimit" in error_type_name:
         return LLMErrorType.RATE_LIMIT
 
     # Check for service unavailable errors
-    if "ServiceUnavailable" in error_type_name:
+    if "ServiceUnavailable" in error_type_name or "Server" in error_type_name:
         return LLMErrorType.SERVICE_UNAVAILABLE
 
     # Check for context length exceeded errors

@@ -1,0 +1,446 @@
+"""Databricks provider implementation.
+
+Uses the OpenAI SDK for Databricks Foundation Model APIs (January 2026).
+
+Supported model families via Databricks serving endpoints:
+- OpenAI GPT-5 series (gpt-5-2, gpt-5-1, gpt-5, gpt-5-mini, gpt-5-nano)
+- Anthropic Claude series (claude-opus-4-5, claude-sonnet-4-5, claude-haiku-4-5, claude-sonnet-4, claude-opus-4-1)
+- Google Gemini series (gemini-3-flash, gemini-3-pro, gemini-2-5-pro, gemini-2-5-flash, gemma-3-12b)
+- Meta Llama series (llama-4-maverick, meta-llama-3-3-70b-instruct, meta-llama-3-1-405b-instruct)
+- Alibaba Qwen series (qwen3-next-80b-a3b-instruct)
+
+Reference: https://docs.databricks.com/en/machine-learning/model-serving/score-foundation-models.html
+Databricks SDK: https://github.com/databricks/databricks-sdk-py (v0.77.0+)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import re
+from typing import TYPE_CHECKING, Any
+
+from ..errors import (
+    LLMAuthError,
+    LLMCancelledError,
+    LLMContextLengthError,
+    LLMError,
+    LLMInvalidRequestError,
+    LLMRateLimitError,
+    LLMServerError,
+    LLMTimeoutError,
+    is_context_length_error,
+)
+from ..profiles import ModelProfile, get_profile
+from ..types import (
+    CompletionResponse,
+    ContentPart,
+    LLMMessage,
+    LLMRequest,
+    StreamEvent,
+    StructuredOutputSpec,
+    TextPart,
+    ToolCallPart,
+    Usage,
+)
+from .base import OpenAICompatibleProvider
+
+if TYPE_CHECKING:
+    from ..types import CancelToken, StreamCallback
+
+
+class DatabricksProvider(OpenAICompatibleProvider):
+    """Databricks provider using OpenAI-compatible API.
+
+    Uses the Databricks Foundation Model APIs which provide an OpenAI-compatible
+    interface. Supports structured outputs via constrained decoding and function
+    calling (GA as of 2025).
+
+    Available model families (January 2026):
+    - OpenAI GPT-5 series: databricks-gpt-5-2, databricks-gpt-5-1, databricks-gpt-5,
+      databricks-gpt-5-mini, databricks-gpt-5-nano, databricks-gpt-oss-120b, databricks-gpt-oss-20b
+    - Anthropic Claude: databricks-claude-opus-4-5, databricks-claude-sonnet-4-5,
+      databricks-claude-haiku-4-5, databricks-claude-sonnet-4, databricks-claude-opus-4-1
+    - Google Gemini: databricks-gemini-3-flash, databricks-gemini-3-pro,
+      databricks-gemini-2-5-pro, databricks-gemini-2-5-flash, databricks-gemma-3-12b
+    - Meta Llama: databricks-llama-4-maverick, databricks-meta-llama-3-3-70b-instruct,
+      databricks-meta-llama-3-1-405b-instruct, databricks-meta-llama-3-1-8b-instruct
+    - Alibaba Qwen: databricks-qwen3-next-80b-a3b-instruct
+
+    Handles Databricks-specific quirks:
+    - Nested JSON error messages
+    - No reasoning_effort parameter support (use extended thinking on Claude models)
+    - Schema limitations (no anyOf/oneOf/allOf/$ref/pattern, max 64 keys)
+    - Function calling limited to 32 functions, 16 keys per schema
+
+    Reference: https://docs.databricks.com/en/machine-learning/model-serving/score-foundation-models.html
+    """
+
+    # Maximum limits per Databricks docs
+    MAX_SCHEMA_KEYS = 64
+    MAX_TOOLS = 32
+    MAX_TOOL_SCHEMA_KEYS = 16
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        host: str | None = None,
+        token: str | None = None,
+        profile: ModelProfile | None = None,
+        timeout: float = 120.0,
+    ):
+        """Initialize the Databricks provider.
+
+        Args:
+            model: Model identifier (e.g., "databricks-claude-sonnet-4-5", "databricks-gpt-5-2").
+            host: Databricks workspace host (uses DATABRICKS_HOST env var if not provided).
+            token: Databricks access token (uses DATABRICKS_TOKEN env var if not provided).
+                   OAuth tokens are recommended for production use.
+            profile: Model profile override.
+            timeout: Default timeout in seconds.
+        """
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as e:
+            raise ImportError(
+                "OpenAI SDK not installed. Install with: pip install openai>=1.50.0"
+            ) from e
+
+        self._model = model
+        self._profile = profile or get_profile(model)
+        self._timeout = timeout
+
+        host = host or os.environ.get("DATABRICKS_HOST")
+        token = token or os.environ.get("DATABRICKS_TOKEN")
+
+        if not host or not token:
+            raise ValueError(
+                "Databricks host and token required. Set DATABRICKS_HOST and "
+                "DATABRICKS_TOKEN environment variables or pass explicitly."
+            )
+
+        # Normalize host
+        if host.startswith("https://"):
+            host = host[8:]
+        if host.startswith("http://"):
+            host = host[7:]
+        host = host.rstrip("/")
+
+        base_url = f"https://{host}/serving-endpoints"
+
+        self._client = AsyncOpenAI(
+            api_key=token,
+            base_url=base_url,
+            timeout=timeout,
+        )
+
+    @property
+    def provider_name(self) -> str:
+        return "databricks"
+
+    @property
+    def profile(self) -> ModelProfile:
+        return self._profile
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def validate_request(self, request: LLMRequest) -> None:
+        """Validate request against Databricks limits."""
+        if request.tools and len(request.tools) > self.MAX_TOOLS:
+            raise LLMInvalidRequestError(
+                message=f"Databricks supports max {self.MAX_TOOLS} tools, got {len(request.tools)}",
+                provider="databricks",
+            )
+
+    async def complete(
+        self,
+        request: LLMRequest,
+        *,
+        timeout_s: float | None = None,
+        cancel: CancelToken | None = None,
+        stream: bool = False,
+        on_stream_event: StreamCallback | None = None,
+    ) -> CompletionResponse:
+        """Execute a completion request."""
+        if cancel and cancel.is_cancelled():
+            raise LLMCancelledError(message="Request cancelled", provider="databricks")
+
+        self.validate_request(request)
+        params = self._build_params(request)
+        timeout = timeout_s or self._timeout
+
+        try:
+            if stream and on_stream_event:
+                return await self._stream_completion(params, on_stream_event, timeout, cancel)
+
+            async with asyncio.timeout(timeout):
+                response = await self._client.chat.completions.create(**params)
+
+            message, usage = self._from_openai_response(response)
+
+            return CompletionResponse(
+                message=message,
+                usage=usage,
+                raw_response=response,
+                finish_reason=response.choices[0].finish_reason,
+            )
+
+        except TimeoutError as e:
+            raise LLMTimeoutError(
+                message=f"Request timed out after {timeout}s",
+                provider="databricks",
+                raw=e,
+            ) from e
+        except asyncio.CancelledError:
+            raise LLMCancelledError(
+                message="Request cancelled", provider="databricks"
+            ) from None
+        except Exception as e:
+            raise self._map_error(e) from e
+
+    async def _stream_completion(
+        self,
+        params: dict[str, Any],
+        on_stream_event: StreamCallback,
+        timeout: float,
+        cancel: CancelToken | None,
+    ) -> CompletionResponse:
+        """Handle streaming completion."""
+        params["stream"] = True
+
+        text_acc: list[str] = []
+        tool_calls_acc: dict[int, dict[str, Any]] = {}
+        usage: Usage | None = None
+        finish_reason: str | None = None
+
+        try:
+            async with asyncio.timeout(timeout):
+                stream = await self._client.chat.completions.create(**params)
+                async for chunk in stream:
+                    if cancel and cancel.is_cancelled():
+                        raise LLMCancelledError(message="Request cancelled", provider="databricks")
+
+                    if not chunk.choices:
+                        # Usage chunk at the end (if supported)
+                        if hasattr(chunk, "usage") and chunk.usage:
+                            usage = Usage(
+                                input_tokens=chunk.usage.prompt_tokens,
+                                output_tokens=chunk.usage.completion_tokens,
+                                total_tokens=chunk.usage.total_tokens,
+                            )
+                        continue
+
+                    delta = chunk.choices[0].delta
+                    finish_reason = chunk.choices[0].finish_reason
+
+                    # Handle text content
+                    if delta.content:
+                        text_acc.append(delta.content)
+                        on_stream_event(StreamEvent(delta_text=delta.content))
+
+                    # Handle tool calls
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            idx = tc.index
+                            if idx not in tool_calls_acc:
+                                tool_calls_acc[idx] = {
+                                    "id": tc.id or "",
+                                    "name": "",
+                                    "arguments": "",
+                                }
+                            if tc.function:
+                                if tc.function.name:
+                                    tool_calls_acc[idx]["name"] = tc.function.name
+                                if tc.function.arguments:
+                                    tool_calls_acc[idx]["arguments"] += tc.function.arguments
+
+        except TimeoutError as e:
+            raise LLMTimeoutError(
+                message=f"Stream timed out after {timeout}s",
+                provider="databricks",
+                raw=e,
+            ) from e
+
+        # Build final message
+        parts: list[ContentPart] = []
+        full_text = "".join(text_acc)
+        if full_text:
+            parts.append(TextPart(text=full_text))
+
+        for idx in sorted(tool_calls_acc.keys()):
+            tc = tool_calls_acc[idx]
+            parts.append(
+                ToolCallPart(
+                    name=tc["name"],
+                    arguments_json=tc["arguments"],
+                    call_id=tc["id"],
+                )
+            )
+
+        on_stream_event(StreamEvent(done=True, usage=usage, finish_reason=finish_reason))
+
+        return CompletionResponse(
+            message=LLMMessage(role="assistant", parts=parts),
+            usage=usage or Usage.zero(),
+            raw_response=None,
+            finish_reason=finish_reason,
+        )
+
+    def _build_params(self, request: LLMRequest) -> dict[str, Any]:
+        """Build Databricks API parameters from request."""
+        params: dict[str, Any] = {
+            "model": self._model,
+            "messages": self._to_openai_messages(request.messages),
+            "temperature": request.temperature,
+        }
+
+        if request.max_tokens is not None:
+            params["max_tokens"] = request.max_tokens
+
+        if request.tools:
+            params["tools"] = self._to_openai_tools(request.tools)
+
+        if request.tool_choice:
+            params["tool_choice"] = {
+                "type": "function",
+                "function": {"name": request.tool_choice},
+            }
+
+        # Handle structured output via constrained decoding
+        if request.structured_output:
+            params["response_format"] = self._to_databricks_response_format(request.structured_output)
+
+        # Handle extra parameters (drop unsupported ones)
+        if request.extra:
+            extra = dict(request.extra)
+            # Databricks doesn't support reasoning_effort
+            extra.pop("reasoning_effort", None)
+            params.update(extra)
+
+        return params
+
+    def _to_databricks_response_format(self, structured_output: StructuredOutputSpec) -> dict[str, Any]:
+        """Convert structured output spec to Databricks response_format."""
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": structured_output.name,
+                "schema": structured_output.json_schema,
+                "strict": structured_output.strict,
+            },
+        }
+
+    def _map_error(self, exc: Exception) -> LLMError:
+        """Map Databricks/OpenAI SDK exceptions to LLMError."""
+        # Try to extract nested error message
+        clean_message = self._extract_databricks_error(exc)
+
+        try:
+            from openai import (
+                APIConnectionError,
+                APIStatusError,
+                AuthenticationError,
+                BadRequestError,
+                RateLimitError,
+            )
+
+            if isinstance(exc, AuthenticationError):
+                return LLMAuthError(
+                    message=clean_message,
+                    provider="databricks",
+                    status_code=401,
+                    raw=exc,
+                )
+
+            if isinstance(exc, RateLimitError):
+                return LLMRateLimitError(
+                    message=clean_message,
+                    provider="databricks",
+                    status_code=429,
+                    raw=exc,
+                )
+
+            if isinstance(exc, BadRequestError):
+                if is_context_length_error(exc) or is_context_length_error(clean_message):
+                    return LLMContextLengthError(
+                        message=clean_message,
+                        provider="databricks",
+                        status_code=400,
+                        raw=exc,
+                    )
+                return LLMInvalidRequestError(
+                    message=clean_message,
+                    provider="databricks",
+                    status_code=400,
+                    raw=exc,
+                )
+
+            if isinstance(exc, APIStatusError):
+                status = getattr(exc, "status_code", 500)
+                if status >= 500:
+                    return LLMServerError(
+                        message=clean_message,
+                        provider="databricks",
+                        status_code=status,
+                        raw=exc,
+                    )
+                return LLMInvalidRequestError(
+                    message=clean_message,
+                    provider="databricks",
+                    status_code=status,
+                    raw=exc,
+                )
+
+            if isinstance(exc, APIConnectionError):
+                return LLMServerError(
+                    message=clean_message,
+                    provider="databricks",
+                    raw=exc,
+                )
+
+        except ImportError:
+            pass
+
+        # Check for context length in extracted message
+        if is_context_length_error(clean_message):
+            return LLMContextLengthError(
+                message=clean_message,
+                provider="databricks",
+                raw=exc,
+            )
+
+        return LLMError(
+            message=clean_message,
+            provider="databricks",
+            raw=exc,
+        )
+
+    def _extract_databricks_error(self, exc: Exception) -> str:
+        """Extract clean error message from Databricks nested JSON format.
+
+        Databricks wraps errors in a DatabricksException with nested JSON:
+        {"error_code":"BAD_REQUEST","message":"{\\"message\\":\\"Input is too long.\\"}"}
+        """
+        error_str = str(exc)
+
+        # Try to extract nested JSON message
+        # Pattern: {"error_code":"BAD_REQUEST","message":"{"message":"..."}"}
+        try:
+            json_match = re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"', error_str)
+            if json_match:
+                inner_msg = json_match.group(1)
+                inner_msg = inner_msg.replace('\\"', '"').replace("\\\\", "\\")
+
+                # Check for double-nested JSON
+                inner_json = re.search(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"', inner_msg)
+                if inner_json:
+                    return inner_json.group(1).replace('\\"', '"')
+
+                return inner_msg
+        except Exception:
+            pass
+
+        return error_str

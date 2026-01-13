@@ -9,6 +9,7 @@ from typing import Any
 
 from ..artifacts import ArtifactStore, NoOpArtifactStore, discover_artifact_store
 from ..catalog import NodeSpec, build_catalog
+from ..llm import create_native_adapter
 from ..node import Node
 from ..registry import ModelRegistry
 from . import prompts
@@ -78,7 +79,56 @@ def init_react_planner(
     multi_action_sequential: bool = False,
     multi_action_read_only_only: bool = True,
     multi_action_max_tools: int = 2,
+    use_native_llm: bool = False,
 ) -> None:
+    """Initialize a ReactPlanner instance with the specified configuration.
+
+    Args:
+        planner: The planner instance to initialize.
+        llm: Model identifier string or config dict for the LLM.
+        nodes: Sequence of Node instances to build the catalog from.
+        catalog: Pre-built catalog of NodeSpec entries.
+        registry: ModelRegistry for type adapters.
+        llm_client: Custom JSONLLMClient implementation.
+        max_iters: Maximum planning iterations.
+        temperature: LLM temperature setting.
+        json_schema_mode: Enable JSON schema mode for structured output.
+        system_prompt_extra: Additional content to append to system prompt.
+        token_budget: Maximum token budget for context window.
+        pause_enabled: Enable pause/resume functionality.
+        state_store: Optional state persistence store.
+        artifact_store: Optional artifact storage backend.
+        observation_guardrail: Configuration for observation size limits.
+        summarizer_llm: Separate LLM for trajectory summarization.
+        planning_hints: Mapping of planning hints for the LLM.
+        repair_attempts: Maximum repair attempts for invalid responses.
+        max_consecutive_arg_failures: Maximum consecutive argument validation failures.
+        arg_fill_enabled: Enable automatic argument filling.
+        deadline_s: Wall-clock deadline in seconds.
+        hop_budget: Maximum number of planning hops.
+        time_source: Custom time source callable.
+        event_callback: Callback for planner events.
+        llm_timeout_s: LLM request timeout in seconds.
+        llm_max_retries: Maximum LLM retry attempts.
+        use_native_reasoning: Enable native reasoning for supported models.
+        reasoning_effort: Reasoning effort level (e.g., "low", "medium", "high").
+        absolute_max_parallel: Maximum parallel tool executions.
+        reflection_config: Configuration for reflection/critique.
+        reflection_llm: Separate LLM for reflection.
+        tool_policy: Policy for filtering available tools.
+        stream_final_response: Enable streaming for final responses.
+        short_term_memory: Short-term memory configuration.
+        background_tasks: Configuration for background task handling.
+        error_recovery: Configuration for error recovery strategies.
+        action_format: Action format mode (auto, json, etc.).
+        multi_action_sequential: Execute multiple actions sequentially.
+        multi_action_read_only_only: Only allow read-only actions in parallel.
+        multi_action_max_tools: Maximum tools per multi-action.
+        use_native_llm: When True, use the native LLM layer (penguiflow.llm)
+            instead of LiteLLM. The native layer provides type-safe requests,
+            provider-specific adapters, and integrated cost tracking.
+            Defaults to False for backward compatibility.
+    """
     if catalog is None:
         if nodes is None or registry is None:
             raise ValueError("Either catalog or (nodes and registry) must be provided")
@@ -248,6 +298,8 @@ def init_react_planner(
 
     if llm_client is not None:
         planner._client = llm_client
+        # When using a custom client, auxiliary clients default to LiteLLM for consistency
+        planner._use_native_llm = False
 
         # CRITICAL: Detect DSPy client and create separate instances for multi-schema support
         # DSPyLLMClient is hardcoded to a single output schema, so we need separate
@@ -304,16 +356,31 @@ def init_react_planner(
     else:
         if llm is None:
             raise ValueError("llm or llm_client must be provided")
-        planner._client = _LiteLLMJSONClient(
-            llm,
-            temperature=temperature,
-            json_schema_mode=json_schema_mode,
-            max_retries=llm_max_retries,
-            timeout_s=llm_timeout_s,
-            streaming_enabled=stream_final_response,
-            use_native_reasoning=use_native_reasoning,
-            reasoning_effort=reasoning_effort,
-        )
+        # Store the flag for auxiliary clients to reference
+        planner._use_native_llm = use_native_llm
+        if use_native_llm:
+            # Use the native LLM layer instead of LiteLLM
+            planner._client = create_native_adapter(
+                llm,
+                temperature=temperature,
+                json_schema_mode=json_schema_mode,
+                max_retries=llm_max_retries,
+                timeout_s=llm_timeout_s,
+                streaming_enabled=stream_final_response,
+                use_native_reasoning=use_native_reasoning,
+                reasoning_effort=reasoning_effort,
+            )
+        else:
+            planner._client = _LiteLLMJSONClient(
+                llm,
+                temperature=temperature,
+                json_schema_mode=json_schema_mode,
+                max_retries=llm_max_retries,
+                timeout_s=llm_timeout_s,
+                streaming_enabled=stream_final_response,
+                use_native_reasoning=use_native_reasoning,
+                reasoning_effort=reasoning_effort,
+            )
 
     if (
         planner._memory_summarizer_client is None
@@ -321,33 +388,60 @@ def init_react_planner(
         and planner._memory_config.strategy == "rolling_summary"
         and planner._memory_config.summarizer_model is not None
     ):
-        planner._memory_summarizer_client = _LiteLLMJSONClient(
-            planner._memory_config.summarizer_model,
-            temperature=temperature,
-            json_schema_mode=True,
-            max_retries=llm_max_retries,
-            timeout_s=llm_timeout_s,
-        )
+        if getattr(planner, "_use_native_llm", False):
+            planner._memory_summarizer_client = create_native_adapter(
+                planner._memory_config.summarizer_model,
+                temperature=temperature,
+                json_schema_mode=True,
+                max_retries=llm_max_retries,
+                timeout_s=llm_timeout_s,
+            )
+        else:
+            planner._memory_summarizer_client = _LiteLLMJSONClient(
+                planner._memory_config.summarizer_model,
+                temperature=temperature,
+                json_schema_mode=True,
+                max_retries=llm_max_retries,
+                timeout_s=llm_timeout_s,
+            )
 
     # LiteLLM-based separate clients (override DSPy if explicitly provided)
     if summarizer_llm is not None:
-        planner._summarizer_client = _LiteLLMJSONClient(
-            summarizer_llm,
-            temperature=temperature,
-            json_schema_mode=True,
-            max_retries=llm_max_retries,
-            timeout_s=llm_timeout_s,
-        )
+        if getattr(planner, "_use_native_llm", False):
+            planner._summarizer_client = create_native_adapter(
+                summarizer_llm,
+                temperature=temperature,
+                json_schema_mode=True,
+                max_retries=llm_max_retries,
+                timeout_s=llm_timeout_s,
+            )
+        else:
+            planner._summarizer_client = _LiteLLMJSONClient(
+                summarizer_llm,
+                temperature=temperature,
+                json_schema_mode=True,
+                max_retries=llm_max_retries,
+                timeout_s=llm_timeout_s,
+            )
 
     # Only set reflection client from reflection_llm if not already set by DSPy
     if planner._reflection_client is None:
         if reflection_config and reflection_config.use_separate_llm:
             if reflection_llm is None:
                 raise ValueError("reflection_llm required when use_separate_llm=True")
-            planner._reflection_client = _LiteLLMJSONClient(
-                reflection_llm,
-                temperature=temperature,
-                json_schema_mode=True,
-                max_retries=llm_max_retries,
-                timeout_s=llm_timeout_s,
-            )
+            if getattr(planner, "_use_native_llm", False):
+                planner._reflection_client = create_native_adapter(
+                    reflection_llm,
+                    temperature=temperature,
+                    json_schema_mode=True,
+                    max_retries=llm_max_retries,
+                    timeout_s=llm_timeout_s,
+                )
+            else:
+                planner._reflection_client = _LiteLLMJSONClient(
+                    reflection_llm,
+                    temperature=temperature,
+                    json_schema_mode=True,
+                    max_retries=llm_max_retries,
+                    timeout_s=llm_timeout_s,
+                )

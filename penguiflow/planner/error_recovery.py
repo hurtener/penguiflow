@@ -230,9 +230,12 @@ async def step_with_recovery(
             elif error_type in (
                 LLMErrorType.RATE_LIMIT,
                 LLMErrorType.SERVICE_UNAVAILABLE,
+                LLMErrorType.TIMEOUT,
             ):
-                # These should be handled by existing retry logic in the client
-                # Re-raise so the client's backoff mechanisms can work
+                # These are transient errors that should be handled by retry logic
+                # in the client. Re-raise so the client's backoff mechanisms can work.
+                # Timeout errors are retryable - the LLM client should retry with
+                # exponential backoff before giving up.
                 logger.debug(
                     "error_recovery_passthrough",
                     extra={"error_type": error_type.value},

@@ -397,6 +397,7 @@ class ReactPlanner:
         multi_action_sequential: bool = False,
         multi_action_read_only_only: bool = True,
         multi_action_max_tools: int = 2,
+        use_native_llm: bool = False,
     ) -> None:
         # Store init kwargs so the planner can be safely forked for background tasks.
         # This is intentionally best-effort and uses references for non-serialisable objects.
@@ -439,6 +440,7 @@ class ReactPlanner:
             "multi_action_sequential": multi_action_sequential,
             "multi_action_read_only_only": multi_action_read_only_only,
             "multi_action_max_tools": multi_action_max_tools,
+            "use_native_llm": use_native_llm,
         }
         _init_react_planner(
             self,
@@ -480,6 +482,7 @@ class ReactPlanner:
             multi_action_sequential=multi_action_sequential,
             multi_action_read_only_only=multi_action_read_only_only,
             multi_action_max_tools=multi_action_max_tools,
+            use_native_llm=use_native_llm,
         )
 
     def fork(

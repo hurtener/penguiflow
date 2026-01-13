@@ -58,6 +58,13 @@ planner = [
     "aiohttp>=3.9.0",
     "jsonschema>=4.23",
 ]
+llm = [
+    "openai>=2.0.0",
+    "anthropic>=0.75.0",
+    "google-genai>=1.57.0",
+    "boto3>=1.42.0",
+    "databricks-sdk>=0.77.0",
+]
 tools-cli = ["utcp-cli>=1.0.0"]
 tools-websocket = ["utcp-websocket>=1.0.0"]
 
@@ -147,6 +154,7 @@ omit = [
 ]
 
 [tool.coverage.report]
+fail_under = 84.5
 exclude_lines = [
     "pragma: no cover",
     "if TYPE_CHECKING:",
