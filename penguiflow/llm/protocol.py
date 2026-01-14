@@ -7,12 +7,14 @@ JSONLLMClient protocol used by the planner.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any
 
 from .errors import is_retryable
-from .pricing import calculate_cost
+from .pricing import calculate_cost, get_pricing
 from .providers import create_provider
 from .types import (
     LLMMessage,
@@ -54,7 +56,7 @@ class NativeLLMAdapter:
         max_retries: int = 3,
         timeout_s: float = 120.0,
         json_schema_mode: bool = True,
-        streaming_enabled: bool = False,
+        streaming_enabled: bool = True,
         use_native_reasoning: bool = True,
         reasoning_effort: str | None = None,
         **provider_kwargs: Any,
@@ -120,12 +122,23 @@ class NativeLLMAdapter:
 
         # Create streaming callback wrapper if needed
         stream_callback: StreamCallback | None = None
-        if stream and self._streaming_enabled and on_stream_chunk is not None:
+        streaming_active = (
+            stream and self._streaming_enabled and (on_stream_chunk is not None or on_reasoning_chunk is not None)
+        )
+        saw_reasoning_delta = False
+
+        if streaming_active:
+
             def stream_callback_wrapper(event: StreamEvent) -> None:
-                if event.delta_text:
+                nonlocal saw_reasoning_delta
+                if event.delta_text and on_stream_chunk is not None:
                     on_stream_chunk(event.delta_text, False)
+                if event.delta_reasoning and on_reasoning_chunk is not None:
+                    saw_reasoning_delta = True
+                    on_reasoning_chunk(event.delta_reasoning, False)
                 if event.done:
-                    on_stream_chunk("", True)
+                    return
+
             stream_callback = stream_callback_wrapper
 
         # Execute request with retry logic
@@ -135,7 +148,7 @@ class NativeLLMAdapter:
                 response = await self._provider.complete(
                     request,
                     timeout_s=self._timeout_s,
-                    stream=stream and self._streaming_enabled,
+                    stream=streaming_active,
                     on_stream_event=stream_callback,
                 )
 
@@ -145,16 +158,60 @@ class NativeLLMAdapter:
                 # Calculate cost
                 cost = 0.0
                 if response.usage:
+                    input_tokens = response.usage.input_tokens
+                    output_tokens = response.usage.output_tokens
+
+                    # Best-effort usage fallback: some OpenAI-compatible proxies (and some
+                    # streaming modes) return usage as 0/0 even when pricing is known.
+                    # We approximate token counts from the actual request/response text.
+                    if input_tokens == 0 or output_tokens == 0:
+                        input_price, output_price = get_pricing(self._provider.model)
+                        if input_price > 0.0 or output_price > 0.0:
+                            if input_tokens == 0:
+                                prompt_blob = json.dumps(
+                                    {
+                                        "messages": list(messages),
+                                        "response_format": response_format,
+                                    },
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
+                                input_tokens = max(1, int(len(prompt_blob) / 3.5))
+
+                            if output_tokens == 0:
+                                output_blob = content + (response.reasoning_content or "")
+                                if output_blob:
+                                    output_tokens = max(1, int(len(output_blob) / 3.5))
+
+                            logger.debug(
+                                "llm_usage_estimated",
+                                extra={
+                                    "provider": self._provider.provider_name,
+                                    "model": self._provider.model,
+                                    "estimated_input_tokens": input_tokens,
+                                    "estimated_output_tokens": output_tokens,
+                                },
+                            )
+
                     cost = calculate_cost(
                         self._provider.model,
-                        response.usage.input_tokens,
-                        response.usage.output_tokens,
+                        input_tokens,
+                        output_tokens,
                     )
 
-                # Handle reasoning content if callback provided
-                if on_reasoning_chunk is not None and response.reasoning_content:
-                    on_reasoning_chunk(response.reasoning_content, False)
-                    on_reasoning_chunk("", True)
+                # If we streamed, finalize callbacks and optionally backfill reasoning.
+                if streaming_active:
+                    if on_reasoning_chunk is not None and response.reasoning_content and not saw_reasoning_delta:
+                        on_reasoning_chunk(response.reasoning_content, False)
+                    if on_stream_chunk is not None:
+                        on_stream_chunk("", True)
+                    if on_reasoning_chunk is not None:
+                        on_reasoning_chunk("", True)
+                else:
+                    # Non-streaming reasoning callback (matches LiteLLM behavior)
+                    if on_reasoning_chunk is not None and response.reasoning_content:
+                        on_reasoning_chunk(response.reasoning_content, False)
+                        on_reasoning_chunk("", True)
 
                 return content, cost
 
@@ -164,9 +221,9 @@ class NativeLLMAdapter:
 
                 # Check if error is retryable (timeout, rate limit, server errors)
                 if is_retryable(e) and attempt < self._max_retries - 1:
-                    backoff_s = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, ...
+                    backoff_s = 2**attempt  # Exponential backoff: 1s, 2s, 4s, ...
                     logger.warning(
-                        f"Native LLM adapter error: {e} | provider={self._provider.name}",
+                        f"Native LLM adapter error: {e} | provider={self._provider.provider_name}",
                         extra={
                             "attempt": attempt + 1,
                             "max_retries": self._max_retries,
@@ -179,7 +236,7 @@ class NativeLLMAdapter:
 
                 # Non-retryable error or final attempt
                 logger.warning(
-                    f"Native LLM adapter error: {e} | provider={self._provider.name}",
+                    f"Native LLM adapter error: {e} | provider={self._provider.provider_name}",
                     extra={
                         "attempt": attempt + 1,
                         "max_retries": self._max_retries,
@@ -192,6 +249,60 @@ class NativeLLMAdapter:
         # Should not reach here, but handle just in case
         msg = f"LLM call failed after {self._max_retries} retries"
         raise RuntimeError(msg) from last_error
+
+    async def stream_events(
+        self,
+        *,
+        messages: Sequence[Mapping[str, str]],
+        response_format: Mapping[str, Any] | None = None,
+        timeout_s: float | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Stream events as an async iterator.
+
+        This provides a LiteLLM-style "pull" streaming API (async iteration) on top
+        of the provider callback-based streaming contract.
+        """
+        if not self._streaming_enabled:
+            raise RuntimeError("Streaming is disabled for this adapter (set streaming_enabled=True).")
+
+        llm_messages = self._convert_messages(messages)
+        request = self._build_request(llm_messages, response_format)
+
+        queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
+        saw_done = False
+
+        def on_stream_event(event: StreamEvent) -> None:
+            nonlocal saw_done
+            if event.done:
+                saw_done = True
+            queue.put_nowait(event)
+
+        async def run() -> None:
+            try:
+                await self._provider.complete(
+                    request,
+                    timeout_s=timeout_s or self._timeout_s,
+                    stream=True,
+                    on_stream_event=on_stream_event,
+                )
+            finally:
+                if not saw_done:
+                    queue.put_nowait(StreamEvent(done=True))
+
+        task = asyncio.create_task(run())
+
+        try:
+            while True:
+                event = await queue.get()
+                yield event
+                if event.done:
+                    break
+            await task
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     def _convert_messages(self, messages: Sequence[Mapping[str, str]]) -> list[LLMMessage]:
         """Convert dict messages to LLMMessage format."""
@@ -264,7 +375,7 @@ def create_native_adapter(
     json_schema_mode: bool = True,
     max_retries: int = 3,
     timeout_s: float = 60.0,
-    streaming_enabled: bool = False,
+    streaming_enabled: bool = True,
     use_native_reasoning: bool = True,
     reasoning_effort: str | None = None,
     **kwargs: Any,
@@ -294,8 +405,7 @@ def create_native_adapter(
         api_key = model.get("api_key")
         base_url = model.get("base_url") or model.get("api_base")
         # Merge other config as kwargs
-        extra_kwargs = {k: v for k, v in model.items()
-                       if k not in ("model", "api_key", "base_url", "api_base")}
+        extra_kwargs = {k: v for k, v in model.items() if k not in ("model", "api_key", "base_url", "api_base")}
         kwargs.update(extra_kwargs)
     else:
         model_name = model

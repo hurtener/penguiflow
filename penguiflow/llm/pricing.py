@@ -89,6 +89,7 @@ PRICING: dict[str, tuple[float, float]] = {
     "databricks-mixtral-8x7b-instruct": (0.0005, 0.001),
     "databricks-claude-3-5-sonnet": (0.003, 0.015),
     "databricks-claude-sonnet-4": (0.003, 0.015),
+    "databricks-claude-opus-4-5": (0.005, 0.025),
     # DeepSeek
     "deepseek-r1": (0.00056, 0.00168),  # $0.56/$1.68 per 1M tokens
     "deepseek-chat": (0.00089, 0.0011),  # $0.89/$1.10 per 1M tokens (V3)

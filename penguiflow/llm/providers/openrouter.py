@@ -200,6 +200,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
                 message=message,
                 usage=usage,
                 raw_response=response,
+                reasoning_content=self._extract_openai_reasoning_content(response.choices[0].message),
                 finish_reason=response.choices[0].finish_reason,
             )
 
@@ -225,11 +226,15 @@ class OpenRouterProvider(OpenAICompatibleProvider):
     ) -> CompletionResponse:
         """Handle streaming completion."""
         params["stream"] = True
+        stream_options = dict(params.get("stream_options") or {})
+        stream_options.setdefault("include_usage", True)
+        params["stream_options"] = stream_options
 
         text_acc: list[str] = []
         tool_calls_acc: dict[int, dict[str, Any]] = {}
         usage: Usage | None = None
         finish_reason: str | None = None
+        reasoning_acc: list[str] = []
 
         try:
             async with asyncio.timeout(timeout):
@@ -253,6 +258,11 @@ class OpenRouterProvider(OpenAICompatibleProvider):
                     if delta.content:
                         text_acc.append(delta.content)
                         on_stream_event(StreamEvent(delta_text=delta.content))
+
+                    delta_reasoning = self._extract_openai_delta_reasoning(delta)
+                    if delta_reasoning:
+                        reasoning_acc.append(delta_reasoning)
+                        on_stream_event(StreamEvent(delta_reasoning=delta_reasoning))
 
                     if delta.tool_calls:
                         for tc in delta.tool_calls:
@@ -297,6 +307,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
             message=LLMMessage(role="assistant", parts=parts),
             usage=usage or Usage.zero(),
             raw_response=None,
+            reasoning_content="".join(reasoning_acc) or None,
             finish_reason=finish_reason,
         )
 

@@ -16,6 +16,7 @@ Databricks SDK: https://github.com/databricks/databricks-sdk-py (v0.77.0+)
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 from typing import TYPE_CHECKING, Any
@@ -93,7 +94,8 @@ class DatabricksProvider(OpenAICompatibleProvider):
         """Initialize the Databricks provider.
 
         Args:
-            model: Model identifier (e.g., "databricks-claude-sonnet-4-5", "databricks-gpt-5-2").
+            model: Model identifier (e.g., "databricks/databricks-claude-sonnet-4-5").
+                   The "databricks/" prefix will be stripped to get the endpoint name.
             host: Databricks workspace host (uses DATABRICKS_HOST env var if not provided).
             token: Databricks access token (uses DATABRICKS_TOKEN env var if not provided).
                    OAuth tokens are recommended for production use.
@@ -103,11 +105,16 @@ class DatabricksProvider(OpenAICompatibleProvider):
         try:
             from openai import AsyncOpenAI
         except ImportError as e:
-            raise ImportError(
-                "OpenAI SDK not installed. Install with: pip install openai>=1.50.0"
-            ) from e
+            raise ImportError("OpenAI SDK not installed. Install with: pip install openai>=1.50.0") from e
 
-        self._model = model
+        # Strip "databricks/" prefix if present to get the endpoint name
+        self._original_model = model
+        if model.startswith("databricks/"):
+            self._endpoint = model[len("databricks/") :]
+        else:
+            self._endpoint = model
+        self._model = self._endpoint  # For compatibility with base class
+
         self._profile = profile or get_profile(model)
         self._timeout = timeout
 
@@ -127,7 +134,13 @@ class DatabricksProvider(OpenAICompatibleProvider):
             host = host[7:]
         host = host.rstrip("/")
 
-        base_url = f"https://{host}/serving-endpoints"
+        # Databricks native API endpoint.
+        #
+        # Important: Keep a trailing slash so relative path joins (e.g. "invocations")
+        # do not drop the endpoint segment (urljoin semantics).
+        #
+        # Format: https://{host}/serving-endpoints/{endpoint}/invocations
+        base_url = f"https://{host}/serving-endpoints/{self._endpoint}/"
 
         self._client = AsyncOpenAI(
             api_key=token,
@@ -165,6 +178,8 @@ class DatabricksProvider(OpenAICompatibleProvider):
         on_stream_event: StreamCallback | None = None,
     ) -> CompletionResponse:
         """Execute a completion request."""
+        from openai.types.chat import ChatCompletion
+
         if cancel and cancel.is_cancelled():
             raise LLMCancelledError(message="Request cancelled", provider="databricks")
 
@@ -174,10 +189,34 @@ class DatabricksProvider(OpenAICompatibleProvider):
 
         try:
             if stream and on_stream_event:
+                # Databricks Model Serving rejects structured output with streaming:
+                # 400 INVALID_PARAMETER_VALUE: "Structured output is not currently supported with streaming."
+                #
+                # LiteLLM users still expect streaming to work for JSON outputs, so we
+                # drop response_format during streaming and instead provide best-effort
+                # prompt guidance to emit JSON (schema-guided if available).
+                if request.structured_output is not None and "response_format" in params:
+                    params = dict(params)
+                    params.pop("response_format", None)
+                    schema = request.structured_output.json_schema
+                    schema_json = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+                    guidance = (
+                        "Return a single valid JSON object that matches this JSON Schema:\n"
+                        f"{schema_json}\n"
+                        "Respond with JSON only."
+                    )
+                    params["messages"] = [{"role": "system", "content": guidance}] + list(params["messages"])
+
                 return await self._stream_completion(params, on_stream_event, timeout, cancel)
 
+            # Use client.post() directly to hit invocations endpoint
+            # (chat.completions.create() would append /chat/completions which Databricks doesn't support)
             async with asyncio.timeout(timeout):
-                response = await self._client.chat.completions.create(**params)
+                response = await self._client.post(
+                    "invocations",
+                    body=params,
+                    cast_to=ChatCompletion,
+                )
 
             message, usage = self._from_openai_response(response)
 
@@ -185,6 +224,7 @@ class DatabricksProvider(OpenAICompatibleProvider):
                 message=message,
                 usage=usage,
                 raw_response=response,
+                reasoning_content=self._extract_openai_reasoning_content(response.choices[0].message),
                 finish_reason=response.choices[0].finish_reason,
             )
 
@@ -195,9 +235,7 @@ class DatabricksProvider(OpenAICompatibleProvider):
                 raw=e,
             ) from e
         except asyncio.CancelledError:
-            raise LLMCancelledError(
-                message="Request cancelled", provider="databricks"
-            ) from None
+            raise LLMCancelledError(message="Request cancelled", provider="databricks") from None
         except Exception as e:
             raise self._map_error(e) from e
 
@@ -209,16 +247,30 @@ class DatabricksProvider(OpenAICompatibleProvider):
         cancel: CancelToken | None,
     ) -> CompletionResponse:
         """Handle streaming completion."""
+        from openai import AsyncStream
+        from openai.types.chat import ChatCompletionChunk
+
         params["stream"] = True
+        stream_options = dict(params.get("stream_options") or {})
+        stream_options.setdefault("include_usage", True)
+        params["stream_options"] = stream_options
 
         text_acc: list[str] = []
         tool_calls_acc: dict[int, dict[str, Any]] = {}
         usage: Usage | None = None
         finish_reason: str | None = None
+        reasoning_acc: list[str] = []
 
         try:
             async with asyncio.timeout(timeout):
-                stream = await self._client.chat.completions.create(**params)
+                # Use client.post() directly to hit invocations endpoint with streaming
+                stream: AsyncStream[ChatCompletionChunk] = await self._client.post(
+                    "invocations",
+                    body=params,
+                    cast_to=ChatCompletionChunk,
+                    stream=True,
+                    stream_cls=AsyncStream[ChatCompletionChunk],
+                )
                 async for chunk in stream:
                     if cancel and cancel.is_cancelled():
                         raise LLMCancelledError(message="Request cancelled", provider="databricks")
@@ -240,6 +292,11 @@ class DatabricksProvider(OpenAICompatibleProvider):
                     if delta.content:
                         text_acc.append(delta.content)
                         on_stream_event(StreamEvent(delta_text=delta.content))
+
+                    delta_reasoning = self._extract_openai_delta_reasoning(delta)
+                    if delta_reasoning:
+                        reasoning_acc.append(delta_reasoning)
+                        on_stream_event(StreamEvent(delta_reasoning=delta_reasoning))
 
                     # Handle tool calls
                     if delta.tool_calls:
@@ -286,6 +343,7 @@ class DatabricksProvider(OpenAICompatibleProvider):
             message=LLMMessage(role="assistant", parts=parts),
             usage=usage or Usage.zero(),
             raw_response=None,
+            reasoning_content="".join(reasoning_acc) or None,
             finish_reason=finish_reason,
         )
 

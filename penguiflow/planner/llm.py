@@ -1183,10 +1183,12 @@ async def request_revision(
     messages.append({"role": "user", "content": revision_prompt})
 
     # Enable streaming for revision if callback provided and client supports it
+    from penguiflow.llm.protocol import NativeLLMAdapter
+
     stream_allowed = (
         on_stream_chunk is not None
         and planner._stream_final_response
-        and isinstance(planner._client, _LiteLLMJSONClient)
+        and isinstance(planner._client, (_LiteLLMJSONClient, NativeLLMAdapter))
     )
 
     llm_result = await planner._client.complete(

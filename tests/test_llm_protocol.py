@@ -202,7 +202,7 @@ class TestCreateNativeAdapter:
                 json_schema_mode=True,
                 max_retries=3,
                 timeout_s=60.0,
-                streaming_enabled=False,
+                streaming_enabled=True,
                 use_native_reasoning=True,
                 reasoning_effort=None,
             )
@@ -222,7 +222,7 @@ class TestCreateNativeAdapter:
                 json_schema_mode=True,
                 max_retries=3,
                 timeout_s=60.0,
-                streaming_enabled=False,
+                streaming_enabled=True,
                 use_native_reasoning=True,
                 reasoning_effort=None,
             )
@@ -289,9 +289,13 @@ class TestNativeLLMAdapterStreaming:
         from penguiflow.llm.types import StreamEvent
 
         received_chunks: list[tuple[str, bool]] = []
+        received_reasoning: list[tuple[str, bool]] = []
 
         def on_chunk(text: str, done: bool) -> None:
             received_chunks.append((text, done))
+
+        def on_reasoning(text: str, done: bool) -> None:
+            received_reasoning.append((text, done))
 
         # Mock provider that calls the stream callback
         async def mock_complete(request: Any, **kwargs: Any) -> CompletionResponse:
@@ -299,6 +303,7 @@ class TestNativeLLMAdapterStreaming:
             if callback:
                 callback(StreamEvent(delta_text="Hello"))
                 callback(StreamEvent(delta_text=" world"))
+                callback(StreamEvent(delta_reasoning="Because..."))
                 callback(StreamEvent(done=True))
             return CompletionResponse(
                 message=LLMMessage(role="assistant", parts=[TextPart(text="Hello world")]),
@@ -315,11 +320,14 @@ class TestNativeLLMAdapterStreaming:
                 messages=[{"role": "user", "content": "Hi"}],
                 stream=True,
                 on_stream_chunk=on_chunk,
+                on_reasoning_chunk=on_reasoning,
             )
 
         assert ("Hello", False) in received_chunks
         assert (" world", False) in received_chunks
         assert ("", True) in received_chunks
+        assert ("Because...", False) in received_reasoning
+        assert ("", True) in received_reasoning
 
     @pytest.mark.asyncio
     async def test_streaming_disabled_ignores_callback(self, mock_provider: MagicMock) -> None:
@@ -344,6 +352,57 @@ class TestNativeLLMAdapterStreaming:
             # stream should be False when streaming_enabled=False
             call_kwargs = mock_provider.complete.call_args[1]
             assert call_kwargs["stream"] is False
+
+
+class TestNativeLLMAdapterStreamEvents:
+    @pytest.mark.asyncio
+    async def test_stream_events_yields_provider_events(self) -> None:
+        from penguiflow.llm.types import StreamEvent
+
+        async def mock_complete(request: Any, **kwargs: Any) -> CompletionResponse:
+            callback = kwargs.get("on_stream_event")
+            assert kwargs.get("stream") is True
+            assert callback is not None
+            callback(StreamEvent(delta_text="Hello"))
+            callback(StreamEvent(delta_reasoning="Thinking..."))
+            callback(StreamEvent(done=True))
+            return CompletionResponse(
+                message=LLMMessage(role="assistant", parts=[TextPart(text="Hello")]),
+                usage=Usage(input_tokens=1, output_tokens=2, total_tokens=3),
+                reasoning_content="Thinking...",
+            )
+
+        mock_provider = MagicMock()
+        mock_provider.model = "test-model"
+        mock_provider.provider_name = "test"
+        mock_provider.complete = mock_complete
+
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_create.return_value = mock_provider
+            adapter = NativeLLMAdapter("test-model", streaming_enabled=True)
+
+            events: list[Any] = []
+            async for event in adapter.stream_events(messages=[{"role": "user", "content": "Hi"}]):
+                events.append(event)
+
+        assert any(e.delta_text == "Hello" for e in events)
+        assert any(e.delta_reasoning == "Thinking..." for e in events)
+        assert events[-1].done is True
+
+    @pytest.mark.asyncio
+    async def test_stream_events_raises_when_disabled(self) -> None:
+        mock_provider = MagicMock()
+        mock_provider.model = "test-model"
+        mock_provider.provider_name = "test"
+        mock_provider.complete = AsyncMock()
+
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_create.return_value = mock_provider
+            adapter = NativeLLMAdapter("test-model", streaming_enabled=False)
+
+            with pytest.raises(RuntimeError, match="Streaming is disabled"):
+                async for _ in adapter.stream_events(messages=[{"role": "user", "content": "Hi"}]):
+                    pass
 
 
 class TestNativeLLMAdapterBuildRequest:
@@ -450,10 +509,32 @@ class TestNativeLLMAdapterCost:
             assert cost > 0
 
     @pytest.mark.asyncio
-    async def test_zero_cost_no_usage(self) -> None:
-        """Test zero cost when no usage data."""
+    async def test_estimated_cost_no_usage_for_known_model(self) -> None:
+        """Test cost estimation when usage is missing but pricing is known."""
         mock_provider = MagicMock()
-        mock_provider.model = "gpt-4o"
+        mock_provider.model = "claude-haiku-4.5"
+        mock_provider.complete = AsyncMock(
+            return_value=CompletionResponse(
+                message=LLMMessage(role="assistant", parts=[TextPart(text="Response " * 200)]),
+                usage=Usage.zero(),
+            )
+        )
+
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter("claude-haiku-4.5")
+            content, cost = await adapter.complete(
+                messages=[{"role": "user", "content": "Hello " * 500}]
+            )
+
+            assert cost > 0.0
+
+    @pytest.mark.asyncio
+    async def test_zero_cost_no_usage_for_unknown_model(self) -> None:
+        """Test zero cost when usage is missing and pricing is unknown."""
+        mock_provider = MagicMock()
+        mock_provider.model = "totally-unknown-model"
         mock_provider.complete = AsyncMock(
             return_value=CompletionResponse(
                 message=LLMMessage(role="assistant", parts=[TextPart(text="Response")]),
@@ -464,7 +545,7 @@ class TestNativeLLMAdapterCost:
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_create.return_value = mock_provider
 
-            adapter = NativeLLMAdapter("gpt-4o")
+            adapter = NativeLLMAdapter("totally-unknown-model")
             content, cost = await adapter.complete(
                 messages=[{"role": "user", "content": "Hello"}]
             )

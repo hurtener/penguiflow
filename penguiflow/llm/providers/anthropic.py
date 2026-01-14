@@ -151,8 +151,10 @@ class AnthropicProvider(Provider):
     ) -> CompletionResponse:
         """Handle streaming completion."""
         text_acc: list[str] = []
+        reasoning_acc: list[str] = []
         tool_calls: list[dict[str, Any]] = []
         current_tool: dict[str, Any] | None = None
+        current_block_type: str | None = None
         usage: Usage | None = None
         finish_reason: str | None = None
 
@@ -164,6 +166,16 @@ class AnthropicProvider(Provider):
                             raise LLMCancelledError(message="Request cancelled", provider="anthropic")
 
                         if event.type == "content_block_start":
+                            current_block_type = event.content_block.type
+                            if event.content_block.type in ("thinking", "redacted_thinking"):
+                                initial = (
+                                    getattr(event.content_block, "thinking", None)
+                                    or getattr(event.content_block, "text", None)
+                                    or ""
+                                )
+                                if initial:
+                                    reasoning_acc.append(str(initial))
+                                    on_stream_event(StreamEvent(delta_reasoning=str(initial)))
                             if event.content_block.type == "tool_use":
                                 current_tool = {
                                     "id": event.content_block.id,
@@ -172,7 +184,16 @@ class AnthropicProvider(Provider):
                                 }
 
                         elif event.type == "content_block_delta":
-                            if hasattr(event.delta, "text"):
+                            if current_block_type in ("thinking", "redacted_thinking"):
+                                delta_thinking = (
+                                    getattr(event.delta, "thinking", None)
+                                    or getattr(event.delta, "text", None)
+                                    or ""
+                                )
+                                if delta_thinking:
+                                    reasoning_acc.append(str(delta_thinking))
+                                    on_stream_event(StreamEvent(delta_reasoning=str(delta_thinking)))
+                            elif hasattr(event.delta, "text"):
                                 text_acc.append(event.delta.text)
                                 on_stream_event(StreamEvent(delta_text=event.delta.text))
                             elif hasattr(event.delta, "partial_json") and current_tool:
@@ -182,6 +203,7 @@ class AnthropicProvider(Provider):
                             if current_tool:
                                 tool_calls.append(current_tool)
                                 current_tool = None
+                            current_block_type = None
 
                         elif event.type == "message_delta":
                             finish_reason = event.delta.stop_reason
@@ -230,6 +252,7 @@ class AnthropicProvider(Provider):
             message=LLMMessage(role="assistant", parts=parts),
             usage=usage or Usage.zero(),
             raw_response=None,
+            reasoning_content="".join(reasoning_acc) or None,
             finish_reason=finish_reason,
         )
 
@@ -364,10 +387,19 @@ class AnthropicProvider(Provider):
     def _from_anthropic_response(self, response: Any) -> CompletionResponse:
         """Convert Anthropic response to CompletionResponse."""
         parts: list[Any] = []
+        reasoning_acc: list[str] = []
 
         for block in response.content:
             if block.type == "text":
                 parts.append(TextPart(text=block.text))
+            elif block.type in ("thinking", "redacted_thinking"):
+                thinking_text = (
+                    getattr(block, "thinking", None)
+                    or getattr(block, "text", None)
+                    or ""
+                )
+                if thinking_text:
+                    reasoning_acc.append(str(thinking_text))
             elif block.type == "tool_use":
                 parts.append(
                     ToolCallPart(
@@ -387,6 +419,7 @@ class AnthropicProvider(Provider):
             message=LLMMessage(role="assistant", parts=parts),
             usage=usage,
             raw_response=response,
+            reasoning_content="".join(reasoning_acc) or None,
             finish_reason=response.stop_reason,
         )
 

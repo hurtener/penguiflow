@@ -246,3 +246,44 @@ class OpenAICompatibleProvider(Provider, ABC):
 
         message = LLMMessage(role="assistant", parts=parts)
         return message, usage
+
+    def _extract_openai_reasoning_content(self, message: Any) -> str | None:
+        """Best-effort extraction of reasoning/thinking content from OpenAI-shaped messages.
+
+        Different OpenAI-compatible backends may expose this under different fields.
+        """
+        if message is None:
+            return None
+
+        # SDK objects
+        for attr in ("reasoning_content", "reasoning", "thinking"):
+            val = getattr(message, attr, None)
+            if isinstance(val, str) and val:
+                return val
+
+        # Dict-shaped messages (defensive)
+        if isinstance(message, dict):
+            for key in ("reasoning_content", "reasoning", "thinking"):
+                val = message.get(key)
+                if isinstance(val, str) and val:
+                    return val
+
+        return None
+
+    def _extract_openai_delta_reasoning(self, delta: Any) -> str | None:
+        """Best-effort extraction of reasoning/thinking deltas from OpenAI-shaped streaming deltas."""
+        if delta is None:
+            return None
+
+        for attr in ("reasoning_content", "reasoning", "thinking"):
+            val = getattr(delta, attr, None)
+            if isinstance(val, str) and val:
+                return val
+
+        if isinstance(delta, dict):
+            for key in ("reasoning_content", "reasoning", "thinking"):
+                val = delta.get(key)
+                if isinstance(val, str) and val:
+                    return val
+
+        return None

@@ -205,9 +205,11 @@ class BedrockProvider(Provider):
         loop = asyncio.get_event_loop()
 
         text_acc: list[str] = []
+        reasoning_acc: list[str] = []
         tool_calls: list[dict[str, Any]] = []
         usage: Usage | None = None
         finish_reason: str | None = None
+        current_block_type: str | None = None
 
         try:
             async with asyncio.timeout(timeout):
@@ -224,9 +226,24 @@ class BedrockProvider(Provider):
 
                     if "contentBlockDelta" in event:
                         delta = event["contentBlockDelta"]["delta"]
-                        if "text" in delta:
+                        if "text" in delta and current_block_type == "reasoning":
+                            reasoning_acc.append(delta["text"])
+                            on_stream_event(StreamEvent(delta_reasoning=delta["text"]))
+                        elif "text" in delta:
                             text_acc.append(delta["text"])
                             on_stream_event(StreamEvent(delta_text=delta["text"]))
+                        elif "reasoningContent" in delta:
+                            rc = delta["reasoningContent"]
+                            if isinstance(rc, str) and rc:
+                                reasoning_acc.append(rc)
+                                on_stream_event(StreamEvent(delta_reasoning=rc))
+                            elif isinstance(rc, dict):
+                                for key in ("text", "reasoningText", "thinkingText", "content"):
+                                    val = rc.get(key)
+                                    if isinstance(val, str) and val:
+                                        reasoning_acc.append(val)
+                                        on_stream_event(StreamEvent(delta_reasoning=val))
+                                        break
                         elif "toolUse" in delta:
                             # Tool input streaming
                             pass  # Accumulate in content block stop
@@ -234,14 +251,19 @@ class BedrockProvider(Provider):
                     elif "contentBlockStart" in event:
                         start = event["contentBlockStart"]["start"]
                         if "toolUse" in start:
+                            current_block_type = "toolUse"
                             tool_calls.append({
                                 "id": start["toolUse"]["toolUseId"],
                                 "name": start["toolUse"]["name"],
                                 "input": "",
                             })
+                        elif "reasoningContent" in start:
+                            current_block_type = "reasoning"
+                        elif "text" in start:
+                            current_block_type = "text"
 
                     elif "contentBlockStop" in event:
-                        pass  # Finalize current block
+                        current_block_type = None
 
                     elif "messageStop" in event:
                         finish_reason = event["messageStop"].get("stopReason")
@@ -284,6 +306,7 @@ class BedrockProvider(Provider):
             message=LLMMessage(role="assistant", parts=parts),
             usage=usage or Usage.zero(),
             raw_response=None,
+            reasoning_content="".join(reasoning_acc) or None,
             finish_reason=finish_reason,
         )
 
@@ -422,6 +445,7 @@ class BedrockProvider(Provider):
     def _from_bedrock_response(self, response: dict[str, Any]) -> CompletionResponse:
         """Convert Bedrock response to CompletionResponse."""
         parts: list[Any] = []
+        reasoning_acc: list[str] = []
 
         output = response.get("output", {})
         message = output.get("message", {})
@@ -429,6 +453,17 @@ class BedrockProvider(Provider):
         for block in message.get("content", []):
             if "text" in block:
                 parts.append(TextPart(text=block["text"]))
+            elif "reasoningContent" in block:
+                rc = block["reasoningContent"]
+                if isinstance(rc, str) and rc:
+                    reasoning_acc.append(rc)
+                elif isinstance(rc, dict):
+                    # Bedrock Converse uses different shapes depending on model/provider.
+                    for key in ("text", "reasoningText", "thinkingText", "content"):
+                        val = rc.get(key)
+                        if isinstance(val, str) and val:
+                            reasoning_acc.append(val)
+                            break
             elif "toolUse" in block:
                 tu = block["toolUse"]
                 parts.append(
@@ -450,6 +485,7 @@ class BedrockProvider(Provider):
             message=LLMMessage(role="assistant", parts=parts),
             usage=usage,
             raw_response=response,
+            reasoning_content="".join(reasoning_acc) or None,
             finish_reason=response.get("stopReason"),
         )
 

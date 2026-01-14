@@ -70,9 +70,14 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
         if response_format is None and getattr(planner._client, "expects_json_schema", False):
             response_format = planner._action_schema
 
+        # Native LLM adapter supports the same callback-based streaming contract
+        # as the LiteLLM client. Keep the gating here so templates can enable/disable
+        # streaming consistently via `stream_final_response`.
+        from penguiflow.llm.protocol import NativeLLMAdapter
+
         stream_allowed = (
             planner._stream_final_response
-            and isinstance(planner._client, _LiteLLMJSONClient)
+            and isinstance(planner._client, (_LiteLLMJSONClient, NativeLLMAdapter))
             and (
                 response_format is None
                 or (
@@ -191,7 +196,10 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                 )
             )
         try:
-            if isinstance(planner._client, _LiteLLMJSONClient) and getattr(planner, "_use_native_reasoning", True):
+            if (
+                isinstance(planner._client, (_LiteLLMJSONClient, NativeLLMAdapter))
+                and getattr(planner, "_use_native_reasoning", True)
+            ):
                 llm_result = await planner._client.complete(
                     messages=messages,
                     response_format=response_format,

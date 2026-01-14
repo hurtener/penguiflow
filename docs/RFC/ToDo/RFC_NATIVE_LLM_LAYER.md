@@ -43,6 +43,37 @@ This is the intended “works as designed” surface for v1; anything beyond thi
 - Databricks: `native` (constrained decoding `json_schema`), `tools` (preview limits), `prompted`, usage (streaming best-effort)
 - OpenRouter: OpenAI-compatible best-effort (depends on routed provider)
 
+### Thinking / Reasoning Normalization (January 2026)
+
+PenguiFlow normalizes “thinking / reasoning” into:
+
+- `CompletionResponse.reasoning_content` (non-streaming)
+- `StreamEvent.delta_reasoning` (streaming deltas)
+
+Provider SDKs do **not** share a single canonical field name. As of **January 2026** (and as implemented in `penguiflow/llm/providers/`), we extract reasoning/thinking using the following best-effort rules:
+
+- OpenAI (`penguiflow/llm/providers/openai.py`)
+  - Non-stream: `response.choices[0].message.reasoning_content`
+  - Stream: `chunk.choices[0].delta.reasoning_content`
+- OpenAI-compatible (OpenRouter, Databricks) (`penguiflow/llm/providers/base.py`)
+  - Non-stream: first non-empty of `message.reasoning_content`, `message.reasoning`, `message.thinking`
+  - Stream: first non-empty of `delta.reasoning_content`, `delta.reasoning`, `delta.thinking`
+- Anthropic (`penguiflow/llm/providers/anthropic.py`)
+  - Non-stream: `response.content` blocks with `type in {"thinking","redacted_thinking"}` (using `block.thinking` or `block.text`)
+  - Stream: `content_block_start`/`content_block_delta` for thinking blocks (using `delta.thinking` or `delta.text`)
+- AWS Bedrock Converse (`penguiflow/llm/providers/bedrock.py`)
+  - Non-stream: `output.message.content` blocks with `reasoningContent` (extracting `text`/`reasoningText`/`thinkingText`/`content`)
+  - Stream: `contentBlockStart` + `contentBlockDelta` reasoning blocks (best-effort; Bedrock event shapes vary by routed model)
+- Google Gemini (`penguiflow/llm/providers/google.py`)
+  - Non-stream: candidate `content.parts` looking for `thought` / `thinking` / `thinking_content` / `reasoning` / `reasoning_content`
+  - Stream: same scan against streamed `chunk.candidates[0].content.parts` (best-effort; SDK shapes evolve)
+
+Notes:
+
+- Reasoning/thinking is always treated as **separate** from user-visible `TextPart` output; providers must not concatenate it into assistant text.
+- Some providers may only return reasoning at the end of generation; in those cases streaming will emit it as late as possible (often at completion time).
+- This mapping is expected to evolve as providers change SDK field names; keep provider notes/docstrings updated when bumping SDK versions.
+
 ## Motivation
 
 ### Current State

@@ -154,6 +154,7 @@ class GoogleProvider(Provider):
     ) -> CompletionResponse:
         """Handle streaming completion."""
         text_acc: list[str] = []
+        reasoning_acc: list[str] = []
         usage: Usage | None = None
         finish_reason: str | None = None
 
@@ -170,6 +171,22 @@ class GoogleProvider(Provider):
                     if chunk.text:
                         text_acc.append(chunk.text)
                         on_stream_event(StreamEvent(delta_text=chunk.text))
+
+                    # Best-effort reasoning/thinking extraction from candidates content parts.
+                    if hasattr(chunk, "candidates") and chunk.candidates and chunk.candidates[0].content:
+                        for part in chunk.candidates[0].content.parts:
+                            for attr in (
+                                "thought",
+                                "thinking",
+                                "thinking_content",
+                                "reasoning",
+                                "reasoning_content",
+                            ):
+                                val = getattr(part, attr, None)
+                                if isinstance(val, str) and val:
+                                    reasoning_acc.append(val)
+                                    on_stream_event(StreamEvent(delta_reasoning=val))
+                                    break
 
                     if chunk.usage_metadata:
                         usage = Usage(
@@ -200,6 +217,7 @@ class GoogleProvider(Provider):
             message=LLMMessage(role="assistant", parts=parts),
             usage=usage or Usage.zero(),
             raw_response=None,
+            reasoning_content="".join(reasoning_acc) or None,
             finish_reason=finish_reason,
         )
 
@@ -304,6 +322,7 @@ class GoogleProvider(Provider):
     def _from_google_response(self, response: GenerateContentResponse) -> CompletionResponse:
         """Convert Google GenerateContentResponse to CompletionResponse."""
         parts: list[TextPart | ToolCallPart | ToolResultPart | ImagePart] = []
+        reasoning_acc: list[str] = []
 
         if response.candidates and response.candidates[0].content:
             for part in response.candidates[0].content.parts:
@@ -317,6 +336,18 @@ class GoogleProvider(Provider):
                             call_id=None,  # Google doesn't use call IDs
                         )
                     )
+                else:
+                    for attr in (
+                        "thought",
+                        "thinking",
+                        "thinking_content",
+                        "reasoning",
+                        "reasoning_content",
+                    ):
+                        val = getattr(part, attr, None)
+                        if isinstance(val, str) and val:
+                            reasoning_acc.append(val)
+                            break
 
         usage = Usage.zero()
         if response.usage_metadata:
@@ -334,6 +365,7 @@ class GoogleProvider(Provider):
             message=LLMMessage(role="assistant", parts=parts),
             usage=usage,
             raw_response=response,
+            reasoning_content="".join(reasoning_acc) or None,
             finish_reason=finish_reason,
         )
 
