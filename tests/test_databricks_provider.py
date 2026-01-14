@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from urllib.parse import urljoin
+from typing import Any
 from unittest.mock import MagicMock, patch
+from urllib.parse import urljoin
 
 import pytest
 
@@ -59,7 +60,9 @@ async def test_databricks_structured_output_streaming_degrades_to_single_chunk()
 
     provider._client = SimpleNamespace(post=post)
 
-    async def mock_stream_completion(params: dict[str, Any], on_stream_event: object, timeout: float, cancel: object) -> object:
+    async def mock_stream_completion(
+        params: dict[str, Any], on_stream_event: object, timeout: float, cancel: object
+    ) -> object:
         # response_format should be dropped for streaming
         assert "response_format" not in params
         # and schema guidance should be injected

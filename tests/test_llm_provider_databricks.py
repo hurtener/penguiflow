@@ -798,8 +798,8 @@ class TestDatabricksThinkingBudget:
 
 
 @pytest.mark.skip(reason="Deprecated: tests below target old chat.completions path.")
-class TestDatabricksProviderComplete:
-    """Test Databricks provider complete method."""
+class TestDatabricksProviderCompleteLegacy:
+    """Test Databricks provider complete method (legacy chat.completions path)."""
 
     def _create_mock_response(
         self,

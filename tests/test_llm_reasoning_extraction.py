@@ -73,7 +73,7 @@ async def test_openrouter_stream_emits_reasoning() -> None:
             self._chunks = chunks
             self._idx = 0
 
-        def __aiter__(self) -> "FakeStream":
+        def __aiter__(self) -> FakeStream:
             return self
 
         async def __anext__(self) -> FakeChunk:
