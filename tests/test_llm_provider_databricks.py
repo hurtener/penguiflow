@@ -59,6 +59,27 @@ class TestDatabricksProviderInit:
             assert call_kwargs["api_key"] == "dapi-token-123"
             assert "my-workspace.cloud.databricks.com" in call_kwargs["base_url"]
 
+    def test_init_strips_databricks_prefix(self, mock_openai_sdk: MagicMock) -> None:
+        """Test that databricks/ prefix is stripped from model name."""
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.databricks import DatabricksProvider
+
+            provider = DatabricksProvider(
+                "databricks/databricks-gpt-5-2",
+                host="my-workspace.cloud.databricks.com",
+                token="token",
+            )
+
+            # Model should have prefix stripped
+            assert provider.model == "databricks-gpt-5-2"
+            assert provider._endpoint == "databricks-gpt-5-2"
+            assert provider._original_model == "databricks/databricks-gpt-5-2"
+
+            # Base URL should use stripped endpoint name
+            call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
+            assert "databricks-gpt-5-2" in call_kwargs["base_url"]
+            assert "databricks/databricks-gpt-5-2" not in call_kwargs["base_url"]
+
     def test_init_normalizes_host(self, mock_openai_sdk: MagicMock) -> None:
         """Test that host is normalized."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
@@ -442,6 +463,340 @@ class TestDatabricksProviderComplete:
         with pytest.raises(LLMCancelledError):
             await provider.complete(request, cancel=cancel)
 
+
+class TestDatabricksProviderStreaming:
+    """Test Databricks provider streaming with structured output fallback."""
+
+    @pytest.mark.asyncio
+    async def test_streaming_drops_response_format_and_adds_guidance(self) -> None:
+        """Databricks rejects structured output with streaming; verify fallback."""
+        from types import SimpleNamespace
+
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+        provider._timeout = 5.0
+        provider._model = "databricks-claude-sonnet-4-5"
+        provider._profile = MagicMock()
+        provider._profile.max_output_tokens = 64000
+
+        captured_params: dict[str, Any] = {}
+
+        async def mock_stream_gen():
+            # Single text chunk
+            chunk = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content='{"result": "ok"}', tool_calls=None),
+                        finish_reason=None,
+                    )
+                ]
+            )
+            yield chunk
+            # Final chunk with usage
+            final = SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+            yield final
+
+        async def post(
+            path: str,
+            *,
+            body: object,
+            cast_to: object,
+            stream: bool = False,
+            stream_cls: object = None,
+        ) -> object:
+            captured_params.update(body)  # type: ignore[arg-type]
+            return mock_stream_gen()
+
+        provider._client = SimpleNamespace(post=post)
+
+        schema = {"type": "object", "properties": {"result": {"type": "string"}}}
+        request = LLMRequest(
+            model="databricks-claude-sonnet-4-5",
+            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            structured_output=StructuredOutputSpec(
+                name="TestSchema",
+                json_schema=schema,
+                strict=True,
+            ),
+        )
+
+        events: list[StreamEvent] = []
+        response = await provider.complete(
+            request,
+            stream=True,
+            on_stream_event=lambda e: events.append(e),
+        )
+
+        # response_format should be dropped for streaming
+        assert "response_format" not in captured_params
+        # System message with schema guidance should be prepended
+        assert any("JSON Schema" in str(m.get("content", "")) for m in captured_params["messages"])
+        assert response.message.text == '{"result": "ok"}'
+
+    @pytest.mark.asyncio
+    async def test_streaming_with_tool_calls(self) -> None:
+        """Test streaming handles tool calls correctly."""
+        from types import SimpleNamespace
+
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+        provider._timeout = 5.0
+        provider._model = "databricks-claude-sonnet-4-5"
+        provider._profile = MagicMock()
+
+        async def mock_stream_gen():
+            # Tool call chunk with function name
+            tc1 = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=None,
+                            tool_calls=[
+                                SimpleNamespace(
+                                    index=0,
+                                    id="call_123",
+                                    function=SimpleNamespace(name="get_weather", arguments='{"city":'),
+                                )
+                            ],
+                        ),
+                        finish_reason=None,
+                    )
+                ]
+            )
+            yield tc1
+            # Tool call chunk with more arguments
+            tc2 = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=None,
+                            tool_calls=[
+                                SimpleNamespace(
+                                    index=0,
+                                    id=None,
+                                    function=SimpleNamespace(name=None, arguments='"NYC"}'),
+                                )
+                            ],
+                        ),
+                        finish_reason="tool_calls",
+                    )
+                ]
+            )
+            yield tc2
+            # Usage chunk
+            final = SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+            yield final
+
+        async def post(path: str, **kwargs: Any) -> Any:
+            return mock_stream_gen()
+
+        provider._client = SimpleNamespace(post=post)
+
+        request = LLMRequest(
+            model="databricks-claude-sonnet-4-5",
+            messages=(LLMMessage(role="user", parts=[TextPart(text="Weather?")]),),
+        )
+
+        events: list[StreamEvent] = []
+        response = await provider.complete(
+            request,
+            stream=True,
+            on_stream_event=lambda e: events.append(e),
+        )
+
+        assert len(response.message.parts) == 1
+        assert isinstance(response.message.parts[0], ToolCallPart)
+        assert response.message.parts[0].name == "get_weather"
+        assert response.message.parts[0].arguments_json == '{"city":"NYC"}'
+
+    @pytest.mark.asyncio
+    async def test_streaming_with_reasoning_list_content(self) -> None:
+        """Test streaming handles list-shaped content with reasoning blocks."""
+        from types import SimpleNamespace
+
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+        provider._timeout = 5.0
+        provider._model = "databricks-claude-sonnet-4-5"
+        provider._profile = MagicMock()
+
+        async def mock_stream_gen():
+            # Content as list with reasoning
+            chunk = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=[
+                                {"type": "thinking", "text": "Let me reason..."},
+                                {"type": "text", "text": "Final answer."},
+                            ],
+                            tool_calls=None,
+                        ),
+                        finish_reason="stop",
+                    )
+                ]
+            )
+            yield chunk
+            final = SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+            yield final
+
+        async def post(path: str, **kwargs: Any) -> Any:
+            return mock_stream_gen()
+
+        provider._client = SimpleNamespace(post=post)
+
+        request = LLMRequest(
+            model="databricks-claude-sonnet-4-5",
+            messages=(LLMMessage(role="user", parts=[TextPart(text="Think")]),),
+        )
+
+        events: list[StreamEvent] = []
+        response = await provider.complete(
+            request,
+            stream=True,
+            on_stream_event=lambda e: events.append(e),
+        )
+
+        assert response.message.text == "Final answer."
+        assert response.reasoning_content == "Let me reason..."
+
+    @pytest.mark.asyncio
+    async def test_streaming_timeout(self) -> None:
+        """Test streaming timeout handling."""
+        from types import SimpleNamespace
+
+        from penguiflow.llm.errors import LLMError
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+        provider._timeout = 0.001
+        provider._model = "databricks-claude-sonnet-4-5"
+        provider._profile = MagicMock()
+
+        async def post(path: str, **kwargs: Any) -> Any:
+            raise TimeoutError("Stream timed out")
+
+        provider._client = SimpleNamespace(post=post)
+
+        request = LLMRequest(
+            model="databricks-claude-sonnet-4-5",
+            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+        )
+
+        # TimeoutError is caught and mapped to LLMError (or LLMTimeoutError)
+        with pytest.raises((LLMTimeoutError, LLMError)):
+            await provider.complete(
+                request,
+                stream=True,
+                on_stream_event=lambda e: None,
+            )
+
+
+class TestDatabricksThinkingBudget:
+    """Test Databricks thinking budget token mapping."""
+
+    def test_thinking_budget_tokens_for_effort_low(self) -> None:
+        """Test low effort maps to 4096 tokens."""
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+        assert provider._thinking_budget_tokens_for_effort("low") == 4096
+        assert provider._thinking_budget_tokens_for_effort("minimal") == 4096
+
+    def test_thinking_budget_tokens_for_effort_medium(self) -> None:
+        """Test medium effort maps to 16384 tokens."""
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+        assert provider._thinking_budget_tokens_for_effort("medium") == 16384
+        assert provider._thinking_budget_tokens_for_effort("default") == 16384
+
+    def test_thinking_budget_tokens_for_effort_high(self) -> None:
+        """Test high effort maps to 32768 tokens."""
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+        assert provider._thinking_budget_tokens_for_effort("high") == 32768
+        assert provider._thinking_budget_tokens_for_effort("max") == 32768
+
+    def test_thinking_budget_tokens_for_effort_unknown(self) -> None:
+        """Test unknown effort defaults to 4096 tokens."""
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+        assert provider._thinking_budget_tokens_for_effort("unknown") == 4096
+
+    def test_ensure_thinking_budget_sets_max_tokens(self) -> None:
+        """Test that thinking budget sets max_tokens when not provided."""
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+        provider._profile = MagicMock()
+        provider._profile.max_output_tokens = 64000
+
+        params: dict[str, Any] = {"thinking": {"type": "enabled", "budget_tokens": 8000}}
+        provider._ensure_thinking_budget_and_max_tokens(params, request_max_tokens=None)
+
+        # max_tokens should be set to budget + DEFAULT_VISIBLE_OUTPUT_TOKENS_WITH_THINKING
+        assert params["max_tokens"] == 8000 + DatabricksProvider.DEFAULT_VISIBLE_OUTPUT_TOKENS_WITH_THINKING
+
+    def test_ensure_thinking_budget_shrinks_budget_when_max_tokens_too_small(self) -> None:
+        """Test that budget is shrunk when max_tokens <= budget."""
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+        provider._profile = MagicMock()
+        provider._profile.max_output_tokens = 64000
+
+        params: dict[str, Any] = {
+            "thinking": {"type": "enabled", "budget_tokens": 8000},
+            "max_tokens": 5000,
+        }
+        provider._ensure_thinking_budget_and_max_tokens(params, request_max_tokens=None)
+
+        # Budget should be shrunk to max_tokens - 1
+        assert params["thinking"]["budget_tokens"] == 4999
+
+    def test_ensure_thinking_budget_removes_thinking_when_budget_zero(self) -> None:
+        """Test that thinking is removed when budget would be <= 0."""
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+        provider._profile = MagicMock()
+        provider._profile.max_output_tokens = 64000
+
+        params: dict[str, Any] = {
+            "thinking": {"type": "enabled", "budget_tokens": 0},
+        }
+        provider._ensure_thinking_budget_and_max_tokens(params, request_max_tokens=None)
+
+        assert "thinking" not in params
+
+    def test_ensure_thinking_budget_noop_without_thinking(self) -> None:
+        """Test that method does nothing when thinking is not set."""
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+        provider._profile = MagicMock()
+
+        params: dict[str, Any] = {"max_tokens": 1000}
+        provider._ensure_thinking_budget_and_max_tokens(params, request_max_tokens=1000)
+
+        assert params == {"max_tokens": 1000}
+
+
 @pytest.mark.skip(reason="Deprecated: tests below target old chat.completions path.")
 class TestDatabricksProviderComplete:
     """Test Databricks provider complete method."""
@@ -620,8 +975,8 @@ class TestDatabricksProviderComplete:
 
 
 @pytest.mark.skip(reason="Deprecated: Databricks provider streaming uses /invocations via client.post(stream=True).")
-class TestDatabricksProviderStreaming:
-    """Test Databricks provider streaming."""
+class TestDatabricksProviderStreamingLegacy:
+    """Test Databricks provider streaming (legacy/deprecated)."""
 
     @pytest.mark.asyncio
     async def test_streaming_text(self, mock_openai_sdk: MagicMock) -> None:
@@ -693,6 +1048,149 @@ class TestDatabricksProviderStreaming:
             assert response.message.text == "Hello world!"
 
 
+class TestDatabricksProviderErrorMapping:
+    """Test Databricks provider error mapping."""
+
+    def test_map_auth_error(self) -> None:
+        """Test authentication error mapping."""
+        from openai import AuthenticationError
+
+        from penguiflow.llm.errors import LLMAuthError
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+
+        response = MagicMock()
+        response.status_code = 401
+        exc = AuthenticationError(
+            message="Invalid token",
+            response=response,
+            body=None,
+        )
+        result = provider._map_error(exc)
+        assert isinstance(result, LLMAuthError)
+
+    def test_map_rate_limit_error(self) -> None:
+        """Test rate limit error mapping."""
+        from openai import RateLimitError
+
+        from penguiflow.llm.errors import LLMRateLimitError
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+
+        response = MagicMock()
+        response.status_code = 429
+        exc = RateLimitError(
+            message="Rate limited",
+            response=response,
+            body=None,
+        )
+        result = provider._map_error(exc)
+        assert isinstance(result, LLMRateLimitError)
+
+    def test_map_context_length_error(self) -> None:
+        """Test context length error mapping via BadRequestError."""
+        from openai import BadRequestError
+
+        from penguiflow.llm.errors import LLMContextLengthError
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+
+        response = MagicMock()
+        response.status_code = 400
+        exc = BadRequestError(
+            message="context_length_exceeded: Input too long",
+            response=response,
+            body=None,
+        )
+        result = provider._map_error(exc)
+        assert isinstance(result, LLMContextLengthError)
+
+    def test_map_server_error(self) -> None:
+        """Test server error mapping via APIStatusError."""
+        from openai import APIStatusError
+
+        from penguiflow.llm.errors import LLMServerError
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+
+        response = MagicMock()
+        response.status_code = 500
+        exc = APIStatusError(
+            message="Internal server error",
+            response=response,
+            body=None,
+        )
+        result = provider._map_error(exc)
+        assert isinstance(result, LLMServerError)
+
+    def test_map_generic_error(self) -> None:
+        """Test generic error mapping."""
+        from penguiflow.llm.errors import LLMError
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+
+        exc = ValueError("Unknown error")
+        result = provider._map_error(exc)
+        assert isinstance(result, LLMError)
+        assert "Unknown error" in result.message
+
+    def test_map_bad_request_non_context_error(self) -> None:
+        """Test bad request error mapping (non-context length)."""
+        from openai import BadRequestError
+
+        from penguiflow.llm.errors import LLMInvalidRequestError
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+
+        response = MagicMock()
+        response.status_code = 400
+        exc = BadRequestError(
+            message="Invalid parameter",
+            response=response,
+            body=None,
+        )
+        result = provider._map_error(exc)
+        assert isinstance(result, LLMInvalidRequestError)
+
+    def test_map_api_connection_error(self) -> None:
+        """Test API connection error mapping."""
+        from openai import APIConnectionError
+
+        from penguiflow.llm.errors import LLMServerError
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+
+        exc = APIConnectionError(message="Connection failed", request=MagicMock())
+        result = provider._map_error(exc)
+        assert isinstance(result, LLMServerError)
+
+    def test_map_api_status_error_4xx(self) -> None:
+        """Test API status error mapping for 4xx errors."""
+        from openai import APIStatusError
+
+        from penguiflow.llm.errors import LLMInvalidRequestError
+        from penguiflow.llm.providers.databricks import DatabricksProvider
+
+        provider = DatabricksProvider.__new__(DatabricksProvider)
+
+        response = MagicMock()
+        response.status_code = 422
+        exc = APIStatusError(
+            message="Unprocessable entity",
+            response=response,
+            body=None,
+        )
+        result = provider._map_error(exc)
+        assert isinstance(result, LLMInvalidRequestError)
+
+
 class TestDatabricksProviderErrorExtraction:
     """Test Databricks error message extraction."""
 
@@ -730,8 +1228,8 @@ class TestDatabricksProviderErrorExtraction:
             assert "Input is too long" in result
 
 
-class TestDatabricksProviderErrorMapping:
-    """Test Databricks provider error mapping."""
+class TestDatabricksProviderErrorMappingFallback:
+    """Test Databricks provider error mapping fallback."""
 
     def test_map_unknown_error_without_sdk_imports(self, mock_openai_sdk: MagicMock) -> None:
         """Test error mapping falls back to generic error when SDK classes unavailable."""

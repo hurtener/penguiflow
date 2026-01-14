@@ -802,7 +802,7 @@ def _generate_config(
     config_path = project_dir / "src" / package_name / "config.py"
 
     memory_base = repr(spec.services.memory_iceberg.base_url) if spec.services.memory_iceberg.base_url else "None"
-    lighthouse_base = repr(spec.services.lighthouse.base_url) if spec.services.lighthouse.base_url else "None"
+    rag_server_base = repr(spec.services.rag_server.base_url) if spec.services.rag_server.base_url else "None"
     wayfinder_base = repr(spec.services.wayfinder.base_url) if spec.services.wayfinder.base_url else "None"
     stm = spec.planner.short_term_memory
     stm_budget = stm.budget if stm else None
@@ -825,7 +825,7 @@ def _generate_config(
             "reflection_quality_threshold": spec.llm.reflection.quality_threshold if spec.llm.reflection else 0.8,
             "reflection_max_revisions": spec.llm.reflection.max_revisions if spec.llm.reflection else 2,
             "memory_base_url": memory_base,
-            "lighthouse_base_url": lighthouse_base,
+            "rag_server_base_url": rag_server_base,
             "wayfinder_base_url": wayfinder_base,
             "planner_max_iters": spec.planner.max_iters,
             "planner_hop_budget": spec.planner.hop_budget,
@@ -929,7 +929,7 @@ def _generate_env_example(
             "summarizer_enabled": str(bool(spec.llm.summarizer and spec.llm.summarizer.enabled)).lower(),
             "reflection_enabled": str(bool(spec.llm.reflection and spec.llm.reflection.enabled)).lower(),
             "memory_base_url": spec.services.memory_iceberg.base_url or "http://localhost:8000",
-            "lighthouse_base_url": spec.services.lighthouse.base_url or "http://localhost:8081",
+            "rag_server_base_url": spec.services.rag_server.base_url or "http://localhost:8081",
             "wayfinder_base_url": spec.services.wayfinder.base_url or "http://localhost:8082",
             "planner_max_iters": spec.planner.max_iters,
             "planner_hop_budget": spec.planner.hop_budget,

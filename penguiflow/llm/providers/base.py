@@ -307,7 +307,7 @@ class OpenAICompatibleProvider(Provider, ABC):
                     # Databricks Claude: {"type":"reasoning","summary":[{"text":"..."}]}
                     summary = item.get("summary")
                     if isinstance(summary, list):
-                        texts: list[str] = []
+                        texts = []
                         for s in summary:
                             if isinstance(s, dict) and isinstance(s.get("text"), str) and s["text"]:
                                 texts.append(s["text"])

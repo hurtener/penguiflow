@@ -215,7 +215,7 @@ class AgentFlagsSpec(BaseModel):
 class AgentSpec(BaseModel):
     name: str
     description: str
-    template: Literal["minimal", "react", "parallel", "lighthouse", "wayfinder", "analyst", "enterprise"]
+    template: Literal["minimal", "react", "parallel", "rag_server", "wayfinder", "analyst", "enterprise"]
     flags: AgentFlagsSpec = Field(default_factory=AgentFlagsSpec)
 
     model_config = ConfigDict(extra="forbid")
@@ -434,7 +434,7 @@ class ServiceConfigSpec(BaseModel):
 
 class ServiceSpec(BaseModel):
     memory_iceberg: ServiceConfigSpec = Field(default_factory=ServiceConfigSpec)
-    lighthouse: ServiceConfigSpec = Field(default_factory=ServiceConfigSpec)
+    rag_server: ServiceConfigSpec = Field(default_factory=ServiceConfigSpec)
     wayfinder: ServiceConfigSpec = Field(default_factory=ServiceConfigSpec)
 
     model_config = ConfigDict(extra="forbid")
@@ -868,10 +868,10 @@ def _validate_services(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail]:
     errors: list[SpecErrorDetail] = []
     default_urls = {
         "memory_iceberg": "http://localhost:8000",
-        "lighthouse": "http://localhost:8081",
+        "rag_server": "http://localhost:8081",
         "wayfinder": "http://localhost:8082",
     }
-    for field_name in ("memory_iceberg", "lighthouse", "wayfinder"):
+    for field_name in ("memory_iceberg", "rag_server", "wayfinder"):
         cfg: ServiceConfigSpec = getattr(spec.services, field_name)
         if cfg.enabled and not cfg.base_url:
             path = ("services", field_name, "base_url")

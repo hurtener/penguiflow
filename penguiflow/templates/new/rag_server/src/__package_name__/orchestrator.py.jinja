@@ -22,7 +22,7 @@ from penguiflow.sessions.tool_jobs import build_tool_job_pipeline
 {% if with_a2a %}
 from .a2a import A2AServer
 {% endif %}
-from .clients.lighthouse import LighthouseClient
+from .clients.rag_server import RagServerClient
 {% if memory_enabled %}
 from .clients.memory import MemoryClient
 {% endif %}
@@ -108,7 +108,7 @@ class {{ class_name }}Orchestrator:
 {% else %}
         self._memory = None
 {% endif %}
-        self._lighthouse = LighthouseClient(config.lighthouse_base_url)
+        self._rag_server = RagServerClient(config.rag_server_base_url)
         self._telemetry = telemetry or AgentTelemetry(
             flow_name="{{ project_name }}",
             logger=_LOGGER,
@@ -201,7 +201,7 @@ class {{ class_name }}Orchestrator:
         tool_context: Mapping[str, Any] | None = None,
         steering: SteeringInbox | None = None,
     ) -> AgentResponse:
-        """Execute the ReactPlanner with lighthouse integration."""
+        """Execute the ReactPlanner with RAG server integration."""
         trace_id = secrets.token_hex(8)
         turn_id = secrets.token_hex(8)
 
@@ -234,7 +234,7 @@ class {{ class_name }}Orchestrator:
             "turn_id": turn_id,
             "task_id": trace_id,
             "is_subagent": False,
-            "lighthouse_base_url": self._config.lighthouse_base_url,
+            "rag_server_base_url": self._config.rag_server_base_url,
             "status_publisher": self._telemetry.publish_status,
         }
         merged_tool_context = {
@@ -321,7 +321,7 @@ class {{ class_name }}Orchestrator:
             "turn_id": turn_id,
             "task_id": trace_id,
             "is_subagent": False,
-            "lighthouse_base_url": self._config.lighthouse_base_url,
+            "rag_server_base_url": self._config.rag_server_base_url,
             "status_publisher": self._telemetry.publish_status,
         }
         merged_tool_context = {

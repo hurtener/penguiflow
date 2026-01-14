@@ -303,7 +303,8 @@ class DatabricksProvider(OpenAICompatibleProvider):
                             if not isinstance(item, dict):
                                 continue
                             item_type = item.get("type")
-                            if item_type in ("text", "output_text") and isinstance(item.get("text"), str) and item["text"]:
+                            item_text = item.get("text")
+                            if item_type in ("text", "output_text") and isinstance(item_text, str) and item_text:
                                 text_acc.append(item["text"])
                                 on_stream_event(StreamEvent(delta_text=item["text"]))
                             elif item_type in ("reasoning", "thinking", "thought"):
@@ -355,12 +356,12 @@ class DatabricksProvider(OpenAICompatibleProvider):
             parts.append(TextPart(text=full_text))
 
         for idx in sorted(tool_calls_acc.keys()):
-            tc = tool_calls_acc[idx]
+            tc_data = tool_calls_acc[idx]
             parts.append(
                 ToolCallPart(
-                    name=tc["name"],
-                    arguments_json=tc["arguments"],
-                    call_id=tc["id"],
+                    name=tc_data["name"],
+                    arguments_json=tc_data["arguments"],
+                    call_id=tc_data["id"],
                 )
             )
 

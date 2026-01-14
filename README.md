@@ -60,7 +60,7 @@ It provides:
 **v2.5 CLI Scaffolding (included):**
 - Full `penguiflow new` command with 9 project templates
 - **Tier 1 (Core):** `minimal`, `react`, `parallel` — foundational patterns
-- **Tier 2 (Service):** `lighthouse`, `wayfinder`, `analyst` — domain-ready agents
+- **Tier 2 (Service):** `rag_server`, `wayfinder`, `analyst` — domain-ready agents
 - **Tier 3 (Enterprise):** `enterprise` — multi-tenant with RBAC, quotas, audit trails
 - **Additional:** `flow`, `controller` — traditional PenguiFlow patterns
 - **Enhancement flags:** `--with-streaming`, `--with-hitl`, `--with-a2a`, `--no-memory`

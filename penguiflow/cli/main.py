@@ -142,7 +142,7 @@ def dev(project_root: str, host: str, port: int, no_browser: bool) -> None:
     "-t",
     default="react",
     type=click.Choice(
-        ["minimal", "react", "parallel", "flow", "controller", "lighthouse", "wayfinder", "analyst", "enterprise"],
+        ["minimal", "react", "parallel", "flow", "controller", "rag_server", "wayfinder", "analyst", "enterprise"],
         case_sensitive=False,
     ),
     show_default=True,

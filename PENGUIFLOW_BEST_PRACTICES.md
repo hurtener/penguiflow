@@ -1,8 +1,8 @@
-# PenguiFlow Implementation Guide: Production Best Practices
+# PenguiFlow DAG Implementation Guide: Production Best Practices
 
 ## Introduction
 
-This guide distills production-tested patterns from an internal PenguiFlow deployment (referenced here as `memory_service`), a memory management system built entirely on PenguiFlow. The codebase demonstrates advanced flow orchestration patterns, error handling, validation, and testing practices that downstream teams can adopt.
+This guide distills production-tested patterns from an internal PenguiFlow deployment (referenced here as `memory_service`), a memory management system built entirely on PenguiFlow. The codebase demonstrates advanced flow orchestration patterns, error handling, validation, and testing practices to be adopted.
 
 ---
 

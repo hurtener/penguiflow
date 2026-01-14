@@ -78,7 +78,7 @@ class Config:
 
     # Service URLs
     memory_base_url: str | None = {{ memory_base_url }}
-    lighthouse_base_url: str | None = {{ lighthouse_base_url }}
+    rag_server_base_url: str | None = {{ rag_server_base_url }}
     wayfinder_base_url: str | None = {{ wayfinder_base_url }}
 
     # Planner Settings
@@ -164,7 +164,7 @@ class Config:
 
             # Service URLs (None if not set)
             memory_base_url=os.getenv("MEMORY_BASE_URL"),
-            lighthouse_base_url=os.getenv("LIGHTHOUSE_BASE_URL"),
+            rag_server_base_url=os.getenv("RAG_SERVER_BASE_URL"),
             wayfinder_base_url=os.getenv("WAYFINDER_BASE_URL"),
 
             # Planner Settings

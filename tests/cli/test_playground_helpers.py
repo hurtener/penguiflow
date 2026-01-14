@@ -289,7 +289,7 @@ planner:
             assert len(meta.services) == 3
             service_names = [s["name"] for s in meta.services]
             assert "memory_iceberg" in service_names
-            assert "lighthouse" in service_names
+            assert "rag_server" in service_names
             assert "wayfinder" in service_names
 
             # Verify tools list is populated (lines 202-210)

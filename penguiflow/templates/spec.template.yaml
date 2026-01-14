@@ -3,7 +3,7 @@
 agent:
   name: my-agent
   description: Example agent project
-  template: react  # minimal|react|parallel|lighthouse|wayfinder|analyst|enterprise
+  template: react  # minimal|react|parallel|rag_server|wayfinder|analyst|enterprise
   flags:
     streaming: true
     hitl: false
@@ -45,7 +45,7 @@ services:
   memory_iceberg:
     enabled: false
     base_url: http://localhost:8000
-  lighthouse:
+  rag_server:
     enabled: false
     base_url: http://localhost:8081
   wayfinder:

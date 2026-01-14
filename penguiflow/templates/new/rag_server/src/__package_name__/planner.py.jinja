@@ -38,7 +38,7 @@ class PlannerBundle:
 
 
 class ScriptedLLM:
-    """Deterministic LLM client that returns lighthouse planner actions."""
+    """Deterministic LLM client that returns RAG server planner actions."""
 
     def __init__(self, scripted: Sequence[Mapping[str, Any]] | None = None) -> None:
         self._scripted = [json.dumps(item, ensure_ascii=False) for item in scripted] if scripted else None

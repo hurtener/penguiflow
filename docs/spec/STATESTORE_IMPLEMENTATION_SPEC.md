@@ -6,6 +6,8 @@
 
 This document provides a complete specification for implementing a StateStore backend compatible with PenguiFlow. It covers the protocol definition, data types, method contracts, integration points, distributed deployment patterns, and production best practices.
 
+> **Forward-looking backlog:** For known gaps and the roadmap to make this surface even more robust, see `docs/RFC/ToDo/RFC_STATESTORE_GOLD_STANDARD_FOLLOWUPS.md`.
+
 ---
 
 ## Table of Contents
@@ -65,7 +67,7 @@ This document provides a complete specification for implementing a StateStore ba
 
 1. **Optional but recommended** - Flows work without a StateStore, but persistence features require one
 2. **Protocol-based (duck-typing)** - No inheritance required; just implement the methods
-3. **Fail-safe** - StateStore errors never crash the runtime; errors are logged and execution continues
+3. **Fail-safe where it matters** - Core runtime audit-log persistence is best-effort (errors are logged and execution continues). Session/Planner subsystems *expect stores to be reliable*, so downstream implementations should treat all methods as "must not throw" and instead degrade gracefully (timeouts, circuit breakers, dead-letter queues, etc.)
 4. **Async-only** - All methods must be async/awaitable
 5. **Idempotent writes** - `save_event` may be called multiple times for the same event (retries)
 6. **Capability detection** - Optional features detected via `hasattr()` at runtime
@@ -105,7 +107,7 @@ PenguiFlow defines additional protocols for optional features:
 @runtime_checkable
 class SupportsPlannerState(Protocol):
     async def save_planner_state(self, token: str, payload: dict[str, Any]) -> None: ...
-    async def load_planner_state(self, token: str) -> dict[str, Any]: ...
+    async def load_planner_state(self, token: str) -> dict[str, Any] | None: ...
 
 @runtime_checkable
 class SupportsMemoryState(Protocol):
@@ -190,21 +192,36 @@ class StoredEvent:
 
 #### Event Types (`kind` field)
 
-| Event Kind | Description | When Emitted |
-|------------|-------------|--------------|
-| `node_start` | Node began processing | Before node handler runs |
-| `node_end` | Node completed successfully | After node handler returns |
-| `node_error` | Node raised an exception | On unhandled exception |
-| `retry` | Retry attempt initiated | Before retry sleep |
-| `emit` | Message emitted to downstream | When node emits output |
-| `fetch` | Message fetched from queue | When node pulls from queue |
-| `stream_chunk` | Streaming token emitted | During LLM streaming |
-| `cancel_begin` | Trace cancellation started | When `cancel()` called |
-| `cancel_end` | Trace cancellation completed | After cancel cleanup |
-| `timeout` | Deadline exceeded | When deadline/budget exhausted |
-| `session.task` | Task lifecycle event | On task state change |
-| `session.update` | Task progress update | On streaming update |
-| `session.steering` | Steering event | On steering received |
+`StoredEvent.kind` is a **string discriminator**. In v2.8, PenguiFlow persists three *families* of events:
+
+1) **Core runtime events** (`FlowEvent.event_type`): emitted by the `PenguiFlow` runtime around node execution and trace lifecycle.
+
+| Event Kind | Description |
+|------------|-------------|
+| `node_start` | Node began processing |
+| `node_success` | Node completed successfully |
+| `node_timeout` | Node exceeded deadline/budget |
+| `node_retry` | Node retry cycle started |
+| `node_error` | Node raised an exception |
+| `node_failed` | Node failure after retries exhausted |
+| `node_cancelled` | Node cancelled locally (steering/budget) |
+| `node_trace_cancelled` | Node skipped because trace is cancelled |
+| `deadline_skip` | Work skipped due to deadline pre-check |
+| `trace_cancel_start` | Trace cancellation started |
+| `trace_cancel_finish` | Trace cancellation finished |
+| `trace_cancel_drop` | Cancellation requested for unknown/finished trace |
+
+2) **Session/task pseudo-events**: when a session store is adapted onto a core `StateStore`, it persists session state as audit-log entries under `trace_id="session:{session_id}"`.
+
+| Event Kind | Description |
+|------------|-------------|
+| `session.task` | Task lifecycle snapshot persisted |
+| `session.update` | Task streaming/progress update persisted |
+| `session.steering` | Steering event persisted |
+
+3) **Planner/tool streaming events are *not* `StoredEvent`s.** They are `PlannerEvent`s (see `SupportsPlannerEvents`) and have their own `event_type` values such as `stream_chunk`, `llm_stream_chunk`, and `artifact_chunk`.
+
+> **Callout (important):** If you want to persist tool/LLM streaming events for the Playground UI or trace replay, implement `SupportsPlannerEvents` (`save_planner_event` / `list_planner_events`). Do **not** attempt to cram these into `save_event` as `StoredEvent.kind="stream_chunk"`; PenguiFlow treats those as different channels.
 
 #### Payload Structure
 
@@ -213,7 +230,7 @@ The `payload` dict contains event-specific fields. Common fields:
 ```python
 {
     "ts": 1702857600.123,          # Timestamp
-    "event": "node_end",           # Event type (same as kind)
+    "event": "node_success",       # Event type (same as kind)
     "node_name": "llm_node",       # Node name
     "node_id": "llm_node_abc123",  # Node instance ID
     "trace_id": "trace_xyz",       # Trace ID
@@ -230,7 +247,7 @@ The `payload` dict contains event-specific fields. Common fields:
     "flow_error": {
         "code": "TOOL_EXECUTION_FAILED",
         "message": "API returned 500",
-        "original_exc": "HTTPError(...)"
+        # Additional provider-specific fields may be included (exception type, stack summary, etc.)
     }
 }
 ```
@@ -548,14 +565,17 @@ These methods are **not part of the Protocol** but are detected at runtime via `
 **Payload Structure:**
 ```python
 {
-    "trajectory": [...],           # List of planner steps
-    "payload": {...},              # Original request payload
-    "constraints": {...},          # Planning constraints (deadline, hop budget)
-    "tool_context": {...},         # Tool execution context
-    "llm_context": {...},          # LLM context (optional)
-    "short_term_memory": {...},    # Memory snapshot (optional)
+    "trajectory": {...},           # Trajectory.serialise() payload (includes steps + context)
+    "reason": "await_input",       # Pause reason string
+    "payload": {...},              # Caller-provided pause payload (OAuth/HITL metadata)
+    "constraints": {...} | None,   # Constraint tracker snapshot (optional)
+    "tool_context": {...} | None,  # JSON-serialisable tool_context snapshot (optional)
 }
 ```
+
+> **Callout (gold standard):** Treat the pause payload as a *wire format*, not an internal object dump.
+> The runtime currently persists `Trajectory.serialise()` plus minimal metadata (see `penguiflow/planner/pause_management.py`).
+> Downstream stores should store and return the payload **losslessly** (no lossy JSON coercion beyond ensuring JSON-serialisability).
 
 **Example Implementation:**
 ```python
@@ -573,15 +593,15 @@ async def save_planner_state(self, token: str, payload: dict) -> None:
     )
 ```
 
-### 5. `load_planner_state(token: str) -> dict`
+### 5. `load_planner_state(token: str) -> dict | None`
 
 **Purpose:** Load planner pause state for resume.
 
 **When Called:** When `ReactPlanner.resume(token)` is called after OAuth/HITL completion.
 
 **Contract:**
-- MUST return empty dict `{}` if token not found or expired
-- SHOULD NOT raise exceptions for missing tokens
+- SHOULD return `None` if token not found or expired
+- MUST NOT raise exceptions for missing tokens
 - SHOULD delete/expire token after successful load (one-time use)
 
 **Parameters:**
@@ -589,11 +609,15 @@ async def save_planner_state(self, token: str, payload: dict) -> None:
 |-----------|------|-------------|
 | `token` | `str` | The pause token to load |
 
-**Returns:** `dict` - The stored payload, or `{}` if not found
+**Returns:** `dict | None` - The stored payload, or `None` if not found
+
+> **Callout (type mismatch):** `SupportsPlannerState.load_planner_state()` is typed as returning `dict[str, Any]` in
+> `penguiflow/state/protocol.py`, but the runtime treats `None` as the clean "not found" signal. Returning `{}` tends to
+> produce confusing downstream errors (`KeyError: 'trajectory'`) instead of a proper missing-token path. Prefer `None`.
 
 **Example Implementation:**
 ```python
-async def load_planner_state(self, token: str) -> dict:
+async def load_planner_state(self, token: str) -> dict | None:
     row = await self._pool.fetchrow(
         """
         DELETE FROM planner_pauses
@@ -603,7 +627,7 @@ async def load_planner_state(self, token: str) -> dict:
         token,
     )
     if not row:
-        return {}
+        return None
     return json.loads(row["payload"])
 ```
 
@@ -1058,10 +1082,11 @@ class ArtifactStore(Protocol):
         self,
         data: bytes,
         *,
-        mime_type: str = "application/octet-stream",
+        mime_type: str | None = None,
         filename: str | None = None,
-        namespace: str = "default",
+        namespace: str | None = None,
         scope: ArtifactScope | None = None,
+        meta: dict[str, Any] | None = None,
     ) -> ArtifactRef: ...
 
     async def put_text(
@@ -1070,8 +1095,9 @@ class ArtifactStore(Protocol):
         *,
         mime_type: str = "text/plain",
         filename: str | None = None,
-        namespace: str = "default",
+        namespace: str | None = None,
         scope: ArtifactScope | None = None,
+        meta: dict[str, Any] | None = None,
     ) -> ArtifactRef: ...
 
     async def get(self, artifact_id: str) -> bytes | None: ...
@@ -1086,11 +1112,11 @@ Only `ArtifactRef` objects (~100 bytes) are passed to LLMs, never raw binary dat
 
 ```python
 class ArtifactRef(BaseModel):
-    id: str                            # Format: {namespace}_{sha256[:12]}
-    mime_type: str                     # Content type
-    size_bytes: int                    # Original content size
+    id: str                            # Typically "{namespace}_{sha256[:12]}", but not required
+    mime_type: str | None = None       # Content type (best-effort)
+    size_bytes: int | None = None      # Original content size (best-effort)
     filename: str | None = None        # Suggested download name
-    sha256: str                        # Full content hash
+    sha256: str | None = None          # Full content hash (best-effort)
     scope: ArtifactScope | None = None # Access control metadata
     source: dict[str, Any] = Field(default_factory=dict)  # Tool name, warnings
 ```
@@ -1133,7 +1159,7 @@ def artifact_store(self) -> ArtifactStore | None:
 Discovery helper:
 
 ```python
-from penguiflow.state import discover_artifact_store
+from penguiflow.artifacts import discover_artifact_store
 
 store = discover_artifact_store(state_store)  # Returns ArtifactStore or None
 ```
@@ -1157,7 +1183,8 @@ flow = PenguiFlow(
 - `save_event()` called automatically on every `FlowEvent` emission
 - `save_remote_binding()` called when RemoteNode establishes A2A connections
 - `load_history()` called via `flow.load_history(trace_id)`
-- Errors in StateStore methods are logged but **never crash the flow**
+- `save_event()` / `save_remote_binding()` failures are logged and treated as **best-effort** (core runtime continues)
+- `load_history()` is an explicit caller action; errors may propagate to the caller (admin/observability tooling should handle exceptions)
 
 ### 2. ReactPlanner
 
@@ -1178,7 +1205,8 @@ planner = ReactPlanner(
 - `load_planner_state()` called during `planner.resume(token)`
 - `save_memory_state()` called after each run (if memory configured)
 - `load_memory_state()` called at start of each run (if memory configured)
-- Methods detected via `getattr()` - missing methods are silently skipped
+- Methods detected via `getattr()` - missing methods are skipped (planner continues without that capability)
+- Persistence method failures are **logged**; pause records always have an in-memory fallback, but resume may fail if the pause token cannot be loaded
 
 ### 3. StreamingSession / SessionManager
 
@@ -1801,7 +1829,7 @@ async def test_save_and_load_events(store):
     event = StoredEvent(
         trace_id="test-trace",
         ts=1702857600.0,
-        kind="node_end",
+        kind="node_success",
         node_name="test_node",
         node_id="test_node_123",
         payload={"latency_ms": 100},
@@ -1811,7 +1839,7 @@ async def test_save_and_load_events(store):
 
     assert len(history) == 1
     assert history[0].trace_id == "test-trace"
-    assert history[0].kind == "node_end"
+    assert history[0].kind == "node_success"
 
 # 2. Empty history for unknown trace
 async def test_load_history_unknown_trace(store):
@@ -1867,7 +1895,13 @@ async def test_planner_state_save_load(store):
         pytest.skip("Planner state not implemented")
 
     token = "test-token-123"
-    payload = {"trajectory": [], "constraints": {}}
+    payload = {
+        "trajectory": {"version": 1, "steps": []},
+        "reason": "await_input",
+        "payload": {"example": True},
+        "constraints": None,
+        "tool_context": {"tenant_id": "test", "user_id": "test"},
+    }
 
     await store.save_planner_state(token, payload)
     loaded = await store.load_planner_state(token)
@@ -1886,7 +1920,7 @@ async def test_planner_state_consumed(store):
     second_load = await store.load_planner_state(token)
 
     assert first_load == {"data": "value"}
-    assert second_load == {}  # Consumed
+    assert second_load is None  # Consumed / missing
 
 # 8. Memory state (if implemented)
 async def test_memory_state_roundtrip(store):
@@ -2013,19 +2047,32 @@ async def test_statestore_integration():
 
     history = await store.load_history("int-test")
 
-    # Should have at least node_start and node_end events
+    # Should have at least node_start and node_success events
     kinds = [e.kind for e in history]
     assert "node_start" in kinds
-    assert "node_end" in kinds
+    assert "node_success" in kinds
 ```
 
 ---
 
 ## Error Handling
 
-### StateStore Errors Are Non-Fatal
+### What Is Best-Effort vs. What Can Propagate
 
-PenguiFlow wraps all StateStore calls in try/except. Errors are logged but never propagate:
+PenguiFlow does **not** treat every StateStore call uniformly. In v2.8:
+
+- **Core runtime audit-log calls** are best-effort:
+  - `PenguiFlow` wraps `save_event()` and `save_remote_binding()` in `try/except` and logs failures.
+- **Explicit read APIs** (like `flow.load_history(trace_id)`) may propagate storage errors to the caller.
+- **Session persistence calls** (tasks/updates/steering) may be awaited without a defensive wrapper (some are fire-and-forget via `asyncio.create_task`, others are awaited inline). A throwing StateStore can therefore break interactive features.
+- **Planner pause/resume** has an in-memory fallback for saving pause records, but resume still depends on `load_planner_state()` being correct.
+
+> **Gold standard rule:** For production-grade deployments, treat every StateStore method as **must not throw**.
+> Degrade with safe defaults (`[]`/`None`), apply timeouts, and log/telemetry rather than raising.
+
+### Example: Core Runtime Best-Effort Wrapper
+
+The core runtime wraps audit-log persistence:
 
 ```python
 # From penguiflow/core.py
@@ -2051,14 +2098,18 @@ async def save_event(self, event: StoredEvent) -> None:
     try:
         await self._pool.execute(...)
     except asyncpg.PostgresConnectionError:
-        # Log and potentially retry with backoff
-        raise  # Let PenguiFlow handle it
+        # Gold standard: degrade gracefully.
+        # - log/telemetry
+        # - optionally enqueue to a dead-letter queue / local buffer
+        # - return without raising (avoid breaking sessions/planner callers)
+        logger.warning("statestore_unavailable", extra={"method": "save_event", "trace_id": event.trace_id})
+        return
     except asyncpg.UniqueViolationError:
         # Idempotent - this is expected for duplicates
         pass
     except Exception:
-        # Log unexpected errors
-        raise
+        logger.exception("statestore_save_failed", extra={"method": "save_event", "trace_id": event.trace_id})
+        return
 ```
 
 ### Logging Recommendations
@@ -2112,8 +2163,14 @@ class BatchingStateStore:
         if not self._batch:
             return
         batch, self._batch = self._batch, []
-        # Bulk insert
-        await self._delegate.save_events_bulk(batch)
+        # Bulk insert (out-of-protocol extension).
+        # If you add a bulk method, feature-detect it via hasattr() and fall back to per-event writes.
+        bulk = getattr(self._delegate, "save_events_bulk", None)
+        if bulk is not None:
+            await bulk(batch)
+        else:
+            for item in batch:
+                await self._delegate.save_event(item)
 ```
 
 ### Indexing Strategy
@@ -2161,7 +2218,7 @@ Use this checklist to verify your implementation is complete:
 
 - [ ] `save_planner_state(token, payload)` implemented
 - [ ] `load_planner_state(token)` implemented
-- [ ] `load_planner_state` returns `{}` for missing/expired tokens
+- [ ] `load_planner_state` returns `None` for missing/expired tokens
 - [ ] `load_planner_state` consumes token (one-time use)
 - [ ] `save_memory_state(key, state)` implemented
 - [ ] `load_memory_state(key)` implemented

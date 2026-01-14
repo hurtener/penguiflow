@@ -1,4 +1,4 @@
-"""Unit tests for lighthouse tools."""
+"""Unit tests for RAG server tools."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ class DummyCtx:
 
     def __init__(self) -> None:
         self.llm_context = {}
-        self.tool_context = {"lighthouse_base_url": "http://localhost:9000", "tenant_id": "tenant-test"}
+        self.tool_context = {"rag_server_base_url": "http://localhost:9000", "tenant_id": "tenant-test"}
         self.meta = {}
 {% if with_streaming %}
         self.chunks: list[tuple[str, int, str]] = []

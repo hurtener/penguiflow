@@ -145,7 +145,7 @@ Either integrated into the header card or as a second card, show:
 
 Status of services from spec:
 
-memory_iceberg, lighthouse, wayfinder with tiny icons and text (enabled) / (disabled).
+memory_iceberg, rag_server, wayfinder with tiny icons and text (enabled) / (disabled).
 
 LLMs summary:
 
@@ -426,7 +426,7 @@ Render a vertical timeline of steps representing the agent’s run.
 
 Each step shows:
 
-Node name (e.g. search_docs, call_lighthouse, emit_flow, reflect_answer) as main label.
+Node name (e.g. search_docs, call_rag_server, emit_flow, reflect_answer) as main label.
 
 Thought (LLM reasoning snippet) if available.
 
@@ -552,7 +552,7 @@ Indicate inheritance from primary with small labels like inherits primary when a
 
 Services from spec:
 
-memory_iceberg, lighthouse, wayfinder.
+memory_iceberg, rag_server, wayfinder.
 
 Show each service with:
 

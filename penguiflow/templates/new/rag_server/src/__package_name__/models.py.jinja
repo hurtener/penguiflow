@@ -1,4 +1,4 @@
-"""Pydantic models for lighthouse tools."""
+"""Pydantic models for RAG server tools."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 
 class UploadRequest(BaseModel):
-    """Upload local files to Lighthouse."""
+    """Upload local files to the RAG server."""
 
     paths: list[str] = Field(default_factory=list, description="Local file paths to upload")
 
@@ -31,13 +31,13 @@ class IngestStatus(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    """Search Lighthouse index."""
+    """Search the RAG server index."""
 
     question: str
 
 
 class QueryResult(BaseModel):
-    """Search answer from Lighthouse."""
+    """Search answer from the RAG server."""
 
     answer: str
     sources: list[str] = Field(default_factory=list)

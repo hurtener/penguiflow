@@ -329,23 +329,23 @@ def _meta_from_spec(spec: Spec | None) -> MetaPayload:
     }
     services = []
     if spec:
-        services = [
-            {
-                "name": "memory_iceberg",
-                "enabled": spec.services.memory_iceberg.enabled,
-                "url": spec.services.memory_iceberg.base_url,
-            },
-            {
-                "name": "lighthouse",
-                "enabled": spec.services.lighthouse.enabled,
-                "url": spec.services.lighthouse.base_url,
-            },
-            {
-                "name": "wayfinder",
-                "enabled": spec.services.wayfinder.enabled,
-                "url": spec.services.wayfinder.base_url,
-            },
-        ]
+            services = [
+                {
+                    "name": "memory_iceberg",
+                    "enabled": spec.services.memory_iceberg.enabled,
+                    "url": spec.services.memory_iceberg.base_url,
+                },
+                {
+                    "name": "rag_server",
+                    "enabled": spec.services.rag_server.enabled,
+                    "url": spec.services.rag_server.base_url,
+                },
+                {
+                    "name": "wayfinder",
+                    "enabled": spec.services.wayfinder.enabled,
+                    "url": spec.services.wayfinder.base_url,
+                },
+            ]
     tools = []
     if spec:
         for tool in spec.tools:

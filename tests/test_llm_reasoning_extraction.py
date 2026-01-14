@@ -194,3 +194,113 @@ def test_google_nonstream_extracts_reasoning() -> None:
     out = provider._from_google_response(response)  # type: ignore[attr-defined]
     assert out.reasoning_content == "R"
     assert out.message.text == "A"
+
+
+def test_reasoning_extraction_dict_content_list_with_summary() -> None:
+    """Test reasoning extraction from dict message with content list and summary."""
+    provider = _DummyOpenAICompat()
+
+    # Dict message with content list containing reasoning with summary
+    msg = {
+        "content": [
+            {"type": "reasoning", "summary": [{"text": "step1"}, {"text": "step2"}]},
+            {"type": "text", "text": "result"},
+        ]
+    }
+    result = provider._extract_openai_reasoning_content(msg)
+    assert result == "step1step2"
+
+
+def test_reasoning_extraction_dict_content_list_with_direct_text() -> None:
+    """Test reasoning extraction from dict message with content list and direct text."""
+    provider = _DummyOpenAICompat()
+
+    # Dict message with content list containing reasoning with direct text
+    msg = {
+        "content": [
+            {"type": "thinking", "text": "direct thought"},
+            {"type": "text", "text": "result"},
+        ]
+    }
+    result = provider._extract_openai_reasoning_content(msg)
+    assert result == "direct thought"
+
+
+def test_reasoning_extraction_object_content_list_with_summary() -> None:
+    """Test reasoning extraction from object message with content list attribute."""
+    provider = _DummyOpenAICompat()
+
+    # Object message with content list attribute
+    msg = SimpleNamespace(
+        content=[
+            {"type": "thought", "summary": [{"text": "think1"}]},
+            {"type": "text", "text": "output"},
+        ]
+    )
+    result = provider._extract_openai_reasoning_content(msg)
+    assert result == "think1"
+
+
+def test_reasoning_extraction_object_content_list_with_direct_text() -> None:
+    """Test reasoning extraction from object with content list and direct text."""
+    provider = _DummyOpenAICompat()
+
+    msg = SimpleNamespace(
+        content=[
+            {"type": "reasoning", "text": "direct reasoning"},
+        ]
+    )
+    result = provider._extract_openai_reasoning_content(msg)
+    assert result == "direct reasoning"
+
+
+def test_delta_reasoning_dict_content_list_with_summary() -> None:
+    """Test delta reasoning extraction from dict delta with content list."""
+    provider = _DummyOpenAICompat()
+
+    delta = {
+        "content": [
+            {"type": "thinking", "summary": [{"text": "delta summary"}]},
+        ]
+    }
+    result = provider._extract_openai_delta_reasoning(delta)
+    assert result == "delta summary"
+
+
+def test_delta_reasoning_dict_content_list_with_direct_text() -> None:
+    """Test delta reasoning extraction from dict delta with content list direct text."""
+    provider = _DummyOpenAICompat()
+
+    delta = {
+        "content": [
+            {"type": "reasoning", "text": "delta direct"},
+        ]
+    }
+    result = provider._extract_openai_delta_reasoning(delta)
+    assert result == "delta direct"
+
+
+def test_delta_reasoning_object_content_list_with_summary() -> None:
+    """Test delta reasoning extraction from object delta with content list."""
+    provider = _DummyOpenAICompat()
+
+    delta = SimpleNamespace(
+        content=[
+            {"type": "thought", "summary": [{"text": "obj delta summary"}]},
+        ]
+    )
+    result = provider._extract_openai_delta_reasoning(delta)
+    assert result == "obj delta summary"
+
+
+def test_delta_reasoning_object_content_list_with_direct_text() -> None:
+    """Test delta reasoning extraction from object delta with content list direct text."""
+    provider = _DummyOpenAICompat()
+
+    delta = SimpleNamespace(
+        content=[
+            {"type": "thinking", "text": "obj delta direct"},
+        ]
+    )
+    result = provider._extract_openai_delta_reasoning(delta)
+    assert result == "obj delta direct"

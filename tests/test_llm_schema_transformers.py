@@ -506,6 +506,73 @@ class TestDatabricksJsonSchemaTransformer:
         # allOf should be removed/simplified
         assert "allOf" not in result
 
+    def test_recursive_ref_handling(self) -> None:
+        """Test that recursive references are detected and handled."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "node": {"$ref": "#/$defs/Node"},
+            },
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "child": {"$ref": "#/$defs/Node"},  # Recursive!
+                    },
+                },
+            },
+        }
+        transformer = DatabricksJsonSchemaTransformer(schema, strict=True)
+        result = transformer.transform()
+
+        # Should handle recursive ref gracefully
+        assert result is not None
+        assert not transformer.is_strict_compatible
+        # Should have warning about recursive reference
+        assert any("recursive" in w.lower() for w in transformer._warnings)
+
+    def test_cached_transformed_def(self) -> None:
+        """Test that the same $ref used multiple times hits the cache."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "first": {"$ref": "#/$defs/Item"},
+                "second": {"$ref": "#/$defs/Item"},  # Same ref again
+            },
+            "$defs": {
+                "Item": {"type": "string"},
+            },
+        }
+        transformer = DatabricksJsonSchemaTransformer(schema, strict=True)
+        result = transformer.transform()
+
+        # Both should be resolved to the same type
+        assert result["properties"]["first"]["type"] == "string"
+        assert result["properties"]["second"]["type"] == "string"
+        # Cache should have the def
+        assert "Item" in transformer._transformed_defs
+
+    def test_unknown_ref_handling(self) -> None:
+        """Test that unknown $ref patterns are handled gracefully."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "external": {"$ref": "https://example.com/schema.json"},
+            },
+        }
+        transformer = DatabricksJsonSchemaTransformer(schema, strict=True)
+        result = transformer.transform()
+
+        # Should replace with placeholder
+        assert result is not None
+        external = result["properties"]["external"]
+        assert external["type"] == "string"
+        assert "Unresolved ref" in external.get("description", "")
+        assert not transformer.is_strict_compatible
+        # Should have warning about unknown ref
+        assert any("resolve" in w.lower() for w in transformer._warnings)
+
 
 class TestTransformerStrictModes:
     """Test strict vs non-strict mode behaviors."""

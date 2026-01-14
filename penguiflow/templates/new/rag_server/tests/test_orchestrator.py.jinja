@@ -56,7 +56,7 @@ async def test_execute_returns_agent_response(config: Config) -> None:
     # Verify streaming is enabled and streams attribute exists
     assert hasattr(response, "streams")
     assert response.streams is not None
-    # Note: lighthouse template may emit "upload", "ingest", "ingest_status", "query" streams if tools are called
+    # Note: RAG server template may emit "upload", "ingest", "ingest_status", "query" streams if tools are called
 {% endif %}
 {% if with_hitl %}
     assert hasattr(response, "pause_token")

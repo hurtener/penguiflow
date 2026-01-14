@@ -1,21 +1,21 @@
-"""Lighthouse RAG tools."""
+"""RAG server tools."""
 
 from __future__ import annotations
 
 from penguiflow.catalog import tool
 from penguiflow.planner import ToolContext
 
-from ..clients.lighthouse import LighthouseClient
+from ..clients.rag_server import RagServerClient
 from ..models import IngestRequest, IngestStatus, QueryRequest, QueryResult, UploadRequest, UploadResult
 
 
-def _client(ctx: ToolContext) -> LighthouseClient:
-    """Resolve Lighthouse client from tool context."""
-    base_url = ctx.tool_context.get("lighthouse_base_url", "http://localhost:9000")
-    return LighthouseClient(base_url)
+def _client(ctx: ToolContext) -> RagServerClient:
+    """Resolve RAG server client from tool context."""
+    base_url = ctx.tool_context.get("rag_server_base_url", "http://localhost:9000")
+    return RagServerClient(base_url)
 
 
-@tool(desc="Upload files to Lighthouse", side_effects="write", tags=["lighthouse"])
+@tool(desc="Upload files to the RAG server", side_effects="write", tags=["rag_server"])
 async def upload_files(args: UploadRequest, ctx: ToolContext) -> UploadResult:
     client = _client(ctx)
 {% if with_streaming %}
@@ -28,7 +28,7 @@ async def upload_files(args: UploadRequest, ctx: ToolContext) -> UploadResult:
     return UploadResult(file_ids=list(result.get("file_ids", [])))
 
 
-@tool(desc="Start ingestion job", side_effects="write", tags=["lighthouse"])
+@tool(desc="Start ingestion job", side_effects="write", tags=["rag_server"])
 async def ingest_documents(args: IngestRequest, ctx: ToolContext) -> IngestStatus:
     client = _client(ctx)
 {% if with_streaming %}
@@ -41,7 +41,7 @@ async def ingest_documents(args: IngestRequest, ctx: ToolContext) -> IngestStatu
     return IngestStatus(job_id=result.get("job_id", "job-unknown"), status="pending")
 
 
-@tool(desc="Check ingestion status", side_effects="read", tags=["lighthouse"])
+@tool(desc="Check ingestion status", side_effects="read", tags=["rag_server"])
 async def check_ingest_status(args: IngestStatus, ctx: ToolContext) -> IngestStatus:
     client = _client(ctx)
 {% if with_streaming %}
@@ -54,7 +54,7 @@ async def check_ingest_status(args: IngestStatus, ctx: ToolContext) -> IngestSta
     return IngestStatus(job_id=result.get("job_id", args.job_id), status=result.get("status", "pending"))
 
 
-@tool(desc="Query Lighthouse index", side_effects="read", tags=["lighthouse"])
+@tool(desc="Query the RAG server index", side_effects="read", tags=["rag_server"])
 async def query_index(args: QueryRequest, ctx: ToolContext) -> QueryResult:
     client = _client(ctx)
 {% if with_streaming %}

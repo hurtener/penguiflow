@@ -12,6 +12,16 @@ The PenguiFlow CLI scaffolds production-ready agent projects with best practices
 - `penguiflow new` — Interactive scaffolding with templates
 - `penguiflow generate` — Declarative YAML spec → generated project (v2.6+)
 
+> **Recommendation (Jan 2026)**: Prefer the **Spec engine** (`penguiflow generate`) for downstream teams.
+> It’s the most stable interface for reproducible scaffolding, feature flags, and future migrations.
+
+> **Important (Jan 2026)**: New projects scaffold with a **Stub/Scripted LLM** by default so tests pass out-of-the-box.
+> To run a real model, you must switch the planner to either:
+> - **LiteLLM** (`llm="openrouter/..."`, `llm="openai/..."`, etc.), or
+> - **Native LLM layer** (`llm="openrouter/..."`, `use_native_llm=True`) for direct provider adapters.
+>
+> See [LLM Setup: Stub → Real Model](#llm-setup-stub--real-model) for the exact edit.
+
 ---
 
 ## Table of Contents
@@ -24,7 +34,7 @@ The PenguiFlow CLI scaffolds production-ready agent projects with best practices
    - [react](#react-template-default)
    - [parallel](#parallel-template)
 5. [Tier 2: Service Templates](#tier-2-service-templates)
-   - [lighthouse](#lighthouse-template)
+   - [rag_server](#rag_server-template)
    - [wayfinder](#wayfinder-template)
    - [analyst](#analyst-template)
 6. [Tier 3: Enterprise Template](#tier-3-enterprise-template)
@@ -35,6 +45,8 @@ The PenguiFlow CLI scaffolds production-ready agent projects with best practices
    - [--with-streaming](#--with-streaming)
    - [--with-hitl](#--with-hitl)
    - [--with-a2a](#--with-a2a)
+   - [--with-rich-output](#--with-rich-output)
+   - [--with-background-tasks](#--with-background-tasks)
    - [--no-memory](#--no-memory)
 9. [External Tool Integration (ToolNode v2)](#external-tool-integration-toolnode-v2)
    - [Overview](#overview)
@@ -72,11 +84,47 @@ penguiflow new my-agent
 # Navigate and run
 cd my-agent
 uv sync
-cp .env.example .env  # Configure your LLM API keys
+cp .env.example .env
 uv run python -m my_agent
 ```
 
-**30 seconds to a working agent.**
+**Note**: This runs with a Stub/Scripted LLM by default (deterministic, no network calls). For a real model, follow the next section.
+
+---
+
+## LLM Setup: Stub → Real Model
+
+Scaffolds intentionally use a deterministic stub LLM so:
+- `uv run python -m <package>` works immediately
+- tests can run without provider credentials
+
+To use a real LLM, edit `src/<your_package>/planner.py` and switch to one of the supported backends below.
+
+### Option A: LiteLLM (recommended for broad provider parity)
+
+1. Edit `src/<your_package>/planner.py`:
+   - Remove `llm_client=ScriptedLLM(...)`
+   - Set `llm=config.llm_model`
+
+2. Set `LLM_MODEL` to a LiteLLM model string in your `.env` (examples):
+   - `LLM_MODEL=openrouter/anthropic/claude-3-5-sonnet`
+   - `LLM_MODEL=openai/gpt-4o-mini`
+
+3. Provide the corresponding provider credentials in your environment (LiteLLM conventions).
+
+### Option B: Native LLM Layer (direct provider adapters)
+
+If you want to bypass LiteLLM and use PenguiFlow’s native providers:
+
+1. Edit `src/<your_package>/planner.py`:
+   - Set `llm=config.llm_model`
+   - Add `use_native_llm=True`
+
+2. Set provider env vars (provider-specific). Example families:
+   - OpenRouter: `OPENROUTER_API_KEY`
+   - Databricks: `DATABRICKS_HOST`, `DATABRICKS_TOKEN`
+
+3. If you want final-answer token streaming, set `stream_final_response=True` on `ReactPlanner` (see [--with-streaming](#--with-streaming)).
 
 ---
 
@@ -106,10 +154,10 @@ The `[cli]` extra includes Jinja2 for template rendering.
 | Tier | Templates | Use Case |
 |------|-----------|----------|
 | **Tier 1** | `minimal`, `react`, `parallel` | Core patterns for most agents |
-| **Tier 2** | `RAG`, `wayfinder`, `analyst` | Internal service integrations |
+| **Tier 2** | `rag_server`, `wayfinder`, `analyst` | Internal service integrations |
 | **Tier 3** | `enterprise` | Production-grade full stack |
 | **Bonus** | `flow`, `controller` | Alternative architectural patterns |
-| **Flags** | `--with-streaming`, `--with-hitl`, `--with-a2a`, `--no-memory` | Add capabilities to any template |
+| **Flags** | `--with-streaming`, `--with-hitl`, `--with-a2a`, `--with-rich-output`, `--with-background-tasks`, `--no-memory` | Add capabilities to any template |
 
 ### Decision Tree
 
@@ -382,12 +430,12 @@ async def merge_results(args: MergeArgs, ctx: ToolContext) -> MergeResult:
 
 ## Tier 2: Service Templates
 
-### `rag` Template
+### `rag_server` Template
 
-**Best for**: RAG (Retrieval-Augmented Generation) applications using RAG API. (work in progress, not production ready yet)
+**Best for**: RAG (Retrieval-Augmented Generation) applications using a dedicated RAG server API.
 
 ```bash
-penguiflow new my-rag --template=lighthouse
+penguiflow new my-rag --template=rag_server
 ```
 
 #### What You Get
@@ -398,10 +446,10 @@ my-rag/
 │   ├── orchestrator.py
 │   ├── planner.py
 │   ├── tools/
-│   │   └── rag.py           # Lighthouse API tools
+│   │   └── rag.py           # RAG server tools
 │   └── clients/
 │       ├── memory.py
-│       └── lighthouse.py    # Lighthouse client stub
+│       └── rag_server.py    # RAG server client stub
 └── ...
 ```
 
@@ -821,18 +869,24 @@ penguiflow new my-agent --template=react --with-streaming
 # Add HITL + A2A to enterprise
 penguiflow new my-agent --template=enterprise --with-hitl --with-a2a
 
+# Add rich output UI components
+penguiflow new my-agent --template=react --with-rich-output
+
+# Add background tasks / subagent orchestration
+penguiflow new my-agent --template=enterprise --with-background-tasks
+
 # RAG without memory
-penguiflow new my-rag --template=lighthouse --no-memory
+penguiflow new my-rag --template=rag_server --no-memory
 
 # Everything
-penguiflow new my-agent --template=react --with-streaming --with-hitl --with-a2a
+penguiflow new my-agent --template=react --with-streaming --with-hitl --with-a2a --with-rich-output --with-background-tasks
 ```
 
 ---
 
 ### `--with-streaming`
 
-**Adds**: Real-time token streaming and status updates.
+**Adds**: Tool-level streaming capture + optional final-answer token streaming hooks.
 
 ```bash
 penguiflow new my-agent --with-streaming
@@ -840,23 +894,21 @@ penguiflow new my-agent --with-streaming
 
 #### What It Adds
 
+**1) Tool streaming via `ctx.emit_chunk()`**
+
+Tools can emit incremental progress (useful for long-running calls):
+
 ```python
-# In orchestrator.py
-from penguiflow.streaming import StreamChunk
-
-# Status publisher pattern
-async def execute(self, query: str, ...) -> AgentResponse:
-    # Publish status updates
-    self._telemetry.publish_status(StatusUpdate(
-        status="thinking",
-        message="Planning response..."
-    ))
-
-    # Stream chunks as they arrive
-    async for chunk in self._planner.run_streaming(...):
-        if isinstance(chunk, StreamChunk):
-            yield chunk  # Forward to client
+await ctx.emit_chunk(stream_id="search", seq=0, text="Starting search…")
+...
+await ctx.emit_chunk(stream_id="search", seq=1, text="Done", done=True)
 ```
+
+Those chunks are captured into `PlannerFinish.metadata["steps"][...]["streams"]` for you to surface in your API/UI.
+
+**2) Optional LLM final-answer streaming via planner events**
+
+If you construct `ReactPlanner(..., stream_final_response=True, event_callback=...)`, the planner emits `llm_stream_chunk` events during the terminal answer generation/revision.
 
 ```python
 # In telemetry.py
@@ -877,8 +929,8 @@ class AgentTelemetry:
 
 - Chat UIs with typing indicators
 - Progress bars for long operations
-- Real-time agent thought process display
-- SSE/WebSocket integrations
+- Real-time “final answer” token streaming (via event callback)
+- SSE/WebSocket integrations (you forward tool chunks + LLM chunks)
 
 ---
 
@@ -902,18 +954,18 @@ async def execute(self, query: str, ...) -> AgentResponse | PauseRequest:
     # Check if planner needs human approval
     if isinstance(result, PlannerPause):
         return PauseRequest(
-            pause_token=result.token,
+            pause_token=result.resume_token,
             reason=result.reason,
-            proposed_action=result.proposed_action,
+            payload=dict(result.payload),
         )
 
     return AgentResponse(...)
 
-async def resume(self, pause_token: str, approved: bool) -> AgentResponse:
-    """Resume after human decision."""
+async def resume(self, pause_token: str, user_input: str) -> AgentResponse:
+    """Resume after user input/approval."""
     result = await self._planner.resume(
         token=pause_token,
-        approved=approved,
+        user_input=user_input,
     )
     return AgentResponse(...)
 ```
@@ -924,9 +976,12 @@ async def resume(self, pause_token: str, approved: bool) -> AgentResponse:
 async def dangerous_operation(args: Args, ctx: ToolContext) -> Result:
     # Request human approval before proceeding
     if args.requires_approval:
-        raise PlannerPause(
-            reason="This will delete production data",
-            proposed_action=f"DELETE FROM {args.table}",
+        await ctx.pause(
+            "approval_required",
+            {
+                "reason": "This will delete production data",
+                "proposed_action": f"DELETE FROM {args.table}",
+            },
         )
 
     return await execute_operation(args)
@@ -943,7 +998,10 @@ async def dangerous_operation(args: Args, ctx: ToolContext) -> Result:
 
 ### `--with-a2a`
 
-**Adds**: Agent-to-Agent communication server.
+**Adds**: A minimal A2A scaffold (placeholder).
+
+> **Status (Jan 2026)**: The A2A scaffold is **being re-worked** and is currently **out of spec** for production use.
+> Treat `--with-a2a` as a stub to help teams align on project structure only.
 
 ```bash
 penguiflow new my-agent --with-a2a
@@ -953,52 +1011,41 @@ penguiflow new my-agent --with-a2a
 
 ```python
 # In a2a.py
-from penguiflow.remote import A2AServer, RemoteCapability
-
-class MyAgentA2AServer:
-    """Expose agent as A2A-callable service."""
-
-    def __init__(self, orchestrator: MyAgentOrchestrator):
-        self._orchestrator = orchestrator
-        self._server = A2AServer(
-            capabilities=[
-                RemoteCapability(
-                    name="process_query",
-                    description="Process user query with full context",
-                    input_schema=QueryInput.model_json_schema(),
-                    output_schema=QueryOutput.model_json_schema(),
-                ),
-            ]
-        )
-
-    async def handle_request(self, request: A2ARequest) -> A2AResponse:
-        result = await self._orchestrator.execute(
-            query=request.input.query,
-            tenant_id=request.context.tenant_id,
-            ...
-        )
-        return A2AResponse(output=result)
-```
-
-```python
-# In __main__.py - start A2A server
-async def main():
-    orchestrator = MyAgentOrchestrator(config)
-    a2a_server = MyAgentA2AServer(orchestrator)
-
-    # Start both HTTP API and A2A server
-    await asyncio.gather(
-        start_http_server(orchestrator),
-        a2a_server.start(port=config.a2a_port),
-    )
+class A2AServer:
+    """Placeholder A2A server for remote agent communication."""
+    ...
 ```
 
 #### Use Cases
 
-- Microservice agent architecture
-- Agent composition (agents calling agents)
-- Distributed agent systems
-- Service mesh integration
+- Project scaffolding for teams planning A2A adoption
+- Not production-ready as of Jan 2026
+
+---
+
+### `--with-rich-output`
+
+**Adds**: Rich output tooling for UI components (charts, reports, grids) as planner tools.
+
+This flag wires in the `penguiflow.rich_output` runtime and nodes and adds configuration toggles for:
+- Allowlisting component types
+- Payload size limits
+- Optional prompt catalog / examples
+
+Use this when you want the model to return structured UI artifacts (and keep heavy payloads out of the main LLM context).
+
+---
+
+### `--with-background-tasks`
+
+**Adds**: Background task/subagent scaffolding (session manager, task service, task telemetry).
+
+This is used to support patterns like:
+- “Spawn 3 subagents to research in parallel, then merge”
+- long-running background jobs
+- user-gated result merges (HUMAN_GATED)
+
+It also enables additional planner prompt guidance and validation, plus runtime limits (max concurrent tasks, timeouts, etc.).
 
 ---
 
@@ -1348,13 +1395,15 @@ async def execute(self, query: str, user_id: str, ...) -> AgentResponse | PauseR
     result = await self._planner.run(...)
 
     # Check if OAuth is needed
-    if isinstance(result, PlannerPause) and result.reason == "oauth_required":
-        # Return auth URL to user
+    # Note: PenguiFlow pause reasons are a fixed set; encode domain-specific
+    # pause intent (like OAuth) in the payload.
+    if isinstance(result, PlannerPause) and result.reason == "await_input":
+        # Return auth URL to user if your tool placed it in payload
         return PauseRequest(
-            pause_token=result.token,
+            pause_token=result.resume_token,
             reason="oauth_required",
-            auth_url=result.metadata.get("auth_url"),
-            provider=result.metadata.get("provider"),
+            auth_url=result.payload.get("auth_url"),
+            provider=result.payload.get("provider"),
         )
 
     return AgentResponse(...)
@@ -1365,7 +1414,7 @@ async def resume(self, pause_token: str, auth_code: str) -> AgentResponse:
     await self._oauth_manager.exchange_code(auth_code)
 
     # Resume planner
-    result = await self._planner.resume(token=pause_token)
+    result = await self._planner.resume(token=pause_token, user_input=auth_code)
     return AgentResponse(...)
 ```
 
@@ -1403,8 +1452,8 @@ Instead of manually creating tools and wiring the planner, describe what you wan
 
 | Approach | Best For |
 |----------|----------|
-| `penguiflow new` | Quick start, exploring templates, learning patterns |
-| `penguiflow generate` | Defined requirements, spec-driven development, reproducible scaffolding |
+| `penguiflow generate` (recommended) | Spec-driven development, reproducible scaffolding, team handoff, CI consistency |
+| `penguiflow new` | Quick start, exploring templates, learning patterns (then migrate to spec) |
 
 ### Generator Command
 
@@ -1412,11 +1461,18 @@ Instead of manually creating tools and wiring the planner, describe what you wan
 penguiflow generate --spec=agent.yaml [--output-dir=.] [--dry-run] [--force] [--verbose]
 ```
 
+To scaffold a new spec workspace:
+
+```bash
+penguiflow generate --init my-agent [--output-dir=.] [--force]
+```
+
 **Options:**
 
 | Flag | Description |
 |------|-------------|
 | `--spec`, `-s` | Path to the agent spec YAML file (required) |
+| `--init` | Create a new spec workspace (mutually exclusive with `--spec`) |
 | `--output-dir` | Directory for the project (default: current directory) |
 | `--dry-run` | Preview files without creating them |
 | `--force` | Overwrite existing files |
@@ -1440,6 +1496,7 @@ agent:
     hitl: false                     # --with-hitl
     a2a: false                      # --with-a2a
     memory: true                    # default true, false = --no-memory
+    background_tasks: false         # --with-background-tasks
 
 # ─────────────────────────────────────────────────────────────
 # TOOLS (ReactPlanner catalog)
@@ -1449,6 +1506,11 @@ tools:
     description: Search indexed documents by query
     side_effects: read              # pure|read|write|external|stateful
     tags: ["search", "rag"]         # For ToolPolicy filtering
+    background:                     # Optional tool-level background execution (Jan 2026)
+      enabled: false
+      mode: job                     # job|subagent
+      default_merge_strategy: HUMAN_GATED
+      notify_on_complete: true
     args:
       query: str
       limit: Optional[int]
@@ -1477,7 +1539,7 @@ services:
   memory_iceberg:
     enabled: true
     base_url: http://localhost:8000
-  lighthouse:
+  rag_server:
     enabled: false
   wayfinder:
     enabled: false
@@ -1539,6 +1601,18 @@ planner:
       max_artifact_bytes: 52428800       # 50MB per artifact
       max_session_bytes: 524288000       # 500MB per session
       cleanup_strategy: lru              # lru, fifo, none
+
+  # Rich output UI components (optional)
+  rich_output:
+    enabled: true
+    allowlist: ["markdown", "echarts", "datagrid"]
+
+  # Background tasks / subagent orchestration (optional)
+  background_tasks:
+    enabled: false
+    allow_tool_background: false
+    max_concurrent_tasks: 5
+    max_tasks_per_session: 50
 ```
 
 ### Supported Types
@@ -1595,7 +1669,7 @@ services:
   memory_iceberg:
     enabled: true
     base_url: http://localhost:8000
-  lighthouse:
+  rag_server:
     enabled: true
     base_url: http://localhost:8081
 
@@ -1649,7 +1723,7 @@ rag-assistant/
 │       ├── test_search_documents.py
 │       └── test_summarize_results.py
 ├── pyproject.toml
-├── .env.example               # All env vars pre-filled
+├── .env.example               # Minimal env template (add provider keys as needed)
 └── .vscode/
 ```
 
@@ -2116,7 +2190,7 @@ my-agent/
 │       ├── planner.py           # Planner/catalog setup (if applicable)
 │       ├── models.py            # Shared Pydantic models
 │       ├── telemetry.py         # Observability middleware
-│       ├── a2a.py               # A2A server (if --with-a2a)
+│       ├── a2a.py               # A2A placeholder scaffold (Jan 2026: not production-ready)
 │       ├── tools/               # Tool definitions
 │       │   ├── __init__.py
 │       │   └── *.py
@@ -2145,31 +2219,37 @@ my-agent/
 
 ### Environment Variables
 
-Copy `.env.example` to `.env` and configure:
+Copy `.env.example` to `.env` and configure.
+
+By default, templates include only a **minimal** environment surface (so projects run without provider credentials).
+If you switch to a real LLM backend (LiteLLM or native), you must add the relevant provider API keys.
 
 ```bash
-# Required: LLM Provider
-LLM_MODEL=openrouter/openai/gpt-4o              # Or: anthropic/claude-3-5-sonnet
-OPENROUTER_API_KEY=sk-or-v1-...                  # Or: ANTHROPIC_API_KEY, OPENAI_API_KEY
-
-# Planner Settings
-LLM_TEMPERATURE=0.3                              # 0.0 = deterministic
-LLM_MAX_RETRIES=3                                # Retry on transient failures
-LLM_TIMEOUT_S=60.0                               # Per-call timeout
-PLANNER_MAX_ITERS=12                             # Max planning iterations
-PLANNER_TOKEN_BUDGET=8000                        # Trajectory compression budget
+# Required: model identifier (stub by default)
+LLM_MODEL=stub-llm
 
 # Memory Server (if enabled)
 MEMORY_BASE_URL=http://localhost:8000
 
-# Observability
-LOG_LEVEL=INFO                                   # DEBUG, INFO, WARNING, ERROR
-ENABLE_TELEMETRY=true
-TELEMETRY_BACKEND=logging                        # logging, mlflow
+# Optional planner knobs (template defaults are usually fine)
+PLANNER_MULTI_ACTION_SEQUENTIAL=false
+PLANNER_MULTI_ACTION_READ_ONLY_ONLY=true
+PLANNER_MULTI_ACTION_MAX_TOOLS=2
 
-# Application
-AGENT_ENVIRONMENT=development                    # development, staging, production
-AGENT_NAME=my_agent
+# Provider credentials (examples, required only when using a real model)
+# OPENROUTER_API_KEY=...
+# OPENAI_API_KEY=...
+# ANTHROPIC_API_KEY=...
+# DATABRICKS_HOST=...
+# DATABRICKS_TOKEN=...
+
+# Rich output (when --with-rich-output)
+# RICH_OUTPUT_ENABLED=true
+# RICH_OUTPUT_ALLOWLIST=markdown,echarts,datagrid
+
+# Background tasks (when --with-background-tasks)
+# BACKGROUND_TASKS_ENABLED=true
+# BACKGROUND_TASKS_MAX_CONCURRENT_TASKS=5
 ```
 
 ### Config Class
@@ -2184,28 +2264,14 @@ import os
 class Config:
     """Agent configuration loaded from environment."""
 
-    llm_model: str
-    llm_temperature: float
-    llm_max_retries: int
-    llm_timeout_s: float
-    planner_max_iters: int
-    planner_token_budget: int
     memory_base_url: str
-    log_level: str
-    agent_name: str
+    llm_model: str
 
     @classmethod
     def from_env(cls) -> "Config":
         return cls(
-            llm_model=os.getenv("LLM_MODEL", "openrouter/openai/gpt-4o"),
-            llm_temperature=float(os.getenv("LLM_TEMPERATURE", "0.3")),
-            llm_max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
-            llm_timeout_s=float(os.getenv("LLM_TIMEOUT_S", "60.0")),
-            planner_max_iters=int(os.getenv("PLANNER_MAX_ITERS", "12")),
-            planner_token_budget=int(os.getenv("PLANNER_TOKEN_BUDGET", "8000")),
             memory_base_url=os.getenv("MEMORY_BASE_URL", "http://localhost:8000"),
-            log_level=os.getenv("LOG_LEVEL", "INFO"),
-            agent_name=os.getenv("AGENT_NAME", "my_agent"),
+            llm_model=os.getenv("LLM_MODEL", "stub-llm"),
         )
 ```
 
@@ -2221,7 +2287,7 @@ uv sync
 
 # Configure environment
 cp .env.example .env
-# Edit .env with your API keys
+# If you switched to a real model backend, add provider API keys to `.env`
 
 # Run the agent
 uv run python -m my_agent
@@ -2511,8 +2577,9 @@ async def execute(self, query: str, ...) -> AgentResponse:
 - [ ] Configure proper `LLM_MODEL` for production
 - [ ] Set `LOG_LEVEL=INFO` (not DEBUG)
 - [ ] Enable `TELEMETRY_BACKEND` (mlflow, logging)
-- [ ] Set `PLANNER_TOKEN_BUDGET` to control costs
-- [ ] Configure `LLM_MAX_RETRIES` for resilience
+- [ ] Set `ReactPlanner(token_budget=...)` to control trajectory size
+- [ ] Configure `ReactPlanner(llm_max_retries=..., llm_timeout_s=...)` for resilience
+- [ ] Decide LLM backend: LiteLLM vs `use_native_llm=True`
 - [ ] Implement health checks
 - [ ] Set up alerting for error rates
 - [ ] Review and secure all API keys
@@ -2544,26 +2611,24 @@ pip install penguiflow[cli]
 # Check .env is configured
 cat .env | grep -v "^#" | grep -v "^$"
 
-# Ensure API key is set
-echo $OPENROUTER_API_KEY  # or OPENAI_API_KEY, ANTHROPIC_API_KEY
+# If using a real model backend, ensure provider API key is set
+echo $OPENROUTER_API_KEY  # or OPENAI_API_KEY / ANTHROPIC_API_KEY / DATABRICKS_TOKEN ...
 ```
 
 **Memory client connection refused**
 
 ```bash
-# Memory is stubbed by default - implement the client or use --no-memory
+# If you don't want memory, scaffold without it:
 penguiflow new my-agent --no-memory
 ```
 
 **Planner loops forever**
 
-```bash
-# Set iteration limit in .env
-PLANNER_MAX_ITERS=10
+Set safety limits in `src/<your_package>/planner.py`:
 
-# Or set deadline
-PLANNER_DEADLINE_S=30.0
-```
+- `ReactPlanner(max_iters=...)`
+- `ReactPlanner(deadline_s=...)`
+- `ReactPlanner(hop_budget=...)`
 
 ### Getting Help
 
@@ -2584,9 +2649,9 @@ PLANNER_DEADLINE_S=30.0
 | parallel | `penguiflow new NAME --template=parallel` | Batch processing |
 | flow | `penguiflow new NAME --template=flow` | Linear pipelines |
 | controller | `penguiflow new NAME --template=controller` | Iterative loops |
-| RAG | `penguiflow new NAME --template=lighthouse` | RAG applications |
+| rag_server | `penguiflow new NAME --template=rag_server` | RAG applications |
 | wayfinder | `penguiflow new NAME --template=wayfinder` | NLQ-to-SQL |
-| analyst | `penguiflow new NAME --template=analyst` | A2A analysis service |
+| analyst | `penguiflow new NAME --template=analyst` | Analysis/reporting patterns |
 | enterprise | `penguiflow new NAME --template=enterprise` | Production platforms |
 
 ### All Flags
@@ -2595,7 +2660,9 @@ PLANNER_DEADLINE_S=30.0
 |------|--------|
 | `--with-streaming` | Add real-time streaming + status updates |
 | `--with-hitl` | Add human-in-the-loop pause/resume |
-| `--with-a2a` | Add Agent-to-Agent server |
+| `--with-a2a` | Add A2A placeholder scaffold (Jan 2026: WIP) |
+| `--with-rich-output` | Add rich output component tooling |
+| `--with-background-tasks` | Add background tasks/subagent scaffolding |
 | `--no-memory` | Remove Memory Server integration |
 | `--force` | Overwrite existing files |
 | `--dry-run` | Preview without creating files |
@@ -2607,13 +2674,13 @@ PLANNER_DEADLINE_S=30.0
 penguiflow new my-agent --with-streaming
 
 # RAG with human approval for sensitive queries
-penguiflow new my-rag --template=lighthouse --with-hitl
+penguiflow new my-rag --template=rag_server --with-hitl
 
 # Stateless NLQ service
 penguiflow new my-nlq --template=wayfinder --no-memory
 
 # Full enterprise with everything
-penguiflow new my-platform --template=enterprise --with-streaming --with-hitl --with-a2a
+penguiflow new my-platform --template=enterprise --with-streaming --with-hitl --with-rich-output --with-background-tasks
 ```
 
 ---

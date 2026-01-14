@@ -20,7 +20,11 @@ This document explains how to configure environment variables for your agent.
 
 ## LLM Provider Configuration
 
-PenguiFlow uses [LiteLLM](https://docs.litellm.ai/) for LLM integration. Set the appropriate API key based on your provider:
+PenguiFlow can use either:
+- **LiteLLM** (broad provider parity), or
+- **Native LLM layer** (direct provider adapters).
+
+Most downstream teams should start with LiteLLM. Set the appropriate API key based on your provider:
 
 ### OpenAI
 ```bash
@@ -68,6 +72,7 @@ LLM_MODEL=bedrock/anthropic.claude-3-sonnet-20240229-v1:0
 |----------|-------------|---------|
 | `LLM_MODEL` | Primary LLM model identifier | `stub-llm` |
 | `MEMORY_BASE_URL` | Memory service endpoint | `http://localhost:8000` |
+| `RAG_SERVER_BASE_URL` | RAG server endpoint | `http://localhost:9000` |
 | `PLANNER_MULTI_ACTION_SEQUENTIAL` | Execute extra tool actions sequentially when multiple JSON actions appear | `false` |
 | `PLANNER_MULTI_ACTION_READ_ONLY_ONLY` | Only auto-execute extra actions for read-only tools | `true` |
 | `PLANNER_MULTI_ACTION_MAX_TOOLS` | Max extra tool actions to auto-execute per turn | `2` |

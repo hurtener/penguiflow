@@ -1,4 +1,4 @@
-"""Configuration for {{ project_name }} lighthouse agent."""
+"""Configuration for {{ project_name }} RAG server agent."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class Config:
     """Environment-driven configuration."""
 
     memory_base_url: str = "http://localhost:8000"
-    lighthouse_base_url: str = "http://localhost:9000"
+    rag_server_base_url: str = "http://localhost:9000"
     llm_model: str = "stub-llm"
     # Planner settings
     multi_action_sequential: bool = False
@@ -79,7 +79,7 @@ class Config:
         """Load configuration from environment variables."""
         return cls(
             memory_base_url=os.getenv("MEMORY_BASE_URL", "http://localhost:8000"),
-            lighthouse_base_url=os.getenv("LIGHTHOUSE_BASE_URL", "http://localhost:9000"),
+            rag_server_base_url=os.getenv("RAG_SERVER_BASE_URL", "http://localhost:9000"),
             llm_model=os.getenv("LLM_MODEL", "stub-llm"),
             multi_action_sequential=_env_flag("PLANNER_MULTI_ACTION_SEQUENTIAL", False),
             multi_action_read_only_only=_env_flag("PLANNER_MULTI_ACTION_READ_ONLY_ONLY", True),

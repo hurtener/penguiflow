@@ -874,7 +874,7 @@ Measured on production build with gzip sizes; “initial JS” excludes lazy ren
 | Total JS after idle (core + common renderers, gzip) | 2.63 MB | < 2.0 MB |
 | Largest renderer chunk (gzip) | 1.40 MB (Plotly) | < 700 KB |
 | Time to Interactive (Fast 3G) | N/A (not measured) | < 2s |
-| Lighthouse Performance | N/A (not measured) | > 90 |
+| RAG Server Performance | N/A (not measured) | > 90 |
 
 ### 7.5 Optimization Checklist
 
@@ -1230,7 +1230,7 @@ Phase 7: Developer Experience (Week 6-7)
 
 ### Phase 5: Performance
 - [x] Initial JS 89 KB gzip (meets < 300 KB target)
-- [x] Lighthouse target documented; baseline pending
+- [x] RAG server target documented; baseline pending
 - [x] All heavy libs lazy loaded
 - [x] Bundle analysis script available; CI hook optional
 
