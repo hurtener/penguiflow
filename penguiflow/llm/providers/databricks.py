@@ -70,7 +70,7 @@ class DatabricksProvider(OpenAICompatibleProvider):
 
     Handles Databricks-specific quirks:
     - Nested JSON error messages
-    - No reasoning_effort parameter support (use extended thinking on Claude models)
+    - Reasoning controls vary by model family (reasoning_effort vs thinking budget)
     - Schema limitations (no anyOf/oneOf/allOf/$ref/pattern, max 64 keys)
     - Function calling limited to 32 functions, 16 keys per schema
 
@@ -81,6 +81,7 @@ class DatabricksProvider(OpenAICompatibleProvider):
     MAX_SCHEMA_KEYS = 64
     MAX_TOOLS = 32
     MAX_TOOL_SCHEMA_KEYS = 16
+    DEFAULT_VISIBLE_OUTPUT_TOKENS_WITH_THINKING = 4096
 
     def __init__(
         self,
@@ -289,14 +290,40 @@ class DatabricksProvider(OpenAICompatibleProvider):
                     finish_reason = chunk.choices[0].finish_reason
 
                     # Handle text content
-                    if delta.content:
-                        text_acc.append(delta.content)
-                        on_stream_event(StreamEvent(delta_text=delta.content))
+                    delta_content = getattr(delta, "content", None)
+                    if isinstance(delta_content, str) and delta_content:
+                        text_acc.append(delta_content)
+                        on_stream_event(StreamEvent(delta_text=delta_content))
+                    elif isinstance(delta_content, list):
+                        for item in delta_content:
+                            if isinstance(item, str) and item:
+                                text_acc.append(item)
+                                on_stream_event(StreamEvent(delta_text=item))
+                                continue
+                            if not isinstance(item, dict):
+                                continue
+                            item_type = item.get("type")
+                            if item_type in ("text", "output_text") and isinstance(item.get("text"), str) and item["text"]:
+                                text_acc.append(item["text"])
+                                on_stream_event(StreamEvent(delta_text=item["text"]))
+                            elif item_type in ("reasoning", "thinking", "thought"):
+                                summary = item.get("summary")
+                                if isinstance(summary, list):
+                                    for s in summary:
+                                        if isinstance(s, dict) and isinstance(s.get("text"), str) and s["text"]:
+                                            reasoning_acc.append(s["text"])
+                                            on_stream_event(StreamEvent(delta_reasoning=s["text"]))
+                                elif isinstance(item.get("text"), str) and item["text"]:
+                                    reasoning_acc.append(item["text"])
+                                    on_stream_event(StreamEvent(delta_reasoning=item["text"]))
 
-                    delta_reasoning = self._extract_openai_delta_reasoning(delta)
-                    if delta_reasoning:
-                        reasoning_acc.append(delta_reasoning)
-                        on_stream_event(StreamEvent(delta_reasoning=delta_reasoning))
+                    # If we already parsed reasoning blocks from a list-shaped delta content,
+                    # don't double-emit via the generic OpenAI delta extractor.
+                    if not isinstance(delta_content, list):
+                        delta_reasoning = self._extract_openai_delta_reasoning(delta)
+                        if delta_reasoning:
+                            reasoning_acc.append(delta_reasoning)
+                            on_stream_event(StreamEvent(delta_reasoning=delta_reasoning))
 
                     # Handle tool calls
                     if delta.tool_calls:
@@ -371,14 +398,122 @@ class DatabricksProvider(OpenAICompatibleProvider):
         if request.structured_output:
             params["response_format"] = self._to_databricks_response_format(request.structured_output)
 
-        # Handle extra parameters (drop unsupported ones)
+        # Handle extra parameters with Databricks-specific sanitization/mapping
         if request.extra:
             extra = dict(request.extra)
-            # Databricks doesn't support reasoning_effort
-            extra.pop("reasoning_effort", None)
+
+            reasoning_effort = extra.pop("reasoning_effort", None)
+            if isinstance(reasoning_effort, str) and reasoning_effort:
+                model_id = self._model
+
+                # Claude + Gemini 2.5 use a "thinking" budget (hybrid reasoning).
+                if model_id.startswith("databricks-claude-") or model_id.startswith("databricks-gemini-2-5-"):
+                    # Respect an explicit thinking config if the caller provided one.
+                    if "thinking" not in extra and "thinking" not in params:
+                        effort = reasoning_effort.strip().lower()
+                        if effort not in ("none", "off", "disabled", "false", "0"):
+                            budget_tokens = self._thinking_budget_tokens_for_effort(effort)
+                            if budget_tokens > 0:
+                                params["thinking"] = {"type": "enabled", "budget_tokens": budget_tokens}
+
+                # GPT OSS + Gemini 3 accept reasoning_effort directly.
+                elif model_id.startswith("databricks-gpt-oss-") or model_id.startswith("databricks-gemini-3-"):
+                    params["reasoning_effort"] = reasoning_effort
+
+                # GPT-5 family also accepts reasoning_effort, but the allowed values vary;
+                # pass through as-is when supplied.
+                elif model_id.startswith("databricks-gpt-5"):
+                    params["reasoning_effort"] = reasoning_effort
+
             params.update(extra)
 
+        self._ensure_thinking_budget_and_max_tokens(
+            params,
+            request_max_tokens=request.max_tokens,
+        )
         return params
+
+    def _ensure_thinking_budget_and_max_tokens(
+        self,
+        params: dict[str, Any],
+        *,
+        request_max_tokens: int | None,
+    ) -> None:
+        """Ensure Databricks thinking budgets satisfy max_tokens constraints.
+
+        Databricks (and upstream Claude/Gemini semantics) require:
+        - thinking.budget_tokens < max_tokens
+        If the caller doesn't set max_tokens, Databricks may default to a low value,
+        which can break extended thinking.
+        """
+        thinking = params.get("thinking")
+        if not isinstance(thinking, dict):
+            return
+
+        budget_tokens = thinking.get("budget_tokens")
+        if not isinstance(budget_tokens, int) or budget_tokens <= 0:
+            params.pop("thinking", None)
+            return
+
+        max_tokens = params.get("max_tokens")
+        profile_max = getattr(self._profile, "max_output_tokens", None)
+        profile_max_int = profile_max if isinstance(profile_max, int) and profile_max > 0 else None
+
+        # If max_tokens isn't provided, choose a sensible default that leaves room
+        # for visible output in addition to internal thinking.
+        if not isinstance(max_tokens, int) or max_tokens <= 0:
+            desired = budget_tokens + self.DEFAULT_VISIBLE_OUTPUT_TOKENS_WITH_THINKING
+            if profile_max_int is not None:
+                desired = min(desired, profile_max_int)
+            if desired <= budget_tokens:
+                desired = budget_tokens + 1
+                if profile_max_int is not None and desired > profile_max_int:
+                    budget_tokens = max(profile_max_int - 1, 0)
+                    desired = profile_max_int
+            if budget_tokens <= 0:
+                params.pop("thinking", None)
+                return
+            thinking["budget_tokens"] = budget_tokens
+            params["max_tokens"] = desired
+            return
+
+        # If the caller set max_tokens but it's <= budget, shrink budget to fit.
+        if max_tokens <= budget_tokens:
+            # User intent is typically "give me up to max_tokens of visible output"
+            # plus up to budget_tokens of internal thinking; Databricks enforces the
+            # constraint by requiring max_tokens > budget_tokens.
+            if request_max_tokens is not None:
+                desired = max_tokens + budget_tokens
+                if profile_max_int is not None:
+                    desired = min(desired, profile_max_int)
+                params["max_tokens"] = desired
+                if desired <= budget_tokens:
+                    budget_tokens = max(desired - 1, 0)
+                    if budget_tokens <= 0:
+                        params.pop("thinking", None)
+                        return
+                    thinking["budget_tokens"] = budget_tokens
+            else:
+                budget_tokens = max(max_tokens - 1, 0)
+                if budget_tokens <= 0:
+                    params.pop("thinking", None)
+                    return
+                thinking["budget_tokens"] = budget_tokens
+
+    def _thinking_budget_tokens_for_effort(self, effort: str) -> int:
+        """Map reasoning effort tiers to Databricks 'thinking' budget_tokens.
+
+        Databricks docs warn that thinking budgets above 32k may vary; we cap at 32k.
+        """
+        effort_norm = effort.strip().lower()
+        if effort_norm in ("low", "minimal"):
+            return 4096
+        if effort_norm in ("medium", "default"):
+            return 16384
+        if effort_norm in ("high", "max"):
+            return 32768
+        # Unknown value: be conservative.
+        return 4096
 
     def _to_databricks_response_format(self, structured_output: StructuredOutputSpec) -> dict[str, Any]:
         """Convert structured output spec to Databricks response_format."""

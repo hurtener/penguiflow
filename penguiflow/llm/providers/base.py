@@ -226,8 +226,18 @@ class OpenAICompatibleProvider(Provider, ABC):
         msg = response.choices[0].message
         parts: list[Any] = []
 
-        if msg.content:
-            parts.append(TextPart(text=msg.content))
+        content = getattr(msg, "content", None)
+        if isinstance(content, str) and content:
+            parts.append(TextPart(text=content))
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, str) and item:
+                    parts.append(TextPart(text=item))
+                    continue
+                if isinstance(item, dict):
+                    item_type = item.get("type")
+                    if item_type in ("text", "output_text") and isinstance(item.get("text"), str) and item["text"]:
+                        parts.append(TextPart(text=item["text"]))
 
         for tc in getattr(msg, "tool_calls", []) or []:
             parts.append(
@@ -267,6 +277,44 @@ class OpenAICompatibleProvider(Provider, ABC):
                 val = message.get(key)
                 if isinstance(val, str) and val:
                     return val
+            content = message.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    item_type = item.get("type")
+                    if item_type in ("reasoning", "thinking", "thought"):
+                        summary = item.get("summary")
+                        if isinstance(summary, list):
+                            texts: list[str] = []
+                            for s in summary:
+                                if isinstance(s, dict) and isinstance(s.get("text"), str) and s["text"]:
+                                    texts.append(s["text"])
+                            if texts:
+                                return "".join(texts)
+                        if isinstance(item.get("text"), str) and item["text"]:
+                            return item["text"]
+
+        # Some OpenAI-shaped backends (e.g. Databricks hybrid reasoning) return
+        # a list of content blocks (reasoning + text).
+        content = getattr(message, "content", None)
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                if item_type in ("reasoning", "thinking", "thought"):
+                    # Databricks Claude: {"type":"reasoning","summary":[{"text":"..."}]}
+                    summary = item.get("summary")
+                    if isinstance(summary, list):
+                        texts: list[str] = []
+                        for s in summary:
+                            if isinstance(s, dict) and isinstance(s.get("text"), str) and s["text"]:
+                                texts.append(s["text"])
+                        if texts:
+                            return "".join(texts)
+                    if isinstance(item.get("text"), str) and item["text"]:
+                        return item["text"]
 
         return None
 
@@ -285,5 +333,35 @@ class OpenAICompatibleProvider(Provider, ABC):
                 val = delta.get(key)
                 if isinstance(val, str) and val:
                     return val
+
+            content = delta.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    item_type = item.get("type")
+                    if item_type in ("reasoning", "thinking", "thought"):
+                        summary = item.get("summary")
+                        if isinstance(summary, list):
+                            for s in summary:
+                                if isinstance(s, dict) and isinstance(s.get("text"), str) and s["text"]:
+                                    return s["text"]
+                        if isinstance(item.get("text"), str) and item["text"]:
+                            return item["text"]
+
+        content = getattr(delta, "content", None)
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                if item_type in ("reasoning", "thinking", "thought"):
+                    summary = item.get("summary")
+                    if isinstance(summary, list):
+                        for s in summary:
+                            if isinstance(s, dict) and isinstance(s.get("text"), str) and s["text"]:
+                                return s["text"]
+                    if isinstance(item.get("text"), str) and item["text"]:
+                        return item["text"]
 
         return None

@@ -106,7 +106,7 @@ The `[cli]` extra includes Jinja2 for template rendering.
 | Tier | Templates | Use Case |
 |------|-----------|----------|
 | **Tier 1** | `minimal`, `react`, `parallel` | Core patterns for most agents |
-| **Tier 2** | `lighthouse`, `wayfinder`, `analyst` | Pengui service integrations |
+| **Tier 2** | `RAG`, `wayfinder`, `analyst` | Internal service integrations |
 | **Tier 3** | `enterprise` | Production-grade full stack |
 | **Bonus** | `flow`, `controller` | Alternative architectural patterns |
 | **Flags** | `--with-streaming`, `--with-hitl`, `--with-a2a`, `--no-memory` | Add capabilities to any template |
@@ -122,7 +122,7 @@ What are you building?
 │
 ├─ Batch Processing / Multi-source → parallel
 │
-├─ RAG Application → lighthouse
+├─ RAG Application → RAG Service
 │
 ├─ NLQ-to-SQL Application → wayfinder
 │
@@ -382,9 +382,9 @@ async def merge_results(args: MergeArgs, ctx: ToolContext) -> MergeResult:
 
 ## Tier 2: Service Templates
 
-### `lighthouse` Template
+### `rag` Template
 
-**Best for**: RAG (Retrieval-Augmented Generation) applications using Lighthouse API.
+**Best for**: RAG (Retrieval-Augmented Generation) applications using RAG API. (work in progress, not production ready yet)
 
 ```bash
 penguiflow new my-rag --template=lighthouse
@@ -422,9 +422,9 @@ my-rag/
 └──────────────────────────────────────────────────────────────┘
 ```
 
-#### Lighthouse Tools
+#### RAG Tools
 
-| Tool | Lighthouse Endpoint | Description |
+| Tool | RAG Endpoint | Description |
 |------|---------------------|-------------|
 | `upload_files` | `POST /v1/files` | Upload documents |
 | `ingest` | `POST /v1/ingest` | Trigger indexing |
@@ -821,7 +821,7 @@ penguiflow new my-agent --template=react --with-streaming
 # Add HITL + A2A to enterprise
 penguiflow new my-agent --template=enterprise --with-hitl --with-a2a
 
-# Lighthouse without memory
+# RAG without memory
 penguiflow new my-rag --template=lighthouse --no-memory
 
 # Everything
@@ -2584,7 +2584,7 @@ PLANNER_DEADLINE_S=30.0
 | parallel | `penguiflow new NAME --template=parallel` | Batch processing |
 | flow | `penguiflow new NAME --template=flow` | Linear pipelines |
 | controller | `penguiflow new NAME --template=controller` | Iterative loops |
-| lighthouse | `penguiflow new NAME --template=lighthouse` | RAG applications |
+| RAG | `penguiflow new NAME --template=lighthouse` | RAG applications |
 | wayfinder | `penguiflow new NAME --template=wayfinder` | NLQ-to-SQL |
 | analyst | `penguiflow new NAME --template=analyst` | A2A analysis service |
 | enterprise | `penguiflow new NAME --template=enterprise` | Production platforms |
