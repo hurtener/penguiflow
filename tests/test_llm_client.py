@@ -302,20 +302,45 @@ class TestLiteLLMJSONClient:
 
         mock_litellm.acompletion = AsyncMock(return_value=_stream())
 
-        def completion_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
-            assert model == "gpt-4o"
-            assert prompt_tokens == 10
-            assert completion_tokens == 5
+        def completion_cost(completion_response: Any) -> float:
+            assert completion_response.model == "gpt-4o"
+            assert completion_response.usage.prompt_tokens == 10
+            assert completion_response.usage.completion_tokens == 5
             return 0.123
 
         mock_litellm.completion_cost = completion_cost  # type: ignore[attr-defined]
+
+        # Mock ModelResponse and Usage classes for cost calculation
+        class MockUsage:
+            def __init__(self, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0) -> None:
+                self.prompt_tokens = prompt_tokens
+                self.completion_tokens = completion_tokens
+                self.total_tokens = total_tokens
+
+        class MockModelResponse:
+            def __init__(self, id: str, model: str, choices: list[Any], usage: Any) -> None:
+                self.id = id
+                self.model = model
+                self.choices = choices
+                self.usage = usage
+
+        mock_litellm.ModelResponse = MockModelResponse
+        # Set up nested module for litellm.types.utils.Usage
+        mock_types = MagicMock()
+        mock_types.utils.Usage = MockUsage
+        mock_litellm.types = mock_types
 
         chunks: list[tuple[str, bool]] = []
 
         def on_chunk(text: str, done: bool) -> None:
             chunks.append((text, done))
 
-        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+        patched_modules = {
+            "litellm": mock_litellm,
+            "litellm.types": mock_types,
+            "litellm.types.utils": mock_types.utils,
+        }
+        with patch.dict(sys.modules, patched_modules):
             client = _LiteLLMJSONClient(
                 "gpt-4o",
                 temperature=0.0,

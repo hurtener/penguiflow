@@ -20,6 +20,7 @@ from penguiflow.llm.errors import (
 from penguiflow.llm.types import (
     LLMMessage,
     LLMRequest,
+    StructuredOutputSpec,
     TextPart,
 )
 
@@ -145,6 +146,56 @@ class TestGoogleProviderBuildConfig:
 
             call_kwargs = mock_types.GenerateContentConfig.call_args[1]
             assert call_kwargs["max_output_tokens"] == 500
+
+    def test_build_config_structured_output_uses_response_json_schema(self) -> None:
+        """Structured output should use response_json_schema to avoid Schema coercion issues."""
+        mock_genai = MagicMock()
+        mock_types = MagicMock()
+        mock_genai.types = mock_types
+
+        with patch.dict("sys.modules", {"google": MagicMock(), "google.genai": mock_genai}):
+            from penguiflow.llm.providers.google import GoogleProvider
+
+            provider = GoogleProvider("gemini-2.5-flash", api_key="test")
+
+            request = LLMRequest(
+                model="gemini-2.5-flash",
+                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                structured_output=StructuredOutputSpec(
+                    name="test_schema",
+                    json_schema={
+                        "type": "object",
+                        "properties": {"answer": {"type": "string"}},
+                        "required": ["answer"],
+                    },
+                    strict=True,
+                ),
+            )
+
+            provider._build_config(request)
+
+            call_kwargs = mock_types.GenerateContentConfig.call_args[1]
+            assert call_kwargs["response_mime_type"] == "application/json"
+            assert "response_json_schema" in call_kwargs
+            assert "response_schema" not in call_kwargs
+
+    def test_build_config_reasoning_effort_does_not_set_level_and_budget(self) -> None:
+        """Gemini config rejects setting both thinking_budget and thinking_level."""
+        from penguiflow.llm.providers.google import GoogleProvider
+
+        provider = GoogleProvider.__new__(GoogleProvider)
+
+        request = LLMRequest(
+            model="gemini-2.5-flash",
+            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            max_tokens=4096,
+            extra={"reasoning_effort": "medium"},
+        )
+
+        cfg = provider._build_config(request)  # type: ignore[attr-defined]
+        assert cfg.thinking_config is not None
+        # Only one of these may be set.
+        assert not (cfg.thinking_config.thinking_budget and cfg.thinking_config.thinking_level)
 
 
 class TestGoogleProviderComplete:

@@ -691,14 +691,21 @@ class _LiteLLMJSONClient:
                         cost = 0.0
                         if usage_payload:
                             try:
-                                cost = float(
-                                    litellm.completion_cost(
-                                        model=stream_params.get("model", ""),
+                                # Construct a minimal response object for accurate cost calculation
+                                from litellm import ModelResponse
+                                from litellm.types.utils import Usage as LiteLLMUsage
+
+                                mock_response = ModelResponse(
+                                    id="stream",
+                                    model=stream_params.get("model", ""),
+                                    choices=[{"message": {"content": content}, "index": 0, "finish_reason": "stop"}],
+                                    usage=LiteLLMUsage(
                                         prompt_tokens=usage_payload.get("prompt_tokens", 0),
                                         completion_tokens=usage_payload.get("completion_tokens", 0),
-                                    )
-                                    or 0.0
+                                        total_tokens=usage_payload.get("total_tokens", 0),
+                                    ),
                                 )
+                                cost = float(litellm.completion_cost(completion_response=mock_response) or 0.0)
                             except Exception:
                                 cost = 0.0
 

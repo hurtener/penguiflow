@@ -160,7 +160,7 @@ class GoogleProvider(Provider):
 
         try:
             async with asyncio.timeout(timeout):
-                async for chunk in self._client.aio.models.generate_content_stream(
+                async for chunk in await self._client.aio.models.generate_content_stream(
                     model=self._model,
                     contents=contents,
                     config=config,
@@ -174,19 +174,21 @@ class GoogleProvider(Provider):
 
                     # Best-effort reasoning/thinking extraction from candidates content parts.
                     if hasattr(chunk, "candidates") and chunk.candidates and chunk.candidates[0].content:
-                        for part in chunk.candidates[0].content.parts:
-                            for attr in (
-                                "thought",
-                                "thinking",
-                                "thinking_content",
-                                "reasoning",
-                                "reasoning_content",
-                            ):
-                                val = getattr(part, attr, None)
-                                if isinstance(val, str) and val:
-                                    reasoning_acc.append(val)
-                                    on_stream_event(StreamEvent(delta_reasoning=val))
-                                    break
+                        chunk_parts = chunk.candidates[0].content.parts
+                        if chunk_parts:
+                            for part in chunk_parts:
+                                for attr in (
+                                    "thought",
+                                    "thinking",
+                                    "thinking_content",
+                                    "reasoning",
+                                    "reasoning_content",
+                                ):
+                                    val = getattr(part, attr, None)
+                                    if isinstance(val, str) and val:
+                                        reasoning_acc.append(val)
+                                        on_stream_event(StreamEvent(delta_reasoning=val))
+                                        break
 
                     if chunk.usage_metadata:
                         usage = Usage(
@@ -232,7 +234,7 @@ class GoogleProvider(Provider):
 
             for part in msg.parts:
                 if isinstance(part, TextPart):
-                    parts.append(genai_types.Part.from_text(part.text))
+                    parts.append(genai_types.Part.from_text(text=part.text))
                 elif isinstance(part, ImagePart):
                     parts.append(
                         genai_types.Part.from_bytes(
@@ -281,7 +283,17 @@ class GoogleProvider(Provider):
                 strict=request.structured_output.strict,
             )
             config["response_mime_type"] = "application/json"
-            config["response_schema"] = transformer.transform()
+            # IMPORTANT: Use response_json_schema, not response_schema.
+            #
+            # google-genai's GenerateContentConfig supports both:
+            # - response_schema: a google.genai.types.Schema (OpenAPI-ish) which the SDK converts
+            # - response_json_schema: raw JSON schema, passed through as-is
+            #
+            # We intentionally use response_json_schema here because:
+            # - Our transformer produces JSON Schema (not a google.genai.types.Schema tree)
+            # - Some SDK/server combinations reject snake_case schema fields (e.g., additional_properties),
+            #   which can be introduced during Schema coercion/serialization.
+            config["response_json_schema"] = transformer.transform()
 
         # Handle function calling
         if request.tools:
@@ -290,13 +302,61 @@ class GoogleProvider(Provider):
         if request.tool_choice:
             config["tool_config"] = genai_types.ToolConfig(
                 function_calling_config=genai_types.FunctionCallingConfig(
-                    mode="ANY",
+                    mode=genai_types.FunctionCallingConfigMode.ANY,
                     allowed_function_names=[request.tool_choice],
                 )
             )
 
         if request.extra:
-            config.update(request.extra)
+            extra = dict(request.extra)
+            reasoning_effort = extra.pop("reasoning_effort", None)
+            config.update(extra)
+
+            if reasoning_effort and "thinking_config" not in config:
+                effort = str(reasoning_effort).strip().lower()
+                level = None
+                budget = None
+
+                effort_to_level = {
+                    "minimal": "MINIMAL",
+                    "low": "LOW",
+                    "medium": "MEDIUM",
+                    "high": "HIGH",
+                }
+                effort_to_budget = {
+                    "minimal": 1024,
+                    "low": 4096,
+                    "medium": 16384,
+                    "high": 32768,
+                }
+
+                level_name = effort_to_level.get(effort)
+                if level_name is not None and hasattr(genai_types, "ThinkingLevel"):
+                    level = getattr(genai_types.ThinkingLevel, level_name, None)
+
+                budget = effort_to_budget.get(effort)
+                if isinstance(budget, int) and budget > 0:
+                    max_out = config.get("max_output_tokens")
+                    if isinstance(max_out, int) and max_out <= budget:
+                        budget = None
+
+                thinking_kwargs: dict[str, Any] = {"include_thoughts": True}
+                if budget is not None:
+                    thinking_kwargs["thinking_budget"] = budget
+                elif level is not None:
+                    # google-genai / Gemini API: only one of thinking_budget or thinking_level may be set.
+                    thinking_kwargs["thinking_level"] = level
+
+                try:
+                    config["thinking_config"] = genai_types.ThinkingConfig(**thinking_kwargs)
+                except Exception:
+                    config["thinking_config"] = thinking_kwargs
+
+        allowed_keys = getattr(getattr(genai_types, "GenerateContentConfig", None), "model_fields", None)
+        if isinstance(allowed_keys, dict):
+            for key in list(config.keys()):
+                if key not in allowed_keys:
+                    config.pop(key, None)
 
         return genai_types.GenerateContentConfig(**config)
 
@@ -325,29 +385,32 @@ class GoogleProvider(Provider):
         reasoning_acc: list[str] = []
 
         if response.candidates and response.candidates[0].content:
-            for part in response.candidates[0].content.parts:
-                if hasattr(part, "text") and part.text:
-                    parts.append(TextPart(text=part.text))
-                elif hasattr(part, "function_call") and part.function_call:
-                    parts.append(
-                        ToolCallPart(
-                            name=part.function_call.name,
-                            arguments_json=json.dumps(dict(part.function_call.args)),
-                            call_id=None,  # Google doesn't use call IDs
+            content_parts = response.candidates[0].content.parts
+            if content_parts:
+                for part in content_parts:
+                    if hasattr(part, "text") and part.text:
+                        parts.append(TextPart(text=part.text))
+                    elif hasattr(part, "function_call") and part.function_call:
+                        fc = part.function_call
+                        parts.append(
+                            ToolCallPart(
+                                name=fc.name or "",
+                                arguments_json=json.dumps(dict(fc.args) if fc.args else {}),
+                                call_id=None,  # Google doesn't use call IDs
+                            )
                         )
-                    )
-                else:
-                    for attr in (
-                        "thought",
-                        "thinking",
-                        "thinking_content",
-                        "reasoning",
-                        "reasoning_content",
-                    ):
-                        val = getattr(part, attr, None)
-                        if isinstance(val, str) and val:
-                            reasoning_acc.append(val)
-                            break
+                    else:
+                        for attr in (
+                            "thought",
+                            "thinking",
+                            "thinking_content",
+                            "reasoning",
+                            "reasoning_content",
+                        ):
+                            val = getattr(part, attr, None)
+                            if isinstance(val, str) and val:
+                                reasoning_acc.append(val)
+                                break
 
         usage = Usage.zero()
         if response.usage_metadata:
