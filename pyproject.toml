@@ -38,6 +38,11 @@ dev = [
     "uvicorn>=0.32",
     "tenacity>=9.0.0",
     "aiohttp>=3.9.0",
+    # LLM provider SDKs for testing native LLM layer
+    "openai>=2.0.0",
+    "anthropic>=0.75.0",
+    "google-genai>=1.57.0",
+    "boto3>=1.42.0",
 ]
 cli = [
     "ag-ui-protocol>=0.0.42",
