@@ -26,7 +26,6 @@ from .models import (
     ClarificationResponse,
     JSONLLMClient,
     ObservationGuardrailConfig,
-    PlannerAction,
     ReflectionConfig,
     ReflectionCritique,
     ToolPolicy,
@@ -261,11 +260,13 @@ def init_react_planner(
     planner._absolute_max_parallel = absolute_max_parallel
     planner._use_native_reasoning = use_native_reasoning
     planner._reasoning_effort = reasoning_effort
+    from .llm import _build_planner_action_schema_conditional_finish
+
     action_schema = {
         "type": "json_schema",
         "json_schema": {
             "name": "planner_action",
-            "schema": PlannerAction.model_json_schema(),
+            "schema": _build_planner_action_schema_conditional_finish(),
         },
     }
     planner._action_schema = action_schema

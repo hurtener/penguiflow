@@ -68,7 +68,12 @@ class GoogleJsonSchemaTransformer(JsonSchemaTransformer):
 
         # Handle object types
         if node.get("type") == "object" and self.strict:
-            node["additionalProperties"] = False
+            # Only enforce additionalProperties=false when the object has an explicit
+            # "properties" shape. For dict-like schemas (no properties, or a schema-valued
+            # additionalProperties), forcing a boolean here breaks common patterns like
+            # `dict[str, Any]` (used for PlannerAction.args), making all keys invalid.
+            if "properties" in node and "additionalProperties" not in node:
+                node["additionalProperties"] = False
 
         return node
 

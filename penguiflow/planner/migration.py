@@ -554,6 +554,18 @@ def _normalize_unified_final(args: Any, *, thought: Any = None) -> dict[str, Any
     # e.g., {"next_node": "final_response", "args": "Here is my answer"}
     if isinstance(args, str) and args.strip():
         payload = {"answer": args.strip(), "raw_answer": args.strip()}
+    # Another weak-model pattern: args is a list of strings, typically a single item.
+    # e.g., {"next_node": "final_response", "args": ["Here is my answer"]}
+    elif isinstance(args, Sequence) and not isinstance(args, (str, bytes, bytearray)):
+        pieces: list[str] = []
+        for item in args:
+            if isinstance(item, str) and item.strip():
+                pieces.append(item)
+        if pieces:
+            answer_text = "\n".join(pieces).strip()
+            payload = {"answer": answer_text, "raw_answer": answer_text}
+        else:
+            payload = {}
     elif isinstance(args, Mapping):
         payload = dict(args)
     else:

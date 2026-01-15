@@ -344,6 +344,49 @@ def _build_minimal_planner_schema() -> dict[str, Any]:
     return schema
 
 
+def _build_planner_action_schema_conditional_finish() -> dict[str, Any]:
+    """PlannerAction schema with a finish-specific requirement.
+
+    Pydantic's `PlannerAction` intentionally excludes `thought` from the JSON
+    schema, and cannot express a conditional requirement:
+      if next_node == "final_response" then args.answer is required.
+
+    Some models (notably Gemini) otherwise tend to emit:
+      {"next_node": "final_response", "args": {}}
+    which forces an avoidable finish_repair cycle.
+    """
+
+    base: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "next_node": {"type": "string"},
+            # args is intentionally open-ended; tool args vary by next_node.
+            "args": {"type": "object"},
+        },
+        "required": ["next_node", "args"],
+        "additionalProperties": False,
+    }
+
+    conditional: dict[str, Any] = {
+        "if": {
+            "properties": {"next_node": {"enum": ["final_response"]}},
+            "required": ["next_node"],
+        },
+        "then": {
+            "properties": {
+                "args": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string", "minLength": 1}},
+                    "required": ["answer"],
+                }
+            },
+            "required": ["args"],
+        },
+    }
+
+    return {"allOf": [base, conditional]}
+
+
 def _inline_defs(schema: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
     """Inline local $defs references (limited scope for response_format)."""
 

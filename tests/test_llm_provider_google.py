@@ -196,6 +196,7 @@ class TestGoogleProviderBuildConfig:
         assert cfg.thinking_config is not None
         # Only one of these may be set.
         assert not (cfg.thinking_config.thinking_budget and cfg.thinking_config.thinking_level)
+        assert cfg.thinking_config.thinking_budget is not None
 
 
 class TestGoogleProviderComplete:

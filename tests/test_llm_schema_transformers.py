@@ -204,6 +204,17 @@ class TestGoogleJsonSchemaTransformer:
         assert result["type"] == "object"
         assert result.get("additionalProperties") is False
 
+    def test_does_not_override_additional_properties_schema_for_dict_like_objects(self) -> None:
+        schema = {
+            "type": "object",
+            # Dict-like object: no explicit properties, schema-valued additionalProperties.
+            "additionalProperties": {"type": "string"},
+        }
+        transformer = GoogleJsonSchemaTransformer(schema, strict=True)
+        result = transformer.transform()
+        # Must preserve schema-valued additionalProperties (do not force boolean False).
+        assert result["additionalProperties"] == {"type": "string"}
+
     def test_converts_const_to_enum(self) -> None:
         schema = {
             "type": "object",

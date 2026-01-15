@@ -47,6 +47,15 @@ def test_normalize_action_final_response_args_as_string() -> None:
     assert action.args["raw_answer"] == "Here is my answer to your question"
 
 
+def test_normalize_action_final_response_args_as_list_of_strings() -> None:
+    """Test weak model pattern where args is a list of strings instead of {"answer": ...}."""
+    raw = json.dumps({"next_node": "final_response", "args": ["Here is my answer.", "Second line."]})
+    action = normalize_action(raw)
+    assert action.next_node == "final_response"
+    assert action.args["answer"] == "Here is my answer.\nSecond line."
+    assert action.args["raw_answer"] == "Here is my answer.\nSecond line."
+
+
 def test_normalize_action_unified_parallel_preserves_steps_and_join() -> None:
     raw = json.dumps(
         {

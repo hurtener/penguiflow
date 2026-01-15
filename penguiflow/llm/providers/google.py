@@ -168,27 +168,35 @@ class GoogleProvider(Provider):
                     if cancel and cancel.is_cancelled():
                         raise LLMCancelledError(message="Request cancelled", provider="google")
 
-                    if chunk.text:
-                        text_acc.append(chunk.text)
-                        on_stream_event(StreamEvent(delta_text=chunk.text))
-
-                    # Best-effort reasoning/thinking extraction from candidates content parts.
+                    emitted_from_parts = False
                     if hasattr(chunk, "candidates") and chunk.candidates and chunk.candidates[0].content:
                         chunk_parts = chunk.candidates[0].content.parts
                         if chunk_parts:
                             for part in chunk_parts:
-                                for attr in (
-                                    "thought",
-                                    "thinking",
-                                    "thinking_content",
-                                    "reasoning",
-                                    "reasoning_content",
-                                ):
-                                    val = getattr(part, attr, None)
-                                    if isinstance(val, str) and val:
-                                        reasoning_acc.append(val)
-                                        on_stream_event(StreamEvent(delta_reasoning=val))
-                                        break
+                                emitted_from_parts = True
+                                text = getattr(part, "text", None)
+                                thought = getattr(part, "thought", False)
+                                if isinstance(thought, str) and thought:
+                                    reasoning_acc.append(thought)
+                                    on_stream_event(StreamEvent(delta_reasoning=thought))
+                                    continue
+
+                                if not isinstance(text, str) or not text:
+                                    continue
+
+                                if bool(thought):
+                                    reasoning_acc.append(text)
+                                    on_stream_event(StreamEvent(delta_reasoning=text))
+                                else:
+                                    text_acc.append(text)
+                                    on_stream_event(StreamEvent(delta_text=text))
+
+                    # Fallback: some SDK versions expose aggregated chunk.text (typically non-thought content).
+                    if not emitted_from_parts and getattr(chunk, "text", None):
+                        chunk_text = chunk.text
+                        if isinstance(chunk_text, str) and chunk_text:
+                            text_acc.append(chunk_text)
+                            on_stream_event(StreamEvent(delta_text=chunk_text))
 
                     if chunk.usage_metadata:
                         usage = Usage(
@@ -314,15 +322,8 @@ class GoogleProvider(Provider):
 
             if reasoning_effort and "thinking_config" not in config:
                 effort = str(reasoning_effort).strip().lower()
-                level = None
                 budget = None
 
-                effort_to_level = {
-                    "minimal": "MINIMAL",
-                    "low": "LOW",
-                    "medium": "MEDIUM",
-                    "high": "HIGH",
-                }
                 effort_to_budget = {
                     "minimal": 1024,
                     "low": 4096,
@@ -330,22 +331,15 @@ class GoogleProvider(Provider):
                     "high": 32768,
                 }
 
-                level_name = effort_to_level.get(effort)
-                if level_name is not None and hasattr(genai_types, "ThinkingLevel"):
-                    level = getattr(genai_types.ThinkingLevel, level_name, None)
-
                 budget = effort_to_budget.get(effort)
-                if isinstance(budget, int) and budget > 0:
-                    max_out = config.get("max_output_tokens")
-                    if isinstance(max_out, int) and max_out <= budget:
-                        budget = None
+                if not isinstance(budget, int) or budget < 0:
+                    budget = None
 
                 thinking_kwargs: dict[str, Any] = {"include_thoughts": True}
                 if budget is not None:
                     thinking_kwargs["thinking_budget"] = budget
-                elif level is not None:
-                    # google-genai / Gemini API: only one of thinking_budget or thinking_level may be set.
-                    thinking_kwargs["thinking_level"] = level
+                # Note: Gemini API rejects setting both thinking_budget and thinking_level.
+                # Prefer budget when available because it reliably yields thought parts in practice.
 
                 try:
                     config["thinking_config"] = genai_types.ThinkingConfig(**thinking_kwargs)
@@ -389,7 +383,13 @@ class GoogleProvider(Provider):
             if content_parts:
                 for part in content_parts:
                     if hasattr(part, "text") and part.text:
-                        parts.append(TextPart(text=part.text))
+                        thought = getattr(part, "thought", False)
+                        if isinstance(thought, str) and thought:
+                            reasoning_acc.append(thought)
+                        elif bool(thought):
+                            reasoning_acc.append(part.text)
+                        else:
+                            parts.append(TextPart(text=part.text))
                     elif hasattr(part, "function_call") and part.function_call:
                         fc = part.function_call
                         parts.append(
@@ -399,18 +399,11 @@ class GoogleProvider(Provider):
                                 call_id=None,  # Google doesn't use call IDs
                             )
                         )
+                    # Some SDK versions may attach additional thought fields; keep best-effort support.
                     else:
-                        for attr in (
-                            "thought",
-                            "thinking",
-                            "thinking_content",
-                            "reasoning",
-                            "reasoning_content",
-                        ):
-                            val = getattr(part, attr, None)
-                            if isinstance(val, str) and val:
-                                reasoning_acc.append(val)
-                                break
+                        thought = getattr(part, "thought", None)
+                        if isinstance(thought, str) and thought:
+                            reasoning_acc.append(thought)
 
         usage = Usage.zero()
         if response.usage_metadata:
