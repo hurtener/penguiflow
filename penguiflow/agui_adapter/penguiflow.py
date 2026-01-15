@@ -448,13 +448,16 @@ class PenguiFlowAdapter(AGUIAdapter):
 
             # Handle answer channel - stream as text message
             if channel == "answer":
-                if not self._message_started:
-                    mapped.append(self.text_start())
+                # Only treat as streamed if we actually emitted a non-empty delta.
+                # Some providers/models emit a final "done" marker with empty text,
+                # and we should not suppress the final answer emission in that case.
                 if text:
+                    if not self._message_started:
+                        mapped.append(self.text_start())
                     mapped.append(self.text_content(text))
-                # NOTE: Don't emit text_end() here on done=True - let with_run_lifecycle handle it
-                # This prevents premature message end when there are multiple LLM calls
-                self._streamed_answer = True
+                    # NOTE: Don't emit text_end() here on done=True - let with_run_lifecycle handle it
+                    # This prevents premature message end when there are multiple LLM calls
+                    self._streamed_answer = True
                 return mapped
 
             return mapped

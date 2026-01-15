@@ -15,6 +15,7 @@ from penguiflow.llm.types import (
     CompletionResponse,
     LLMMessage,
     TextPart,
+    ToolCallPart,
     Usage,
 )
 
@@ -79,12 +80,33 @@ class TestNativeLLMAdapter:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("test-model")
-            content, cost = await adapter.complete(
-                messages=[{"role": "user", "content": "Hello"}]
-            )
+            content, cost = await adapter.complete(messages=[{"role": "user", "content": "Hello"}])
 
             assert content == '{"result": "ok"}'
             mock_provider.complete.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_complete_falls_back_to_tool_call_arguments_when_text_empty(self, mock_provider: MagicMock) -> None:
+        mock_provider.complete.return_value = CompletionResponse(
+            message=LLMMessage(
+                role="assistant",
+                parts=[
+                    ToolCallPart(
+                        name="json_output",
+                        arguments_json='{"next_node":"final_response","args":{"answer":"hi"}}',
+                    )
+                ],
+            ),
+            usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
+        )
+
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter("test-model")
+            content, _ = await adapter.complete(messages=[{"role": "user", "content": "Hello"}])
+            assert content.startswith("{")
+            assert '"next_node"' in content
 
     @pytest.mark.asyncio
     async def test_complete_with_response_format(self, mock_provider: MagicMock) -> None:
@@ -502,9 +524,7 @@ class TestNativeLLMAdapterCost:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("gpt-4o")
-            content, cost = await adapter.complete(
-                messages=[{"role": "user", "content": "Hello"}]
-            )
+            content, cost = await adapter.complete(messages=[{"role": "user", "content": "Hello"}])
 
             # Cost should be positive for known model
             assert cost > 0
@@ -525,9 +545,7 @@ class TestNativeLLMAdapterCost:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("claude-haiku-4.5")
-            content, cost = await adapter.complete(
-                messages=[{"role": "user", "content": "Hello " * 500}]
-            )
+            content, cost = await adapter.complete(messages=[{"role": "user", "content": "Hello " * 500}])
 
             assert cost > 0.0
 
@@ -547,8 +565,6 @@ class TestNativeLLMAdapterCost:
             mock_create.return_value = mock_provider
 
             adapter = NativeLLMAdapter("totally-unknown-model")
-            content, cost = await adapter.complete(
-                messages=[{"role": "user", "content": "Hello"}]
-            )
+            content, cost = await adapter.complete(messages=[{"role": "user", "content": "Hello"}])
 
             assert cost == 0.0

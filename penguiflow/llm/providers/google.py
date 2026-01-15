@@ -168,17 +168,18 @@ class GoogleProvider(Provider):
                     if cancel and cancel.is_cancelled():
                         raise LLMCancelledError(message="Request cancelled", provider="google")
 
-                    emitted_from_parts = False
+                    emitted_any = False
                     if hasattr(chunk, "candidates") and chunk.candidates and chunk.candidates[0].content:
                         chunk_parts = chunk.candidates[0].content.parts
                         if chunk_parts:
                             for part in chunk_parts:
-                                emitted_from_parts = True
+                                text_emitted = False
                                 text = getattr(part, "text", None)
                                 thought = getattr(part, "thought", False)
                                 if isinstance(thought, str) and thought:
                                     reasoning_acc.append(thought)
                                     on_stream_event(StreamEvent(delta_reasoning=thought))
+                                    emitted_any = True
                                     continue
 
                                 if not isinstance(text, str) or not text:
@@ -187,12 +188,19 @@ class GoogleProvider(Provider):
                                 if bool(thought):
                                     reasoning_acc.append(text)
                                     on_stream_event(StreamEvent(delta_reasoning=text))
+                                    text_emitted = True
                                 else:
                                     text_acc.append(text)
                                     on_stream_event(StreamEvent(delta_text=text))
+                                    text_emitted = True
+                                if text_emitted:
+                                    emitted_any = True
 
                     # Fallback: some SDK versions expose aggregated chunk.text (typically non-thought content).
-                    if not emitted_from_parts and getattr(chunk, "text", None):
+                    # Also: some responses include candidates.parts metadata without usable text deltas
+                    # while chunk.text carries the actual delta; do not suppress chunk.text unless we
+                    # actually emitted content from parts.
+                    if not emitted_any and getattr(chunk, "text", None):
                         chunk_text = chunk.text
                         if isinstance(chunk_text, str) and chunk_text:
                             text_acc.append(chunk_text)
