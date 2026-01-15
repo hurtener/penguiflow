@@ -1,4 +1,12 @@
-import type { MetaResponse, SpecData, ValidationResult, TrajectoryPayload, ArtifactRef, ComponentRegistryPayload } from '$lib/types';
+import type {
+  MetaResponse,
+  SpecData,
+  ValidationResult,
+  TrajectoryPayload,
+  ArtifactRef,
+  ComponentRegistryPayload,
+  TaskState
+} from '$lib/types';
 import type { Result } from '$lib/utils/result';
 
 const BASE_URL = '';  // Same origin
@@ -198,4 +206,63 @@ export async function getArtifactMeta(
     return null;
   }
   return result.data;
+}
+
+export async function steerTask(
+  sessionId: string,
+  taskId: string,
+  eventType: string,
+  payload: Record<string, unknown> = {},
+  source = 'user'
+): Promise<boolean> {
+  const result = await fetchWithErrorHandling<{ accepted: boolean }>(`${BASE_URL}/steer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id: sessionId,
+      task_id: taskId,
+      event_type: eventType,
+      payload,
+      source
+    })
+  });
+  if (!result.ok) {
+    console.error('steer task failed', result.error);
+    return false;
+  }
+  return Boolean(result.data.accepted);
+}
+
+export async function listTasks(sessionId: string, status?: string): Promise<TaskState[] | null> {
+  const url = new URL(`${BASE_URL}/tasks`, window.location.origin);
+  url.searchParams.set('session_id', sessionId);
+  if (status) {
+    url.searchParams.set('status', status);
+  }
+  const result = await fetchWithErrorHandling<TaskState[]>(url.toString());
+  if (!result.ok) {
+    console.error('tasks fetch failed', result.error);
+    return null;
+  }
+  return result.data;
+}
+
+export async function applyContextPatch(
+  sessionId: string,
+  patchId: string,
+  action: 'apply' | 'reject' = 'apply'
+): Promise<boolean> {
+  const result = await fetchWithErrorHandling<{ ok: boolean }>(
+    `${BASE_URL}/sessions/${sessionId}/apply-context-patch`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ patch_id: patchId, action })
+    }
+  );
+  if (!result.ok) {
+    console.error('apply context patch failed', result.error);
+    return false;
+  }
+  return Boolean(result.data.ok);
 }

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -10,7 +12,7 @@ from penguiflow.planner import ToolContext
 from penguiflow.planner.artifact_registry import (
     get_artifact_registry,
     has_artifact_refs,
-    resolve_artifact_refs,
+    resolve_artifact_refs_async,
 )
 
 from .runtime import get_runtime
@@ -27,6 +29,7 @@ from .tools import (
     UIInteractionResult,
     UISelectOptionArgs,
 )
+from .validate import RichOutputValidationError
 
 
 def _ensure_enabled() -> None:
@@ -42,6 +45,38 @@ def _emit_metadata(extra: Mapping[str, Any] | None) -> dict[str, Any]:
     return metadata
 
 
+def _dedupe_key(payload: Mapping[str, Any]) -> str:
+    try:
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        canonical = str(payload)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def _summarise_component(component: str, props: Mapping[str, Any]) -> str:
+    if component == "report":
+        sections = props.get("sections")
+        if isinstance(sections, list):
+            return f"Rendered report ({len(sections)} sections)"
+        return "Rendered report"
+    if component == "grid":
+        items = props.get("items")
+        if isinstance(items, list):
+            return f"Rendered grid ({len(items)} items)"
+        return "Rendered grid"
+    if component == "tabs":
+        tabs = props.get("tabs")
+        if isinstance(tabs, list):
+            return f"Rendered tabs ({len(tabs)} tabs)"
+        return "Rendered tabs"
+    if component == "accordion":
+        items = props.get("items")
+        if isinstance(items, list):
+            return f"Rendered accordion ({len(items)} items)"
+        return "Rendered accordion"
+    return f"Rendered {component}"
+
+
 @tool(desc="Request a rich UI component render (passive).", tags=["rich_output", "ui"], side_effects="pure")
 async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> RenderComponentResult:
     runtime = get_runtime()
@@ -51,6 +86,7 @@ async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> Rende
     payload = args.model_dump(by_alias=True)
     component = payload.get("component")
     props = payload.get("props") or {}
+    dedupe = _dedupe_key(payload)
 
     if not isinstance(component, str):
         raise RuntimeError("render_component requires a component name")
@@ -62,19 +98,54 @@ async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> Rende
         if registry is None:
             raise RuntimeError("artifact_ref usage requires an active planner run")
         session_id = ctx.tool_context.get("session_id")
-        props = resolve_artifact_refs(
+        props = await resolve_artifact_refs_async(
             props,
             registry=registry,
             trajectory=getattr(ctx, "_trajectory", None),
             session_id=str(session_id) if session_id is not None else None,
+            artifact_store=getattr(ctx, "artifacts", None),
         )
         if not isinstance(props, Mapping):
             raise RuntimeError("artifact_ref resolution returned invalid props")
 
-    runtime.validate_component(component, props, tool_context=ctx.tool_context)
+    try:
+        runtime.validate_component(component, props, tool_context=ctx.tool_context)
+    except RichOutputValidationError as exc:
+        hint = (
+            f"{exc}\n"
+            "To fix this, call `describe_component` with the component name to get the exact props schema, "
+            "then retry `render_component` with props matching that schema.\n"
+            f"Example: {{\"next_node\":\"describe_component\",\"args\":{{\"name\":\"{component}\"}}}}"
+        )
+        raise RuntimeError(hint) from exc
 
     meta = _emit_metadata(args.metadata)
     meta.setdefault("registry_version", runtime.registry.version)
+
+    summary = _summarise_component(component, props)
+
+    # Register the rendered component payload into the in-run artifact registry (if available),
+    # so the model can reference it later via artifact_ref and avoid re-render loops.
+    artifact_ref: str | None = None
+    if registry is not None:
+        trajectory = getattr(ctx, "_trajectory", None)
+        step_index = len(getattr(trajectory, "steps", []) or [])
+        record = registry.register_tool_artifact(
+            "render_component",
+            "ui",
+            {
+                "component": component,
+                "props": dict(props),
+                "title": payload.get("title"),
+                "summary": summary,
+                "metadata": dict(meta),
+            },
+            step_index=step_index,
+        )
+        artifact_ref = record.ref
+        metadata = getattr(trajectory, "metadata", None)
+        if isinstance(metadata, dict):
+            registry.write_snapshot(metadata)
 
     await ctx.emit_artifact(
         "ui",
@@ -88,7 +159,13 @@ async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> Rende
         artifact_type="ui_component",
         meta=meta,
     )
-    return RenderComponentResult()
+    return RenderComponentResult(
+        ok=True,
+        component=component,
+        artifact_ref=artifact_ref,
+        dedupe_key=dedupe,
+        summary=summary,
+    )
 
 
 @tool(
@@ -101,7 +178,20 @@ async def list_artifacts(args: ListArtifactsArgs, ctx: ToolContext) -> ListArtif
     registry = get_artifact_registry(ctx)
     if registry is None:
         return ListArtifactsResult(artifacts=[])
-    kind = None if args.kind == "all" else args.kind
+    # Backward/behavioral compatibility: callers often use kind="tool_artifact"
+    # when they really mean "any tool-produced artifact" (including ui_component).
+    kind = None if args.kind in {"all", "tool_artifact"} else args.kind
+
+    # Background task results are merged into llm_context as ContextPatch payloads.
+    # Those artifacts must be ingested into the in-run registry so they can be
+    # referenced via artifact_ref and resolved later in the same run.
+    llm_context = getattr(ctx, "llm_context", None)
+    if llm_context is not None:
+        try:
+            registry.ingest_llm_context(llm_context)
+        except Exception:
+            # Never fail listing due to best-effort ingestion.
+            pass
     items = registry.list_records(kind=kind, source_tool=args.source_tool, limit=args.limit)
     return ListArtifactsResult(artifacts=[ArtifactSummary.model_validate(item) for item in items])
 

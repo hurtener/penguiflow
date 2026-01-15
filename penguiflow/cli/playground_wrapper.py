@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import secrets
 
@@ -18,6 +19,7 @@ from penguiflow.planner import (  # noqa: E402
     ReactPlanner,
     Trajectory,
 )
+from penguiflow.steering import SteeringInbox  # noqa: E402
 
 from .playground_state import PlaygroundStateStore  # noqa: E402
 
@@ -49,6 +51,7 @@ class AgentWrapper(Protocol):
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult: ...
 
     async def resume(
@@ -60,6 +63,7 @@ class AgentWrapper(Protocol):
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult: ...
 
     async def shutdown(self) -> None: ...
@@ -98,7 +102,7 @@ class _EventRecorder:
         events = list(self._buffer)
         self._buffer.clear()
         for event in events:
-            await self._state_store.save_event(trace_id, event)
+            await self._state_store.save_planner_event(trace_id, event)
 
 
 def _combine_callbacks(
@@ -235,6 +239,7 @@ class PlannerAgentWrapper:
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult:
         llm_context = dict(llm_context or {})
         trace_id = trace_id_hint or secrets.token_hex(8)
@@ -257,11 +262,19 @@ class PlannerAgentWrapper:
                 "session_id": session_id,
                 "trace_id": trace_id,
             }
-            result = await self._planner.run(
-                query=query,
-                llm_context=llm_context,
-                tool_context=merged_tool_context,
-            )
+            if "steering" in inspect.signature(self._planner.run).parameters:
+                result = await self._planner.run(
+                    query=query,
+                    llm_context=llm_context,
+                    tool_context=merged_tool_context,
+                    steering=steering,
+                )
+            else:
+                result = await self._planner.run(
+                    query=query,
+                    llm_context=llm_context,
+                    tool_context=merged_tool_context,
+                )
         finally:
             if callback is not None:
                 self._planner._event_callback = original_callback
@@ -323,6 +336,7 @@ class PlannerAgentWrapper:
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult:
         trace_id = trace_id_hint or secrets.token_hex(8)
 
@@ -344,11 +358,19 @@ class PlannerAgentWrapper:
                 "session_id": session_id,
                 "trace_id": trace_id,
             }
-            result = await self._planner.resume(
-                resume_token,
-                user_input=user_input,
-                tool_context=merged_tool_context,
-            )
+            if "steering" in inspect.signature(self._planner.resume).parameters:
+                result = await self._planner.resume(
+                    resume_token,
+                    user_input=user_input,
+                    tool_context=merged_tool_context,
+                    steering=steering,
+                )
+            else:
+                result = await self._planner.resume(
+                    resume_token,
+                    user_input=user_input,
+                    tool_context=merged_tool_context,
+                )
         finally:
             if callback is not None:
                 self._planner._event_callback = original_callback
@@ -410,13 +432,86 @@ class OrchestratorAgentWrapper:
         state_store: PlaygroundStateStore | None = None,
         tenant_id: str = "playground-tenant",
         user_id: str = "playground-user",
+        tool_context_defaults: Mapping[str, Any] | None = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._state_store = state_store
         self._tenant_id = tenant_id
         self._user_id = user_id
+        self._tool_context_defaults = dict(tool_context_defaults or {})
         self._event_recorder = _EventRecorder(state_store)
         self._initialized = False
+
+    async def _call_execute(
+        self,
+        *,
+        query: str,
+        session_id: str,
+        tool_context: Mapping[str, Any],
+        steering: SteeringInbox | None = None,
+    ) -> Any:
+        execute = self._orchestrator.execute
+        try:
+            sig = inspect.signature(execute)
+        except (TypeError, ValueError):
+            sig = None
+
+        kwargs: dict[str, Any] = {
+            "query": query,
+            "tenant_id": tool_context.get("tenant_id", self._tenant_id),
+            "user_id": tool_context.get("user_id", self._user_id),
+            "session_id": session_id,
+        }
+
+        if sig is not None:
+            params = sig.parameters
+            if "tool_context" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                kwargs["tool_context"] = dict(tool_context)
+            if "steering" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                kwargs["steering"] = steering
+
+        try:
+            return await execute(**kwargs)
+        except TypeError:
+            kwargs.pop("tool_context", None)
+            kwargs.pop("steering", None)
+            return await execute(**kwargs)
+
+    async def _call_resume(
+        self,
+        resume_token: str,
+        *,
+        session_id: str,
+        user_input: str | None,
+        tool_context: Mapping[str, Any],
+        steering: SteeringInbox | None = None,
+    ) -> Any:
+        resume_fn = self._orchestrator.resume
+        try:
+            sig = inspect.signature(resume_fn)
+        except (TypeError, ValueError):
+            sig = None
+
+        kwargs: dict[str, Any] = {
+            "tenant_id": tool_context.get("tenant_id", self._tenant_id),
+            "user_id": tool_context.get("user_id", self._user_id),
+            "session_id": session_id,
+            "user_input": user_input,
+        }
+
+        if sig is not None:
+            params = sig.parameters
+            if "tool_context" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                kwargs["tool_context"] = dict(tool_context)
+            if "steering" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                kwargs["steering"] = steering
+
+        try:
+            return await resume_fn(resume_token, **kwargs)
+        except TypeError:
+            kwargs.pop("tool_context", None)
+            kwargs.pop("steering", None)
+            return await resume_fn(resume_token, **kwargs)
 
     async def initialize(self) -> None:
         """Eagerly initialize the orchestrator if it supports lazy initialization.
@@ -442,9 +537,13 @@ class OrchestratorAgentWrapper:
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult:
         ctx = dict(llm_context or {})
-        tool_ctx = dict(tool_context or {})
+        tool_ctx = {
+            **self._tool_context_defaults,
+            **dict(tool_context or {}),
+        }
         planner = getattr(self._orchestrator, "_planner", None)
         trace_holder: dict[str, str | None] = {"id": trace_id_hint}
 
@@ -463,11 +562,8 @@ class OrchestratorAgentWrapper:
             planner._event_callback = _combine_callbacks(original_callback, callback)
 
         try:
-            response = await self._orchestrator.execute(
-                query=query,
-                tenant_id=tool_ctx.get("tenant_id", self._tenant_id),
-                user_id=tool_ctx.get("user_id", self._user_id),
-                session_id=session_id,
+            response = await self._call_execute(
+                query=query, session_id=session_id, tool_context=tool_ctx, steering=steering
             )
         finally:
             if planner is not None and callback is not None:
@@ -515,8 +611,15 @@ class OrchestratorAgentWrapper:
                 pause=pause_dict,
             )
 
+        raw_answer = _get_attr(response, "answer")
+        normalised_answer = _normalise_answer(raw_answer)
+        _LOGGER.info(
+            "orchestrator_answer_extract: has_answer=%s, answer_len=%s",
+            normalised_answer is not None,
+            len(normalised_answer) if normalised_answer else 0,
+        )
         return ChatResult(
-            answer=_normalise_answer(_get_attr(response, "answer")),
+            answer=normalised_answer,
             trace_id=trace_id,
             session_id=session_id,
             metadata=metadata,
@@ -536,6 +639,7 @@ class OrchestratorAgentWrapper:
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult:
         # Check if orchestrator has a resume method (HITL support)
         resume_fn = getattr(self._orchestrator, "resume", None)
@@ -545,7 +649,10 @@ class OrchestratorAgentWrapper:
                 "Ensure your agent was created with --with-hitl flag."
             )
 
-        tool_ctx = dict(tool_context or {})
+        tool_ctx = {
+            **self._tool_context_defaults,
+            **dict(tool_context or {}),
+        }
         planner = getattr(self._orchestrator, "_planner", None)
         trace_holder: dict[str, str | None] = {"id": trace_id_hint}
 
@@ -564,12 +671,12 @@ class OrchestratorAgentWrapper:
             planner._event_callback = _combine_callbacks(original_callback, callback)
 
         try:
-            response = await resume_fn(
+            response = await self._call_resume(
                 resume_token,
-                tenant_id=tool_ctx.get("tenant_id", self._tenant_id),
-                user_id=tool_ctx.get("user_id", self._user_id),
                 session_id=session_id,
                 user_input=user_input,
+                tool_context=tool_ctx,
+                steering=steering,
             )
         finally:
             if planner is not None and callback is not None:
@@ -602,8 +709,15 @@ class OrchestratorAgentWrapper:
                 pause=pause_dict,
             )
 
+        raw_answer = _get_attr(response, "answer")
+        normalised_answer = _normalise_answer(raw_answer)
+        _LOGGER.info(
+            "orchestrator_resume_answer_extract: has_answer=%s, answer_len=%s",
+            normalised_answer is not None,
+            len(normalised_answer) if normalised_answer else 0,
+        )
         return ChatResult(
-            answer=_normalise_answer(_get_attr(response, "answer")),
+            answer=normalised_answer,
             trace_id=trace_id,
             session_id=session_id,
             metadata=metadata,

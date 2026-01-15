@@ -166,7 +166,7 @@ Response:
 Returns metadata used by the UI’s left column:
 - agent name/description/template/flags
 - planner settings summary
-- service flags (memory_iceberg/lighthouse/wayfinder)
+- service flags (memory_iceberg/rag_server/wayfinder)
 - tool catalog listing (name/description/tags)
 
 ### `POST /chat`

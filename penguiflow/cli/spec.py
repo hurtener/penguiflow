@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
-import yaml  # type: ignore[import-untyped]
+import yaml  # type: ignore[import-untyped,unused-ignore]
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode  # type: ignore[import-untyped]
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode  # type: ignore[import-untyped,unused-ignore]
 
 from .spec_errors import (
     SpecErrorDetail,
@@ -207,6 +207,7 @@ class AgentFlagsSpec(BaseModel):
     hitl: bool = False
     a2a: bool = False
     memory: bool = True
+    background_tasks: bool = False
 
     model_config = ConfigDict(extra="forbid")
 
@@ -214,7 +215,7 @@ class AgentFlagsSpec(BaseModel):
 class AgentSpec(BaseModel):
     name: str
     description: str
-    template: Literal["minimal", "react", "parallel", "lighthouse", "wayfinder", "analyst", "enterprise"]
+    template: Literal["minimal", "react", "parallel", "rag_server", "wayfinder", "analyst", "enterprise"]
     flags: AgentFlagsSpec = Field(default_factory=AgentFlagsSpec)
 
     model_config = ConfigDict(extra="forbid")
@@ -234,6 +235,17 @@ class AgentSpec(BaseModel):
         return value
 
 
+class ToolBackgroundSpec(BaseModel):
+    """Tool-level background execution configuration."""
+
+    enabled: bool = False
+    mode: Literal["job", "subagent"] = "job"
+    default_merge_strategy: Literal["APPEND", "REPLACE", "HUMAN_GATED"] = "HUMAN_GATED"
+    notify_on_complete: bool = True
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class ToolSpec(BaseModel):
     name: str
     description: str
@@ -242,6 +254,7 @@ class ToolSpec(BaseModel):
     group: str | None = None
     args: dict[str, TypeExpression] = Field(default_factory=dict)
     result: dict[str, TypeExpression] = Field(default_factory=dict)
+    background: ToolBackgroundSpec | None = None
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
@@ -421,7 +434,7 @@ class ServiceConfigSpec(BaseModel):
 
 class ServiceSpec(BaseModel):
     memory_iceberg: ServiceConfigSpec = Field(default_factory=ServiceConfigSpec)
-    lighthouse: ServiceConfigSpec = Field(default_factory=ServiceConfigSpec)
+    rag_server: ServiceConfigSpec = Field(default_factory=ServiceConfigSpec)
     wayfinder: ServiceConfigSpec = Field(default_factory=ServiceConfigSpec)
 
     model_config = ConfigDict(extra="forbid")
@@ -657,6 +670,25 @@ class PlannerRichOutputSpec(BaseModel):
         return value
 
 
+class PlannerBackgroundTasksSpec(BaseModel):
+    """Background task orchestration configuration for ReactPlanner."""
+
+    enabled: bool = False
+    allow_tool_background: bool = False
+    default_mode: Literal["subagent", "job"] = "subagent"
+    default_merge_strategy: Literal["APPEND", "REPLACE", "HUMAN_GATED"] = "HUMAN_GATED"
+    context_depth: Literal["full", "summary", "none"] = "full"
+    propagate_on_cancel: Literal["cascade", "isolate"] = "cascade"
+    spawn_requires_confirmation: bool = False
+    include_prompt_guidance: bool = True
+    max_concurrent_tasks: int = Field(default=5, ge=1, le=20)
+    max_tasks_per_session: int = Field(default=50, ge=1, le=200)
+    task_timeout_s: int = Field(default=3600, ge=60)
+    max_pending_steering: int = Field(default=2, ge=1, le=10)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class PlannerSpec(BaseModel):
     max_iters: int = 12
     hop_budget: int = 8
@@ -666,8 +698,14 @@ class PlannerSpec(BaseModel):
     short_term_memory: PlannerShortTermMemorySpec | None = None
     artifact_store: PlannerArtifactStoreSpec = Field(default_factory=PlannerArtifactStoreSpec)
     rich_output: PlannerRichOutputSpec = Field(default_factory=PlannerRichOutputSpec)
+    background_tasks: PlannerBackgroundTasksSpec = Field(default_factory=PlannerBackgroundTasksSpec)
     hints: PlannerHintsSpec | None = None
     stream_final_response: bool = False
+    # When models emit multiple JSON objects in a single response, optionally
+    # execute additional tool calls sequentially (guarded by read-only gating).
+    multi_action_sequential: bool = False
+    multi_action_read_only_only: bool = True
+    multi_action_max_tools: int = Field(default=2, ge=0, le=10)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -830,10 +868,10 @@ def _validate_services(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail]:
     errors: list[SpecErrorDetail] = []
     default_urls = {
         "memory_iceberg": "http://localhost:8000",
-        "lighthouse": "http://localhost:8081",
+        "rag_server": "http://localhost:8081",
         "wayfinder": "http://localhost:8082",
     }
-    for field_name in ("memory_iceberg", "lighthouse", "wayfinder"):
+    for field_name in ("memory_iceberg", "rag_server", "wayfinder"):
         cfg: ServiceConfigSpec = getattr(spec.services, field_name)
         if cfg.enabled and not cfg.base_url:
             path = ("services", field_name, "base_url")
@@ -956,6 +994,71 @@ def _validate_cross_fields(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail
                     ),
                 )
             )
+    # Background tasks validation
+    bg = spec.planner.background_tasks
+    if bg.enabled:
+        if bg.default_merge_strategy == "HUMAN_GATED" and not spec.agent.flags.hitl:
+            path = ("planner", "background_tasks", "default_merge_strategy")
+            errors.append(
+                SpecErrorDetail(
+                    message="HUMAN_GATED merge strategy requires agent.flags.hitl: true.",
+                    path=path,
+                    line=lines.line_for(path),
+                    suggestion="Enable agent.flags.hitl or use APPEND/REPLACE strategy.",
+                )
+            )
+        if bg.spawn_requires_confirmation and not spec.agent.flags.hitl:
+            path = ("planner", "background_tasks", "spawn_requires_confirmation")
+            errors.append(
+                SpecErrorDetail(
+                    message="spawn_requires_confirmation requires agent.flags.hitl: true.",
+                    path=path,
+                    line=lines.line_for(path),
+                    suggestion="Enable agent.flags.hitl or disable spawn_requires_confirmation.",
+                )
+            )
+    # Tool background validation
+    for idx, tool in enumerate(spec.tools):
+        if tool.background and tool.background.enabled:
+            if not spec.agent.flags.background_tasks:
+                tool_path = ("tools", idx, "background", "enabled")
+                errors.append(
+                    SpecErrorDetail(
+                        message=(
+                            f"Tool '{tool.name}' has background enabled "
+                            "but agent.flags.background_tasks is false."
+                        ),
+                        path=tool_path,
+                        line=lines.line_for(tool_path),
+                        suggestion="Set agent.flags.background_tasks: true.",
+                    )
+                )
+            if not spec.planner.background_tasks.allow_tool_background:
+                tool_path = ("tools", idx, "background", "enabled")
+                errors.append(
+                    SpecErrorDetail(
+                        message=(
+                            f"Tool '{tool.name}' has background enabled "
+                            "but planner.background_tasks.allow_tool_background is false."
+                        ),
+                        path=tool_path,
+                        line=lines.line_for(tool_path),
+                        suggestion="Set planner.background_tasks.allow_tool_background: true.",
+                    )
+                )
+            if tool.background.default_merge_strategy == "HUMAN_GATED" and not spec.agent.flags.hitl:
+                tool_path = ("tools", idx, "background", "default_merge_strategy")
+                errors.append(
+                    SpecErrorDetail(
+                        message=(
+                            f"Tool '{tool.name}' uses HUMAN_GATED merge "
+                            "but agent.flags.hitl is false."
+                        ),
+                        path=tool_path,
+                        line=lines.line_for(tool_path),
+                        suggestion="Enable agent.flags.hitl or use APPEND/REPLACE strategy.",
+                    )
+                )
     return errors
 
 
@@ -1011,6 +1114,7 @@ __all__ = [
     "ExternalToolPresetSpec",
     "ExternalToolCustomSpec",
     "ExternalToolsSpec",
+    "PlannerBackgroundTasksSpec",
     "PlannerHintsSpec",
     "PlannerShortTermMemoryBudgetSpec",
     "PlannerShortTermMemoryIsolationSpec",
@@ -1020,6 +1124,8 @@ __all__ = [
     "ServiceSpec",
     "Spec",
     "SpecValidationError",
+    "ToolBackgroundSpec",
+    "ToolSpec",
     "TypeExpression",
     "UnsupportedTypeAnnotation",
     "load_spec",

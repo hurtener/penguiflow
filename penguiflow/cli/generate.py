@@ -505,6 +505,8 @@ def _generate_planner(
     planning_hints_literal = repr(_planning_hints(spec)).replace("'", '"')
     stm = spec.planner.short_term_memory
     stm_enabled = bool(stm and stm.enabled)
+    bg = spec.planner.background_tasks
+    with_background_tasks = bool(spec.agent.flags.background_tasks or bg.enabled)
 
     content = _render_template(
         "planner.py.jinja",
@@ -526,6 +528,7 @@ def _generate_planner(
             "absolute_max_parallel": spec.planner.absolute_max_parallel,
             "planning_hints_literal": planning_hints_literal if planning_hints_literal != "None" else "None",
             "has_external_tools": bool(spec.external_tools.presets or spec.external_tools.custom),
+            "with_background_tasks": with_background_tasks,
         },
     )
 
@@ -799,7 +802,7 @@ def _generate_config(
     config_path = project_dir / "src" / package_name / "config.py"
 
     memory_base = repr(spec.services.memory_iceberg.base_url) if spec.services.memory_iceberg.base_url else "None"
-    lighthouse_base = repr(spec.services.lighthouse.base_url) if spec.services.lighthouse.base_url else "None"
+    rag_server_base = repr(spec.services.rag_server.base_url) if spec.services.rag_server.base_url else "None"
     wayfinder_base = repr(spec.services.wayfinder.base_url) if spec.services.wayfinder.base_url else "None"
     stm = spec.planner.short_term_memory
     stm_budget = stm.budget if stm else None
@@ -808,6 +811,8 @@ def _generate_config(
     artifact_retention = artifact_cfg.retention
     rich_output = spec.planner.rich_output
     rich_allowlist = rich_output.allowlist or _DEFAULT_RICH_OUTPUT_ALLOWLIST
+    bg = spec.planner.background_tasks
+    with_background_tasks = bool(spec.agent.flags.background_tasks or bg.enabled)
 
     content = _render_template(
         "config.py.jinja",
@@ -820,12 +825,15 @@ def _generate_config(
             "reflection_quality_threshold": spec.llm.reflection.quality_threshold if spec.llm.reflection else 0.8,
             "reflection_max_revisions": spec.llm.reflection.max_revisions if spec.llm.reflection else 2,
             "memory_base_url": memory_base,
-            "lighthouse_base_url": lighthouse_base,
+            "rag_server_base_url": rag_server_base,
             "wayfinder_base_url": wayfinder_base,
             "planner_max_iters": spec.planner.max_iters,
             "planner_hop_budget": spec.planner.hop_budget,
             "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,
             "planner_stream_final_response": spec.planner.stream_final_response,
+            "planner_multi_action_sequential": spec.planner.multi_action_sequential,
+            "planner_multi_action_read_only_only": spec.planner.multi_action_read_only_only,
+            "planner_multi_action_max_tools": spec.planner.multi_action_max_tools,
             "artifact_store_enabled": bool(artifact_cfg.enabled),
             "artifact_store_ttl_seconds": artifact_retention.ttl_seconds,
             "artifact_store_max_artifact_bytes": artifact_retention.max_artifact_bytes,
@@ -860,6 +868,20 @@ def _generate_config(
             "short_term_memory_retry_attempts": stm.retry_attempts if stm else 3,
             "short_term_memory_retry_backoff_base_s": stm.retry_backoff_base_s if stm else 2.0,
             "short_term_memory_degraded_retry_interval_s": stm.degraded_retry_interval_s if stm else 30.0,
+            "with_background_tasks": with_background_tasks,
+            # Background tasks configuration
+            "background_tasks_enabled": bg.enabled,
+            "background_tasks_allow_tool_background": bg.allow_tool_background,
+            "background_tasks_default_mode": bg.default_mode,
+            "background_tasks_default_merge_strategy": bg.default_merge_strategy,
+            "background_tasks_context_depth": bg.context_depth,
+            "background_tasks_propagate_on_cancel": bg.propagate_on_cancel,
+            "background_tasks_spawn_requires_confirmation": bg.spawn_requires_confirmation,
+            "background_tasks_include_prompt_guidance": bg.include_prompt_guidance,
+            "background_tasks_max_concurrent_tasks": bg.max_concurrent_tasks,
+            "background_tasks_max_tasks_per_session": bg.max_tasks_per_session,
+            "background_tasks_task_timeout_s": bg.task_timeout_s,
+            "background_tasks_max_pending_steering": bg.max_pending_steering,
         },
     )
 
@@ -895,6 +917,8 @@ def _generate_env_example(
     rich_output = spec.planner.rich_output
     rich_allowlist = rich_output.allowlist or _DEFAULT_RICH_OUTPUT_ALLOWLIST
     rich_allowlist_csv = ",".join(rich_allowlist)
+    bg = spec.planner.background_tasks
+    with_background_tasks = bool(spec.agent.flags.background_tasks or bg.enabled)
 
     content = _render_template(
         "env.example.jinja",
@@ -905,12 +929,15 @@ def _generate_env_example(
             "summarizer_enabled": str(bool(spec.llm.summarizer and spec.llm.summarizer.enabled)).lower(),
             "reflection_enabled": str(bool(spec.llm.reflection and spec.llm.reflection.enabled)).lower(),
             "memory_base_url": spec.services.memory_iceberg.base_url or "http://localhost:8000",
-            "lighthouse_base_url": spec.services.lighthouse.base_url or "http://localhost:8081",
+            "rag_server_base_url": spec.services.rag_server.base_url or "http://localhost:8081",
             "wayfinder_base_url": spec.services.wayfinder.base_url or "http://localhost:8082",
             "planner_max_iters": spec.planner.max_iters,
             "planner_hop_budget": spec.planner.hop_budget,
             "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,
             "planner_stream_final_response": spec.planner.stream_final_response,
+            "planner_multi_action_sequential": spec.planner.multi_action_sequential,
+            "planner_multi_action_read_only_only": spec.planner.multi_action_read_only_only,
+            "planner_multi_action_max_tools": spec.planner.multi_action_max_tools,
             "artifact_store_enabled": str(bool(artifact_cfg.enabled)).lower(),
             "artifact_store_ttl_seconds": artifact_retention.ttl_seconds,
             "artifact_store_max_artifact_bytes": artifact_retention.max_artifact_bytes,
@@ -939,6 +966,20 @@ def _generate_env_example(
             "short_term_memory_retry_backoff_base_s": stm.retry_backoff_base_s if stm else 2.0,
             "short_term_memory_degraded_retry_interval_s": stm.degraded_retry_interval_s if stm else 30.0,
             "external_env_vars": external_env_vars,
+            "with_background_tasks": with_background_tasks,
+            # Background tasks configuration
+            "background_tasks_enabled": str(bg.enabled).lower(),
+            "background_tasks_allow_tool_background": str(bg.allow_tool_background).lower(),
+            "background_tasks_default_mode": bg.default_mode,
+            "background_tasks_default_merge_strategy": bg.default_merge_strategy,
+            "background_tasks_context_depth": bg.context_depth,
+            "background_tasks_propagate_on_cancel": bg.propagate_on_cancel,
+            "background_tasks_spawn_requires_confirmation": str(bg.spawn_requires_confirmation).lower(),
+            "background_tasks_include_prompt_guidance": str(bg.include_prompt_guidance).lower(),
+            "background_tasks_max_concurrent_tasks": bg.max_concurrent_tasks,
+            "background_tasks_max_tasks_per_session": bg.max_tasks_per_session,
+            "background_tasks_task_timeout_s": bg.task_timeout_s,
+            "background_tasks_max_pending_steering": bg.max_pending_steering,
         },
     )
 
@@ -984,6 +1025,9 @@ def _generate_env_setup_docs(
             "planner_hop_budget": spec.planner.hop_budget,
             "planner_absolute_max_parallel": spec.planner.absolute_max_parallel,
             "planner_stream_final_response": spec.planner.stream_final_response,
+            "planner_multi_action_sequential": spec.planner.multi_action_sequential,
+            "planner_multi_action_read_only_only": spec.planner.multi_action_read_only_only,
+            "planner_multi_action_max_tools": spec.planner.multi_action_max_tools,
         },
     )
 
@@ -1009,6 +1053,7 @@ def _scaffold_project(
     quiet: bool,
 ) -> tuple[Path, list[str], list[str], list[str]]:
     flags = spec.agent.flags
+    bg = spec.planner.background_tasks
     result = run_new(
         name=spec.agent.name,
         template=spec.agent.template,
@@ -1021,6 +1066,7 @@ def _scaffold_project(
         with_a2a=flags.a2a,
         with_rich_output=bool(spec.planner.rich_output.enabled),
         no_memory=not flags.memory,
+        with_background_tasks=flags.background_tasks or bg.enabled,
     )
     project_dir = (output_dir or Path.cwd()) / spec.agent.name
     return project_dir, list(result.created), list(result.skipped), list(result.errors)

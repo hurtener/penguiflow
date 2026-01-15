@@ -1,7 +1,172 @@
 """Tests for penguiflow/planner/models.py edge cases."""
 
+from penguiflow.planner.models import (
+    RESERVED_NEXT_NODES,
+    SPECIAL_NODE_TYPES,
+    ActionFormat,
+    ActionWithReasoning,
+    JoinInjection,
+    ObservationGuardrailConfig,
+    PlannerAction,
+    PlannerEvent,
+)
 
-from penguiflow.planner.models import JoinInjection, ObservationGuardrailConfig, PlannerEvent
+# ─── RFC_UNIFIED_ACTION_SCHEMA: PlannerAction computed properties ─────────────
+
+
+def test_planner_action_is_terminal():
+    """is_terminal should return True only for final_response."""
+    assert PlannerAction(next_node="final_response", args={}).is_terminal() is True
+    assert PlannerAction(next_node="some_tool", args={}).is_terminal() is False
+    assert PlannerAction(next_node="parallel", args={}).is_terminal() is False
+
+
+def test_planner_action_is_parallel():
+    """is_parallel should return True only for parallel actions."""
+    assert PlannerAction(next_node="parallel", args={}).is_parallel() is True
+    assert PlannerAction(next_node="some_tool", args={}).is_parallel() is False
+    assert PlannerAction(next_node="final_response", args={}).is_parallel() is False
+
+
+def test_planner_action_is_background_task():
+    """is_background_task should return True for task.subagent and task.tool."""
+    assert PlannerAction(next_node="task.subagent", args={}).is_background_task() is True
+    assert PlannerAction(next_node="task.tool", args={}).is_background_task() is True
+    assert PlannerAction(next_node="some_tool", args={}).is_background_task() is False
+    assert PlannerAction(next_node="parallel", args={}).is_background_task() is False
+
+
+def test_planner_action_is_tool_call():
+    """is_tool_call should return True for regular tool names, False for special nodes."""
+    assert PlannerAction(next_node="search_documents", args={}).is_tool_call() is True
+    assert PlannerAction(next_node="my_custom_tool", args={}).is_tool_call() is True
+    assert PlannerAction(next_node="final_response", args={}).is_tool_call() is False
+    assert PlannerAction(next_node="parallel", args={}).is_tool_call() is False
+    assert PlannerAction(next_node="task.subagent", args={}).is_tool_call() is False
+    assert PlannerAction(next_node="task.tool", args={}).is_tool_call() is False
+
+
+def test_planner_action_get_answer():
+    """get_answer should extract answer from final_response args."""
+    action = PlannerAction(
+        next_node="final_response",
+        args={"answer": "The answer is 42."},
+    )
+    assert action.get_answer() == "The answer is 42."
+
+    # Non-terminal actions return None
+    tool_action = PlannerAction(next_node="some_tool", args={"query": "test"})
+    assert tool_action.get_answer() is None
+
+    # Missing answer field returns None
+    empty_final = PlannerAction(next_node="final_response", args={})
+    assert empty_final.get_answer() is None
+
+
+def test_planner_action_get_plan_steps():
+    """get_plan_steps should extract steps from parallel args."""
+    action = PlannerAction(
+        next_node="parallel",
+        args={
+            "steps": [
+                {"node": "tool_a", "args": {"x": 1}},
+                {"node": "tool_b", "args": {"y": 2}},
+            ]
+        },
+    )
+    steps = action.get_plan_steps()
+    assert len(steps) == 2
+    assert steps[0]["node"] == "tool_a"
+    assert steps[1]["node"] == "tool_b"
+
+    # Non-parallel actions return None
+    tool_action = PlannerAction(next_node="some_tool", args={})
+    assert tool_action.get_plan_steps() is None
+
+
+def test_planner_action_get_plan_join():
+    """get_plan_join should extract join config from parallel args."""
+    action = PlannerAction(
+        next_node="parallel",
+        args={
+            "steps": [{"node": "tool_a", "args": {}}],
+            "join": {"node": "aggregator", "args": {}, "inject": {"results": "$results"}},
+        },
+    )
+    join = action.get_plan_join()
+    assert join is not None
+    assert join["node"] == "aggregator"
+    assert join["inject"]["results"] == "$results"
+
+    # Parallel without join returns None
+    no_join = PlannerAction(next_node="parallel", args={"steps": []})
+    assert no_join.get_plan_join() is None
+
+
+# ─── RFC_UNIFIED_ACTION_SCHEMA: SPECIAL_NODE_TYPES constant ───────────────────
+
+
+def test_special_node_types_contains_expected_values():
+    """SPECIAL_NODE_TYPES should contain all reserved opcodes."""
+    assert "parallel" in SPECIAL_NODE_TYPES
+    assert "task.subagent" in SPECIAL_NODE_TYPES
+    assert "task.tool" in SPECIAL_NODE_TYPES
+    assert "final_response" in SPECIAL_NODE_TYPES
+
+
+def test_reserved_next_nodes_is_alias():
+    """RESERVED_NEXT_NODES should be an alias for SPECIAL_NODE_TYPES."""
+    assert RESERVED_NEXT_NODES is SPECIAL_NODE_TYPES
+
+
+# ─── RFC_UNIFIED_ACTION_SCHEMA: ActionFormat config ───────────────────────────
+
+
+def test_action_format_values():
+    """ActionFormat should have expected string values."""
+    assert ActionFormat.UNIFIED == "unified"
+    assert ActionFormat.LEGACY == "legacy"
+    assert ActionFormat.AUTO == "auto"
+
+
+# ─── RFC_UNIFIED_ACTION_SCHEMA: ActionWithReasoning dataclass ─────────────────
+
+
+def test_action_with_reasoning_basic():
+    """ActionWithReasoning should wrap action with optional reasoning."""
+    action = PlannerAction(next_node="some_tool", args={"query": "test"})
+    wrapped = ActionWithReasoning(action=action, reasoning="Let me think...")
+    assert wrapped.action is action
+    assert wrapped.reasoning == "Let me think..."
+    assert wrapped.reasoning_tokens is None
+
+
+def test_action_with_reasoning_with_tokens():
+    """ActionWithReasoning should track reasoning token count."""
+    action = PlannerAction(next_node="final_response", args={"answer": "Done"})
+    wrapped = ActionWithReasoning(action=action, reasoning="Analysis...", reasoning_tokens=150)
+    assert wrapped.reasoning_tokens == 150
+
+
+def test_action_with_reasoning_from_llm_response():
+    """from_llm_response should extract reasoning from LiteLLM response structure."""
+
+    # Mock LiteLLM response with reasoning_content
+    class MockMessage:
+        content = '{"next_node": "final_response", "args": {"answer": "42"}}'
+        reasoning_content = "Let me calculate..."
+
+    class MockChoice:
+        message = MockMessage()
+
+    class MockResponse:
+        choices = [MockChoice()]
+
+    action = PlannerAction(next_node="final_response", args={"answer": "42"})
+    wrapped = ActionWithReasoning.from_llm_response(MockResponse(), action)
+
+    assert wrapped.action is action
+    assert wrapped.reasoning == "Let me calculate..."
 
 # ─── PlannerEvent tests ──────────────────────────────────────────────────────
 

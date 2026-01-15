@@ -27,7 +27,7 @@ class DummyStore:
     saved: list[tuple[str, PlannerEvent]]
     trajectories: list[tuple[str, str, Any]]
 
-    async def save_event(self, trace_id: str, event: PlannerEvent) -> None:
+    async def save_planner_event(self, trace_id: str, event: PlannerEvent) -> None:
         self.saved.append((trace_id, event))
 
     async def save_trajectory(self, trace_id: str, session_id: str, trajectory: Any) -> None:
@@ -64,6 +64,39 @@ class DummyOrchestrator:
 
     async def stop(self) -> None:
         self._initialized = False
+
+
+class CapturingOrchestrator:
+    def __init__(self, *, response: Any) -> None:
+        self._response = response
+        self.last_tool_context: dict[str, Any] | None = None
+
+    async def execute(
+        self,
+        query: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        tool_context: dict[str, Any] | None = None,
+    ) -> Any:
+        _ = (query, tenant_id, user_id, session_id)
+        self.last_tool_context = dict(tool_context or {})
+        return self._response
+
+    async def resume(
+        self,
+        resume_token: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        user_input: str | None = None,
+        tool_context: dict[str, Any] | None = None,
+    ) -> Any:
+        _ = (resume_token, tenant_id, user_id, session_id, user_input)
+        self.last_tool_context = dict(tool_context or {})
+        return self._response
 
 
 def make_event(event_type: str = "step") -> PlannerEvent:
@@ -277,3 +310,33 @@ async def test_orchestrator_agent_wrapper_initialize_and_chat_pause() -> None:
     orchestrator._initialized = True
     await wrapper.shutdown()
     assert orchestrator._initialized is False
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_wrapper_forwards_tool_context_when_supported() -> None:
+    orchestrator = CapturingOrchestrator(response={"answer": "ok", "trace_id": "t1", "metadata": {}})
+    wrapper = OrchestratorAgentWrapper(
+        orchestrator,
+        tool_context_defaults={"task_service": "svc-1"},
+        tenant_id="tenant-default",
+        user_id="user-default",
+    )
+
+    await wrapper.chat(
+        "hi",
+        session_id="session-1",
+        tool_context={"tenant_id": "tenant-override"},
+    )
+
+    assert orchestrator.last_tool_context is not None
+    assert orchestrator.last_tool_context["task_service"] == "svc-1"
+    assert orchestrator.last_tool_context["tenant_id"] == "tenant-override"
+
+    await wrapper.resume(
+        "pause-1",
+        session_id="session-1",
+        tool_context={"tenant_id": "tenant-2"},
+    )
+    assert orchestrator.last_tool_context is not None
+    assert orchestrator.last_tool_context["task_service"] == "svc-1"
+    assert orchestrator.last_tool_context["tenant_id"] == "tenant-2"

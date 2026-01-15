@@ -4,11 +4,88 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast
 
 from pydantic import BaseModel, Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from .context import PlannerPauseReason
+
+# ---------------------------------------------------------------------------
+# TypedDict schemas for unified action args (RFC_UNIFIED_ACTION_SCHEMA)
+# ---------------------------------------------------------------------------
+
+
+class PlanStep(TypedDict):
+    """Single step in a parallel plan."""
+
+    node: str
+    args: dict[str, Any]
+
+
+class PlanJoin(TypedDict, total=False):
+    """Aggregation config after parallel execution."""
+
+    node: str | None
+    args: dict[str, Any]
+    inject: dict[str, str]
+
+
+class PlanArgs(TypedDict):
+    """Args schema for next_node='parallel'."""
+
+    steps: list[PlanStep]
+    join: NotRequired[PlanJoin]
+
+
+class TaskArgs(TypedDict, total=False):
+    """Args schema for next_node='task.subagent' and next_node='task.tool'."""
+
+    name: str
+    # subagent mode
+    query: str
+    # tool job mode
+    tool: str
+    tool_args: dict[str, Any]
+    # merge behavior
+    merge_strategy: Literal["HUMAN_GATED", "APPEND", "REPLACE"]
+    # task groups
+    group: str
+    group_id: str
+    group_sealed: bool
+    group_report: Literal["all", "any", "none"]
+    group_merge_strategy: Literal["HUMAN_GATED", "APPEND", "REPLACE"]
+    retain_turn: bool
+
+
+class FinalResponseArgs(TypedDict, total=False):
+    """Args schema for next_node='final_response'."""
+
+    answer: str
+    artifacts: dict[str, Any]
+    sources: list[dict[str, Any]]
+    suggested_actions: list[dict[str, Any]]
+    confidence: float
+    language: str
+
+
+# ---------------------------------------------------------------------------
+# Action format configuration (RFC_UNIFIED_ACTION_SCHEMA)
+# ---------------------------------------------------------------------------
+
+
+class ActionFormat:
+    """Configuration for action schema parsing format.
+
+    Values:
+        UNIFIED: Use the unified 2-field format (next_node + args only)
+        LEGACY: Use the legacy 5-field format with separate tool_name, plan, etc.
+        AUTO: Automatically detect format from LLM response structure
+    """
+
+    UNIFIED = "unified"
+    LEGACY = "legacy"
+    AUTO = "auto"
 
 
 class JSONLLMClient(Protocol):
@@ -162,11 +239,131 @@ class FinalPayload(BaseModel):
 
 
 class PlannerAction(BaseModel):
-    thought: str
-    next_node: str | None = None
-    args: dict[str, Any] | None = None
-    plan: list[ParallelCall] | None = None
-    join: ParallelJoin | None = None
+    """Unified action format (RFC_UNIFIED_ACTION_SCHEMA).
+
+    The LLM-facing schema is always:
+    - ``next_node``: non-null string opcode or tool name
+    - ``args``: object payload (defaults to {})
+
+    Internally, we keep a best-effort ``thought`` field for trajectory logging and
+    repair prompts, but it is excluded from the JSON schema so it is not required
+    (or encouraged) in structured outputs.
+
+    Special next_node values:
+    - "final_response": Terminal action, args.answer streams to user
+    - "parallel": Parallel execution, args contains steps and join config
+    - "task.subagent": Background subagent task, args contains query and group config
+    - "task.tool": Background single-tool job, args contains tool/tool_args and group config
+    - Any other value: Tool call, args passed to the tool
+    """
+
+    next_node: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    thought: SkipJsonSchema[str] = ""
+    # Internal field to carry raw LLM response for debugging (excluded from serialization)
+    raw_llm_response: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
+    # Optional additional action candidates extracted from mixed model output
+    # (e.g. multiple JSON objects in a single response). Excluded from schema/serialization.
+    alternate_actions: SkipJsonSchema[list[dict[str, Any]] | None] = Field(default=None, exclude=True)
+
+    def is_terminal(self) -> bool:
+        """True if this is a terminal action (final response to user)."""
+        return self.next_node == "final_response"
+
+    def is_parallel(self) -> bool:
+        """True if this is a parallel execution plan."""
+        return self.next_node == "parallel"
+
+    def is_background_task(self) -> bool:
+        """True if this is a background task spawn."""
+        return self.next_node in {"task.subagent", "task.tool"}
+
+    def is_tool_call(self) -> bool:
+        """True if this is a regular tool call."""
+        return self.next_node not in SPECIAL_NODE_TYPES
+
+    def get_answer(self) -> str | None:
+        """Extract answer text for terminal actions."""
+        if not self.is_terminal():
+            return None
+        return self.args.get("answer")
+
+    def answer_text(self) -> str | None:
+        """Extract answer from args.answer or args.raw_answer (backward compatible)."""
+        value = self.args.get("answer")
+        if isinstance(value, str):
+            return value
+        legacy = self.args.get("raw_answer")
+        if isinstance(legacy, str):
+            return legacy
+        return None
+
+    def get_plan_steps(self) -> list[PlanStep] | None:
+        """Extract parallel plan steps."""
+        if not self.is_parallel():
+            return None
+        steps = self.args.get("steps", [])
+        return steps if isinstance(steps, list) else []
+
+    def get_plan_join(self) -> PlanJoin | None:
+        """Extract parallel plan join config."""
+        if not self.is_parallel():
+            return None
+        join = self.args.get("join")
+        return cast(PlanJoin, join) if isinstance(join, dict) else None
+
+
+# Special node types that aren't tool names (RFC_UNIFIED_ACTION_SCHEMA)
+SPECIAL_NODE_TYPES = frozenset({"parallel", "task.subagent", "task.tool", "final_response"})
+
+# Backward compatible alias
+RESERVED_NEXT_NODES = SPECIAL_NODE_TYPES
+
+
+@dataclass
+class ActionWithReasoning:
+    """Container for planner action with associated reasoning.
+
+    Reasoning comes from LiteLLM's native reasoning_content,
+    not from a JSON field.
+    """
+
+    action: PlannerAction
+    reasoning: str | None = None
+    reasoning_tokens: int | None = None
+
+    @classmethod
+    def from_llm_response(
+        cls,
+        response: Any,
+        action: PlannerAction,
+    ) -> ActionWithReasoning:
+        """Create from LiteLLM response with reasoning extraction."""
+        reasoning = None
+        reasoning_tokens = None
+
+        if isinstance(response, Mapping):
+            choice = response.get("choices", [{}])[0]
+            message = choice.get("message", {}) if isinstance(choice, Mapping) else {}
+            reasoning = message.get("reasoning_content")
+            usage = response.get("usage", {})
+            if isinstance(usage, Mapping):
+                reasoning_tokens = usage.get("reasoning_tokens")
+        else:
+            try:
+                message = response.choices[0].message
+                reasoning = getattr(message, "reasoning_content", None)
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    reasoning_tokens = getattr(usage, "reasoning_tokens", None)
+            except (AttributeError, IndexError):
+                pass
+
+        return cls(
+            action=action,
+            reasoning=reasoning,
+            reasoning_tokens=reasoning_tokens,
+        )
 
 
 class PlannerPause(BaseModel):
@@ -205,6 +402,111 @@ class ToolPolicy(BaseModel):
             return False
 
         return True
+
+
+class BackgroundTasksConfig(BaseModel):
+    """Configuration for background tasks/subagent orchestration.
+
+    This is the single source of truth for background task settings, consumed by:
+    - ReactPlanner (prompt guidance, tool validation)
+    - SessionManager/TaskService (runtime enforcement)
+    - Spec generation engine (agent.yaml generation)
+    - Template engine (scaffolding new agents)
+
+    Downstream teams configure these values in their agent's Config class,
+    which builds this model before passing to ReactPlanner.
+    """
+
+    # Core enablement
+    enabled: bool = False
+    """Master switch for background task capabilities."""
+
+    include_prompt_guidance: bool = True
+    """Whether to inject background task guidance into the system prompt."""
+
+    allow_tool_background: bool = False
+    """Whether tools marked with background=True can spawn async tasks."""
+
+    # Task execution mode
+    default_mode: str = "subagent"
+    """Default execution mode: 'subagent' (full reasoning) or 'job' (single tool)."""
+
+    default_merge_strategy: str = "HUMAN_GATED"
+    """How task results merge into context: HUMAN_GATED, APPEND, or REPLACE."""
+
+    context_depth: str = "full"
+    """Context snapshot depth for spawned tasks: 'full', 'summary', or 'minimal'."""
+
+    propagate_on_cancel: str = "cascade"
+    """Cancel propagation: 'cascade' (cancel children), 'orphan' (leave running)."""
+
+    spawn_requires_confirmation: bool = False
+    """Whether spawning a task requires explicit user confirmation."""
+
+    # Resource limits
+    max_concurrent_tasks: int = 5
+    """Maximum number of tasks running concurrently per session."""
+
+    max_tasks_per_session: int = 50
+    """Maximum total tasks (active + completed) per session."""
+
+    task_timeout_s: int = 3600
+    """Task timeout in seconds (default: 1 hour)."""
+
+    max_pending_steering: int = 2
+    """Maximum steering messages queued per task before backpressure."""
+
+    # Proactive report-back settings
+    proactive_report_enabled: bool = False
+    """Master switch for proactive messages on auto-merge completion."""
+
+    proactive_report_strategies: list[str] = ["APPEND", "REPLACE"]
+    """Merge strategies that trigger proactive reports (not HUMAN_GATED)."""
+
+    proactive_report_max_queued: int = 5
+    """Maximum queued reports before dropping oldest."""
+
+    proactive_report_timeout_s: float = 30.0
+    """Timeout for proactive message generation."""
+
+    proactive_report_fallback_notification: bool = True
+    """Fall back to notification panel if generation fails."""
+
+    # Task group settings (RFC_TASK_GROUPS)
+    default_group_merge_strategy: str = "APPEND"
+    """Default merge strategy for task groups."""
+
+    default_group_report: str = "all"
+    """Default report strategy for groups: 'all', 'any', or 'none'."""
+
+    group_timeout_s: float = 600.0
+    """Timeout for group completion (seal to complete)."""
+
+    group_partial_on_failure: bool = True
+    """If True, report partial results when some tasks in a group fail."""
+
+    max_tasks_per_group: int = 10
+    """Maximum tasks allowed in a single group."""
+
+    auto_seal_groups_on_foreground_yield: bool = True
+    """Auto-seal OPEN groups when foreground yields to user."""
+
+    retain_turn_timeout_s: float = 30.0
+    """Max time foreground waits for retained tasks/groups before force-yield."""
+
+    background_continuation_max_hops: int = 2
+    """Maximum background continuation cycles after retain-timeout."""
+
+    background_continuation_cooldown_s: float = 0.0
+    """Delay between background continuation cycles."""
+
+
+class BackgroundTaskHandle(BaseModel):
+    """Return type for tools that run asynchronously in the background."""
+
+    task_id: str
+    status: str = "PENDING"
+    message: str | None = None
 
 
 class ReflectionCriteria(BaseModel):

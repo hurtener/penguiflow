@@ -5,7 +5,9 @@ import {
   createChatStore,
   createEventsStore,
   createTrajectoryStore,
-  createInteractionsStore
+  createInteractionsStore,
+  createTasksStore,
+  createNotificationsStore
 } from '$lib/stores';
 
 const runAgentMock = vi.fn();
@@ -25,12 +27,16 @@ describe('chatStreamManager (AG-UI)', () => {
   const eventsStore = createEventsStore();
   const trajectoryStore = createTrajectoryStore();
   const interactionsStore = createInteractionsStore();
+  const tasksStore = createTasksStore();
+  const notificationsStore = createNotificationsStore();
   const chatStreamManager = createChatStreamManager({
     chatStore,
     eventsStore,
     trajectoryStore,
     artifactsStore,
-    interactionsStore
+    interactionsStore,
+    tasksStore,
+    notificationsStore
   });
 
   beforeEach(() => {
@@ -39,6 +45,8 @@ describe('chatStreamManager (AG-UI)', () => {
     eventsStore.clear();
     trajectoryStore.clear();
     interactionsStore.clear();
+    tasksStore.clear();
+    notificationsStore.clear();
     runAgentMock.mockReset();
   });
 

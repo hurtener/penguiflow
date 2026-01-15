@@ -45,7 +45,33 @@ from .remote import (
     RemoteStreamEvent,
     RemoteTransport,
 )
+from .sessions.models import (
+    ContextPatch,
+    NotificationAction,
+    StateUpdate,
+    TaskContextSnapshot,
+    TaskStatus,
+    TaskType,
+    UpdateType,
+)
+from .sessions.persistence import (
+    InMemorySessionStateStore,
+    SessionStateStore,
+    StateStoreSessionAdapter,
+)
+from .sessions.planner import PlannerTaskPipeline
+from .sessions.scheduler import JobDefinition, JobScheduler, JobSchedulerRunner, ScheduleConfig
+from .sessions.session import (
+    PendingContextPatch,
+    SessionLimits,
+    SessionManager,
+    StreamingSession,
+    TaskResult,
+    TaskRuntime,
+)
+from .sessions.transport import SessionConnection, Transport
 from .state import RemoteBinding, StateStore, StoredEvent
+from .steering import SteeringCancelled, SteeringEvent, SteeringEventType, SteeringInbox
 from .streaming import (
     chunk_to_ws_json,
     emit_stream_events,
@@ -112,6 +138,33 @@ __all__ = [
     "flow_to_dot",
     "create",
     "testkit",
+    "SteeringCancelled",
+    "SteeringEvent",
+    "SteeringEventType",
+    "SteeringInbox",
+    "ContextPatch",
+    "NotificationAction",
+    "StateUpdate",
+    "TaskContextSnapshot",
+    "TaskStatus",
+    "TaskType",
+    "UpdateType",
+    "PlannerTaskPipeline",
+    "InMemorySessionStateStore",
+    "JobDefinition",
+    "JobScheduler",
+    "JobSchedulerRunner",
+    "ScheduleConfig",
+    "PendingContextPatch",
+    "SessionConnection",
+    "SessionLimits",
+    "SessionManager",
+    "SessionStateStore",
+    "StateStoreSessionAdapter",
+    "StreamingSession",
+    "TaskResult",
+    "TaskRuntime",
+    "Transport",
     "StateStore",
     "StoredEvent",
     "RemoteBinding",
@@ -127,4 +180,4 @@ __all__ = [
     "TrajectoryStep",
 ]
 
-__version__ = "2.9.0"
+__version__ = "2.10.1"

@@ -316,6 +316,31 @@ class TestSSEEventFrames:
         assert b"event: llm_stream_chunk" in frame
         assert b'"channel":"answer"' in frame
 
+    def test_llm_stream_chunk_message_id_does_not_multiplex_on_action_seq(self) -> None:
+        """_event_frame should not derive message_id from action_seq (chat bubbles regression)."""
+        from penguiflow.cli.playground import _event_frame
+
+        event = PlannerEvent(
+            event_type="llm_stream_chunk",
+            ts=1234567890.0,
+            trajectory_step=1,
+            extra={
+                "text": "stream",
+                "done": False,
+                "phase": "answer",
+                "action_seq": 7,
+            },
+        )
+
+        frame = _event_frame(event, "trace_123", "session_456")
+        assert frame is not None
+        assert b'"message_id"' not in frame
+        assert b'"msg_7"' not in frame
+
+        frame = _event_frame(event, "trace_123", "session_456", default_message_id="msg_test")
+        assert frame is not None
+        assert b'"message_id":"msg_test"' in frame
+
 
 # ─── Artifact Endpoint Tests ─────────────────────────────────────────────────
 

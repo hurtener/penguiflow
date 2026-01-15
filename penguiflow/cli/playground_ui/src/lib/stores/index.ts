@@ -8,6 +8,8 @@ import { createAgentStore, getAgentStore, setAgentStore } from './domain/agent.s
 import type { AgentStore } from './domain/agent.svelte';
 import { createEventsStore, getEventsStore, setEventsStore } from './features/events.svelte';
 import type { EventsStore } from './features/events.svelte';
+import { createTasksStore, getTasksStore, setTasksStore } from './features/tasks.svelte';
+import type { TasksStore } from './features/tasks.svelte';
 import { createTrajectoryStore, getTrajectoryStore, setTrajectoryStore } from './features/trajectory.svelte';
 import type { TrajectoryStore } from './features/trajectory.svelte';
 import { createSpecStore, getSpecStore, setSpecStore } from './features/spec.svelte';
@@ -39,6 +41,9 @@ export {
   createEventsStore,
   getEventsStore,
   setEventsStore,
+  createTasksStore,
+  getTasksStore,
+  setTasksStore,
   createTrajectoryStore,
   getTrajectoryStore,
   setTrajectoryStore,
@@ -68,6 +73,7 @@ export type {
   ArtifactsStore,
   AgentStore,
   EventsStore,
+  TasksStore,
   TrajectoryStore,
   SpecStore,
   SetupStore,
@@ -84,6 +90,7 @@ export interface AppStores {
   artifactsStore: ArtifactsStore;
   agentStore: AgentStore;
   eventsStore: EventsStore;
+  tasksStore: TasksStore;
   trajectoryStore: TrajectoryStore;
   specStore: SpecStore;
   setupStore: SetupStore;
@@ -100,6 +107,7 @@ export function initStores(): AppStores {
     artifactsStore: setArtifactsStore(),
     agentStore: setAgentStore(),
     eventsStore: setEventsStore(),
+    tasksStore: setTasksStore(),
     trajectoryStore: setTrajectoryStore(),
     specStore: setSpecStore(),
     setupStore: setSetupStore(),

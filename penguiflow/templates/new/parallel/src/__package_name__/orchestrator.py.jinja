@@ -10,6 +10,14 @@ from typing import Any
 
 from penguiflow.errors import FlowError
 from penguiflow.planner import PlannerFinish, PlannerPause
+{% if with_background_tasks %}
+from penguiflow.planner import BackgroundTasksConfig, ReactPlanner
+from penguiflow.sessions import SessionLimits, SessionManager
+from penguiflow.sessions.task_service import InProcessTaskService
+from penguiflow.sessions.task_tools import SUBAGENT_FLAG_KEY, TASK_SERVICE_KEY
+from penguiflow.sessions.telemetry import LoggingTaskTelemetrySink
+from penguiflow.sessions.tool_jobs import build_tool_job_pipeline
+{% endif %}
 
 {% if with_a2a %}
 from .a2a import A2AServer
@@ -17,6 +25,8 @@ from .a2a import A2AServer
 {% if memory_enabled %}
 from .clients.memory import MemoryClient
 {% endif %}
+from penguiflow.steering import SteeringInbox
+
 from .config import Config
 from .models import FinalDocuments
 from .planner import PlannerBundle, build_planner
@@ -88,6 +98,10 @@ class {{ class_name }}Orchestrator:
         config: Config,
         *,
         telemetry: AgentTelemetry | None = None,
+{% if with_background_tasks %}
+        task_service: Any | None = None,
+        session_manager: SessionManager | None = None,
+{% endif %}
     ) -> None:
         self._config = config
 {% if memory_enabled %}
@@ -105,10 +119,77 @@ class {{ class_name }}Orchestrator:
             event_callback=self._telemetry.record_planner_event,
         )
         self._planner = planner_bundle.planner
+        self._tool_context_defaults: dict[str, Any] = {}
+{% if with_background_tasks %}
+        self._session_manager = session_manager
+        self._task_service = task_service
+        if self._task_service is not None:
+            self._tool_context_defaults[TASK_SERVICE_KEY] = self._task_service
+            self._tool_context_defaults[SUBAGENT_FLAG_KEY] = False
+        elif config.background_tasks_enabled:
+            self._setup_background_tasks_fallback()
+{% endif %}
 {% if with_a2a %}
         self._a2a_server = A2AServer(self)
 {% endif %}
         self._started = True
+
+{% if with_background_tasks %}
+    def _setup_background_tasks_fallback(self) -> None:
+        if self._task_service is not None:
+            return
+        if not isinstance(self._planner, ReactPlanner):
+            raise RuntimeError("background_tasks_fallback_requires_react_planner")
+
+        _LOGGER.warning(
+            "No task_service provided; using in-process fallback (SessionManager + InProcessTaskService)."
+        )
+
+        limits = SessionLimits(
+            max_tasks_per_session=self._config.background_tasks_max_tasks_per_session,
+            max_background_tasks=self._config.background_tasks_max_concurrent_tasks,
+            max_concurrent_tasks=self._config.background_tasks_max_concurrent_tasks,
+            max_task_runtime_s=float(self._config.background_tasks_task_timeout_s),
+        )
+        self._session_manager = self._session_manager or SessionManager(
+            limits=limits,
+            telemetry_sink=LoggingTaskTelemetrySink(logger=_LOGGER),
+        )
+
+        planner = self._planner
+        spec_by_name = getattr(planner, "_spec_by_name", {}) or {}
+        artifact_store = getattr(planner, "artifact_store", None)
+
+        tool_job_factory = None
+        if spec_by_name and artifact_store is not None:
+
+            def _tool_job_factory(tool_name: str, tool_args: Any):
+                spec = spec_by_name.get(tool_name)
+                if spec is None:
+                    raise RuntimeError(f"tool_not_found:{tool_name}")
+                return build_tool_job_pipeline(
+                    spec=spec,
+                    args_payload=dict(tool_args or {}),
+                    artifacts=artifact_store,
+                )
+
+            tool_job_factory = _tool_job_factory
+
+        subagent_background_cfg = BackgroundTasksConfig(enabled=False, include_prompt_guidance=False)
+
+        self._task_service = InProcessTaskService(
+            sessions=self._session_manager,
+            planner_factory=planner.fork,
+            subagent_planner_factory=lambda: planner.fork(
+                catalog_filter=lambda spec: not str(spec.name).startswith("tasks."),
+                background_tasks=subagent_background_cfg,
+            ),
+            tool_job_factory=tool_job_factory,
+        )
+        self._tool_context_defaults[TASK_SERVICE_KEY] = self._task_service
+        self._tool_context_defaults[SUBAGENT_FLAG_KEY] = False
+
+{% endif %}
 
     async def execute(
         self,
@@ -117,9 +198,12 @@ class {{ class_name }}Orchestrator:
         tenant_id: str,
         user_id: str,
         session_id: str,
+        tool_context: Mapping[str, Any] | None = None,
+        steering: SteeringInbox | None = None,
     ) -> AgentResponse:
         """Execute the ReactPlanner with memory integration."""
         trace_id = secrets.token_hex(8)
+        turn_id = secrets.token_hex(8)
 
 {% if memory_enabled %}
         conscious = await self._memory.start_session(
@@ -142,18 +226,34 @@ class {{ class_name }}Orchestrator:
             "conscious_memories": conscious.get("conscious", []),
             "retrieved_memories": retrieval.get("snippets", []),
         }
-        tool_context = {
+        base_tool_context = {
             "tenant_id": tenant_id,
             "user_id": user_id,
             "session_id": session_id,
             "trace_id": trace_id,
+            "turn_id": turn_id,
+            "task_id": trace_id,
+            "is_subagent": False,
             "status_publisher": self._telemetry.publish_status,
         }
+        merged_tool_context = {
+            **self._tool_context_defaults,
+            **(dict(tool_context or {})),
+            **base_tool_context,
+        }
+{% if with_background_tasks %}
+        if self._session_manager is not None:
+            session = await self._session_manager.get_or_create(session_id)
+            snapshot_tool_context = dict(merged_tool_context)
+            snapshot_tool_context.pop(TASK_SERVICE_KEY, None)
+            session.update_context(llm_context=dict(llm_context), tool_context=snapshot_tool_context)
+{% endif %}
 
         result = await self._planner.run(
             query=query,
             llm_context=llm_context,
-            tool_context=tool_context,
+            tool_context=merged_tool_context,
+            steering=steering,
         )
 {% if with_streaming %}
         streams = _collect_streams(getattr(result, "metadata", {}) or {})
@@ -206,20 +306,39 @@ class {{ class_name }}Orchestrator:
         user_id: str,
         session_id: str,
         user_input: str | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+        steering: SteeringInbox | None = None,
     ) -> AgentResponse:
         """Resume a paused planner execution."""
         trace_id = secrets.token_hex(8)
-        tool_context = {
+        turn_id = secrets.token_hex(8)
+        base_tool_context = {
             "tenant_id": tenant_id,
             "user_id": user_id,
             "session_id": session_id,
             "trace_id": trace_id,
+            "turn_id": turn_id,
+            "task_id": trace_id,
+            "is_subagent": False,
             "status_publisher": self._telemetry.publish_status,
         }
+        merged_tool_context = {
+            **self._tool_context_defaults,
+            **(dict(tool_context or {})),
+            **base_tool_context,
+        }
+{% if with_background_tasks %}
+        if self._session_manager is not None:
+            session = await self._session_manager.get_or_create(session_id)
+            snapshot_tool_context = dict(merged_tool_context)
+            snapshot_tool_context.pop(TASK_SERVICE_KEY, None)
+            session.update_context(llm_context={}, tool_context=snapshot_tool_context)
+{% endif %}
         result = await self._planner.resume(
             token=resume_token,
             user_input=user_input,
-            tool_context=tool_context,
+            tool_context=merged_tool_context,
+            steering=steering,
         )
 {% if with_streaming %}
         streams = _collect_streams(getattr(result, "metadata", {}) or {})

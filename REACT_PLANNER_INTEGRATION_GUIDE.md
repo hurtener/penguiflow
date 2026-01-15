@@ -12,6 +12,8 @@ This guide is the **source of truth** for wiring `ReactPlanner` into a productio
 
 1. [Overview](#1-overview)
 2. [Quick Start](#2-quick-start)
+   - [LLM Backends](#llm-backends-litellm-vs-native-vs-custom)
+   - [Streaming](#final-answer-streaming-llm-vs-tool-streaming)
 3. [Understanding Context Types](#3-understanding-context-types)
    - [Short-Term Memory (Optional)](#short-term-memory-optional)
 4. [Building an Orchestrator](#4-building-an-orchestrator)
@@ -43,7 +45,7 @@ This guide is the **source of truth** for wiring `ReactPlanner` into a productio
 ### Key Contracts
 
 - **Catalog**: `NodeSpec` set with input/output schemas (built via `build_catalog`)
-- **LLM**: JSON-only responses (LiteLLM or custom client)
+- **LLM**: JSON-only responses (LiteLLM, native LLM layer, or any `JSONLLMClient`-compatible client)
 - **Context surfaces**: `llm_context` for LLM prompt, `tool_context` for tools
 - **Pause/Resume**: `PlannerPause` round-trips through orchestrator
 - **Parallel**: `plan` + `join` with explicit injection sources
@@ -114,6 +116,50 @@ Answer: The sum of 2+2 is 4.
 Confidence: 0.95
 Artifacts: {}
 ```
+
+---
+
+### LLM Backends (LiteLLM vs Native vs Custom)
+
+`ReactPlanner` supports three ways to talk to an LLM:
+
+1) **LiteLLM** (default, broad provider parity)
+```python
+planner = ReactPlanner(
+    llm="openrouter/anthropic/claude-3-5-sonnet",
+    catalog=catalog,
+    use_native_llm=False,  # default
+)
+```
+
+2) **Native LLM layer** (direct provider adapters)
+```python
+planner = ReactPlanner(
+    llm="openrouter/anthropic/claude-3-5-sonnet",
+    catalog=catalog,
+    use_native_llm=True,
+)
+```
+
+3) **Custom client** (any object implementing the `JSONLLMClient` protocol)
+```python
+planner = ReactPlanner(
+    llm_client=my_client,
+    catalog=catalog,
+)
+```
+
+Use LiteLLM when you want consistent behavior across many providers. Use native LLM when you want direct control over provider-specific parameters and behavior (e.g., reasoning/thinking parameters) without a wrapper layer.
+
+### Final-Answer Streaming (LLM) vs Tool Streaming
+
+There are two different “streaming” surfaces:
+
+- **Tool streaming**: tools call `ctx.emit_chunk()` / `ctx.emit_artifact()` during execution. These are captured into:
+  - `PlannerFinish.metadata["steps"][...]["streams"]` (for orchestration/UIs)
+  - `PlannerEvent` stream as `stream_chunk` / `artifact_chunk` (for telemetry)
+
+- **LLM final-answer streaming**: when `stream_final_response=True`, the planner emits `llm_stream_chunk` events while generating the terminal answer/revisions. This is designed for UIs that want token-by-token updates.
 
 ---
 
@@ -404,7 +450,11 @@ elif result.reason == "budget_exhausted":
 ### The ToolContext Protocol
 
 ```python
-from penguiflow.planner import ToolContext
+from collections.abc import Mapping, MutableMapping
+from typing import Any, Protocol
+
+from penguiflow.artifacts import ArtifactStore
+from penguiflow.planner import PlannerPause, PlannerPauseReason
 
 class ToolContext(Protocol):
     @property
@@ -418,6 +468,10 @@ class ToolContext(Protocol):
     @property
     def meta(self) -> MutableMapping[str, Any]:
         """Combined context. DEPRECATED: use llm_context/tool_context."""
+
+    @property
+    def artifacts(self) -> ArtifactStore:
+        """Binary/large-text artifact storage (out-of-band)."""
 
     async def pause(
         self,
@@ -436,6 +490,17 @@ class ToolContext(Protocol):
         meta: Mapping[str, Any] | None = None,
     ) -> None:
         """Emit a streaming chunk."""
+
+    async def emit_artifact(
+        self,
+        stream_id: str,
+        chunk: Any,
+        *,
+        done: bool = False,
+        artifact_type: str | None = None,
+        meta: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Emit a streaming artifact chunk (e.g., partial chart config)."""
 ```
 
 ### Tool Design Pattern
@@ -775,13 +840,20 @@ planner = ReactPlanner(
 |-------|--------------|
 | `step_start` | Before executing a tool |
 | `step_complete` | After tool returns |
+| `tool_call_start` | Tool call starts (includes args JSON) |
+| `tool_call_end` | Tool call returns (before result payload) |
+| `tool_call_result` | Tool call result is recorded (sanitised/redacted) |
 | `llm_call` | After LLM responds |
+| `llm_stream_chunk` | Token stream for terminal answer/revision (when enabled) |
 | `pause` | Tool triggers pause |
 | `resume` | Planner resumes |
 | `finish` | Planning completes |
 | `error` | Exception occurs |
 | `reflection_critique` | Reflection scores an answer |
 | `stream_chunk` | Tool emits streaming chunk |
+| `artifact_chunk` | Tool emits streaming artifact chunk |
+| `artifact_stored` | Artifact Store accepted an artifact (when enabled) |
+| `resource_updated` | ToolNode resource changed (when configured) |
 | `planner_repair_attempt` | LLM response failed JSON/schema validation |
 | `planner_args_invalid` | Tool args rejected by validation policy |
 | `planner_args_suspect` | Suspect tool args detected (telemetry only) |

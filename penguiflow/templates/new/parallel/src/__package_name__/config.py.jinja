@@ -29,18 +29,49 @@ def _env_csv(name: str, default: list[str]) -> list[str]:
     return items
 
 
+def _env_float(name: str, default: float) -> float:
+    """Parse float from environment variable."""
+    raw = os.getenv(name)
+    return float(raw) if raw is not None else default
+
+
 @dataclass
 class Config:
     """Environment-driven configuration."""
 
     memory_base_url: str = "http://localhost:8000"
     llm_model: str = "stub-llm"
+    # Planner settings
+    multi_action_sequential: bool = False
+    multi_action_read_only_only: bool = True
+    multi_action_max_tools: int = 2
     rich_output_enabled: bool = {{ "True" if with_rich_output else "False" }}
     rich_output_allowlist: list[str] = field(default_factory=lambda: {{ '["markdown", "json", "echarts", "mermaid", "plotly", "datagrid", "metric", "report", "grid", "tabs", "accordion", "code", "latex", "callout", "image", "video", "form", "confirm", "select_option"]' if with_rich_output else "[]" }})
     rich_output_include_prompt_catalog: bool = True
     rich_output_include_prompt_examples: bool = False
     rich_output_max_payload_bytes: int = 250000
     rich_output_max_total_bytes: int = 2000000
+{% if with_background_tasks %}
+    # Background tasks configuration
+    background_tasks_enabled: bool = True
+    background_tasks_allow_tool_background: bool = True
+    background_tasks_default_mode: str = "subagent"
+    background_tasks_default_merge_strategy: str = "HUMAN_GATED"
+    background_tasks_context_depth: str = "full"
+    background_tasks_propagate_on_cancel: str = "cascade"
+    background_tasks_spawn_requires_confirmation: bool = False
+    background_tasks_include_prompt_guidance: bool = True
+    background_tasks_max_concurrent_tasks: int = 5
+    background_tasks_max_tasks_per_session: int = 50
+    background_tasks_task_timeout_s: int = 3600
+    background_tasks_max_pending_steering: int = 2
+    # Proactive report-back settings
+    background_tasks_proactive_report_enabled: bool = False
+    background_tasks_proactive_report_strategies: list[str] = field(default_factory=lambda: ["APPEND", "REPLACE"])
+    background_tasks_proactive_report_max_queued: int = 5
+    background_tasks_proactive_report_timeout_s: float = 30.0
+    background_tasks_proactive_report_fallback_notification: bool = True
+{% endif %}
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -48,6 +79,9 @@ class Config:
         return cls(
             memory_base_url=os.getenv("MEMORY_BASE_URL", "http://localhost:8000"),
             llm_model=os.getenv("LLM_MODEL", "stub-llm"),
+            multi_action_sequential=_env_flag("PLANNER_MULTI_ACTION_SEQUENTIAL", False),
+            multi_action_read_only_only=_env_flag("PLANNER_MULTI_ACTION_READ_ONLY_ONLY", True),
+            multi_action_max_tools=_env_int("PLANNER_MULTI_ACTION_MAX_TOOLS", 2),
             rich_output_enabled=_env_flag("RICH_OUTPUT_ENABLED", {{ "True" if with_rich_output else "False" }}),
             rich_output_allowlist=_env_csv(
                 "RICH_OUTPUT_ALLOWLIST",
@@ -57,4 +91,25 @@ class Config:
             rich_output_include_prompt_examples=_env_flag("RICH_OUTPUT_INCLUDE_PROMPT_EXAMPLES", False),
             rich_output_max_payload_bytes=_env_int("RICH_OUTPUT_MAX_PAYLOAD_BYTES", 250000),
             rich_output_max_total_bytes=_env_int("RICH_OUTPUT_MAX_TOTAL_BYTES", 2000000),
+{% if with_background_tasks %}
+            # Background tasks configuration
+            background_tasks_enabled=_env_flag("BACKGROUND_TASKS_ENABLED", True),
+            background_tasks_allow_tool_background=_env_flag("BACKGROUND_TASKS_ALLOW_TOOL_BACKGROUND", True),
+            background_tasks_default_mode=os.getenv("BACKGROUND_TASKS_DEFAULT_MODE", "subagent"),
+            background_tasks_default_merge_strategy=os.getenv("BACKGROUND_TASKS_DEFAULT_MERGE_STRATEGY", "HUMAN_GATED"),
+            background_tasks_context_depth=os.getenv("BACKGROUND_TASKS_CONTEXT_DEPTH", "full"),
+            background_tasks_propagate_on_cancel=os.getenv("BACKGROUND_TASKS_PROPAGATE_ON_CANCEL", "cascade"),
+            background_tasks_spawn_requires_confirmation=_env_flag("BACKGROUND_TASKS_SPAWN_REQUIRES_CONFIRMATION", False),
+            background_tasks_include_prompt_guidance=_env_flag("BACKGROUND_TASKS_INCLUDE_PROMPT_GUIDANCE", True),
+            background_tasks_max_concurrent_tasks=_env_int("BACKGROUND_TASKS_MAX_CONCURRENT_TASKS", 5),
+            background_tasks_max_tasks_per_session=_env_int("BACKGROUND_TASKS_MAX_TASKS_PER_SESSION", 50),
+            background_tasks_task_timeout_s=_env_int("BACKGROUND_TASKS_TASK_TIMEOUT_S", 3600),
+            background_tasks_max_pending_steering=_env_int("BACKGROUND_TASKS_MAX_PENDING_STEERING", 2),
+            # Proactive report-back settings
+            background_tasks_proactive_report_enabled=_env_flag("BACKGROUND_TASKS_PROACTIVE_REPORT_ENABLED", False),
+            background_tasks_proactive_report_strategies=_env_csv("BACKGROUND_TASKS_PROACTIVE_REPORT_STRATEGIES", ["APPEND", "REPLACE"]),
+            background_tasks_proactive_report_max_queued=_env_int("BACKGROUND_TASKS_PROACTIVE_REPORT_MAX_QUEUED", 5),
+            background_tasks_proactive_report_timeout_s=_env_float("BACKGROUND_TASKS_PROACTIVE_REPORT_TIMEOUT_S", 30.0),
+            background_tasks_proactive_report_fallback_notification=_env_flag("BACKGROUND_TASKS_PROACTIVE_REPORT_FALLBACK_NOTIFICATION", True),
+{% endif %}
         )

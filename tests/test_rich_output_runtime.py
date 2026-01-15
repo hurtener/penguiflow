@@ -39,6 +39,17 @@ def test_runtime_prompt_section() -> None:
     assert "`markdown`" in prompt
 
 
+def test_runtime_prompt_section_include_examples_override() -> None:
+    reset_runtime()
+    runtime = configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["markdown"], include_prompt_examples=False)
+    )
+    prompt = runtime.prompt_section(include_examples=True)
+    assert "`markdown`" in prompt
+    # With examples enabled, prompt generator may include extra example blocks.
+    assert "Example" in prompt or "```json" in prompt
+
+
 def test_rich_output_extensions_patch_registry_and_nodes() -> None:
     reset_runtime()
     clear_rich_output_extensions()

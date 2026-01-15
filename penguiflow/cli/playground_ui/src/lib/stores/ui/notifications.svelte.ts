@@ -9,11 +9,16 @@ export interface Notification {
   message: string;
   level: NotificationLevel;
   ts: number;
+  actions?: Array<{ id: string; label: string; payload?: Record<string, unknown> }>;
 }
 
 export interface NotificationsStore {
   readonly items: Notification[];
-  add(message: string, level?: NotificationLevel): Notification;
+  add(
+    message: string,
+    level?: NotificationLevel,
+    actions?: Notification['actions']
+  ): Notification;
   remove(id: string): void;
   clear(): void;
 }
@@ -23,12 +28,17 @@ export function createNotificationsStore(): NotificationsStore {
 
   return {
     get items() { return items; },
-    add(message: string, level: NotificationLevel = 'info') {
+    add(
+      message: string,
+      level: NotificationLevel = 'info',
+      actions?: Notification['actions']
+    ) {
       const note: Notification = {
         id: `note_${Date.now()}_${Math.random().toString(16).slice(2)}`,
         message,
         level,
-        ts: Date.now()
+        ts: Date.now(),
+        actions
       };
       items = [note, ...items];
       return note;

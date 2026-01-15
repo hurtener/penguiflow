@@ -33,7 +33,9 @@ class FakeAgentWrapper(AgentWrapper):
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Any = None,
         trace_id_hint: str | None = None,
+        steering: Any = None,
     ) -> ChatResult:
+        del steering
         raise RuntimeError("resume not supported in FakeAgentWrapper")
 
     async def chat(
@@ -45,7 +47,9 @@ class FakeAgentWrapper(AgentWrapper):
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Any = None,
         trace_id_hint: str | None = None,
+        steering: Any = None,
     ) -> ChatResult:
+        del steering
         self.last_query = query
         self.last_llm_context = dict(llm_context or {})
         self.last_tool_context = dict(tool_context or {})
@@ -230,7 +234,9 @@ async def test_penguiflow_adapter_emits_pause_custom_event() -> None:
             tool_context: Mapping[str, Any] | None = None,
             event_consumer: Any = None,
             trace_id_hint: str | None = None,
+            steering: Any = None,
         ) -> ChatResult:
+            del steering
             raise RuntimeError("resume not supported in PauseAgentWrapper")
 
         async def chat(
@@ -242,7 +248,9 @@ async def test_penguiflow_adapter_emits_pause_custom_event() -> None:
             tool_context: Mapping[str, Any] | None = None,
             event_consumer: Any = None,
             trace_id_hint: str | None = None,
+            steering: Any = None,
         ) -> ChatResult:
+            del steering
             return ChatResult(
                 answer=None,
                 trace_id=trace_id_hint or "trace-2",
@@ -295,7 +303,9 @@ async def test_penguiflow_adapter_emits_run_error() -> None:
             tool_context: Mapping[str, Any] | None = None,
             event_consumer: Any = None,
             trace_id_hint: str | None = None,
+            steering: Any = None,
         ) -> ChatResult:
+            del steering
             raise RuntimeError("resume not supported in ErrorAgentWrapper")
 
         async def chat(
@@ -307,7 +317,9 @@ async def test_penguiflow_adapter_emits_run_error() -> None:
             tool_context: Mapping[str, Any] | None = None,
             event_consumer: Any = None,
             trace_id_hint: str | None = None,
+            steering: Any = None,
         ) -> ChatResult:
+            del steering
             raise RuntimeError("boom")
 
     adapter = PenguiFlowAdapter(ErrorAgentWrapper())
@@ -327,3 +339,78 @@ async def test_penguiflow_adapter_emits_run_error() -> None:
             events.append(event)
 
     assert any(event.type == EventType.RUN_ERROR for event in events)
+
+
+@pytest.mark.asyncio
+async def test_penguiflow_adapter_registers_foreground_task_when_session_manager_provided() -> None:
+    class FakeRegistry:
+        def __init__(self) -> None:
+            self.created: list[dict[str, Any]] = []
+            self.status_updates: list[tuple[str, str]] = []
+            self.task_updates: list[dict[str, Any]] = []
+
+        async def create_task(self, **kwargs: Any) -> None:
+            self.created.append(dict(kwargs))
+
+        async def update_status(self, task_id: str, status: Any) -> None:
+            self.status_updates.append((task_id, str(status)))
+
+        async def update_task(self, task_id: str, **kwargs: Any) -> None:
+            payload = {"task_id": task_id, **kwargs}
+            self.task_updates.append(payload)
+
+    class FakeSession:
+        def __init__(self, session_id: str) -> None:
+            self.session_id = session_id
+            self.registry = FakeRegistry()
+            self.context_updates: list[dict[str, Any]] = []
+            self.published: list[dict[str, Any]] = []
+            self._steering_inboxes: dict[str, Any] = {}
+            self.turn_ids: list[str | None] = []
+
+        async def ensure_capacity(self, *_: Any, **__: Any) -> None:
+            return None
+
+        def update_context(self, *, llm_context: dict[str, Any], tool_context: dict[str, Any]) -> None:
+            self.context_updates.append({"llm_context": dict(llm_context), "tool_context": dict(tool_context)})
+
+        def set_turn_id(self, turn_id: str | None) -> None:
+            self.turn_ids.append(turn_id)
+
+        def _publish(self, update: Any) -> None:
+            self.published.append(update.model_dump(mode="json"))
+
+    class FakeSessionManager:
+        def __init__(self) -> None:
+            self.sessions: dict[str, FakeSession] = {}
+
+        async def get_or_create(self, session_id: str) -> FakeSession:
+            if session_id not in self.sessions:
+                self.sessions[session_id] = FakeSession(session_id)
+            return self.sessions[session_id]
+
+    session_manager = FakeSessionManager()
+    wrapper = FakeAgentWrapper([])
+    adapter = PenguiFlowAdapter(wrapper, session_manager=session_manager)
+
+    input_payload = RunAgentInput(
+        thread_id="thread-1",
+        run_id="run-1",
+        messages=[{"id": "msg-1", "role": "user", "content": "Hi"}],
+        tools=[],
+        context=[],
+        state={},
+        forwarded_props={"penguiflow": {"llm_context": {"tone": "test"}, "tool_context": {"tenant_id": "t1"}}},
+    )
+
+    async for _event in adapter.run(input_payload):
+        pass
+
+    session = session_manager.sessions["thread-1"]
+    assert session.context_updates == [{"llm_context": {"tone": "test"}, "tool_context": {"tenant_id": "t1"}}]
+    assert session.turn_ids == ["run-1"]
+    assert session.registry.created and session.registry.created[0]["task_id"] == "run-1"
+    assert any(update.get("content", {}).get("status") == "RUNNING" for update in session.published)
+    assert wrapper.last_tool_context is not None
+    assert wrapper.last_tool_context.get("task_id") == "run-1"
+    assert wrapper.last_tool_context.get("is_subagent") is False

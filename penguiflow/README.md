@@ -10,7 +10,7 @@ contributors understand how the pieces fit together.
 | --- | --- |
 | `core.py` | Runtime graph builder, execution engine, retries/timeouts, controller loop semantics, and playbook helper. |
 | `errors.py` | Defines `FlowError` and `FlowErrorCode` used for traceable exceptions. |
-| `state.py` | Protocols for pluggable state stores plus the `StoredEvent`/`RemoteBinding` dataclasses. |
+| `state/` | Unified StateStore protocol, models, and reference in-memory implementation. |
 | `bus.py` | Message bus protocol used to fan out floe traffic to remote workers. |
 | `node.py` | `Node` wrapper and `NodePolicy` configuration (validation scope, timeout, retry/backoff). |
 | `catalog.py` | `NodeSpec` dataclass, tool decorator, and catalog builder feeding the planner. |

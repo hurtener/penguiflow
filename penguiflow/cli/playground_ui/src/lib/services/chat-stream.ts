@@ -1,4 +1,10 @@
-import type { ArtifactChunkPayload, ArtifactStoredEvent, ChatMessage, PendingInteraction } from '$lib/types';
+import type {
+  ArtifactChunkPayload,
+  ArtifactStoredEvent,
+  ChatMessage,
+  PendingInteraction,
+  StateUpdate
+} from '$lib/types';
 import { safeParse } from '$lib/utils';
 import { ANSWER_GATE_SENTINEL } from '$lib/utils/constants';
 import type { AppStores } from '$lib/stores';
@@ -23,7 +29,13 @@ import {
 
 type ChatStreamStores = Pick<
   AppStores,
-  'chatStore' | 'eventsStore' | 'trajectoryStore' | 'artifactsStore' | 'interactionsStore'
+  'chatStore'
+  | 'eventsStore'
+  | 'trajectoryStore'
+  | 'artifactsStore'
+  | 'interactionsStore'
+  | 'tasksStore'
+  | 'notificationsStore'
 >;
 
 type AguiStreamEvent =
@@ -58,6 +70,12 @@ class ChatStreamManager {
   private aguiSessionId: string | null = null;
   private aguiCompleted = false;
   private aguiToolCalls: Map<string, { name: string; args: string; messageId?: string }> = new Map();
+
+  // SSE tool arg streaming state (mirrors AG-UI pattern)
+  private sseToolCalls: Map<string, { name: string; args: string; messageId?: string }> = new Map();
+  // SSE message multiplexing state
+  private sseMessageMap: Map<string, string> = new Map();
+  private sseMappedPlaceholder = false;
 
   /**
    * Start a new chat stream
@@ -96,7 +114,20 @@ class ChatStreamManager {
     this.eventSource = new EventSource(url.toString());
 
     // Register event handlers
-    const events = ['chunk', 'artifact_chunk', 'artifact_stored', 'llm_stream_chunk', 'step', 'event', 'done', 'error'];
+    const events = [
+      'chunk',
+      'artifact_chunk',
+      'artifact_stored',
+      'llm_stream_chunk',
+      'step',
+      'event',
+      'state_update',
+      'tool_call_start',
+      'tool_call_args',
+      'tool_call_end',
+      'done',
+      'error'
+    ];
     events.forEach(eventName => {
       this.eventSource!.addEventListener(eventName, (evt: MessageEvent) => {
         this.handleEvent(eventName, evt, callbacks);
@@ -132,6 +163,10 @@ class ChatStreamManager {
     this.aguiSessionId = null;
     this.aguiCompleted = false;
     this.aguiToolCalls.clear();
+    // Clear SSE tool streaming state
+    this.sseToolCalls.clear();
+    this.sseMessageMap.clear();
+    this.sseMappedPlaceholder = false;
   }
 
   private findAgentMsg(): ChatMessage | undefined {
@@ -168,6 +203,22 @@ class ChatStreamManager {
         this.handleStepEvent(msg, data, eventName);
         break;
 
+      case 'state_update':
+        this.handleStateUpdate(data);
+        break;
+
+      case 'tool_call_start':
+        this.handleSseToolCallStart(data);
+        break;
+
+      case 'tool_call_args':
+        this.handleSseToolCallArgs(data);
+        break;
+
+      case 'tool_call_end':
+        this.handleSseToolCallEnd(data);
+        break;
+
       case 'done':
         this.handleDone(msg, data, callbacks);
         break;
@@ -178,26 +229,119 @@ class ChatStreamManager {
     }
   }
 
+  private handleStateUpdate(data: Record<string, unknown>): void {
+    this.stores.tasksStore.applyUpdate(data as StateUpdate);
+    const updateType = data.update_type as string | undefined;
+    if (updateType === 'NOTIFICATION') {
+      const content = data.content as Record<string, unknown> | undefined;
+      const severity = String(content?.severity ?? 'info');
+      const body = String(content?.body ?? '');
+      const title = String(content?.title ?? '');
+      const message = title ? `${title}: ${body}` : body;
+      const actionsRaw = content?.actions;
+      const actions = Array.isArray(actionsRaw)
+        ? actionsRaw
+            .filter(item => item && typeof item === 'object')
+            .map(item => ({
+              id: String((item as Record<string, unknown>).id ?? ''),
+              label: String((item as Record<string, unknown>).label ?? 'Action'),
+              payload: (item as Record<string, unknown>).payload as Record<string, unknown> | undefined
+            }))
+            .filter(item => item.id)
+        : undefined;
+      this.stores.notificationsStore.add(message || 'Notification', severity as any, actions);
+    }
+  }
+
+  /**
+   * Ensure a message exists for the given message_id (SSE message multiplexing).
+   * First call reuses the placeholder, subsequent calls create new messages.
+   */
+  private ensureSseMessage(messageId?: string): string {
+    if (!messageId) return this.agentMsgId ?? '';
+
+    const existing = this.sseMessageMap.get(messageId);
+    if (existing) return existing;
+
+    // First message reuses placeholder
+    if (!this.sseMappedPlaceholder && this.agentMsgId) {
+      this.sseMappedPlaceholder = true;
+      this.sseMessageMap.set(messageId, this.agentMsgId);
+      return this.agentMsgId;
+    }
+
+    // Subsequent messages create new UI messages
+    const newMsg = this.stores.chatStore.addAgentMessage();
+    this.sseMessageMap.set(messageId, newMsg.id);
+    return newMsg.id;
+  }
+
+  private handleSseToolCallStart(data: Record<string, unknown>): void {
+    const toolCallId = data.tool_call_id as string | undefined;
+    const toolName = data.tool_name as string | undefined;
+    const messageId = data.message_id as string | undefined;
+
+    if (toolCallId && toolName) {
+      const uiMsgId = messageId ? this.ensureSseMessage(messageId) : this.agentMsgId ?? undefined;
+      this.sseToolCalls.set(toolCallId, { name: toolName, args: '', messageId: uiMsgId });
+    }
+
+    this.stores.eventsStore.addEvent(data, 'tool_call_start');
+  }
+
+  private handleSseToolCallArgs(data: Record<string, unknown>): void {
+    const toolCallId = data.tool_call_id as string | undefined;
+    const delta = data.delta as string | undefined;
+
+    if (toolCallId && delta) {
+      const entry = this.sseToolCalls.get(toolCallId);
+      if (entry) {
+        entry.args += delta;
+      }
+    }
+
+    this.stores.eventsStore.addEvent(data, 'tool_call_args');
+  }
+
+  private handleSseToolCallEnd(data: Record<string, unknown>): void {
+    const toolCallId = data.tool_call_id as string | undefined;
+
+    if (toolCallId) {
+      const entry = this.sseToolCalls.get(toolCallId);
+      if (entry) {
+        this.handleInteractiveToolCall(toolCallId, entry.name, entry.args, entry.messageId);
+        this.sseToolCalls.delete(toolCallId);
+      }
+    }
+
+    this.stores.eventsStore.addEvent(data, 'tool_call_end');
+  }
+
   private handleChunk(msg: ChatMessage, data: Record<string, unknown>, eventName: string): void {
+    // Support message multiplexing via message_id
+    const messageId = data.message_id as string | undefined;
+    const targetMsgId = messageId ? this.ensureSseMessage(messageId) : msg.id;
+    const targetMsg = this.stores.chatStore.findMessage(targetMsgId) ?? msg;
+
     const channel = (data.channel as string) ?? 'thinking';
     const phase = (data.phase as string) ?? (eventName === 'chunk' ? 'observation' : undefined);
     const text = (data.text as string) ?? '';
     const done = Boolean(data.done);
 
     if (channel === 'thinking' && phase === 'action') {
-      this.stores.chatStore.updateMessage(msg.id, { isThinking: !done });
+      this.stores.chatStore.updateMessage(targetMsg.id, { isThinking: !done });
       return;
     }
 
     if (channel === 'thinking') {
       if (text) {
-        this.stores.chatStore.updateMessage(msg.id, {
-          observations: `${msg.observations ?? ''}${text}`,
+        this.stores.chatStore.updateMessage(targetMsg.id, {
+          observations: `${targetMsg.observations ?? ''}${text}`,
           showObservations: true,
           isThinking: false
         });
       } else {
-        this.stores.chatStore.updateMessage(msg.id, { isThinking: false });
+        this.stores.chatStore.updateMessage(targetMsg.id, { isThinking: false });
       }
       return;
     }
@@ -207,23 +351,23 @@ class ChatStreamManager {
         isThinking: false,
         isStreaming: true
       };
-      if (!msg.revisionStreamActive) {
+      if (!targetMsg.revisionStreamActive) {
         updates.revisionStreamActive = true;
         updates.text = '';
       }
       if (text) {
-        updates.text = `${msg.revisionStreamActive ? msg.text : ''}${text}`;
+        updates.text = `${targetMsg.revisionStreamActive ? targetMsg.text : ''}${text}`;
       }
-      this.stores.chatStore.updateMessage(msg.id, updates);
+      this.stores.chatStore.updateMessage(targetMsg.id, updates);
       return;
     }
 
     if (channel === 'answer') {
-      const gate = (msg.answerActionSeq ?? ANSWER_GATE_SENTINEL) as number;
+      const gate = (targetMsg.answerActionSeq ?? ANSWER_GATE_SENTINEL) as number;
       const seq = data.action_seq as number | undefined;
 
       if (gate === ANSWER_GATE_SENTINEL) {
-        this.stores.chatStore.updateMessage(msg.id, {
+        this.stores.chatStore.updateMessage(targetMsg.id, {
           answerStreamDone: done,
           isStreaming: !done,
           isThinking: false
@@ -232,7 +376,7 @@ class ChatStreamManager {
       }
 
       if (seq !== undefined && seq !== gate) {
-        this.stores.chatStore.updateMessage(msg.id, { isThinking: false });
+        this.stores.chatStore.updateMessage(targetMsg.id, { isThinking: false });
         return;
       }
 
@@ -241,24 +385,24 @@ class ChatStreamManager {
         isStreaming: !done
       };
       if (text) {
-        updates.text = `${msg.text}${text}`;
+        updates.text = `${targetMsg.text}${text}`;
       }
       if (done) {
         updates.answerStreamDone = true;
       }
-      this.stores.chatStore.updateMessage(msg.id, updates);
+      this.stores.chatStore.updateMessage(targetMsg.id, updates);
       return;
     }
 
     // Default: append to observations
     if (text) {
-      this.stores.chatStore.updateMessage(msg.id, {
-        observations: `${msg.observations ?? ''}${text}`,
+      this.stores.chatStore.updateMessage(targetMsg.id, {
+        observations: `${targetMsg.observations ?? ''}${text}`,
         showObservations: true,
         isThinking: false
       });
     } else {
-      this.stores.chatStore.updateMessage(msg.id, { isThinking: false });
+      this.stores.chatStore.updateMessage(targetMsg.id, { isThinking: false });
     }
   }
 
@@ -355,14 +499,30 @@ class ChatStreamManager {
     const reason = getString(pause.reason) || 'pause';
     const resumeToken = getString(pause.resume_token);
 
-    if (resumeToken) {
+    // Extract interactive component info from payload (like AG-UI)
+    const component = getString(payload.component);
+    const props = asRecord(payload.props);
+
+    // Create pending interaction if component+props exist
+    if (component && props && !this.stores.interactionsStore.pendingInteraction) {
+      this.stores.interactionsStore.setPendingInteraction({
+        tool_call_id: `pause_${Date.now()}`,
+        tool_name: getString(payload.tool) ?? 'ui_pause',
+        component,
+        props,
+        message_id: msg.id,
+        resume_token: resumeToken,
+        created_at: Date.now()
+      });
+    } else if (resumeToken) {
       this.stores.interactionsStore.updatePendingInteraction({ resume_token: resumeToken });
     }
 
+    // Build markdown body for display
     let body = `Planner paused (${reason})`;
     if (provider) body += ` for ${provider}`;
     if (authUrl) body += `\n[Open auth link](${authUrl})`;
-    if (resumeToken) body += `\nResume token: \`${resumeToken}\``;
+    if (resumeToken && !component) body += `\nResume token: \`${resumeToken}\``;
 
     this.stores.chatStore.updateMessage(msg.id, {
       pause: { reason, payload, resume_token: resumeToken },
@@ -663,6 +823,31 @@ class ChatStreamManager {
         const name = e.name;
         const value = e.value;
         const record = asRecord(value);
+
+        // Handle state_update events for task tracking
+        if (name === 'state_update' && record) {
+          this.stores.tasksStore.applyUpdate(record as StateUpdate);
+          const updateType = record.update_type as string | undefined;
+          if (updateType === 'NOTIFICATION') {
+            const content = record.content as Record<string, unknown> | undefined;
+            const severity = String(content?.severity ?? 'info');
+            const body = String(content?.body ?? '');
+            const title = String(content?.title ?? '');
+            const message = title ? `${title}: ${body}` : body;
+            const actionsRaw = content?.actions;
+            const actions = Array.isArray(actionsRaw)
+              ? actionsRaw
+                  .filter(item => item && typeof item === 'object')
+                  .map(item => ({
+                    id: String((item as Record<string, unknown>).id ?? ''),
+                    label: String((item as Record<string, unknown>).label ?? 'Action'),
+                    payload: (item as Record<string, unknown>).payload as Record<string, unknown> | undefined
+                  }))
+                  .filter(item => item.id)
+              : undefined;
+            this.stores.notificationsStore.add(message || 'Notification', severity as any, actions);
+          }
+        }
 
         if (name === 'artifact_stored' && record) {
           const artifactRecord = asRecord(record.artifact);

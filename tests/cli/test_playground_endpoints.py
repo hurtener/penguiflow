@@ -44,8 +44,9 @@ class MockAgentWrapper(AgentWrapper):
         tool_context: dict[str, Any] | None = None,
         event_consumer: Any = None,
         trace_id_hint: str | None = None,
+        steering: Any = None,
     ) -> ChatResult:
-        del resume_token, session_id, user_input, tool_context, event_consumer, trace_id_hint
+        del resume_token, session_id, user_input, tool_context, event_consumer, trace_id_hint, steering
         if self._raise_on_chat:
             raise self._raise_on_chat
         return self._chat_result
@@ -59,7 +60,9 @@ class MockAgentWrapper(AgentWrapper):
         tool_context: dict[str, Any] | None = None,
         event_consumer: Any = None,
         trace_id_hint: str | None = None,
+        steering: Any = None,
     ) -> ChatResult:
+        del steering
         if self._raise_on_chat:
             raise self._raise_on_chat
         return self._chat_result
@@ -665,3 +668,43 @@ class TestAGUIEndpoint:
 
         assert response.status_code == 200
         assert "Test answer" in response.text
+
+
+class TestSessionEndpoints:
+    def test_session_info(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/sessions/test-session")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["session_id"] == "test-session"
+        assert "context_version" in payload
+
+    def test_session_context_update(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.patch(
+            "/sessions/test-session/context",
+            json={"llm_context": {"hello": "world"}, "merge": False},
+        )
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+
+    def test_delete_task_endpoint(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post("/chat", json={"query": "Hello", "session_id": "sess-1"})
+        assert response.status_code == 200
+
+        tasks = client.get("/tasks", params={"session_id": "sess-1"})
+        assert tasks.status_code == 200
+        task_id = tasks.json()[0]["task_id"]
+
+        delete_response = client.delete(f"/tasks/{task_id}", params={"session_id": "sess-1"})
+        assert delete_response.status_code == 200

@@ -352,6 +352,301 @@ async def test_arg_validation_emits_events_for_placeholders() -> None:
 
 
 @pytest.mark.asyncio
+async def test_finish_metadata_includes_answer_action_seq() -> None:
+    """Ensure streaming UIs can correlate final 'done' with step_start action_seq."""
+    events: list[PlannerEvent] = []
+    planner = make_planner(
+        StubClient(
+            [
+                {
+                    "thought": "finish",
+                    "next_node": "final_response",
+                    "args": {"raw_answer": "Done"},
+                }
+            ]
+        ),
+        max_iters=3,
+        event_callback=events.append,
+    )
+    result = await planner.run("hi")
+
+    assert result.reason == "answer_complete"
+    assert isinstance(result.metadata.get("answer_action_seq"), int)
+    assert result.metadata["answer_action_seq"] == 1
+
+    step_start = next((evt for evt in events if evt.event_type == "step_start"), None)
+    assert step_start is not None
+    assert step_start.extra.get("action_seq") == result.metadata["answer_action_seq"]
+
+
+@pytest.mark.asyncio
+async def test_malformed_json_finish_still_sets_answer_action_seq() -> None:
+    """Regression: malformed JSON fallback answers must still reach streaming UIs."""
+
+    class MalformedClient:
+        def __init__(self, raw_responses: list[str]) -> None:
+            self._responses = list(raw_responses)
+
+        async def complete(  # type: ignore[override]
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del messages, response_format, stream, on_stream_chunk
+            if not self._responses:
+                raise AssertionError("No stub responses left")
+            return self._responses.pop(0), 0.0
+
+    events: list[PlannerEvent] = []
+    planner = make_planner(
+        MalformedClient(
+            [
+                '{"next_node":"triage","args":{"question":"hi"}',  # missing }
+                '{"next_node":"retrieve","args":{"intent":"docs"}',  # missing }
+                '{"next_node":"final_response","args":{"raw_answer":"Done"}',  # missing }}
+            ]
+        ),
+        repair_attempts=3,
+        max_iters=3,
+        event_callback=events.append,
+    )
+    result = await planner.run("hi")
+
+    assert result.reason == "answer_complete"
+    assert result.payload["raw_answer"] == "Done"
+    assert result.metadata["answer_action_seq"] == 1
+
+    step_start = next((evt for evt in events if evt.event_type == "step_start"), None)
+    assert step_start is not None
+    assert step_start.extra.get("action_seq") == result.metadata["answer_action_seq"]
+
+
+@pytest.mark.asyncio
+async def test_finish_repair_fills_missing_answer() -> None:
+    """When model finishes without an answer, finish_repair should fill it."""
+
+    class FinishRepairClient:
+        def __init__(self, raw_responses: list[str]) -> None:
+            self._responses = list(raw_responses)
+
+        async def complete(  # type: ignore[override]
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del messages, response_format, stream, on_stream_chunk
+            if not self._responses:
+                raise AssertionError("No stub responses left")
+            return self._responses.pop(0), 0.0
+
+    events: list[PlannerEvent] = []
+    planner = make_planner(
+        FinishRepairClient(
+            [
+                # Finish without answer (triggers finish_repair).
+                '{"next_node":"final_response","args":{}}',
+                # Finish repair response.
+                '{"raw_answer":"Fixed"}',
+            ]
+        ),
+        max_iters=1,
+        event_callback=events.append,
+    )
+    result = await planner.run("hi")
+
+    assert result.reason == "answer_complete"
+    assert result.payload["raw_answer"] == "Fixed"
+    assert any(evt.event_type == "finish_repair_attempt" for evt in events)
+    assert any(evt.event_type == "finish_repair_success" for evt in events)
+    assert any(
+        evt.event_type == "llm_stream_chunk" and evt.extra.get("channel") == "answer" for evt in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_mixed_output_with_multiple_json_objects_executes_tool_call() -> None:
+    """Regression: if the model emits multiple JSON objects, execute the action one."""
+
+    class MixedClient:
+        def __init__(self, raw_responses: list[str]) -> None:
+            self._responses = list(raw_responses)
+
+        async def complete(  # type: ignore[override]
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del messages, response_format, stream, on_stream_chunk
+            if not self._responses:
+                raise AssertionError("No stub responses left")
+            return self._responses.pop(0), 0.0
+
+    events: list[PlannerEvent] = []
+    planner = make_planner(
+        MixedClient(
+            [
+                # Tool call JSON, plus a second JSON object that previously broke naive extraction.
+                '{"next_node":"retrieve","args":{"intent":"docs"}}\n'
+                '{"answer":"```json\\n{\\n  \\"next_node\\": \\"retrieve\\"\\n}\\n```"}',
+                # Normal finish.
+                '{"next_node":"final_response","args":{"answer":"ok"}}',
+            ]
+        ),
+        max_iters=5,
+        event_callback=events.append,
+    )
+    result = await planner.run("hi")
+
+    assert result.reason == "answer_complete"
+    assert result.payload["raw_answer"] == "ok"
+    assert any(evt.event_type == "tool_call_start" for evt in events)
+    assert any(evt.event_type == "step_complete" for evt in events)
+
+
+@pytest.mark.asyncio
+async def test_step_records_llm_parse_extras_in_trajectory_metadata() -> None:
+    """Ensure parse extras are persisted for later inspection."""
+
+    class MixedClient:
+        def __init__(self, raw_responses: list[str]) -> None:
+            self._responses = list(raw_responses)
+
+        async def complete(  # type: ignore[override]
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del messages, response_format, stream, on_stream_chunk
+            if not self._responses:
+                raise AssertionError("No stub responses left")
+            return self._responses.pop(0), 0.0
+
+    planner = make_planner(
+        MixedClient(
+            [
+                "PREFACE\n"
+                '{"next_node":"retrieve","args":{"intent":"docs"}}\n'
+                '{"foo":"bar"}\n',
+                '{"next_node":"final_response","args":{"answer":"ok"}}',
+            ]
+        ),
+        max_iters=5,
+    )
+    result = await planner.run("hi")
+
+    assert result.reason == "answer_complete"
+    trajectory_meta = result.metadata.get("trajectory_metadata", {})
+    extras = trajectory_meta.get("llm_parse_extras")
+    assert isinstance(extras, list)
+    assert extras, "Expected at least one llm_parse_extras entry"
+    assert extras[0].get("selected_next_node") == "retrieve"
+
+@pytest.mark.asyncio
+async def test_multi_action_fallback_uses_alternate_when_first_tool_invalid() -> None:
+    """If the model emits multiple actions, use the next valid tool candidate on failure."""
+
+    class MixedClient:
+        def __init__(self, raw_responses: list[str]) -> None:
+            self._responses = list(raw_responses)
+            self.calls: int = 0
+
+        async def complete(  # type: ignore[override]
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del messages, response_format, stream, on_stream_chunk
+            self.calls += 1
+            if not self._responses:
+                raise AssertionError("No stub responses left")
+            return self._responses.pop(0), 0.0
+
+    events: list[PlannerEvent] = []
+    client = MixedClient(
+        [
+            # First candidate is an unknown tool; second candidate is a real tool.
+            '{"next_node":"not_a_real_tool","args":{"x":1}}\\n'
+            '{"next_node":"triage","args":{"question":"hi"}}',
+            '{"next_node":"final_response","args":{"answer":"ok"}}',
+        ]
+    )
+    planner = make_planner(client, max_iters=5, event_callback=events.append)
+    result = await planner.run("hi")
+
+    assert result.reason == "answer_complete"
+    assert result.payload["raw_answer"] == "ok"
+    assert any(evt.event_type == "multi_action_fallback_used" for evt in events)
+    tool_starts = [evt for evt in events if evt.event_type == "tool_call_start"]
+    assert tool_starts and tool_starts[0].extra.get("tool_name") == "triage"
+
+
+@pytest.mark.asyncio
+async def test_multi_action_sequential_executes_extra_readonly_tools_without_llm_call() -> None:
+    """When enabled, run extra tool calls emitted in one LLM response sequentially."""
+
+    class MixedClient:
+        def __init__(self, raw_responses: list[str]) -> None:
+            self._responses = list(raw_responses)
+            self.calls: int = 0
+
+        async def complete(  # type: ignore[override]
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del messages, response_format, stream, on_stream_chunk
+            self.calls += 1
+            if not self._responses:
+                raise AssertionError("No stub responses left")
+            return self._responses.pop(0), 0.0
+
+    events: list[PlannerEvent] = []
+    client = MixedClient(
+        [
+            # Two tool calls in one response (triage + retrieve). final_response is ignored and requested next.
+            '{"next_node":"triage","args":{"question":"hi"}}\\n'
+            '{"next_node":"retrieve","args":{"intent":"docs"}}\\n'
+            '{"next_node":"final_response","args":{"answer":"premature"}}',
+            '{"next_node":"final_response","args":{"answer":"ok"}}',
+        ]
+    )
+    planner = make_planner(
+        client,
+        max_iters=10,
+        event_callback=events.append,
+        multi_action_sequential=True,
+        multi_action_read_only_only=True,
+        multi_action_max_tools=2,
+    )
+    result = await planner.run("hi")
+
+    assert result.reason == "answer_complete"
+    assert result.payload["raw_answer"] == "ok"
+    # Only two LLM calls: first mixed output, then final answer (retrieve was executed from queue).
+    assert client.calls == 2
+    tool_names = [evt.extra.get("tool_name") for evt in events if evt.event_type == "tool_call_start"]
+    assert tool_names == ["triage", "retrieve"]
+
+
+@pytest.mark.asyncio
 async def test_consecutive_arg_failures_force_finish() -> None:
     """Test that consecutive arg validation failures trigger early finish."""
     registry = ModelRegistry()
@@ -400,7 +695,12 @@ async def test_consecutive_arg_failures_force_finish() -> None:
 
 @pytest.mark.asyncio
 async def test_consecutive_arg_failures_reset_on_success() -> None:
-    """Test that consecutive failure counter resets after successful tool call."""
+    """Test that global consecutive failure counter resets after successful tool call.
+
+    Note: Per-tool counters are tracked separately and only reset when THAT tool succeeds.
+    This test validates the global counter reset behavior using a threshold high enough
+    to not trigger the per-tool force_finish (strict_tool fails twice = 2, threshold = 3).
+    """
     registry = ModelRegistry()
     registry.register("strict_tool", StrictArgs, StrictResult)
     registry.register("triage", Query, Intent)
@@ -419,13 +719,13 @@ async def test_consecutive_arg_failures_reset_on_success() -> None:
             "next_node": "strict_tool",
             "args": {"query": "<auto>"},
         },
-        # Successful call resets counter
+        # Successful call resets global counter (but per-tool counter for strict_tool stays)
         {
             "thought": "Call triage instead",
             "next_node": "triage",
             "args": {"question": "real query"},
         },
-        # New failure - counter starts fresh
+        # New failure - global counter starts fresh, per-tool increments
         {
             "thought": "Try placeholder again",
             "next_node": "strict_tool",
@@ -443,13 +743,79 @@ async def test_consecutive_arg_failures_reset_on_success() -> None:
         llm_client=StubClient(responses),
         catalog=catalog,
         max_iters=10,
-        max_consecutive_arg_failures=2,  # Would trigger on 2nd consecutive failure
+        # Threshold 3 so per-tool counter (2 for strict_tool) doesn't trigger force_finish
+        max_consecutive_arg_failures=3,
     )
     result = await planner.run("test reset behavior")
 
-    # Should complete normally - counter was reset by successful triage call
+    # Should complete normally - global counter was reset by successful triage call
     assert result.reason == "answer_complete"
-    # Final consecutive count should be 1 (not 2) since it was reset
+    # Final global consecutive count should be 1 (reset by triage success)
+    assert result.metadata["consecutive_arg_failures"] == 1
+    # Note: per-tool counter (consecutive_arg_failures_strict_tool = 2) is tracked
+    # internally but not exposed in result metadata
+
+
+@pytest.mark.asyncio
+async def test_per_tool_arg_failures_force_finish() -> None:
+    """Test that per-tool failure counter triggers graceful failure even when other tools succeed.
+
+    This prevents infinite loops where the model repeatedly fails on one tool
+    but the global counter keeps getting reset by successful calls to other tools.
+    When the threshold is reached, the model is asked to generate a user-friendly
+    response instead of returning a technical error.
+    """
+    registry = ModelRegistry()
+    registry.register("strict_tool", StrictArgs, StrictResult)
+    registry.register("triage", Query, Intent)
+    catalog = build_catalog(
+        [
+            Node(strict_tool, name="strict_tool"),
+            Node(triage, name="triage"),
+        ],
+        registry,
+    )
+
+    responses = [
+        # First failure on strict_tool
+        {
+            "thought": "Try with placeholder",
+            "next_node": "strict_tool",
+            "args": {"query": "<auto>"},
+        },
+        # Successful call to triage - resets global but not per-tool
+        {
+            "thought": "Call triage instead",
+            "next_node": "triage",
+            "args": {"question": "real query"},
+        },
+        # Second failure on strict_tool - per-tool counter = 2, hits threshold
+        {
+            "thought": "Try placeholder again",
+            "next_node": "strict_tool",
+            "args": {"query": "<auto>"},
+        },
+        # Graceful failure response - model provides user-friendly message
+        {
+            "raw_answer": "I apologize, but I'm having trouble completing that action. Let me help you in another way."
+        },
+    ]
+
+    planner = ReactPlanner(
+        llm_client=StubClient(responses),
+        catalog=catalog,
+        max_iters=10,
+        # Threshold 2 so per-tool counter triggers graceful failure
+        max_consecutive_arg_failures=2,
+    )
+    result = await planner.run("test per-tool force finish")
+
+    # Should gracefully finish with a user-friendly message instead of no_path
+    assert result.reason == "answer_complete"
+    assert result.payload.get("graceful_failure") is True
+    assert result.payload.get("failure_reason") == "consecutive_arg_failures"
+    assert "apologize" in result.payload.get("raw_answer", "").lower()
+    # Global counter was reset by triage success (only 1 failure since reset)
     assert result.metadata["consecutive_arg_failures"] == 1
 
 
@@ -878,11 +1244,21 @@ async def test_react_planner_recovers_from_invalid_node() -> None:
 
 @pytest.mark.asyncio()
 async def test_react_planner_autofills_missing_args() -> None:
-    """Test that missing required args are autofilled with defaults."""
+    """Test that missing required string args trigger arg-fill recovery.
+
+    When the model omits required args, the planner:
+    1. Autofills with placeholder values (e.g., "<auto>" for strings)
+    2. Detects the placeholder and rejects it (triggers arg validation error)
+    3. Attempts arg-fill to get proper values from the model
+    4. Merges filled values and proceeds with tool execution
+    """
     client = StubClient(
         [
-            # Args empty - will be autofilled with defaults
+            # Model provides empty args - triggers autofill with <auto> placeholder
             {"thought": "retrieve", "next_node": "retrieve", "args": {}},
+            # Arg-fill response - model provides the missing "intent" value
+            {"intent": "docs"},
+            # Model finishes
             {"thought": "finish", "next_node": None, "args": {"raw_answer": "ok"}},
         ]
     )
@@ -890,12 +1266,14 @@ async def test_react_planner_autofills_missing_args() -> None:
 
     result = await planner.run("Test autofill path")
 
-    # Should complete without validation errors because autofill kicks in
+    # Should complete successfully after arg-fill recovery
     assert result.reason == "answer_complete"
-    # First step should have observation (tool was called successfully with autofilled args)
+    # First step should have observation (tool was called with arg-fill values)
     steps = result.metadata["steps"]
     assert len(steps) >= 1
     assert steps[0]["observation"] is not None
+    # Verify arg-fill was used (not just silent autofill acceptance)
+    assert result.metadata.get("arg_fill_success_count", 0) >= 1
 
 
 @pytest.mark.asyncio()
@@ -1122,8 +1500,8 @@ async def test_react_planner_step_salvages_empty_json() -> None:
     trajectory = Trajectory(query="salvage test")
 
     action = await planner.step(trajectory)
-    # Empty JSON should be salvaged to a finish action (next_node=None)
-    assert action.next_node is None
+    # Empty JSON should be salvaged to a finish action.
+    assert action.next_node == "final_response"
     assert action.thought == "planning next step"
     assert len(client.calls) == 1  # No repair needed
 
@@ -1459,6 +1837,184 @@ async def test_react_planner_parallel_plan_executes_concurrently() -> None:
     join_obs = step["observation"]["join"]["observation"]
     assert join_obs["documents"] == ["topic-primary", "topic-secondary"]
     assert step["observation"]["stats"] == {"success": 2, "failed": 0}
+
+
+@pytest.mark.asyncio()
+async def test_parallel_plan_emits_tool_call_events_for_branches_and_join() -> None:
+    """Parallel branches should emit tool_call_* events for live UI feedback."""
+
+    client = StubClient(
+        [
+            {
+                "thought": "fan out",
+                "plan": [
+                    {"node": "fetch_primary", "args": {"topic": "topic", "shard": 0}},
+                    {"node": "fetch_secondary", "args": {"topic": "topic", "shard": 1}},
+                ],
+                "join": {"node": "merge_results"},
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "done"},
+            },
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("fetch_primary", ShardRequest, ShardPayload)
+    registry.register("fetch_secondary", ShardRequest, ShardPayload)
+    registry.register("merge_results", MergeArgs, Documents)
+
+    nodes = [
+        Node(fetch_primary, name="fetch_primary"),
+        Node(fetch_secondary, name="fetch_secondary"),
+        Node(merge_results, name="merge_results"),
+    ]
+
+    events: list[PlannerEvent] = []
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog(nodes, registry),
+        event_callback=events.append,
+    )
+
+    result = await planner.run("parallel fan out")
+    assert result.reason == "answer_complete"
+
+    tool_starts = [evt for evt in events if evt.event_type == "tool_call_start"]
+    tool_results = [evt for evt in events if evt.event_type == "tool_call_result"]
+    assert len(tool_starts) == 3
+    assert len(tool_results) == 3
+    assert {evt.extra.get("tool_name") for evt in tool_starts} == {"fetch_primary", "fetch_secondary", "merge_results"}
+
+
+@pytest.mark.asyncio()
+async def test_parallel_plan_without_join_emits_tool_call_events_for_branches() -> None:
+    client = StubClient(
+        [
+            {
+                "thought": "fan out",
+                "plan": [
+                    {"node": "fetch_primary", "args": {"topic": "topic", "shard": 0}},
+                    {"node": "fetch_secondary", "args": {"topic": "topic", "shard": 1}},
+                ],
+            },
+            {
+                "thought": "finish",
+                "next_node": None,
+                "args": {"raw_answer": "done"},
+            },
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("fetch_primary", ShardRequest, ShardPayload)
+    registry.register("fetch_secondary", ShardRequest, ShardPayload)
+
+    nodes = [
+        Node(fetch_primary, name="fetch_primary"),
+        Node(fetch_secondary, name="fetch_secondary"),
+    ]
+
+    events: list[PlannerEvent] = []
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog(nodes, registry),
+        event_callback=events.append,
+    )
+
+    result = await planner.run("parallel fan out")
+    assert result.reason == "answer_complete"
+
+    tool_starts = [evt for evt in events if evt.event_type == "tool_call_start"]
+    tool_results = [evt for evt in events if evt.event_type == "tool_call_result"]
+    assert len(tool_starts) == 2
+    assert len(tool_results) == 2
+    assert {evt.extra.get("tool_name") for evt in tool_starts} == {"fetch_primary", "fetch_secondary"}
+    assert "join" not in result.metadata["steps"][0]["observation"]
+
+
+@pytest.mark.asyncio()
+async def test_steering_user_message_is_consumed_after_next_llm_call() -> None:
+    """Steering USER_MESSAGE should not be re-injected on every subsequent step."""
+
+    from penguiflow.planner.react_runtime import run_loop
+    from penguiflow.state.models import SteeringEvent, SteeringEventType
+    from penguiflow.steering import SteeringInbox
+
+    class EchoArgs(BaseModel):
+        text: str
+
+    class EchoOut(BaseModel):
+        echoed: str
+
+    @tool(desc="Echo tool", side_effects="read")
+    async def echo(args: EchoArgs, ctx: object) -> EchoOut:
+        return EchoOut(echoed=args.text)
+
+    client = StubClient(
+        [
+            {"next_node": "echo", "args": {"text": "hi"}},
+            {"next_node": "final_response", "args": {"answer": "done", "raw_answer": "done"}},
+        ]
+    )
+
+    registry = ModelRegistry()
+    registry.register("echo", EchoArgs, EchoOut)
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog([Node(echo, name="echo")], registry),
+    )
+
+    inbox = SteeringInbox()
+    planner._steering = inbox
+    await inbox.push(
+        SteeringEvent(
+            session_id="s",
+            task_id="t",
+            event_type=SteeringEventType.USER_MESSAGE,
+            payload={"text": "do this once"},
+            source="user",
+        )
+    )
+
+    trajectory = Trajectory(query="test", llm_context={}, tool_context={})
+    result = await run_loop(planner, trajectory, tracker=None, error_recovery_config=None)
+    assert result.reason == "answer_complete"
+
+    assert len(client.calls) >= 2
+    first_call = client.calls[0]
+    second_call = client.calls[1]
+    assert any("Steering input:" in msg.get("content", "") for msg in first_call)
+    assert not any("Steering input:" in msg.get("content", "") for msg in second_call)
+
+
+@pytest.mark.asyncio()
+async def test_rich_output_prompt_is_injected_when_render_component_is_present() -> None:
+    from penguiflow.rich_output.runtime import (
+        RichOutputConfig,
+        attach_rich_output_nodes,
+        configure_rich_output,
+        reset_runtime,
+    )
+
+    reset_runtime()
+    configure_rich_output(RichOutputConfig(enabled=True, include_prompt_catalog=True, allowlist=["markdown", "report"]))
+
+    registry = ModelRegistry()
+    nodes = list(
+        attach_rich_output_nodes(
+            registry,
+            config=RichOutputConfig(enabled=True, allowlist=["markdown", "report"]),
+        )
+    )
+    catalog = build_catalog(nodes, registry)
+
+    client = StubClient([{"next_node": "final_response", "args": {"raw_answer": "ok"}}])
+    planner = ReactPlanner(llm="gpt-oss-120b", llm_client=client, catalog=catalog)
+
+    assert "# Rich Output Components" in planner._system_prompt
 
 
 @pytest.mark.asyncio()
