@@ -177,8 +177,8 @@ def test_google_nonstream_extracts_reasoning() -> None:
             SimpleNamespace(
                 content=SimpleNamespace(
                     parts=[
-                        SimpleNamespace(thought="R"),
-                        SimpleNamespace(text="A"),
+                        SimpleNamespace(text="R", thought=True),
+                        SimpleNamespace(text="A", thought=False),
                     ]
                 ),
                 finish_reason="STOP",
