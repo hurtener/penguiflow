@@ -184,10 +184,10 @@ class GoogleProvider(Provider):
                     candidates = getattr(chunk, "candidates", None)
                     if candidates:
                         for candidate in candidates:
-                            parts = getattr(getattr(candidate, "content", None), "parts", None)
-                            if not parts:
+                            candidate_parts = getattr(getattr(candidate, "content", None), "parts", None)
+                            if not candidate_parts:
                                 continue
-                            for part in parts:
+                            for part in candidate_parts:
                                 part_text = getattr(part, "text", None)
                                 if not part_text:
                                     continue
@@ -230,14 +230,14 @@ class GoogleProvider(Provider):
             ) from e
 
         # Build final message
-        parts: list[TextPart | ToolCallPart | ToolResultPart | ImagePart] = (
+        out_parts: list[TextPart | ToolCallPart | ToolResultPart | ImagePart] = (
             [TextPart(text=full_text)] if full_text else []
         )
 
         on_stream_event(StreamEvent(done=True, usage=usage, finish_reason=finish_reason))
 
         return CompletionResponse(
-            message=LLMMessage(role="assistant", parts=parts),
+            message=LLMMessage(role="assistant", parts=out_parts),
             usage=usage or Usage.zero(),
             raw_response=None,
             reasoning_content=full_reasoning or None,
@@ -401,26 +401,29 @@ class GoogleProvider(Provider):
 
         if response.candidates:
             for candidate in response.candidates:
-                if hasattr(candidate, "content") and hasattr(candidate.content, "parts"):
-                    for part in candidate.content.parts:
-                        # Handle text vs thought content: google-genai marks thought parts with `part.thought=True`.
-                        part_text = getattr(part, "text", None)
-                        if part_text:
-                            if bool(getattr(part, "thought", False)):
-                                reasoning_acc.append(str(part_text))
-                            else:
-                                parts.append(TextPart(text=str(part_text)))
+                content = getattr(candidate, "content", None)
+                candidate_parts = getattr(content, "parts", None) if content is not None else None
+                if not candidate_parts:
+                    continue
+                for part in candidate_parts:
+                    # Handle text vs thought content: google-genai marks thought parts with `part.thought=True`.
+                    part_text = getattr(part, "text", None)
+                    if part_text:
+                        if bool(getattr(part, "thought", False)):
+                            reasoning_acc.append(str(part_text))
+                        else:
+                            parts.append(TextPart(text=str(part_text)))
 
-                        # Handle function calls
-                        fc = getattr(part, "function_call", None)
-                        if fc:
-                            parts.append(
-                                ToolCallPart(
-                                    name=fc.name or "",
-                                    arguments_json=json.dumps(dict(fc.args) if fc.args else {}),
-                                    call_id=None,  # Google doesn't use call IDs
-                                )
+                    # Handle function calls
+                    fc = getattr(part, "function_call", None)
+                    if fc:
+                        parts.append(
+                            ToolCallPart(
+                                name=fc.name or "",
+                                arguments_json=json.dumps(dict(fc.args) if fc.args else {}),
+                                call_id=None,  # Google doesn't use call IDs
                             )
+                        )
 
         usage = Usage.zero()
         if hasattr(response, "usage_metadata") and response.usage_metadata:
