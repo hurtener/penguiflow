@@ -153,8 +153,18 @@ class GoogleProvider(Provider):
         cancel: CancelToken | None,
     ) -> CompletionResponse:
         """Handle streaming completion."""
-        text_acc: list[str] = []
-        reasoning_acc: list[str] = []
+        def _accumulate(prev: str, incoming: str) -> tuple[str, str]:
+            """Return (delta, next_full) for cumulative or delta streams."""
+            if not incoming:
+                return "", prev
+            if incoming.startswith(prev):
+                return incoming[len(prev) :], incoming
+            if prev and incoming in prev:
+                return "", prev
+            return incoming, prev + incoming
+
+        full_text = ""
+        full_reasoning = ""
         usage: Usage | None = None
         finish_reason: str | None = None
 
@@ -168,51 +178,47 @@ class GoogleProvider(Provider):
                     if cancel and cancel.is_cancelled():
                         raise LLMCancelledError(message="Request cancelled", provider="google")
 
-                    emitted_any = False
-                    if hasattr(chunk, "candidates") and chunk.candidates and chunk.candidates[0].content:
-                        chunk_parts = chunk.candidates[0].content.parts
-                        if chunk_parts:
-                            for part in chunk_parts:
-                                text_emitted = False
-                                text = getattr(part, "text", None)
-                                thought = getattr(part, "thought", False)
-                                if isinstance(thought, str) and thought:
-                                    reasoning_acc.append(thought)
-                                    on_stream_event(StreamEvent(delta_reasoning=thought))
-                                    emitted_any = True
+                    emitted_text = False
+
+                    # Prefer parsing candidates/parts so we can separate thought vs normal output.
+                    candidates = getattr(chunk, "candidates", None)
+                    if candidates:
+                        for candidate in candidates:
+                            parts = getattr(getattr(candidate, "content", None), "parts", None)
+                            if not parts:
+                                continue
+                            for part in parts:
+                                part_text = getattr(part, "text", None)
+                                if not part_text:
                                     continue
 
-                                if not isinstance(text, str) or not text:
-                                    continue
-
-                                if bool(thought):
-                                    reasoning_acc.append(text)
-                                    on_stream_event(StreamEvent(delta_reasoning=text))
-                                    text_emitted = True
+                                is_thought = bool(getattr(part, "thought", False))
+                                if is_thought:
+                                    delta, full_reasoning = _accumulate(full_reasoning, str(part_text))
+                                    if delta:
+                                        on_stream_event(StreamEvent(delta_reasoning=delta))
                                 else:
-                                    text_acc.append(text)
-                                    on_stream_event(StreamEvent(delta_text=text))
-                                    text_emitted = True
-                                if text_emitted:
-                                    emitted_any = True
+                                    delta, full_text = _accumulate(full_text, str(part_text))
+                                    if delta:
+                                        emitted_text = True
+                                        on_stream_event(StreamEvent(delta_text=delta))
 
-                    # Fallback: some SDK versions expose aggregated chunk.text (typically non-thought content).
-                    # Also: some responses include candidates.parts metadata without usable text deltas
-                    # while chunk.text carries the actual delta; do not suppress chunk.text unless we
-                    # actually emitted content from parts.
-                    if not emitted_any and getattr(chunk, "text", None):
-                        chunk_text = chunk.text
-                        if isinstance(chunk_text, str) and chunk_text:
-                            text_acc.append(chunk_text)
-                            on_stream_event(StreamEvent(delta_text=chunk_text))
+                    # Fallback: some SDK/server combos provide streaming text only via chunk.text.
+                    chunk_text = getattr(chunk, "text", None)
+                    if chunk_text and not emitted_text:
+                        delta, full_text = _accumulate(full_text, str(chunk_text))
+                        if delta:
+                            on_stream_event(StreamEvent(delta_text=delta))
 
-                    if chunk.usage_metadata:
+                    # Handle usage metadata if present
+                    if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
                         usage = Usage(
                             input_tokens=chunk.usage_metadata.prompt_token_count or 0,
                             output_tokens=chunk.usage_metadata.candidates_token_count or 0,
                             total_tokens=chunk.usage_metadata.total_token_count or 0,
                         )
 
+                    # Handle finish reason
                     if hasattr(chunk, "candidates") and chunk.candidates:
                         finish_reason = chunk.candidates[0].finish_reason
 
@@ -224,7 +230,6 @@ class GoogleProvider(Provider):
             ) from e
 
         # Build final message
-        full_text = "".join(text_acc)
         parts: list[TextPart | ToolCallPart | ToolResultPart | ImagePart] = (
             [TextPart(text=full_text)] if full_text else []
         )
@@ -235,9 +240,10 @@ class GoogleProvider(Provider):
             message=LLMMessage(role="assistant", parts=parts),
             usage=usage or Usage.zero(),
             raw_response=None,
-            reasoning_content="".join(reasoning_acc) or None,
+            reasoning_content=full_reasoning or None,
             finish_reason=finish_reason,
         )
+
 
     def _to_google_contents(self, messages: tuple[LLMMessage, ...] | list[LLMMessage]) -> list[Content]:
         """Convert typed messages to Google Content format."""
@@ -343,6 +349,7 @@ class GoogleProvider(Provider):
                 if not isinstance(budget, int) or budget < 0:
                     budget = None
 
+                # Configure thinking with proper parameters for streaming
                 thinking_kwargs: dict[str, Any] = {"include_thoughts": True}
                 if budget is not None:
                     thinking_kwargs["thinking_budget"] = budget
@@ -354,6 +361,12 @@ class GoogleProvider(Provider):
                 except Exception:
                     config["thinking_config"] = thinking_kwargs
 
+        # Ensure proper streaming configuration for both text and reasoning
+        # Add safety settings if not already present
+        if "safety_settings" not in config:
+            config["safety_settings"] = None  # Use default safety settings
+
+        # Validate and filter config keys to only include valid ones
         allowed_keys = getattr(getattr(genai_types, "GenerateContentConfig", None), "model_fields", None)
         if isinstance(allowed_keys, dict):
             for key in list(config.keys()):
@@ -386,35 +399,31 @@ class GoogleProvider(Provider):
         parts: list[TextPart | ToolCallPart | ToolResultPart | ImagePart] = []
         reasoning_acc: list[str] = []
 
-        if response.candidates and response.candidates[0].content:
-            content_parts = response.candidates[0].content.parts
-            if content_parts:
-                for part in content_parts:
-                    if hasattr(part, "text") and part.text:
-                        thought = getattr(part, "thought", False)
-                        if isinstance(thought, str) and thought:
-                            reasoning_acc.append(thought)
-                        elif bool(thought):
-                            reasoning_acc.append(part.text)
-                        else:
-                            parts.append(TextPart(text=part.text))
-                    elif hasattr(part, "function_call") and part.function_call:
-                        fc = part.function_call
-                        parts.append(
-                            ToolCallPart(
-                                name=fc.name or "",
-                                arguments_json=json.dumps(dict(fc.args) if fc.args else {}),
-                                call_id=None,  # Google doesn't use call IDs
+        if response.candidates:
+            for candidate in response.candidates:
+                if hasattr(candidate, "content") and hasattr(candidate.content, "parts"):
+                    for part in candidate.content.parts:
+                        # Handle text vs thought content: google-genai marks thought parts with `part.thought=True`.
+                        part_text = getattr(part, "text", None)
+                        if part_text:
+                            if bool(getattr(part, "thought", False)):
+                                reasoning_acc.append(str(part_text))
+                            else:
+                                parts.append(TextPart(text=str(part_text)))
+
+                        # Handle function calls
+                        fc = getattr(part, "function_call", None)
+                        if fc:
+                            parts.append(
+                                ToolCallPart(
+                                    name=fc.name or "",
+                                    arguments_json=json.dumps(dict(fc.args) if fc.args else {}),
+                                    call_id=None,  # Google doesn't use call IDs
+                                )
                             )
-                        )
-                    # Some SDK versions may attach additional thought fields; keep best-effort support.
-                    else:
-                        thought = getattr(part, "thought", None)
-                        if isinstance(thought, str) and thought:
-                            reasoning_acc.append(thought)
 
         usage = Usage.zero()
-        if response.usage_metadata:
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
             usage = Usage(
                 input_tokens=response.usage_metadata.prompt_token_count or 0,
                 output_tokens=response.usage_metadata.candidates_token_count or 0,
