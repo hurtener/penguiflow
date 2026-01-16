@@ -154,6 +154,15 @@ class NativeLLMAdapter:
 
                 # Extract content
                 content = response.message.text
+                if not content.strip():
+                    # Some providers represent "structured output" as a tool call rather than
+                    # plain assistant text. In that case, the JSON payload is typically in the
+                    # tool-call arguments and message.text will be empty.
+                    tool_calls = response.message.tool_calls
+                    if tool_calls:
+                        candidate = tool_calls[0].arguments_json
+                        if isinstance(candidate, str) and candidate.strip():
+                            content = candidate.strip()
 
                 # Calculate cost
                 cost = 0.0

@@ -126,6 +126,7 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
         "_found_args_key",
         "_found_args_brace",
         "_found_answer_key",
+        "_found_args_array",
     )
 
     def __init__(self) -> None:
@@ -139,6 +140,7 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
         self._found_args_key = False  # Found "args":
         self._found_args_brace = False  # Found { after "args":
         self._found_answer_key = False  # Found "answer": or "raw_answer":
+        self._found_args_array = False  # Found [ after "args":
 
     @property
     def is_finish_action(self) -> bool:
@@ -172,9 +174,9 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
                     else:
                         self._next_node_is_non_null = True
 
-        # Incremental pattern matching for args content
+        # Incremental pattern matching for args content.
         # This allows streaming to start as soon as we find the opening quote
-        # instead of waiting for the entire pattern
+        # instead of waiting for the entire pattern.
         if not self._next_node_is_non_null and not self._in_args_string:
             # Stage 1: Look for "args":
             if not self._found_args_key:
@@ -183,26 +185,41 @@ class _StreamingArgsExtractor(_JsonStringBufferExtractor):
                     self._found_args_key = True
                     self._buffer = self._buffer[args_key_match.end() :]
 
-            # Stage 2: Look for { after "args":
-            if self._found_args_key and not self._found_args_brace:
+            # Stage 2: Look for { or [ after "args":
+            if self._found_args_key and not self._found_args_brace and not self._found_args_array:
                 stripped = self._buffer.lstrip()
                 if stripped.startswith("{"):
                     self._found_args_brace = True
                     self._buffer = stripped[1:]  # Remove the {
+                elif stripped.startswith("["):
+                    self._found_args_array = True
+                    self._buffer = stripped[1:]  # Remove the [
 
-            # Stage 3: Look for "answer": or "raw_answer":
+            # Stage 3: Look for "answer": or "raw_answer": in object args.
             if self._found_args_brace and not self._found_answer_key:
                 answer_key_match = self._RE_ANSWER_KEY.search(self._buffer)
                 if answer_key_match:
                     self._found_answer_key = True
                     self._buffer = self._buffer[answer_key_match.end() :]
 
-            # Stage 4: Look for opening quote of the value
+            # Stage 4: Look for opening quote of the value.
             if self._found_answer_key:
                 stripped = self._buffer.lstrip()
                 if stripped.startswith('"'):
                     self._in_args_string = True
                     self._buffer = stripped[1:]  # Remove the opening quote
+            elif self._found_args_key and not self._found_args_brace and not self._found_args_array:
+                # Args can be a direct string: "args": "..."
+                stripped = self._buffer.lstrip()
+                if stripped.startswith('"'):
+                    self._in_args_string = True
+                    self._buffer = stripped[1:]
+            elif self._found_args_array and not self._in_args_string:
+                # Args can be an array of strings: "args": ["..."]
+                stripped = self._buffer.lstrip()
+                if stripped.startswith('"'):
+                    self._in_args_string = True
+                    self._buffer = stripped[1:]
 
         # Extract string content character by character
         if self._in_args_string:
