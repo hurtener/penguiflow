@@ -1,6 +1,6 @@
 # RFC: Native LLM Layer
 
-> **Status**: Proposed
+> **Status**: Implemented (initial core providers)
 > **Created**: 2026-01-12
 > **Author**: PenguiFlow Team
 

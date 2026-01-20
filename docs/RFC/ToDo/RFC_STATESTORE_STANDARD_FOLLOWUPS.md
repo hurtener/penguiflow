@@ -1,4 +1,4 @@
-# RFC: StateStore Gold Standard Follow-Ups (Jan 2026)
+# RFC: StateStore Standard Follow-Ups (Jan 2026)
 
 > **Status:** ToDo  
 > **Owner:** PenguiFlow core  
