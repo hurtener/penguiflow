@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | RFC Number | RFC-003 |
-| Status | Draft |
+| Status | Implemented |
 | Authors | Santi / Penguiflow Core Team |
 | Created | December 2025 |
 | Dependencies | RFC-001 (Core Stability - done), RFC-002 (Tool/Protocol Unification - done) |

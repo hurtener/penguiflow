@@ -36,10 +36,25 @@ def test_streaming_args_extractor_streams_unified_final_response_answer() -> Non
     assert emitted == "hi"
 
 
+def test_streaming_args_extractor_streams_string_args() -> None:
+    extractor = _StreamingArgsExtractor()
+    payload = json.dumps({"next_node": "final_response", "args": "hi"})
+    emitted = _feed_in_chunks(extractor, payload)
+    assert extractor.is_finish_action is True
+    assert emitted == "hi"
+
+
+def test_streaming_args_extractor_streams_array_args() -> None:
+    extractor = _StreamingArgsExtractor()
+    payload = json.dumps({"next_node": "final_response", "args": ["hi"]})
+    emitted = _feed_in_chunks(extractor, payload)
+    assert extractor.is_finish_action is True
+    assert emitted == "hi"
+
+
 def test_streaming_args_extractor_does_not_stream_non_terminal() -> None:
     extractor = _StreamingArgsExtractor()
     payload = json.dumps({"thought": "tool", "next_node": "search", "args": {"q": "x"}, "plan": None, "join": None})
     emitted = _feed_in_chunks(extractor, payload)
     assert extractor.is_finish_action is False
     assert emitted == ""
-

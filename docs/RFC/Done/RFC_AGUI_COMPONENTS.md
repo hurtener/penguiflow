@@ -5,7 +5,7 @@
 | **RFC ID** | RFC-2025-002 |
 | **Title** | Component Artifact System for LLM-Driven Rich UI Generation |
 | **Author** | Platform Team |
-| **Status** | Draft |
+| **Status** | Implemented |
 | **Created** | 2025-12-24 |
 | **Depends On** | RFC-2025-001 (AG-UI Protocol Integration) |
 

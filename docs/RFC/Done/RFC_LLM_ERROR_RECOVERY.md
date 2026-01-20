@@ -1,6 +1,6 @@
 # RFC: LLM Error Recovery
 
-> **Status**: Proposed
+> **Status**: Implemented
 > **Created**: 2026-01-06
 > **Author**: PenguiFlow Team
 

@@ -1,8 +1,8 @@
 # RFC: MCP Binary Content and Large Output Handling
 
-**Status**: Draft
+**Status**: Implemented
 **Created**: 2025-12-22
-**Author**: Claude + Santiago
+**Author**: Santiago
 **Version**: 0.3
 
 ---

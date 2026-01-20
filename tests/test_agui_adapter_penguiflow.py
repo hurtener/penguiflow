@@ -217,6 +217,86 @@ async def test_penguiflow_adapter_extracts_text_from_content_list() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agui_adapter_does_not_suppress_final_answer_on_empty_done_chunk() -> None:
+    """Regression: providers may emit an answer-channel done marker with empty text.
+
+    The adapter must not treat that as a streamed answer; otherwise it will skip
+    emitting the final answer payload and the UI shows nothing.
+    """
+
+    class DoneOnlyChunkAgentWrapper(AgentWrapper):
+        async def initialize(self) -> None:
+            pass
+
+        async def shutdown(self) -> None:
+            pass
+
+        async def resume(
+            self,
+            resume_token: str,
+            *,
+            session_id: str,
+            user_input: str | None = None,
+            tool_context: Mapping[str, Any] | None = None,
+            event_consumer: Any = None,
+            trace_id_hint: str | None = None,
+            steering: Any = None,
+        ) -> ChatResult:
+            del resume_token, session_id, user_input, tool_context, event_consumer, trace_id_hint, steering
+            raise RuntimeError("resume not supported in DoneOnlyChunkAgentWrapper")
+
+        async def chat(
+            self,
+            query: str,
+            *,
+            session_id: str,
+            llm_context: Mapping[str, Any] | None = None,
+            tool_context: Mapping[str, Any] | None = None,
+            event_consumer: Any = None,
+            trace_id_hint: str | None = None,
+            steering: Any = None,
+        ) -> ChatResult:
+            del query, llm_context, tool_context, steering
+            if event_consumer is not None:
+                event_consumer(
+                    PlannerEvent(
+                        event_type="llm_stream_chunk",
+                        ts=0.01,
+                        trajectory_step=0,
+                        extra={"channel": "answer", "text": "", "done": True, "phase": "answer"},
+                    ),
+                    trace_id_hint,
+                )
+            return ChatResult(
+                answer="Final answer should be emitted.",
+                trace_id=trace_id_hint or "trace",
+                session_id=session_id,
+                metadata={},
+                pause=None,
+            )
+
+    wrapper = DoneOnlyChunkAgentWrapper()
+    adapter = PenguiFlowAdapter(wrapper)
+
+    input_payload = RunAgentInput(
+        thread_id="thread-x",
+        run_id="run-x",
+        messages=[{"id": "msg-1", "role": "user", "content": "Hi"}],
+        tools=[],
+        context=[],
+        state={},
+        forwarded_props={},
+    )
+
+    output_events = []
+    async for event in adapter.run(input_payload):
+        output_events.append(event)
+
+    message_chunks = [event for event in output_events if event.type == EventType.TEXT_MESSAGE_CONTENT]
+    assert any(event.delta == "Final answer should be emitted." for event in message_chunks)
+
+
+@pytest.mark.asyncio
 async def test_penguiflow_adapter_emits_pause_custom_event() -> None:
     class PauseAgentWrapper(AgentWrapper):
         async def initialize(self) -> None:

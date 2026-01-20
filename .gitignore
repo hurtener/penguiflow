@@ -158,6 +158,7 @@ marimo/_lsp/
 __marimo__/
 
 # Agentic Code Assist Ignore
-QWEN.md
+
 CLAUDE.md
 PROMPT.md
+.serena/memories/agui_adapter_integration.md
