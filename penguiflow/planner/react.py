@@ -73,6 +73,7 @@ from .models import (
     ReflectionCriteria,
     ReflectionCritique,
     ToolPolicy,
+    ToolVisibilityPolicy,
 )
 from .parallel import execute_parallel_plan
 from .pause_management import (
@@ -528,6 +529,8 @@ class ReactPlanner:
         self,
         *,
         catalog_filter: Callable[[NodeSpec], bool] | None = None,
+        tool_policy: ToolPolicy | None = None,
+        inherit_policy: bool = True,
         background_tasks: BackgroundTasksConfig | None | Literal["inherit"] = "inherit",
     ) -> ReactPlanner:
         """Create a new planner instance with the same configuration.
@@ -537,6 +540,23 @@ class ReactPlanner:
         """
 
         init_kwargs = dict(self._init_kwargs or {})
+        if tool_policy is not None:
+            base_policy = init_kwargs.get("tool_policy")
+            if inherit_policy and isinstance(base_policy, ToolPolicy):
+                allowed: set[str] | None
+                if base_policy.allowed_tools is None:
+                    allowed = tool_policy.allowed_tools
+                elif tool_policy.allowed_tools is None:
+                    allowed = base_policy.allowed_tools
+                else:
+                    allowed = base_policy.allowed_tools & tool_policy.allowed_tools
+                init_kwargs["tool_policy"] = ToolPolicy(
+                    allowed_tools=allowed,
+                    denied_tools=set(base_policy.denied_tools) | set(tool_policy.denied_tools),
+                    require_tags=set(base_policy.require_tags) | set(tool_policy.require_tags),
+                )
+            else:
+                init_kwargs["tool_policy"] = tool_policy
         base_catalog = init_kwargs.get("catalog")
         nodes = init_kwargs.get("nodes")
         registry = init_kwargs.get("registry")
@@ -577,6 +597,7 @@ class ReactPlanner:
         tool_context: Mapping[str, Any] | None = None,
         memory_key: MemoryKey | None = None,
         steering: SteeringInbox | None = None,
+        tool_visibility: ToolVisibilityPolicy | None = None,
     ) -> PlannerFinish | PlannerPause:
         """Execute planner on a query until completion or pause.
 
@@ -620,6 +641,7 @@ class ReactPlanner:
                 context_meta=context_meta,
                 tool_context=tool_context,
                 memory_key=memory_key,
+                tool_visibility=tool_visibility,
             )
         finally:
             self._steering = previous
@@ -632,6 +654,7 @@ class ReactPlanner:
         tool_context: Mapping[str, Any] | None = None,
         memory_key: MemoryKey | None = None,
         steering: SteeringInbox | None = None,
+        tool_visibility: ToolVisibilityPolicy | None = None,
     ) -> PlannerFinish | PlannerPause:
         """Resume a paused planning session.
 
@@ -671,6 +694,7 @@ class ReactPlanner:
                 user_input=user_input,
                 tool_context=tool_context,
                 memory_key=memory_key,
+                tool_visibility=tool_visibility,
             )
         finally:
             self._steering = previous

@@ -5,20 +5,22 @@ from __future__ import annotations
 import json
 import logging
 import warnings
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Iterator, Mapping, MutableMapping, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 from pydantic import ValidationError
 
+from ..catalog import NodeSpec
 from ..steering import SteeringCancelled, SteeringEventType, SteeringInbox
 from . import prompts
 from .artifact_handling import _ArtifactCollector, _SourceCollector
 from .artifact_registry import ArtifactRegistry
 from .constraints import _ConstraintTracker, _CostTracker
 from .error_recovery import ErrorRecoveryConfig, step_with_recovery
-from .models import PlannerAction, PlannerEvent, PlannerFinish, PlannerPause, ReflectionCritique
+from .models import PlannerAction, PlannerEvent, PlannerFinish, PlannerPause, ReflectionCritique, ToolVisibilityPolicy
 from .streaming import _StreamingArgsExtractor
-from .tool_aliasing import rewrite_action_node
+from .tool_aliasing import build_aliased_tool_catalog, rewrite_action_node
 from .tool_calls import execute_tool_call
 from .trajectory import Trajectory, TrajectoryStep
 from .validation_repair import _autofill_missing_args, _coerce_tool_context, _validate_llm_context
@@ -28,6 +30,85 @@ logger = logging.getLogger("penguiflow.planner")
 _TASK_SERVICE_KEY = "task_service"
 _MULTI_ACTION_BLOCKED_NODES = frozenset({"final_response", "render_component", "tasks.spawn"})
 _MULTI_ACTION_READONLY_SIDE_EFFECTS = frozenset({"pure", "read"})
+
+
+@contextmanager
+def _tool_visibility_scope(
+    planner: Any,
+    *,
+    tool_visibility: ToolVisibilityPolicy | None,
+    tool_context: Mapping[str, Any],
+) -> Iterator[None]:
+    if tool_visibility is None:
+        yield
+        return
+
+    base_specs: Sequence[NodeSpec] = list(getattr(planner, "_specs", []) or [])
+    base_by_name = {spec.name: spec for spec in base_specs}
+    visible = tool_visibility.visible_tools(base_specs, tool_context)
+    visible_names: set[str] = set()
+    for item in visible:
+        if isinstance(item, NodeSpec):
+            visible_names.add(item.name)
+        else:
+            name = getattr(item, "name", None)
+            if isinstance(name, str):
+                visible_names.add(name)
+    visible_names &= set(base_by_name)
+    visible_specs = [spec for spec in base_specs if spec.name in visible_names]
+
+    original_specs = getattr(planner, "_specs", None)
+    original_spec_by_name = getattr(planner, "_spec_by_name", None)
+    original_catalog_records = getattr(planner, "_catalog_records", None)
+    original_tool_aliases = getattr(planner, "_tool_aliases", None)
+    original_system_prompt = getattr(planner, "_system_prompt", None)
+    original_guardrail_available: list[str] | None = None
+    guardrail_context = getattr(planner, "_guardrail_context", None)
+    if guardrail_context is not None:
+        tool_ctx = getattr(guardrail_context, "tool_context", None)
+        if isinstance(tool_ctx, dict) and "available_tools" in tool_ctx:
+            value = tool_ctx.get("available_tools")
+            if isinstance(value, list):
+                original_guardrail_available = list(value)
+
+    try:
+        planner._specs = visible_specs
+        spec_by_name, catalog_records, alias_to_real = build_aliased_tool_catalog(visible_specs)
+        planner._spec_by_name = spec_by_name
+        planner._catalog_records = catalog_records
+        planner._tool_aliases = alias_to_real
+
+        planning_hints = getattr(planner, "_planning_hints", None)
+        hints_payload = None
+        if planning_hints is not None and not getattr(planning_hints, "empty", True):
+            hints_payload = planning_hints.to_prompt_payload()
+        planner._system_prompt = prompts.build_system_prompt(
+            planner._catalog_records,
+            extra=getattr(planner, "_system_prompt_extra", None),
+            planning_hints=hints_payload,
+        )
+
+        if guardrail_context is not None:
+            tool_ctx = getattr(guardrail_context, "tool_context", None)
+            if isinstance(tool_ctx, dict):
+                tool_ctx["available_tools"] = [spec.name for spec in visible_specs]
+
+        yield
+    finally:
+        if original_specs is not None:
+            planner._specs = original_specs
+        if original_spec_by_name is not None:
+            planner._spec_by_name = original_spec_by_name
+        if original_catalog_records is not None:
+            planner._catalog_records = original_catalog_records
+        if original_tool_aliases is not None:
+            planner._tool_aliases = original_tool_aliases
+        if original_system_prompt is not None:
+            planner._system_prompt = original_system_prompt
+        if guardrail_context is not None and original_guardrail_available is not None:
+            tool_ctx = getattr(guardrail_context, "tool_context", None)
+            if isinstance(tool_ctx, dict):
+                tool_ctx["available_tools"] = original_guardrail_available
 
 
 def _alternate_candidates(action: PlannerAction) -> list[PlannerAction]:
@@ -196,6 +277,7 @@ async def run(
     context_meta: Mapping[str, Any] | None = None,
     tool_context: Mapping[str, Any] | None = None,
     memory_key: Any | None = None,
+    tool_visibility: ToolVisibilityPolicy | None = None,
 ) -> PlannerFinish | PlannerPause:
     # Handle backward compatibility
     if context_meta is not None:
@@ -221,7 +303,8 @@ async def run(
     planner._artifact_registry = ArtifactRegistry.from_snapshot(trajectory.metadata.get("artifact_registry"))
     planner._artifact_registry.write_snapshot(trajectory.metadata)
     error_recovery_cfg = getattr(planner, "_error_recovery_config", None)
-    result = await run_loop(planner, trajectory, tracker=None, error_recovery_config=error_recovery_cfg)
+    with _tool_visibility_scope(planner, tool_visibility=tool_visibility, tool_context=normalised_tool_context or {}):
+        result = await run_loop(planner, trajectory, tracker=None, error_recovery_config=error_recovery_cfg)
     await planner._maybe_record_memory_turn(query, result, trajectory, resolved_key)
     return result
 
@@ -233,6 +316,7 @@ async def resume(
     *,
     tool_context: Mapping[str, Any] | None = None,
     memory_key: Any | None = None,
+    tool_visibility: ToolVisibilityPolicy | None = None,
 ) -> PlannerFinish | PlannerPause:
     logger.info("planner_resume", extra={"token": token[:8] + "..."})
     provided_tool_context = _coerce_tool_context(tool_context) if tool_context is not None else None
@@ -275,7 +359,8 @@ async def resume(
     )
 
     error_recovery_cfg = getattr(planner, "_error_recovery_config", None)
-    result = await run_loop(planner, trajectory, tracker=tracker, error_recovery_config=error_recovery_cfg)
+    with _tool_visibility_scope(planner, tool_visibility=tool_visibility, tool_context=trajectory.tool_context or {}):
+        result = await run_loop(planner, trajectory, tracker=tracker, error_recovery_config=error_recovery_cfg)
     await planner._maybe_record_memory_turn(trajectory.query, result, trajectory, resolved_key)
     return result
 

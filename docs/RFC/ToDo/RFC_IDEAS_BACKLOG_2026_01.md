@@ -91,3 +91,13 @@ Suggested evaluation dimensions:
 - provider-agnostic tool format adapters
 - caching strategy (query result TTL + schema cache)
 
+## Per-Request Tool Visibility (ToolNode UX)
+
+Motivation: per-tenant/per-user tool visibility without rebuilding a whole app-level planner or exposing tools the user can’t run.
+
+Status:
+- Implemented (opt-in, no caching yet): `ReactPlanner.fork(tool_policy=..., inherit_policy=...)` and `ReactPlanner.run(..., tool_visibility=...)`.
+
+Follow-ups (future RFC candidates):
+- System prompt/tool catalog caching: cache the tool-catalog prompt section keyed by visible tool fingerprint (LRU/TTL) and invalidate on dynamic tool discovery updates.
+- Defense-in-depth enforcement: add a `ToolAccessGuardrail` rule that can STOP tool calls based on policy context (tenant/user/role), even if a tool is visible or an alias is guessed.
