@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from penguiflow.steering.guard_inbox import SteeringGuardInbox
 from .context import ContextSnapshotBuilder, ContextSnapshotV1, GuardrailContext, GuardrailEvent
-from .models import GuardrailAction, GuardrailDecision, PauseSpec, RedactionSpec, StopSpec
+from .models import GuardrailAction, GuardrailDecision, GuardrailSeverity, PauseSpec, RedactionSpec, StopSpec
 from .protocols import DecisionPolicy, GuardrailRule, RiskRouter
 from .registry import RuleRegistry
 from .routing import DefaultRiskRouter, RiskRoutingDecision
@@ -156,8 +156,32 @@ class GuardrailGateway:
                     rule.evaluate(event, context_snapshot),
                     timeout=self.config.sync_timeout_ms / 1000,
                 )
-            except Exception:
-                return None
+            except TimeoutError as exc:
+                if self.config.sync_fail_open:
+                    return None
+                return GuardrailDecision(
+                    action=GuardrailAction.STOP,
+                    rule_id=rule.rule_id,
+                    reason=f"Sync guardrail '{rule.rule_id}' timed out (fail-closed)",
+                    severity=GuardrailSeverity.CRITICAL,
+                    stop=StopSpec(
+                        error_code="GUARDRAIL_SYNC_TIMEOUT",
+                        internal_reason=f"{type(exc).__name__}: {exc}",
+                    ),
+                )
+            except Exception as exc:
+                if self.config.sync_fail_open:
+                    return None
+                return GuardrailDecision(
+                    action=GuardrailAction.STOP,
+                    rule_id=rule.rule_id,
+                    reason=f"Sync guardrail '{rule.rule_id}' errored (fail-closed)",
+                    severity=GuardrailSeverity.CRITICAL,
+                    stop=StopSpec(
+                        error_code="GUARDRAIL_SYNC_ERROR",
+                        internal_reason=f"{type(exc).__name__}: {exc}",
+                    ),
+                )
 
         if self.config.sync_parallel:
             results = await asyncio.gather(*[safe_eval(rule) for rule in rules])
