@@ -90,7 +90,7 @@ class DatabricksProvider(OpenAICompatibleProvider):
         host: str | None = None,
         token: str | None = None,
         profile: ModelProfile | None = None,
-        timeout: float = 120.0,
+        timeout: float = 360.0,
     ):
         """Initialize the Databricks provider.
 

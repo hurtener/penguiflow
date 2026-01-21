@@ -26,7 +26,7 @@ This RFC introduces a **Hybrid Guardrail Architecture** for the PenguiFlow React
 1. **Synchronous fast rules** — Inline evaluation for blocking gates (tool allowlists, secrets, injection patterns)
 2. **Asynchronous deep rules** — Via `SteeringGuardInbox` for expensive checks (PII detection, ML classifiers, external APIs)
 3. **Unified Gateway** — Single API hiding sync/async complexity with extensibility hooks
-4. **Pluggable classifiers** — Bring your own jailbreak detection (HuggingFace, Lakera, custom)
+4. **Pluggable classifiers** — Bring your own jailbreak detection (HuggingFace, custom)
 
 ### Design Principles
 
@@ -69,7 +69,7 @@ This RFC introduces a **Hybrid Guardrail Architecture** for the PenguiFlow React
 │  │  │                     │         │                                    │││
 │  │  │  Built-in:          │         │  Plug in:                          │││
 │  │  │  • ToolAllowlist    │         │  • ML classifiers (HuggingFace)    │││
-│  │  │  • SecretRedaction  │         │  • Vendor APIs (Lakera, NeMo)      │││
+│  │  │  • SecretRedaction  │         │  • Vendor APIs (NeMo, custom)      │││
 │  │  │  • InjectionPattern │         │  • PII detection (Presidio)        │││
 │  │  │  • SchemaValidation │         │  • Custom deep rules               │││
 │  │  │                     │         │                                    │││
@@ -1055,9 +1055,11 @@ class AsyncRuleEvaluator:
 
 The architecture is designed to integrate ML classifiers without shipping them. Here are practical examples.
 
-### 8.1 HuggingFace: ProtectAI Prompt Injection Model
+### 8.1 HuggingFace: Prompt Injection Models
 
-[`protectai/deberta-v3-base-prompt-injection-v2`](https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2) is a production-ready classifier trained specifically for prompt injection detection.
+Recommended models include:
+- [`protectai/deberta-v3-base-prompt-injection-v2`](https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2)
+- [`madhurjindal/Jailbreak-Detector-2-XL`](https://huggingface.co/madhurjindal/Jailbreak-Detector-2-XL)
 
 ```python
 from dataclasses import dataclass, field
@@ -1187,83 +1189,7 @@ registry.register(HuggingFaceJailbreakRule(
 ))
 ```
 
-### 8.2 Lakera Guard (Vendor API)
-
-[Lakera Guard](https://www.lakera.ai/) provides a hosted prompt injection detection API.
-
-```python
-import httpx
-from dataclasses import dataclass
-
-
-@dataclass
-class LakeraGuardRule:
-    """Jailbreak detection using Lakera Guard API.
-    
-    Get API key: https://platform.lakera.ai/
-    
-    Usage:
-        registry.register(LakeraGuardRule(api_key=os.environ["LAKERA_API_KEY"]))
-    """
-    
-    rule_id: str = "lakera-guard"
-    version: str = "1.0.0"
-    supports_event_types: frozenset[str] = frozenset({"llm_before"})
-    cost: RuleCost = RuleCost.DEEP
-    enabled: bool = True
-    severity: GuardrailSeverity = GuardrailSeverity.CRITICAL
-    
-    api_key: str = ""
-    api_url: str = "https://api.lakera.ai/v1/prompt_injection"
-    timeout_s: float = 2.0
-    
-    async def evaluate(
-        self,
-        event: GuardrailEvent,
-        context_snapshot: ContextSnapshotV1,
-    ) -> GuardrailDecision | None:
-        text = event.text_content
-        if not text:
-            return None
-        
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(
-                    self.api_url,
-                    json={"input": text},
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    timeout=self.timeout_s,
-                )
-                response.raise_for_status()
-                result = response.json()
-            except Exception:
-                return None  # Fail open on API error
-        
-        # Lakera response: {"results": [{"flagged": true, "categories": {...}}]}
-        if result.get("results", [{}])[0].get("flagged"):
-            categories = result["results"][0].get("categories", {})
-            
-            return GuardrailDecision(
-                action=GuardrailAction.STOP,
-                rule_id=self.rule_id,
-                reason="Lakera Guard flagged prompt injection",
-                severity=GuardrailSeverity.CRITICAL,
-                confidence=0.95,
-                effects=("flag_trajectory", "emit_alert"),
-                classifier_result={
-                    "provider": "lakera",
-                    "categories": categories,
-                },
-                stop=StopSpec(
-                    error_code="JAILBREAK_LAKERA",
-                    user_message="I can't process that request.",
-                ),
-            )
-        
-        return None
-```
-
-### 8.3 Custom Embedding + Classifier
+### 8.2 Custom Embedding + Classifier
 
 For teams that want to train their own classifier:
 
@@ -1690,18 +1616,7 @@ registry.register(HuggingFaceJailbreakRule(
 ))
 ```
 
-### 11.3 With Lakera Guard
-
-```python
-import os
-from penguiflow.planner.guardrails import LakeraGuardRule
-
-registry.register(LakeraGuardRule(
-    api_key=os.environ["LAKERA_API_KEY"],
-))
-```
-
-### 11.4 Custom Risk Router
+### 11.3 Custom Risk Router
 
 ```python
 from penguiflow.planner.guardrails import RiskRouter, RiskRoutingDecision
@@ -1780,7 +1695,7 @@ gateway = GuardrailGateway(
 | Model | Type | Latency | Notes |
 |-------|------|---------|-------|
 | [`protectai/deberta-v3-base-prompt-injection-v2`](https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2) | HuggingFace | ~50ms | Production-ready, well-maintained |
-| [Lakera Guard](https://www.lakera.ai/) | API | ~100ms | Hosted, continuous updates |
+| [`madhurjindal/Jailbreak-Detector-2-XL`](https://huggingface.co/madhurjindal/Jailbreak-Detector-2-XL) | HuggingFace | varies | Large model, strong recall |
 | [NVIDIA NeMo Guardrails](https://github.com/NVIDIA/NeMo-Guardrails) | Framework | varies | Comprehensive, self-hosted |
 
 ### Appendix C: Tool Risk Tier Guidelines
@@ -1827,7 +1742,7 @@ gateway = GuardrailGateway(
 - Added `RiskRouter` protocol for dynamic routing
 - Added `ContextSnapshotV1` for agent-aware context
 - Added `JailbreakIntent` taxonomy (labels only)
-- Added integration examples: HuggingFace, Lakera, custom
+- Added integration examples: HuggingFace, custom
 - Simplified policy pack configuration
 
 ### v3.0.0 (2026-01-13)
@@ -1923,15 +1838,57 @@ This plan is designed to introduce guardrails safely without breaking existing b
 
 **Scope:**
 - Document and optionally ship examples for external classifiers:
-  - HuggingFace / Transformers
-  - Lakera Guard API
-  - Custom embeddings + sklearn
+  - HuggingFace / Transformers (two prompt-injection models)
+  - Custom embeddings + sklearn (binary in-scope/out-of-scope)
 - Provide example `RiskRouter` policies (fail-closed for critical tools).
 - Provide example `DecisionPolicy` (e.g., voting or tenant-specific).
 
 **Acceptance:**
 - No extra dependencies in core installation.
 - Examples are optional and documented.
+
+### Phase 4 Addendum: Example Design (Analytics Assistant)
+
+This phase includes two opt-in example tracks, both intended to run locally
+and load at agent startup without sidecars.
+
+#### Example A: HuggingFace Prompt Injection (Async)
+
+Provide an async guardrail rule with two model options:
+- `protectai/deberta-v3-base-prompt-injection-v2`
+- `madhurjindal/Jailbreak-Detector-2-XL`
+
+Guidance:
+- Configurable `threshold` and `device`.
+- Augment input with context signals (tool risk, prior strikes).
+- Default action: STOP on high-confidence injection.
+
+#### Example B: Train-Your-Own Scope Classifier (Async, Binary)
+
+Domain: **Analytics Assistant** (in-scope vs out-of-scope).
+
+Goal: Avoid off-topic requests (e.g., weather) while supporting benign
+continuations (e.g., "yes, go on") by enriching classifier input.
+
+Workflow:
+1. **Few-shot seeds**: user provides ~10–20 in-scope and out-of-scope examples.
+2. **Dataset bootstrapping**: a local script uses the LLM to expand to
+   ~100–200 examples.
+3. **Local training**: embeddings + LogisticRegression (or LinearSVM).
+4. **Runtime loading**: in-memory classifier at agent startup.
+
+Classifier input should include minimal context to disambiguate short replies:
+```
+[USER] yes, go on
+[LAST_ASSISTANT] ...summary of last response...
+[TASK_SCOPE] analytics reporting, metrics, charts
+[AVAILABLE_TOOLS] query_metrics, chart_line, table_summary
+```
+
+Decision behavior:
+- Default action: RETRY with clarification guidance (not hard stop).
+- Guidance should preserve developer voice by using the existing system prompt
+  tone and a short clarification request or gentle out-of-scope refusal.
 
 ### Phase 5: Hardening + Observability (Optional, Non-Blocking)
 
@@ -2120,8 +2077,10 @@ This section enumerates files, APIs, and tests required per phase. All paths are
 
 **Files (new/modified):**
 - `examples/guardrails/huggingface/README.md` (new)
-- `examples/guardrails/lakera/README.md` (new)
 - `examples/guardrails/custom/README.md` (new)
+- `examples/guardrails/scope_classifier/README.md` (new)
+- `examples/guardrails/scope_classifier/train_classifier.py` (new)
+- `examples/guardrails/scope_classifier/rule.py` (new)
 - `docs/guardrails/INTEGRATIONS.md` (new)
 
 **APIs:**

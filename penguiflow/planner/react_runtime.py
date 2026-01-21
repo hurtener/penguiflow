@@ -207,7 +207,7 @@ async def run(
         if llm_context is None:
             llm_context = context_meta
 
-    logger.info("planner_run_start", extra={"query": query})
+    logger.debug("planner_run_start", extra={"query": query})
     normalised_tool_context = _coerce_tool_context(tool_context)
     normalised_llm_context = _validate_llm_context(llm_context)
     resolved_key = planner._resolve_memory_key(memory_key, normalised_tool_context)
@@ -338,7 +338,7 @@ def _log_action_received(planner: Any, action: PlannerAction, trajectory: Trajec
         action_extra["args_keys"] = list(action.args.keys())
         action_extra["has_raw_answer"] = "raw_answer" in action.args
         action_extra["has_answer"] = "answer" in action.args
-    logger.info("planner_action", extra=action_extra)
+    logger.debug("planner_action", extra=action_extra)
 
 
 async def _handle_parallel_plan(
@@ -430,7 +430,7 @@ async def _handle_finish_action(
     candidate_answer = action.args if action.args else last_observation
     # Trace: Log candidate_answer state (helps debug answer loss issues)
     _ca_raw = candidate_answer.get("raw_answer") if isinstance(candidate_answer, dict) else None
-    logger.info(
+    logger.debug(
         "finish_candidate_answer",
         extra={
             "has_raw_answer": _ca_raw is not None,
@@ -670,7 +670,7 @@ async def _handle_finish_action(
 
     # Trace: Verify answer state before final payload
     _pre_raw = candidate_answer.get("raw_answer") if isinstance(candidate_answer, dict) else None
-    logger.info(
+    logger.debug(
         "finish_pre_payload",
         extra={
             "has_raw_answer": _pre_raw is not None,
@@ -684,7 +684,7 @@ async def _handle_finish_action(
         trajectory.artifacts,
         trajectory.sources,
     )
-    logger.info(
+    logger.debug(
         "finish_payload_built",
         extra={"raw_answer_len": len(final_payload.raw_answer) if final_payload.raw_answer else 0},
     )
@@ -1325,6 +1325,27 @@ async def run_loop(
                 return outcome.pause
 
             if outcome.error is not None:
+                guardrail_payload = None
+                if isinstance(outcome.failure, Mapping):
+                    guardrail_payload = outcome.failure.get("guardrail")
+                if isinstance(guardrail_payload, Mapping):
+                    if guardrail_payload.get("action") == "STOP":
+                        stop_message = None
+                        stop_info = guardrail_payload.get("stop")
+                        if isinstance(stop_info, Mapping):
+                            stop_message = stop_info.get("user_message")
+                        return planner._finish(
+                            trajectory,
+                            reason="no_path",
+                            payload={
+                                "raw_answer": stop_message or "Unable to complete the request.",
+                                "guardrail": dict(guardrail_payload),
+                            },
+                            thought=str(guardrail_payload.get("reason") or "guardrail_stop"),
+                            constraints=tracker,
+                            error=outcome.error,
+                            metadata_extra={"guardrail": dict(guardrail_payload)},
+                        )
                 trajectory.steps.append(
                     TrajectoryStep(
                         action=action,

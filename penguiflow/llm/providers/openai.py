@@ -64,7 +64,7 @@ class OpenAIProvider(OpenAICompatibleProvider):
         base_url: str | None = None,
         profile: ModelProfile | None = None,
         organization: str | None = None,
-        timeout: float = 60.0,
+        timeout: float = 360.0,
     ):
         """Initialize the OpenAI provider.
 

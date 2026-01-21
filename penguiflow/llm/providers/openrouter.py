@@ -85,7 +85,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         profile: ModelProfile | None = None,
         app_url: str | None = None,
         app_title: str | None = None,
-        timeout: float = 120.0,
+        timeout: float = 360.0,
     ) -> None:
         """Initialize the OpenRouter provider.
 

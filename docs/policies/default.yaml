@@ -1,0 +1,51 @@
+policy_pack: "default"
+version: "1.0.0"
+
+gateway:
+  mode: "enforce"
+  sync:
+    timeout_ms: 15
+    parallel: true
+    fail_open: false
+  async:
+    enabled: true
+    fail_open: true
+
+tool_risks:
+  "filesystem.delete": "critical"
+  "admin.execute": "critical"
+  "filesystem.write": "high"
+  "database.modify": "high"
+  "filesystem.read": "medium"
+  "__default__": "medium"
+
+sync_rules:
+  - id: "tool-allowlist"
+    enabled: true
+    config:
+      denied_tools:
+        - "admin.execute"
+        - "filesystem.delete"
+
+  - id: "secret-redaction"
+    enabled: true
+
+  - id: "injection-patterns"
+    enabled: true
+
+async_rules:
+  - id: "hf-jailbreak"
+    enabled: true
+    config:
+      model_name: "protectai/deberta-v3-base-prompt-injection-v2"
+      threshold: 0.85
+
+environments:
+  dev:
+    gateway:
+      mode: "shadow"
+  prod:
+    gateway:
+      mode: "enforce"
+      sync:
+        fail_open: false

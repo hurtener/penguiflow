@@ -101,6 +101,50 @@ async def execute_tool_call(
         )
     )
 
+    if planner._guardrails_enabled():
+        decision = await planner._evaluate_guardrail(
+            planner._build_guardrail_event(
+                event_type="tool_call_start",
+                tool_name=spec.name,
+                tool_args=args_payload,
+                payload={"tool_call_id": tool_call_id, "action_seq": action_seq},
+                trajectory=trajectory,
+            )
+        )
+        if decision and planner._guardrails_enforced():
+            if decision.action.value == "STOP":
+                failure_payload = {"guardrail": planner._guardrail_decision_payload(decision)}
+                result_json = _safe_json_dumps({"error": decision.reason, "failure": failure_payload})
+                planner._emit_event(
+                    PlannerEvent(
+                        event_type="tool_call_result",
+                        ts=planner._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        extra={
+                            "tool_call_id": tool_call_id,
+                            "tool_name": spec.name,
+                            "result_json": result_json,
+                            "action_seq": action_seq,
+                        },
+                    )
+                )
+                return ToolCallOutcome(
+                    error=f"guardrail_stop:{decision.rule_id}",
+                    failure=failure_payload,
+                    streams=None,
+                )
+            if decision.action.value == "PAUSE":
+                pause_payload = {"guardrail": planner._guardrail_decision_payload(decision)}
+                pause = await planner._pause_from_context(
+                    "approval_required",
+                    pause_payload,
+                    trajectory,
+                )
+                return ToolCallOutcome(
+                    pause=pause,
+                    streams=None,
+                )
+
     ctx = _PlannerContext(planner, trajectory)
     if tool_context_update and isinstance(ctx.tool_context, MutableMapping):
         ctx.tool_context.update(dict(tool_context_update))
@@ -370,6 +414,61 @@ async def execute_tool_call(
 
     llm_obs = observation_json if was_clamped else _redact_artifacts(spec.out_model, observation_json)
     result_json = _safe_json_dumps(llm_obs)
+    if planner._guardrails_enabled():
+        decision = await planner._evaluate_guardrail(
+            planner._build_guardrail_event(
+                event_type="tool_call_result",
+                text_content=result_json,
+                tool_name=spec.name,
+                tool_args=args_payload,
+                payload={"tool_call_id": tool_call_id, "action_seq": action_seq},
+                trajectory=trajectory,
+            )
+        )
+        if decision and planner._guardrails_enforced():
+            if decision.action.value == "STOP":
+                failure_payload = {"guardrail": planner._guardrail_decision_payload(decision)}
+                error = f"guardrail_stop:{decision.rule_id}"
+                planner._emit_event(
+                    PlannerEvent(
+                        event_type="tool_call_result",
+                        ts=planner._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        extra={
+                            "tool_call_id": tool_call_id,
+                            "tool_name": spec.name,
+                            "result_json": _safe_json_dumps({"error": error, "failure": failure_payload}),
+                            "action_seq": action_seq,
+                        },
+                    )
+                )
+                return ToolCallOutcome(
+                    error=error,
+                    failure=failure_payload,
+                    streams=ctx._collect_chunks() or None,
+                )
+            if decision.action.value == "PAUSE":
+                pause_payload = {"guardrail": planner._guardrail_decision_payload(decision)}
+                pause = await planner._pause_from_context(
+                    "approval_required",
+                    pause_payload,
+                    trajectory,
+                )
+                return ToolCallOutcome(
+                    pause=pause,
+                    streams=ctx._collect_chunks() or None,
+                )
+            if decision.action.value == "REDACT" and decision.redactions:
+                from .guardrails.utils import apply_redactions_to_text
+
+                redacted_json = apply_redactions_to_text(result_json, decision.redactions)
+                result_json = redacted_json
+                try:
+                    redacted_payload = json.loads(redacted_json)
+                    llm_obs = redacted_payload
+                    observation_json = redacted_payload
+                except json.JSONDecodeError:
+                    pass
     planner._emit_event(
         PlannerEvent(
             event_type="tool_call_result",

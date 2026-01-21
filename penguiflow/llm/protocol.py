@@ -383,7 +383,7 @@ def create_native_adapter(
     temperature: float = 0.0,
     json_schema_mode: bool = True,
     max_retries: int = 3,
-    timeout_s: float = 60.0,
+    timeout_s: float = 360.0,
     streaming_enabled: bool = True,
     use_native_reasoning: bool = True,
     reasoning_effort: str | None = None,

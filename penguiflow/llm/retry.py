@@ -237,7 +237,7 @@ async def call_with_retry(
 
         except ModelRetry as e:
             state.errors.append(e)
-            logger.info(f"Model retry requested on attempt {attempt + 1}: {e.message}")
+            logger.debug(f"Model retry requested on attempt {attempt + 1}: {e.message}")
 
             if attempt >= config.max_retries:
                 raise

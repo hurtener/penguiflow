@@ -61,7 +61,7 @@ class AnthropicProvider(Provider):
         *,
         api_key: str | None = None,
         profile: ModelProfile | None = None,
-        timeout: float = 60.0,
+        timeout: float = 360.0,
         max_tokens: int = 8192,
     ):
         """Initialize the Anthropic provider.

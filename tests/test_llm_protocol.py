@@ -61,7 +61,7 @@ class TestNativeLLMAdapter:
                 api_key="test-key",
                 base_url="https://api.example.com",
                 max_retries=5,
-                timeout_s=60.0,
+                timeout_s=360.0,
                 json_schema_mode=False,
             )
 
@@ -71,7 +71,7 @@ class TestNativeLLMAdapter:
                 base_url="https://api.example.com",
             )
             assert adapter._max_retries == 5
-            assert adapter._timeout_s == 60.0
+            assert adapter._timeout_s == 360.0
             assert adapter._json_schema_mode is False
 
     @pytest.mark.asyncio
@@ -224,7 +224,7 @@ class TestCreateNativeAdapter:
                 temperature=0.7,
                 json_schema_mode=True,
                 max_retries=3,
-                timeout_s=60.0,
+                timeout_s=360.0,
                 streaming_enabled=True,
                 use_native_reasoning=True,
                 reasoning_effort=None,
@@ -244,7 +244,7 @@ class TestCreateNativeAdapter:
                 temperature=0.5,
                 json_schema_mode=True,
                 max_retries=3,
-                timeout_s=60.0,
+                timeout_s=360.0,
                 streaming_enabled=True,
                 use_native_reasoning=True,
                 reasoning_effort=None,
