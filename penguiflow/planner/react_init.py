@@ -81,6 +81,7 @@ def init_react_planner(
     multi_action_max_tools: int = 2,
     use_native_llm: bool = False,
     guardrail_gateway: Any | None = None,
+    guardrail_conversation_history_turns: int = 1,
 ) -> None:
     """Initialize a ReactPlanner instance with the specified configuration.
 
@@ -173,6 +174,9 @@ def init_react_planner(
     planner._guardrail_gateway = guardrail_gateway
     planner._guardrail_context = None
     planner._guardrail_run_id = None
+    planner._guardrail_conversation_history_turns = int(guardrail_conversation_history_turns)
+    if planner._guardrail_conversation_history_turns < 0:
+        raise ValueError("guardrail_conversation_history_turns must be >= 0")
     if guardrail_gateway is not None:
         from .guardrails import GuardrailContext
 

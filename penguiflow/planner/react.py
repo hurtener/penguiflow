@@ -430,6 +430,7 @@ class ReactPlanner:
         multi_action_max_tools: int = 2,
         use_native_llm: bool = False,
         guardrail_gateway: Any | None = None,
+        guardrail_conversation_history_turns: int = 1,
     ) -> None:
         # Store init kwargs so the planner can be safely forked for background tasks.
         # This is intentionally best-effort and uses references for non-serialisable objects.
@@ -474,6 +475,7 @@ class ReactPlanner:
             "multi_action_max_tools": multi_action_max_tools,
             "use_native_llm": use_native_llm,
             "guardrail_gateway": guardrail_gateway,
+            "guardrail_conversation_history_turns": guardrail_conversation_history_turns,
         }
         _init_react_planner(
             self,
@@ -517,6 +519,7 @@ class ReactPlanner:
             multi_action_max_tools=multi_action_max_tools,
             use_native_llm=use_native_llm,
             guardrail_gateway=guardrail_gateway,
+            guardrail_conversation_history_turns=guardrail_conversation_history_turns,
         )
         self._guardrail_stream_handler = None
         self._guardrail_stream_decision = None
@@ -1103,6 +1106,22 @@ class ReactPlanner:
                 if isinstance(scope, str) and scope.strip():
                     payload["task_scope"] = scope.strip()
                     break
+
+        history_turns = int(getattr(self, "_guardrail_conversation_history_turns", 0) or 0)
+        conversation_history: list[dict[str, str]] = []
+        if history_turns > 0 and isinstance(trajectory.llm_context, Mapping):
+            conversation_memory = trajectory.llm_context.get("conversation_memory")
+            if isinstance(conversation_memory, Mapping):
+                recent_turns = conversation_memory.get("recent_turns")
+                if isinstance(recent_turns, list):
+                    for item in recent_turns[-history_turns:]:
+                        if not isinstance(item, Mapping):
+                            continue
+                        user = item.get("user")
+                        assistant = item.get("assistant")
+                        if isinstance(user, str) and isinstance(assistant, str):
+                            conversation_history.append({"user": user, "assistant": assistant})
+        payload["conversation_history"] = conversation_history
 
         return payload
 
