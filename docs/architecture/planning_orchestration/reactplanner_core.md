@@ -149,6 +149,58 @@ The ReactPlanner is the central orchestrator of the Penguiflow system, implement
 - **Safety Controls**: Prevent unsafe tool combinations
 - **Multi-tenant Isolation**: Tenant-specific tool availability
 
+### 3.1 Guardrails & Policy Packs
+- **Opt-in**: Guardrails only run when a `GuardrailGateway` is provided to the planner
+- **Policy Packs**: YAML bundles that configure gateway mode, risk routing, tool risk tiers, and rule settings
+- **Built-ins**: Regex prompt-injection detection, secret redaction, tool allowlists
+- **Async vs sync**: Fast rules run inline; deep rules (model-based) run async
+
+See `docs/architecture/planning_orchestration/guardrails_policy_packs.md` for full details.
+
+#### Policy Pack wiring
+```python
+from penguiflow.planner.guardrails import (
+    GuardrailGateway,
+    RuleRegistry,
+    ContextSnapshotBuilder,
+    DefaultRiskRouter,
+    load_policy_pack,
+    apply_policy_config,
+)
+
+registry = RuleRegistry()
+gateway = GuardrailGateway(registry=registry)
+builder = ContextSnapshotBuilder()
+router = DefaultRiskRouter()
+
+policy = load_policy_pack("docs/policies/default.yaml", env="local")
+apply_policy_config(registry, gateway, builder, router, policy)
+```
+
+#### Policy Pack shape (YAML)
+```yaml
+policy_pack: default-guardrails
+version: "1.0"
+gateway:
+  mode: enforce
+  sync:
+    timeout_ms: 800
+    fail_open: true
+  async:
+    enabled: true
+    fail_open: true
+sync_rules:
+  - id: injection-patterns
+    enabled: true
+async_rules:
+  - id: scope-classifier
+    enabled: true
+tool_risks:
+  tools.delete_user: critical
+risk_router:
+  high_risk_wait_ms: 500
+```
+
 ### 4. Parallel Execution
 - **Concurrent Tool Calls**: Execute multiple tools simultaneously
 - **Join Strategies**: Different strategies for aggregating parallel results

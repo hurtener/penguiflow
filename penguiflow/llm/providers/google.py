@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ..errors import (
     LLMAuthError,
@@ -65,7 +65,7 @@ class GoogleProvider(Provider):
         *,
         api_key: str | None = None,
         profile: ModelProfile | None = None,
-        timeout: float = 60.0,
+        timeout: float = 360.0,
     ):
         """Initialize the Google provider.
 
@@ -125,7 +125,7 @@ class GoogleProvider(Provider):
             async with asyncio.timeout(timeout):
                 response = await self._client.aio.models.generate_content(
                     model=self._model,
-                    contents=contents,
+                    contents=cast(Any, contents),
                     config=config,
                 )
 
@@ -172,7 +172,7 @@ class GoogleProvider(Provider):
             async with asyncio.timeout(timeout):
                 async for chunk in await self._client.aio.models.generate_content_stream(
                     model=self._model,
-                    contents=contents,
+                    contents=cast(Any, contents),
                     config=config,
                 ):
                     if cancel and cancel.is_cancelled():

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -180,10 +181,35 @@ if TYPE_CHECKING:
     from ..steering import SteeringInbox
     from .artifact_registry import ArtifactRegistry
     from .constraints import _CostTracker
+    from .guardrails import GuardrailContext, GuardrailDecision, GuardrailEvent, GuardrailGateway
     from .hints import _PlanningHints
     from .pause import _PauseRecord
 
 logger = logging.getLogger("penguiflow.planner")
+
+
+class _GuardrailStreamHandler:
+    """Serializes guardrail evaluation for streamed LLM chunks."""
+
+    def __init__(self, planner: ReactPlanner, trajectory: Trajectory) -> None:
+        self._planner = planner
+        self._trajectory = trajectory
+        self._queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        self._task = asyncio.create_task(self._run())
+
+    def enqueue(self, payload: dict[str, Any]) -> None:
+        self._queue.put_nowait(payload)
+
+    async def close(self) -> None:
+        await self._queue.put(None)
+        await self._task
+
+    async def _run(self) -> None:
+        while True:
+            payload = await self._queue.get()
+            if payload is None:
+                break
+            await self._planner._emit_guardrailed_llm_stream_chunk(self._trajectory, payload)
 
 
 class ReactPlanner:
@@ -354,7 +380,12 @@ class ReactPlanner:
     _multi_action_max_tools: int
     _use_native_reasoning: bool
     _reasoning_effort: str | None
+    _guardrail_gateway: GuardrailGateway | None
+    _guardrail_context: GuardrailContext | None
+    _guardrail_run_id: str | None
     _init_kwargs: dict[str, Any] | None
+    _guardrail_stream_handler: _GuardrailStreamHandler | None
+    _guardrail_stream_decision: GuardrailDecision | None
 
     def __init__(
         self,
@@ -398,6 +429,7 @@ class ReactPlanner:
         multi_action_read_only_only: bool = True,
         multi_action_max_tools: int = 2,
         use_native_llm: bool = False,
+        guardrail_gateway: Any | None = None,
     ) -> None:
         # Store init kwargs so the planner can be safely forked for background tasks.
         # This is intentionally best-effort and uses references for non-serialisable objects.
@@ -441,6 +473,7 @@ class ReactPlanner:
             "multi_action_read_only_only": multi_action_read_only_only,
             "multi_action_max_tools": multi_action_max_tools,
             "use_native_llm": use_native_llm,
+            "guardrail_gateway": guardrail_gateway,
         }
         _init_react_planner(
             self,
@@ -483,7 +516,10 @@ class ReactPlanner:
             multi_action_read_only_only=multi_action_read_only_only,
             multi_action_max_tools=multi_action_max_tools,
             use_native_llm=use_native_llm,
+            guardrail_gateway=guardrail_gateway,
         )
+        self._guardrail_stream_handler = None
+        self._guardrail_stream_decision = None
 
     def fork(
         self,
@@ -1002,6 +1038,162 @@ class ReactPlanner:
                     },
                 )
         self._last_event = event
+
+    def _guardrails_enabled(self) -> bool:
+        return self._guardrail_gateway is not None and self._guardrail_context is not None
+
+    def _guardrails_enforced(self) -> bool:
+        if not self._guardrails_enabled():
+            return False
+        mode = getattr(getattr(self._guardrail_gateway, "config", None), "mode", "enforce")
+        return mode == "enforce"
+
+    def _build_guardrail_event(
+        self,
+        *,
+        event_type: str,
+        text_content: str | None = None,
+        tool_name: str | None = None,
+        tool_args: dict[str, Any] | None = None,
+        payload: Mapping[str, Any] | None = None,
+        trajectory: Trajectory | None = None,
+    ) -> GuardrailEvent:
+        from .guardrails import GuardrailEvent
+
+        merged_payload = dict(payload or {})
+        if trajectory is not None:
+            for key, value in self._guardrail_context_payload(trajectory).items():
+                merged_payload.setdefault(key, value)
+
+        return GuardrailEvent(
+            event_type=event_type,
+            run_id=self._guardrail_run_id or "unknown",
+            text_content=text_content,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            payload=merged_payload,
+        )
+
+    def _guardrail_context_payload(self, trajectory: Trajectory) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        summary = trajectory.summary
+        if summary and summary.last_output_digest:
+            payload["last_assistant"] = summary.last_output_digest
+        elif trajectory.steps:
+            last_step = trajectory.steps[-1]
+            action = last_step.action
+            if action.is_terminal():
+                answer = action.answer_text()
+                if isinstance(answer, str) and answer.strip():
+                    payload["last_assistant"] = answer
+            else:
+                observation = last_step.observation
+                if isinstance(observation, str) and observation.strip():
+                    payload["last_assistant"] = observation
+                elif isinstance(observation, Mapping):
+                    for key in ("answer", "raw_answer", "summary"):
+                        value = observation.get(key)
+                        if isinstance(value, str) and value.strip():
+                            payload["last_assistant"] = value
+                            break
+
+        for ctx in (trajectory.tool_context, trajectory.llm_context):
+            if isinstance(ctx, Mapping):
+                scope = ctx.get("task_scope") or ctx.get("agent_scope")
+                if isinstance(scope, str) and scope.strip():
+                    payload["task_scope"] = scope.strip()
+                    break
+
+        return payload
+
+    async def _evaluate_guardrail(self, event: GuardrailEvent) -> GuardrailDecision | None:
+        if not self._guardrails_enabled():
+            return None
+        gateway = self._guardrail_gateway
+        ctx = self._guardrail_context
+        if gateway is None or ctx is None:
+            return None
+        return await gateway.evaluate(ctx, event)
+
+    def _guardrail_decision_payload(self, decision: GuardrailDecision) -> dict[str, Any]:
+        stop = decision.stop
+        return {
+            "action": decision.action.value,
+            "rule_id": decision.rule_id,
+            "reason": decision.reason,
+            "decision_id": decision.decision_id,
+            "severity": decision.severity.value,
+            "effects": list(decision.effects),
+            "stop": {
+                "error_code": stop.error_code,
+                "user_message": stop.user_message,
+                "internal_reason": stop.internal_reason,
+            }
+            if stop is not None
+            else None,
+        }
+
+    def _ensure_guardrail_stream_handler(self, trajectory: Trajectory) -> None:
+        if not self._guardrails_enabled():
+            return
+        if self._guardrail_stream_handler is None:
+            self._guardrail_stream_handler = _GuardrailStreamHandler(self, trajectory)
+
+    def _enqueue_llm_stream_chunk(self, trajectory: Trajectory, payload: dict[str, Any]) -> None:
+        if self._event_callback is None:
+            return
+        if not self._guardrails_enabled() or not self._guardrails_enforced():
+            self._emit_event(
+                PlannerEvent(
+                    event_type="llm_stream_chunk",
+                    ts=payload["ts"],
+                    trajectory_step=payload["trajectory_step"],
+                    extra=payload["extra"],
+                )
+            )
+            return
+        self._ensure_guardrail_stream_handler(trajectory)
+        if self._guardrail_stream_handler is not None:
+            self._guardrail_stream_handler.enqueue(payload)
+
+    async def _emit_guardrailed_llm_stream_chunk(self, trajectory: Trajectory, payload: dict[str, Any]) -> None:
+        from .guardrails.utils import apply_redactions_to_text
+
+        text = payload["extra"].get("text", "")
+        event = self._build_guardrail_event(
+            event_type="llm_stream_chunk",
+            text_content=text,
+            payload={"phase": payload["extra"].get("phase"), "channel": payload["extra"].get("channel")},
+            trajectory=trajectory,
+        )
+        decision = await self._evaluate_guardrail(event)
+        if decision and decision.action.value == "STOP":
+            self._guardrail_stream_decision = decision
+            return
+        if decision and decision.action.value == "PAUSE":
+            self._guardrail_stream_decision = decision
+            return
+        if decision and decision.action.value == "REDACT" and decision.redactions:
+            redacted = apply_redactions_to_text(text, decision.redactions)
+            payload = dict(payload)
+            extra = dict(payload["extra"])
+            extra["text"] = redacted
+            payload["extra"] = extra
+        self._emit_event(
+            PlannerEvent(
+                event_type="llm_stream_chunk",
+                ts=payload["ts"],
+                trajectory_step=payload["trajectory_step"],
+                extra=payload["extra"],
+            )
+        )
+
+    async def _finalize_guardrail_stream(self) -> None:
+        if self._guardrail_stream_handler is None:
+            return
+        handler = self._guardrail_stream_handler
+        self._guardrail_stream_handler = None
+        await handler.close()
 
     def _register_resource_callbacks(self) -> None:
         """Wire ToolNode resource update callbacks into planner events."""

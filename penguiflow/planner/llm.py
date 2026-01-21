@@ -932,7 +932,7 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
     multi_action_count = int(getattr(planner, "_multi_action_history_count", 0))
     render_component_count = int(getattr(planner, "_render_component_failure_history_count", 0))
 
-    logger.info(
+    logger.debug(
         "build_messages_repair_counts",
         extra={
             "finish_repair_history_count": finish_repair_count,

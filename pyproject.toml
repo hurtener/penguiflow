@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "penguiflow"
-version = "2.10.2"
+version = "2.11.0"
 description = "Async-first orchestration library for multi-agent and data pipelines"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,6 +18,7 @@ dependencies = [
     "pyyaml>=6.0",
     "fastapi>=0.118",
     "uvicorn>=0.32",
+    "databricks-mcp>=0.6.0",
 ]
 
 [project.optional-dependencies]

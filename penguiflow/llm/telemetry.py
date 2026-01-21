@@ -165,7 +165,7 @@ def default_logger_callback(event: LLMEvent) -> None:
         extra = event.extra or {}
         attempt = extra.get("attempt", 0)
         reason = extra.get("reason", "unknown")
-        logger.info(f"LLM {event.provider}/{event.model} retry {attempt}: {reason}")
+        logger.debug(f"LLM {event.provider}/{event.model} retry {attempt}: {reason}")
 
 
 # ---------------------------------------------------------------------------

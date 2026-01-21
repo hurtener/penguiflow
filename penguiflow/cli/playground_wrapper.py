@@ -576,7 +576,7 @@ class OrchestratorAgentWrapper:
         await self._event_recorder.persist(trace_id)
 
         metadata = _normalise_metadata(_get_attr(response, "metadata"))
-        _LOGGER.info(
+        _LOGGER.debug(
             "orchestrator chat complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s, has_store=%s",
             trace_id, session_id,
             list(metadata.keys()) if metadata else None,
@@ -586,7 +586,7 @@ class OrchestratorAgentWrapper:
         trajectory = _build_trajectory(query, session_id, trace_id, metadata, ctx, tool_ctx)
         if trajectory is not None and self._state_store is not None:
             await self._state_store.save_trajectory(trace_id, session_id, trajectory)
-            _LOGGER.info("trajectory saved: trace_id=%s, session_id=%s", trace_id, session_id)
+            _LOGGER.debug("trajectory saved: trace_id=%s, session_id=%s", trace_id, session_id)
         elif trajectory is None:
             _LOGGER.warning("trajectory not saved: trajectory is None (metadata=%s)", metadata is not None)
 
@@ -613,7 +613,7 @@ class OrchestratorAgentWrapper:
 
         raw_answer = _get_attr(response, "answer")
         normalised_answer = _normalise_answer(raw_answer)
-        _LOGGER.info(
+        _LOGGER.debug(
             "orchestrator_answer_extract: has_answer=%s, answer_len=%s",
             normalised_answer is not None,
             len(normalised_answer) if normalised_answer else 0,

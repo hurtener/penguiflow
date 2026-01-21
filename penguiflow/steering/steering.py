@@ -14,6 +14,7 @@ MAX_STEERING_KEYS = 64
 MAX_STEERING_LIST_ITEMS = 50
 MAX_STEERING_STRING = 4_096
 
+
 class SteeringValidationError(ValueError):
     """Raised when a steering event payload is invalid."""
 
@@ -48,6 +49,7 @@ def _sanitize_value(value: Any, *, depth: int) -> Any:
 
 def sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Clamp steering payload to a JSON-serialisable, size-bounded shape."""
+
     sanitized = _sanitize_value(payload, depth=MAX_STEERING_DEPTH)
     if not isinstance(sanitized, dict):
         sanitized = {"value": sanitized}
@@ -70,6 +72,7 @@ def sanitize_steering_event(
     max_payload_bytes: int = MAX_STEERING_PAYLOAD_BYTES,
 ) -> SteeringEvent:
     """Return a sanitized copy of the steering event."""
+
     payload = sanitize_payload(dict(event.payload or {}))
     raw = json.dumps(payload, ensure_ascii=False)
     if len(raw.encode("utf-8")) > max_payload_bytes:
@@ -79,6 +82,7 @@ def sanitize_steering_event(
 
 def validate_steering_event(event: SteeringEvent) -> None:
     """Validate steering payloads against type-specific expectations."""
+
     payload = event.payload
     errors: list[str] = []
     if not isinstance(payload, dict):
@@ -163,6 +167,7 @@ class SteeringInbox:
 
     async def push(self, event: SteeringEvent) -> bool:
         """Queue a steering event, returning False if the queue is full."""
+
         if event.event_type == SteeringEventType.CANCEL:
             self._cancel_reason = str(event.payload.get("reason") or "cancelled")
             self._cancel_event.set()
@@ -171,7 +176,6 @@ class SteeringInbox:
         elif event.event_type == SteeringEventType.RESUME:
             self._pause_event.set()
 
-        # Enforce limit on USER_MESSAGE events
         if event.event_type == SteeringEventType.USER_MESSAGE:
             if self._pending_user_message_count >= self._max_pending_user_messages:
                 return False
@@ -187,10 +191,12 @@ class SteeringInbox:
 
     def has_event(self) -> bool:
         """Check if there are queued steering events without draining them."""
+
         return not self._queue.empty()
 
     def drain(self) -> list[SteeringEvent]:
         """Drain any queued steering events without blocking."""
+
         events: list[SteeringEvent] = []
         while True:
             try:
@@ -204,10 +210,12 @@ class SteeringInbox:
 
     async def next(self) -> SteeringEvent:
         """Wait for the next steering event."""
+
         return await self._queue.get()
 
     async def wait_if_paused(self) -> None:
         """Block until a RESUME arrives if the task is paused."""
+
         if not self._pause_event.is_set():
             await self._pause_event.wait()
 
@@ -222,6 +230,10 @@ class SteeringCancelled(RuntimeError):
 
 __all__ = [
     "MAX_STEERING_PAYLOAD_BYTES",
+    "MAX_STEERING_DEPTH",
+    "MAX_STEERING_KEYS",
+    "MAX_STEERING_LIST_ITEMS",
+    "MAX_STEERING_STRING",
     "SteeringValidationError",
     "SteeringCancelled",
     "SteeringEvent",

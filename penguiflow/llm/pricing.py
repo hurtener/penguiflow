@@ -90,6 +90,7 @@ PRICING: dict[str, tuple[float, float]] = {
     "databricks-claude-3-5-sonnet": (0.003, 0.015),
     "databricks-claude-sonnet-4": (0.003, 0.015),
     "databricks-claude-opus-4-5": (0.005, 0.025),
+    "databricks-claude-haiku-4-5": (0.001, 0.005),
     # DeepSeek
     "deepseek-r1": (0.00056, 0.00168),  # $0.56/$1.68 per 1M tokens
     "deepseek-chat": (0.00089, 0.0011),  # $0.89/$1.10 per 1M tokens (V3)
@@ -156,8 +157,7 @@ def get_pricing(model: str) -> tuple[float, float]:
 
     # Default: unknown pricing (free)
     logger.warning(
-        f"Unknown model '{model}' - cost tracking will not work. "
-        "Use register_pricing() to add pricing for this model."
+        f"Unknown model '{model}' - cost tracking will not work. Use register_pricing() to add pricing for this model."
     )
     return (0.0, 0.0)
 

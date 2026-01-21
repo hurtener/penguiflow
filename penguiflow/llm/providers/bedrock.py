@@ -86,7 +86,7 @@ class BedrockProvider(Provider):
         aws_session_token: str | None = None,
         profile_name: str | None = None,
         profile: ModelProfile | None = None,
-        timeout: float = 300.0,
+        timeout: float = 360.0,
     ):
         """Initialize the Bedrock provider.
 

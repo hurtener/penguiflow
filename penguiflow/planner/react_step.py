@@ -47,7 +47,7 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
     last_raw: str | None = None
 
     # DEBUG_REMOVE: Log message structure being sent to LLM
-    logger.info(
+    logger.debug(
         "DEBUG_step_messages",
         extra={
             "message_count": len(messages),
@@ -59,6 +59,7 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
 
 
     for attempt in range(1, planner._repair_attempts + 1):
+        planner._guardrail_stream_decision = None
         if last_error is not None:
             messages = list(base_messages) + [
                 {
@@ -102,24 +103,21 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
             _thought_extractor: _StreamingThoughtExtractor = thought_extractor,
             _action_seq: int = current_action_seq,
         ) -> None:
-            if planner._event_callback is None:
-                return
-
             thought_chars = _thought_extractor.feed(text)
             if thought_chars:
                 thought_text = "".join(thought_chars)
-                planner._emit_event(
-                    PlannerEvent(
-                        event_type="llm_stream_chunk",
-                        ts=planner._time_source(),
-                        trajectory_step=len(trajectory.steps),
-                        extra={
+                planner._enqueue_llm_stream_chunk(
+                    trajectory,
+                    {
+                        "ts": planner._time_source(),
+                        "trajectory_step": len(trajectory.steps),
+                        "extra": {
                             "text": thought_text,
                             "done": False,
                             "phase": "observation",
                             "channel": "thinking",
                         },
-                    )
+                    },
                 )
 
             # Feed chunk to extractor to detect args content
@@ -129,73 +127,134 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
             if args_chars:
                 # Batch small chars into reasonable chunks for efficiency
                 args_text = "".join(args_chars)
-                planner._emit_event(
-                    PlannerEvent(
-                        event_type="llm_stream_chunk",
-                        ts=planner._time_source(),
-                        trajectory_step=len(trajectory.steps),
-                        extra={
+                planner._enqueue_llm_stream_chunk(
+                    trajectory,
+                    {
+                        "ts": planner._time_source(),
+                        "trajectory_step": len(trajectory.steps),
+                        "extra": {
                             "text": args_text,
                             "done": False,
                             "phase": "answer",
                             "channel": "answer",
                             "action_seq": _action_seq,
                         },
-                    )
+                    },
                 )
 
             # Emit done signal when LLM finishes and it was a finish action
             if done and _extractor.is_finish_action:
-                planner._emit_event(
-                    PlannerEvent(
-                        event_type="llm_stream_chunk",
-                        ts=planner._time_source(),
-                        trajectory_step=len(trajectory.steps),
-                        extra={
+                planner._enqueue_llm_stream_chunk(
+                    trajectory,
+                    {
+                        "ts": planner._time_source(),
+                        "trajectory_step": len(trajectory.steps),
+                        "extra": {
                             "text": "",
                             "done": True,
                             "phase": "answer",
                             "channel": "answer",
                             "action_seq": _action_seq,
                         },
-                    )
+                    },
                 )
 
         def _emit_llm_reasoning_chunk(text: str, done: bool, *, _action_seq: int = current_action_seq) -> None:
-            if planner._event_callback is None:
-                return
             if not text and not done:
                 return
-            planner._emit_event(
-                PlannerEvent(
-                    event_type="llm_stream_chunk",
-                    ts=planner._time_source(),
-                    trajectory_step=len(trajectory.steps),
-                    extra={
+            planner._enqueue_llm_stream_chunk(
+                trajectory,
+                {
+                    "ts": planner._time_source(),
+                    "trajectory_step": len(trajectory.steps),
+                    "extra": {
                         "text": text,
                         "done": done,
                         "phase": "thinking",
                         "channel": "thinking",
                         "action_seq": _action_seq,
                     },
-                )
+                },
             )
 
         if planner._event_callback is not None:
-            planner._emit_event(
-                PlannerEvent(
-                    event_type="llm_stream_chunk",
-                    ts=planner._time_source(),
-                    trajectory_step=len(trajectory.steps),
-                    extra={
+            planner._enqueue_llm_stream_chunk(
+                trajectory,
+                {
+                    "ts": planner._time_source(),
+                    "trajectory_step": len(trajectory.steps),
+                    "extra": {
                         "text": "",
                         "done": False,
                         "phase": "action",
                         "channel": "thinking",
                         "action_seq": current_action_seq,
                     },
+                },
+            )
+        if planner._guardrails_enabled():
+            latest_user = next(
+                (msg.get("content") for msg in reversed(messages) if msg.get("role") == "user"),
+                trajectory.resume_user_input or trajectory.query,
+            )
+            decision = await planner._evaluate_guardrail(
+                planner._build_guardrail_event(
+                    event_type="llm_before",
+                    text_content=str(latest_user or ""),
+                    trajectory=trajectory,
                 )
             )
+            if decision is not None:
+                logger.info(
+                    "guardrail_decision",
+                    extra={
+                        "action": decision.action.value,
+                        "rule_id": decision.rule_id,
+                        "reason": decision.reason,
+                        "enforced": planner._guardrails_enforced(),
+                    },
+                )
+            if decision and not planner._guardrails_enforced():
+                logger.info(
+                    "guardrail_decision_shadow",
+                    extra={
+                        "action": decision.action.value,
+                        "rule_id": decision.rule_id,
+                        "reason": decision.reason,
+                    },
+                )
+            if decision and planner._guardrails_enforced():
+                if decision.action.value == "STOP":
+                    stop_message = decision.stop.user_message if decision.stop else None
+                    return PlannerAction(
+                        next_node="final_response",
+                        args={"answer": stop_message or "Unable to complete the request."},
+                        thought=f"guardrail_stop:{decision.rule_id}",
+                    )
+                if decision.action.value == "RETRY" and decision.retry is not None:
+                    retry_meta = None
+                    if isinstance(trajectory.metadata, MutableMapping):
+                        retry_meta = trajectory.metadata
+                    attempts = int(retry_meta.get("guardrail_retry_count", 0)) if retry_meta else 0
+                    if attempts < decision.retry.max_attempts:
+                        if retry_meta is not None:
+                            retry_meta["guardrail_retry_count"] = attempts + 1
+                        if decision.retry.corrective_message:
+                            messages = list(base_messages) + [
+                                {"role": "system", "content": decision.retry.corrective_message}
+                            ]
+                        if planner._event_callback is not None:
+                            planner._emit_event(
+                                PlannerEvent(
+                                    event_type="guardrail_retry",
+                                    ts=planner._time_source(),
+                                    trajectory_step=len(trajectory.steps),
+                                    extra={
+                                        "rule_id": decision.rule_id,
+                                        "attempt": attempts + 1,
+                                    },
+                                )
+                            )
         try:
             if (
                 isinstance(planner._client, (_LiteLLMJSONClient, NativeLLMAdapter))
@@ -216,6 +275,7 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                     on_stream_chunk=_emit_llm_chunk if stream_allowed else None,
                 )
         finally:
+            await planner._finalize_guardrail_stream()
             if planner._event_callback is not None:
                 planner._emit_event(
                     PlannerEvent(
@@ -226,11 +286,20 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                     )
                 )
         raw, cost = _coerce_llm_response(llm_result)
+        if planner._guardrail_stream_decision and planner._guardrails_enforced():
+            decision = planner._guardrail_stream_decision
+            if decision.action.value == "STOP":
+                stop_message = decision.stop.user_message if decision.stop else None
+                return PlannerAction(
+                    next_node="final_response",
+                    args={"answer": stop_message or "Unable to complete the request."},
+                    thought=f"guardrail_stream_stop:{decision.rule_id}",
+                )
         last_raw = raw
         planner._cost_tracker.record_main_call(cost)
 
-        # DEBUG_REMOVE: Log raw LLM response for troubleshooting (INFO level for debugging)
-        logger.info(
+        # DEBUG_REMOVE: Log raw LLM response for troubleshooting (DEBUG level)
+        logger.debug(
             "DEBUG_llm_raw_response",
             extra={
                 "attempt": attempt,

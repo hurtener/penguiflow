@@ -6,6 +6,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
+from uuid import uuid4
 
 from ..artifacts import ArtifactStore, NoOpArtifactStore, discover_artifact_store
 from ..catalog import NodeSpec, build_catalog
@@ -79,6 +80,7 @@ def init_react_planner(
     multi_action_read_only_only: bool = True,
     multi_action_max_tools: int = 2,
     use_native_llm: bool = False,
+    guardrail_gateway: Any | None = None,
 ) -> None:
     """Initialize a ReactPlanner instance with the specified configuration.
 
@@ -127,6 +129,7 @@ def init_react_planner(
             instead of LiteLLM. The native layer provides type-safe requests,
             provider-specific adapters, and integrated cost tracking.
             Defaults to False for backward compatibility.
+        guardrail_gateway: Optional guardrail gateway for safety checks.
     """
     if catalog is None:
         if nodes is None or registry is None:
@@ -167,6 +170,19 @@ def init_react_planner(
     planner._catalog_records = catalog_records
     planner._tool_aliases = alias_to_real
     planner._register_resource_callbacks()
+    planner._guardrail_gateway = guardrail_gateway
+    planner._guardrail_context = None
+    planner._guardrail_run_id = None
+    if guardrail_gateway is not None:
+        from .guardrails import GuardrailContext
+
+        planner._guardrail_run_id = uuid4().hex
+        planner._guardrail_context = GuardrailContext(
+            run_id=planner._guardrail_run_id,
+            tool_context={
+                "available_tools": [spec.name for spec in planner._specs],
+            },
+        )
     planner._planning_hints = _PlanningHints.from_mapping(planning_hints)
     hints_payload = planner._planning_hints.to_prompt_payload() if not planner._planning_hints.empty() else None
     planner._background_tasks = background_tasks or BackgroundTasksConfig()
