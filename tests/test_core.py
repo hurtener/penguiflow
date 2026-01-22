@@ -35,6 +35,82 @@ async def test_pass_through_flow() -> None:
 
 
 @pytest.mark.asyncio
+async def test_trace_scoped_fetch_isolated_across_concurrent_traces() -> None:
+    async def work(msg: Message, ctx) -> str:
+        if msg.payload == "slow":
+            await asyncio.sleep(0.05)
+        return f"done:{msg.payload}"
+
+    node = Node(work, name="work", policy=NodePolicy(validate="none"))
+    flow = create(node.to())
+    flow.run()
+
+    headers = Headers(tenant="acme")
+
+    async def roundtrip(payload: str, trace_id: str) -> str:
+        msg = Message(payload=payload, headers=headers)
+        await flow.emit(msg, trace_id=trace_id)
+        result = await flow.fetch(trace_id=trace_id)
+        assert isinstance(result, str)
+        return result
+
+    slow_task = asyncio.create_task(roundtrip("slow", "t_slow"))
+    fast_task = asyncio.create_task(roundtrip("fast", "t_fast"))
+    slow_result, fast_result = await asyncio.gather(slow_task, fast_task)
+
+    assert slow_result == "done:slow"
+    assert fast_result == "done:fast"
+
+    await flow.stop()
+
+
+@pytest.mark.asyncio
+async def test_trace_scoped_roundtrip_serializes_same_trace_id() -> None:
+    async def work(msg: Message, ctx) -> str:
+        return f"done:{msg.payload}"
+
+    node = Node(work, name="work", policy=NodePolicy(validate="none"))
+    flow = create(node.to())
+    flow.run()
+
+    headers = Headers(tenant="acme")
+    trace_id = "shared"
+    first_emitted = asyncio.Event()
+    allow_fetch = asyncio.Event()
+
+    async def first() -> str:
+        msg = Message(payload="one", headers=headers)
+        await flow.emit(msg, trace_id=trace_id)
+        first_emitted.set()
+        await allow_fetch.wait()
+        result = await flow.fetch(trace_id=trace_id)
+        assert isinstance(result, str)
+        return result
+
+    async def second() -> str:
+        await first_emitted.wait()
+        msg = Message(payload="two", headers=headers)
+        await flow.emit(msg, trace_id=trace_id)
+        result = await flow.fetch(trace_id=trace_id)
+        assert isinstance(result, str)
+        return result
+
+    first_task = asyncio.create_task(first())
+    second_task = asyncio.create_task(second())
+
+    await first_emitted.wait()
+    await asyncio.sleep(0)
+    assert not second_task.done()
+
+    allow_fetch.set()
+
+    assert await asyncio.wait_for(first_task, timeout=1.0) == "done:one"
+    assert await asyncio.wait_for(second_task, timeout=1.0) == "done:two"
+
+    await flow.stop()
+
+
+@pytest.mark.asyncio
 async def test_fan_out_to_multiple_nodes() -> None:
     async def fan(msg: str, ctx) -> str:
         return msg
@@ -108,6 +184,7 @@ async def test_graceful_stop_cancels_nodes() -> None:
         except asyncio.CancelledError:
             cancelled.set()
             raise
+        return msg
 
     blocker_node = Node(blocker, name="blocker")
     flow = create(blocker_node.to())
@@ -169,11 +246,7 @@ async def test_retry_on_failure_logs_and_succeeds(
     assert result == "hello"
     assert attempts == 2
 
-    retry_events = [
-        record
-        for record in caplog.records
-        if getattr(record, "event", "") == "node_retry"
-    ]
+    retry_events = [record for record in caplog.records if getattr(record, "event", "") == "node_retry"]
     assert retry_events, "expected node_retry log record"
 
     await flow.stop()
@@ -221,16 +294,8 @@ async def test_timeout_retries_and_drops_after_max(
 
     assert attempts == 2
 
-    timeout_events = [
-        record
-        for record in caplog.records
-        if getattr(record, "event", "") == "node_timeout"
-    ]
-    failed_events = [
-        record
-        for record in caplog.records
-        if getattr(record, "event", "") == "node_failed"
-    ]
+    timeout_events = [record for record in caplog.records if getattr(record, "event", "") == "node_timeout"]
+    failed_events = [record for record in caplog.records if getattr(record, "event", "") == "node_failed"]
     assert timeout_events, "expected timeout log"
     assert failed_events, "expected failure log"
 
@@ -307,6 +372,7 @@ async def test_run_with_registry_accepts_registered_nodes() -> None:
 @pytest.mark.asyncio
 async def test_flow_run_twice_raises_error() -> None:
     """Running an already running flow should raise RuntimeError."""
+
     async def dummy(msg: str, _ctx) -> str:
         return msg
 
@@ -342,6 +408,7 @@ async def test_cycle_detection_without_allow_cycles() -> None:
 @pytest.mark.asyncio
 async def test_context_emit_to_unknown_target() -> None:
     """Emitting to an unknown target should raise KeyError."""
+
     async def sender(msg: str, ctx) -> None:
         fake_node = Node(lambda m, _c: m, name="fake")
         with pytest.raises(KeyError):
@@ -358,6 +425,7 @@ async def test_context_emit_to_unknown_target() -> None:
 @pytest.mark.asyncio
 async def test_context_fetch_from_nonexistent_source() -> None:
     """Fetching from a nonexistent source should raise appropriate error."""
+
     async def fetcher(msg: str, ctx) -> None:
         fake_node = Node(lambda m, _c: m, name="fake")
         with pytest.raises(KeyError):
@@ -383,11 +451,7 @@ async def test_timeout_with_retries() -> None:
             await asyncio.sleep(0.2)  # Will timeout
         return "success"
 
-    node = Node(
-        slow_node,
-        name="slow",
-        policy=NodePolicy(validate="none", timeout_s=0.1, max_retries=1)
-    )
+    node = Node(slow_node, name="slow", policy=NodePolicy(validate="none", timeout_s=0.1, max_retries=1))
     flow = create(node.to())
     flow.run()
 
@@ -409,11 +473,7 @@ async def test_max_retries_exhausted() -> None:
         attempt_count += 1
         raise ValueError("Always fails")
 
-    node = Node(
-        always_fails,
-        name="fail",
-        policy=NodePolicy(validate="none", max_retries=2, backoff_base=0.01)
-    )
+    node = Node(always_fails, name="fail", policy=NodePolicy(validate="none", max_retries=2, backoff_base=0.01))
     flow = create(node.to())
     flow.run()
 
@@ -461,6 +521,7 @@ async def test_queue_full_backpressure() -> None:
 @pytest.mark.asyncio
 async def test_emit_nowait_queue_full() -> None:
     """emit_nowait should raise QueueFull when queue is full."""
+
     async def blocker(_msg: str, _ctx) -> None:
         await asyncio.sleep(10)  # Block forever
 
@@ -481,6 +542,7 @@ async def test_emit_nowait_queue_full() -> None:
 @pytest.mark.asyncio
 async def test_fetch_nowait_queue_empty() -> None:
     """fetch_nowait should raise QueueEmpty when no messages available."""
+
     async def dummy(msg: str, _ctx) -> str:
         return msg
 
@@ -552,14 +614,11 @@ async def test_message_to_message_no_warning_when_envelope_preserved() -> None:
 @pytest.mark.asyncio
 async def test_registry_missing_validation_nodes() -> None:
     """Flow should raise error when registry is missing required nodes."""
+
     async def needs_validation(msg: str, _ctx) -> str:
         return msg
 
-    node = Node(
-        needs_validation,
-        name="validated",
-        policy=NodePolicy(validate="both")
-    )
+    node = Node(needs_validation, name="validated", policy=NodePolicy(validate="both"))
     flow = create(node.to())
 
     empty_registry = ModelRegistry()

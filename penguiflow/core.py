@@ -6,6 +6,7 @@ queues, cycle detection, and graceful shutdown semantics.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import time
 import warnings
@@ -28,6 +29,12 @@ from .types import WM, FinalAnswer, Message, StreamChunk
 logger = logging.getLogger("penguiflow.core")
 
 ExcInfo = tuple[type[BaseException], BaseException, TracebackType | None]
+
+
+_TRACE_CONTEXT: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "penguiflow_trace_context",
+    default=None,
+)
 
 
 def _capture_exc_info(exc: BaseException | None) -> ExcInfo | None:
@@ -81,6 +88,14 @@ class TraceCancelled(Exception):
     def __init__(self, trace_id: str | None) -> None:
         super().__init__(f"trace cancelled: {trace_id}")
         self.trace_id = trace_id
+
+
+@dataclass(frozen=True, slots=True)
+class _RookeryResult:
+    """Internal wrapper to preserve trace_id for non-Message outputs."""
+
+    trace_id: str
+    value: Any
 
 
 class Context:
@@ -323,6 +338,17 @@ class PenguiFlow:
         self._message_bus = message_bus
         self._bus_tasks: set[asyncio.Task[None]] = set()
 
+        # Opt-in, trace-scoped roundtrip support (emit(trace_id=...) + fetch(trace_id=...)).
+        self._fetch_dispatcher: asyncio.Task[None] | None = None
+        self._fetch_queue_lock = asyncio.Lock()
+        self._fetch_global_queue: asyncio.Queue[Any] | None = None
+        self._fetch_trace_queues: dict[str, asyncio.Queue[Any]] = {}
+        self._fetch_subscribed_traces: set[str] = set()
+        self._fetch_queue_maxsize: int | None = None
+
+        # Serialize concurrent roundtrips sharing the same trace_id.
+        self._trace_roundtrip_locks: dict[str, asyncio.Lock] = {}
+
         self._build_graph(adjacencies)
 
     @property
@@ -424,6 +450,9 @@ class PenguiFlow:
             try:
                 message = await context.fetch()
                 trace_id = self._get_trace_id(message)
+                token: contextvars.Token[str | None] | None = None
+                if trace_id is not None:
+                    token = _TRACE_CONTEXT.set(trace_id)
                 if self._deadline_expired(message):
                     await self._emit_event(
                         event="deadline_skip",
@@ -438,6 +467,8 @@ class PenguiFlow:
                     if isinstance(message, Message):
                         await self._handle_deadline_expired(context, message)
                     await self._finalize_message(message)
+                    if token is not None:
+                        _TRACE_CONTEXT.reset(token)
                     continue
                 if trace_id is not None and self._is_trace_cancelled(trace_id):
                     await self._emit_event(
@@ -450,6 +481,8 @@ class PenguiFlow:
                         level=logging.INFO,
                     )
                     await self._finalize_message(message)
+                    if token is not None:
+                        _TRACE_CONTEXT.reset(token)
                     continue
 
                 try:
@@ -466,6 +499,8 @@ class PenguiFlow:
                     )
                 finally:
                     await self._finalize_message(message)
+                    if token is not None:
+                        _TRACE_CONTEXT.reset(token)
             except asyncio.CancelledError:
                 await self._emit_event(
                     event="node_cancelled",
@@ -481,6 +516,12 @@ class PenguiFlow:
     async def stop(self) -> None:
         if not self._running:
             return
+
+        dispatcher = self._fetch_dispatcher
+        self._fetch_dispatcher = None
+        if dispatcher is not None:
+            dispatcher.cancel()
+
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -508,6 +549,20 @@ class PenguiFlow:
         if self._bus_tasks:
             await asyncio.gather(*self._bus_tasks, return_exceptions=True)
             self._bus_tasks.clear()
+
+        if dispatcher is not None:
+            await asyncio.gather(dispatcher, return_exceptions=True)
+        async with self._fetch_queue_lock:
+            self._fetch_subscribed_traces.clear()
+            self._fetch_trace_queues.clear()
+            self._fetch_global_queue = None
+            self._fetch_queue_maxsize = None
+        for lock in self._trace_roundtrip_locks.values():
+            if lock.locked():
+                with suppress(RuntimeError):
+                    lock.release()
+        self._trace_roundtrip_locks.clear()
+
         self._trace_counts.clear()
         self._trace_events.clear()
         self._trace_invocations.clear()
@@ -517,7 +572,145 @@ class PenguiFlow:
         self._trace_capacity_waiters.clear()
         self._running = False
 
-    async def emit(self, msg: Any, to: Node | Sequence[Node] | None = None) -> None:
+    def _attach_trace_id(self, msg: Any, trace_id: str) -> Any:
+        if isinstance(msg, Message):
+            if msg.trace_id == trace_id:
+                return msg
+            return msg.model_copy(update={"trace_id": trace_id})
+
+        if getattr(msg, "trace_id", None) == trace_id:
+            return msg
+
+        try:
+            msg.trace_id = trace_id
+        except Exception as exc:
+            raise TypeError("emit(trace_id=...) requires a Message (or object with writable .trace_id)") from exc
+        return msg
+
+    async def _ensure_fetch_dispatcher(self) -> None:
+        if self._fetch_dispatcher is not None and not self._fetch_dispatcher.done():
+            return
+
+        rookery_incoming = len(self._contexts[ROOKERY]._incoming)  # noqa: SLF001 runtime private access
+        edges = max(1, rookery_incoming)
+        if self._queue_maxsize <= 0:
+            maxsize = 0
+        else:
+            maxsize = self._queue_maxsize * edges
+
+        self._fetch_queue_maxsize = maxsize
+        self._fetch_global_queue = asyncio.Queue(maxsize=maxsize)
+        loop = asyncio.get_running_loop()
+        self._fetch_dispatcher = loop.create_task(
+            self._dispatch_rookery_results(),
+            name="penguiflow:rookery_dispatcher",
+        )
+
+    async def _dispatch_rookery_results(self) -> None:
+        try:
+            while True:
+                item = await self._contexts[ROOKERY].fetch_any()
+                trace_id = self._get_trace_id(item)
+                queue: asyncio.Queue[Any] | None
+                async with self._fetch_queue_lock:
+                    if trace_id is not None and trace_id in self._fetch_subscribed_traces:
+                        queue = self._fetch_trace_queues.get(trace_id)
+                        if queue is None:
+                            queue_maxsize = self._fetch_queue_maxsize
+                            if queue_maxsize is None:
+                                queue_maxsize = self._queue_maxsize
+                            queue = asyncio.Queue(maxsize=queue_maxsize)
+                            self._fetch_trace_queues[trace_id] = queue
+                    else:
+                        queue = self._fetch_global_queue
+                if queue is None:
+                    # Defensive: should never happen, but do not drop results.
+                    await asyncio.sleep(0)
+                    continue
+                await queue.put(item)
+        except asyncio.CancelledError:
+            raise
+
+    def _unwrap_rookery_result(self, item: Any) -> Any:
+        if isinstance(item, _RookeryResult):
+            return item.value
+        return item
+
+    def _maybe_wrap_rookery_result(self, message: Any) -> Any:
+        if isinstance(message, _RookeryResult):
+            return message
+        if getattr(message, "trace_id", None) is not None:
+            return message
+        if not self._fetch_subscribed_traces:
+            return message
+
+        trace_id = _TRACE_CONTEXT.get()
+        if trace_id is None:
+            return message
+        if trace_id not in self._fetch_subscribed_traces:
+            return message
+        return _RookeryResult(trace_id=trace_id, value=message)
+
+    async def _release_trace_roundtrip(self, trace_id: str) -> None:
+        lock = self._trace_roundtrip_locks.get(trace_id)
+        if lock is not None and lock.locked():
+            with suppress(RuntimeError):
+                lock.release()
+
+        async with self._fetch_queue_lock:
+            queue = self._fetch_trace_queues.pop(trace_id, None)
+            self._fetch_subscribed_traces.discard(trace_id)
+            global_queue = self._fetch_global_queue
+
+        if queue is None or global_queue is None:
+            return
+
+        # Preserve legacy behavior: any extra results are not dropped.
+        while not queue.empty():
+            item = queue.get_nowait()
+            await global_queue.put(item)
+
+    async def emit(
+        self,
+        msg: Any,
+        to: Node | Sequence[Node] | None = None,
+        *,
+        trace_id: str | None = None,
+    ) -> None:
+        if trace_id is not None:
+            if not self._running:
+                raise RuntimeError("PenguiFlow is not running")
+            msg = self._attach_trace_id(msg, trace_id)
+
+            lock = self._trace_roundtrip_locks.setdefault(trace_id, asyncio.Lock())
+            await lock.acquire()
+            try:
+                async with self._fetch_queue_lock:
+                    self._fetch_subscribed_traces.add(trace_id)
+                    queue_maxsize = self._fetch_queue_maxsize
+                    if queue_maxsize is None:
+                        queue_maxsize = self._queue_maxsize
+                    self._fetch_trace_queues.setdefault(trace_id, asyncio.Queue(maxsize=queue_maxsize))
+                await self._ensure_fetch_dispatcher()
+            except Exception:
+                await self._release_trace_roundtrip(trace_id)
+                raise
+
+            enqueued = False
+            try:
+                if isinstance(msg, Message):
+                    payload = msg.payload
+                    if isinstance(payload, WM):
+                        last = self._latest_wm_hops.get(msg.trace_id)
+                        if last is not None and payload.hops == last:
+                            return
+                await self._contexts[OPEN_SEA].emit(msg, to)
+                enqueued = True
+                return
+            finally:
+                if not enqueued:
+                    await self._release_trace_roundtrip(trace_id)
+
         if isinstance(msg, Message):
             payload = msg.payload
             if isinstance(payload, WM):
@@ -526,7 +719,16 @@ class PenguiFlow:
                     return
         await self._contexts[OPEN_SEA].emit(msg, to)
 
-    def emit_nowait(self, msg: Any, to: Node | Sequence[Node] | None = None) -> None:
+    def emit_nowait(
+        self,
+        msg: Any,
+        to: Node | Sequence[Node] | None = None,
+        *,
+        trace_id: str | None = None,
+    ) -> None:
+        if trace_id is not None:
+            raise RuntimeError("emit_nowait(trace_id=...) is not supported; use await emit(..., trace_id=...)")
+
         if isinstance(msg, Message):
             payload = msg.payload
             if isinstance(payload, WM):
@@ -558,15 +760,54 @@ class PenguiFlow:
             to=to,
         )
 
-    async def fetch(self, from_: Node | Sequence[Node] | None = None) -> Any:
-        result = await self._contexts[ROOKERY].fetch(from_)
-        await self._finalize_message(result)
-        return result
+    async def fetch(
+        self,
+        from_: Node | Sequence[Node] | None = None,
+        *,
+        trace_id: str | None = None,
+    ) -> Any:
+        if self._fetch_dispatcher is None or self._fetch_dispatcher.done():
+            if trace_id is None:
+                result = await self._contexts[ROOKERY].fetch(from_)
+                await self._finalize_message(result)
+                return result
 
-    async def fetch_any(self, from_: Node | Sequence[Node] | None = None) -> Any:
-        result = await self._contexts[ROOKERY].fetch_any(from_)
-        await self._finalize_message(result)
-        return result
+            if from_ is not None:
+                raise RuntimeError("fetch(trace_id=...) does not support from_ filtering")
+            await self._ensure_fetch_dispatcher()
+
+        if from_ is not None:
+            raise RuntimeError("fetch(from_=...) is not supported once trace-scoped fetching is enabled")
+
+        if trace_id is None:
+            global_queue = self._fetch_global_queue
+            if global_queue is None:
+                raise RuntimeError("trace-scoped fetch dispatcher is not configured")
+            item = await global_queue.get()
+            await self._finalize_message(item)
+            return self._unwrap_rookery_result(item)
+
+        async with self._fetch_queue_lock:
+            self._fetch_subscribed_traces.add(trace_id)
+            queue_maxsize = self._fetch_queue_maxsize
+            if queue_maxsize is None:
+                queue_maxsize = self._queue_maxsize
+            queue = self._fetch_trace_queues.setdefault(trace_id, asyncio.Queue(maxsize=queue_maxsize))
+        item = await queue.get()
+        try:
+            await self._finalize_message(item)
+            return self._unwrap_rookery_result(item)
+        finally:
+            await self._release_trace_roundtrip(trace_id)
+
+    async def fetch_any(
+        self,
+        from_: Node | Sequence[Node] | None = None,
+        *,
+        trace_id: str | None = None,
+    ) -> Any:
+        # No multi-queue semantics once the dispatcher is enabled.
+        return await self.fetch(from_, trace_id=trace_id)
 
     async def load_history(self, trace_id: str) -> Sequence[StoredEvent]:
         """Return the persisted history for ``trace_id`` from the state store."""
@@ -976,19 +1217,26 @@ class PenguiFlow:
                 cancel_waiter.cancel()
             if timeout_task is not None:
                 timeout_task.cancel()
-            await asyncio.gather(
-                *(task for task in (cancel_waiter, timeout_task) if task is not None),
-                return_exceptions=True,
-            )
+            watchers: list[asyncio.Future[Any]] = []
+            if cancel_waiter is not None:
+                watchers.append(cancel_waiter)
+            if timeout_task is not None:
+                watchers.append(timeout_task)
+            if watchers:
+                await asyncio.gather(*watchers, return_exceptions=True)
             raise
         finally:
             for task in pending:
                 task.cancel()
-            watchers = [task for task in (cancel_waiter, timeout_task) if task is not None]
-            for watcher in watchers:
+            final_watchers: list[asyncio.Future[Any]] = []
+            if cancel_waiter is not None:
+                final_watchers.append(cancel_waiter)
+            if timeout_task is not None:
+                final_watchers.append(timeout_task)
+            for watcher in final_watchers:
                 watcher.cancel()
-            if watchers:
-                await asyncio.gather(*watchers, return_exceptions=True)
+            if final_watchers:
+                await asyncio.gather(*final_watchers, return_exceptions=True)
 
     def _get_trace_id(self, message: Any) -> str | None:
         return getattr(message, "trace_id", None)
@@ -1076,12 +1324,16 @@ class PenguiFlow:
         task.add_done_callback(_cleanup)
 
     async def _send_to_floe(self, floe: Floe, message: Any) -> None:
+        if floe.target is ROOKERY:
+            message = self._maybe_wrap_rookery_result(message)
         self._on_message_enqueued(message)
         if self._message_bus is not None:
             await self._publish_to_bus(floe.source, floe.target, message)
         await floe.queue.put(message)
 
     def _send_to_floe_nowait(self, floe: Floe, message: Any) -> None:
+        if floe.target is ROOKERY:
+            message = self._maybe_wrap_rookery_result(message)
         self._on_message_enqueued(message)
         if self._message_bus is not None:
             self._schedule_bus_publish(floe.source, floe.target, message)
@@ -1136,6 +1388,23 @@ class PenguiFlow:
         for item in retained:
             queue.put_nowait(item)
 
+    async def _drop_trace_from_fetch_queue(self, queue: asyncio.Queue[Any], trace_id: str) -> None:
+        retained: list[Any] = []
+
+        while True:
+            try:
+                item = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            if self._get_trace_id(item) == trace_id:
+                await self._finalize_message(item)
+                continue
+            retained.append(item)
+
+        for item in retained:
+            queue.put_nowait(item)
+
     async def cancel(self, trace_id: str) -> bool:
         if not self._running:
             raise RuntimeError("PenguiFlow is not running")
@@ -1166,6 +1435,18 @@ class PenguiFlow:
         tasks = list(self._trace_invocations.get(trace_id, set()))
         for task in tasks:
             task.cancel()
+
+        trace_queue: asyncio.Queue[Any] | None = None
+        global_queue: asyncio.Queue[Any] | None = None
+        async with self._fetch_queue_lock:
+            trace_queue = self._fetch_trace_queues.get(trace_id)
+            global_queue = self._fetch_global_queue
+
+        if trace_queue is not None:
+            await self._drop_trace_from_fetch_queue(trace_queue, trace_id)
+        if global_queue is not None:
+            await self._drop_trace_from_fetch_queue(global_queue, trace_id)
+        await self._release_trace_roundtrip(trace_id)
 
         return True
 
@@ -1287,6 +1568,8 @@ class PenguiFlow:
 
     async def _emit_to_rookery(self, message: Any, *, source: Node | Endpoint | None = None) -> None:
         """Route ``message`` to the Rookery sink regardless of graph edges."""
+
+        message = self._maybe_wrap_rookery_result(message)
 
         rookery_context = self._contexts[ROOKERY]
         incoming = rookery_context._incoming
