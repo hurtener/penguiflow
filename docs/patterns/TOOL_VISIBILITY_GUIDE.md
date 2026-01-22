@@ -20,9 +20,15 @@ PenguiFlow has two complementary mechanisms:
 - This is intended for per-tenant / per-user / per-request visibility (RBAC, feature flags, entitlements).
 - It affects the *LLM-visible* tool catalog for that single run, and it also restricts tool resolution so hidden tools are not executable during that run.
 
-## Thread-safety (crystal clear)
+## Concurrency & safety 
 
-### `tool_visibility` is **not thread-safe** on a shared planner instance
+### Baseline: the planner is safe when you don't use per-run visibility
+
+If you **do not** pass `tool_visibility`, the planner does not perform any temporary catalog/prompt swapping.
+That means there is **no tool-visibility-specific** thread-safety hazard in the default mode.
+
+
+### `tool_visibility` is **not safe** on an overlapping shared planner instance
 
 `tool_visibility` works by temporarily mutating planner internals while the run is executing (for that planner instance):
 - `planner._specs`
@@ -35,46 +41,60 @@ These fields are used throughout the run loop (prompt building, tool routing, gu
 If two runs overlap on the *same* `ReactPlanner` object, one run can observe the other run’s temporary catalog/prompt state.
 That can cause incorrect tool availability, incorrect prompts, and nondeterministic behavior.
 
-### Safe rule
+### Current safe rule (recommended)
 
-Only use `tool_visibility` when you can guarantee:
-- **No concurrent `run()` / `resume()` calls on the same planner instance.**
+`tool_visibility` is safe when you can guarantee either:
+- **No overlap** on a single planner instance (single-threaded / sequential usage), **or**
+- **Per-session serialization** is enabled and active (see next section).
 
-### Recommended concurrency pattern (safe)
+### Recommended concurrency pattern (safe): per-session serialization
 
-If you need concurrency (background tasks, multi-tenant servers, parallel HTTP requests):
-- Create a **fresh planner instance per request/task**, typically via `planner.fork(...)`.
-- Then use `tool_visibility` on that per-request/per-task planner instance.
+Most production chat systems serialize work per `session_id` (turn ordering), but allow concurrency across sessions.
 
-This is safe because the temporary mutations occur on an instance that is not shared across concurrent runs.
+`ReactPlanner` supports this model when you pass `tool_context["session_id"]` (or a `MemoryKey` with a `session_id`):
+- Calls with the **same** `session_id` are queued (no overlap).
+- Calls with **different** `session_id`s may run concurrently.
+- Internally, the planner routes each session to its own forked runtime instance, so per-run tool visibility swapping stays isolated.
+
+This is the safest “drop-in” option for downstream teams that reuse a single `ReactPlanner` across requests.
+
+> Note: This provides “thread-safe-ish” behavior for typical async server workloads. If you truly call the same
+> planner instance from multiple OS threads, you should still add an application-level lock.
 
 ## Recommended usage patterns
 
-### Pattern A: “Safe by default” for servers (fork per request)
+### Pattern A: “Safe by default” for servers (session-scoped serialization)
 
-Use this when your host app handles multiple requests concurrently.
+Use this when your host app handles multiple requests concurrently and you want “turn ordering” semantics.
 
 1. Keep a base planner configuration (nodes/catalog/registry, LLM config, etc.).
-2. For each request:
-   - create an isolated planner instance via `fork()`
-   - apply coarse constraints via `tool_policy` at fork-time (optional)
-   - apply fine-grained per-request visibility via `tool_visibility` at run-time (optional)
+2. Ensure each request sets `tool_context["session_id"]`.
+3. Optionally apply fine-grained per-request visibility via `tool_visibility` (RBAC/entitlements).
 
 ```python
-from penguiflow.planner import ReactPlanner, ToolPolicy
+from penguiflow.planner import ReactPlanner
 
 def handle_request(base: ReactPlanner, *, user_id: str, role: str) -> str:
-    request_planner = base.fork(
-        # Optional: coarse constraints (tenant/app-level)
-        tool_policy=ToolPolicy(denied_tools={"payments.charge"}),
-    )
-
-    result = await request_planner.run(
+    result = await base.run(
         query="...",
-        tool_context={"user_id": user_id, "role": role},
+        tool_context={"session_id": "s123", "user_id": user_id, "role": role},
         tool_visibility=RoleBasedVisibility(...),  # optional: per-request
     )
     return result.payload
+```
+
+### Pattern B: “Maximum isolation” for servers (fork per request)
+
+Use this when you want strict per-request isolation (at the cost of more allocations), or when you cannot
+reliably provide a stable `session_id`.
+
+```python
+request_planner = base.fork()
+result = await request_planner.run(
+    query="...",
+    tool_context={"session_id": "s123", "user_id": user_id},
+    tool_visibility=RoleBasedVisibility(...),
+)
 ```
 
 ### Pattern B: “Single-threaded” sequential usage (no fork, but no overlap)
@@ -123,6 +143,7 @@ When you pass `tool_visibility`, the planner will:
 If a run pauses and you later call `resume()`:
 - pass the same `tool_visibility` policy to `resume()` (or one that is compatible with the original visible set)
 - otherwise the resumed run might see a different tool catalog than the original paused run
+ - ensure `tool_context["session_id"]` (or `memory_key`) matches the original session so the resume routes to the same session runtime
 
 ## Practical guidance for downstream teams
 
@@ -145,5 +166,6 @@ This is tracked for a future RFC (see `docs/RFC/ToDo/RFC_IDEAS_BACKLOG_2026_01.m
 
 - No caching of the rebuilt system prompt tool catalog yet.
   - This is intentionally deferred; the first implementation prioritizes correctness and opt-in safety.
-- `tool_visibility` is not a replacement for `fork()` in concurrent environments.
-
+- Per-session serialization requires a stable `session_id` per conversation/session.
+- In multi-process deployments, per-session ordering is only guaranteed within a single process unless you add a shared/distributed lock
+  or session affinity at the load balancer.
