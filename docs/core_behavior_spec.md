@@ -76,3 +76,14 @@ canonical regression tests that cover it.
   locks the baseline behavior, while the new property test
   [`tests/test_property_based.py::test_join_k_handles_randomized_fanout`](../tests/test_property_based.py)
   fuzzes randomized arrival orders under tight queue backpressure.
+
+## Trace-scoped Roundtrips
+
+* **Invariant** – When a caller supplies a `trace_id` to `PenguiFlow.emit(..., trace_id=...)` and
+  `PenguiFlow.fetch(trace_id=...)`, the returned Rookery payload is isolated to that trace so
+  concurrent callers reusing the same running flow cannot cross-consume results.
+* **Operational impact** – Enables safe reuse of long-lived flow instances in orchestrators (no
+  per-request flow construction) while keeping different request traces concurrent.
+* **Regression coverage** –
+  [`tests/test_core.py::test_trace_scoped_fetch_isolated_across_concurrent_traces`](../tests/test_core.py) and
+  [`tests/test_core.py::test_trace_scoped_roundtrip_serializes_same_trace_id`](../tests/test_core.py).

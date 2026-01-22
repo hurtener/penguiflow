@@ -215,9 +215,17 @@ registry.register("packer", QueryOut, PackOut)
 
 flow.run(registry=registry)
 
+# Single caller
 await flow.emit(msg)          # emit into OpenSea
 out = await flow.fetch()      # fetch from Rookery
 print(out.payload)            # PackOut(...)
+
+# If you reuse a single running flow across concurrent callers,
+# use trace-scoped roundtrips to avoid cross-consuming results.
+trace_id = "..."  # your request/session id
+await flow.emit(msg, trace_id=trace_id)
+out = await flow.fetch(trace_id=trace_id)
+
 await flow.stop()
 ```
 

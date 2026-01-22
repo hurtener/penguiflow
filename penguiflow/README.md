@@ -68,6 +68,9 @@ models; otherwise you can inject a deterministic stub via the `llm_client` param
   builds a `FlowError` capturing the trace id, node metadata, and failure code. Setting
   `emit_errors_to_rookery=True` on `penguiflow.core.create` pushes the `FlowError`
   directly to Rookery so callers can inspect it.
+* **Trace-scoped roundtrips**: when reusing one running flow across concurrent callers,
+  use `flow.emit(..., trace_id=...)` and `flow.fetch(trace_id=...)` to avoid cross-consuming
+  Rookery results between traces.
 * **Metadata propagation**: every `Message` includes a mutable `meta` dictionary. The
   runtime clones it when emitting streaming chunks, preserving debugging or billing
   breadcrumbs across retries, controller loops, and playbook subflows.

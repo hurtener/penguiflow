@@ -170,6 +170,13 @@ message = Message(
 )
 await flow.emit(message)
 
+# If multiple concurrent callers share the same running flow instance,
+# use trace-scoped roundtrips to avoid cross-consuming results.
+# (Pick a unique trace_id per request.)
+# trace_id = "..."
+# await flow.emit(message, trace_id=trace_id)
+# result = await flow.fetch(trace_id=trace_id)
+
 # 8. Fetch the result from Rookery
 result = await flow.fetch()  # Returns: Message(payload=PackOut(...))
 print(result.payload.prompt)  # "[metrics] summarize 2 docs"
