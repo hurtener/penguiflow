@@ -73,6 +73,7 @@ from .models import (
     ReflectionCriteria,
     ReflectionCritique,
     ToolPolicy,
+    ToolVisibilityPolicy,
 )
 from .parallel import execute_parallel_plan
 from .pause_management import (
@@ -386,6 +387,11 @@ class ReactPlanner:
     _init_kwargs: dict[str, Any] | None
     _guardrail_stream_handler: _GuardrailStreamHandler | None
     _guardrail_stream_decision: GuardrailDecision | None
+    _session_dispatch_enabled: bool
+    _session_registry_lock: asyncio.Lock
+    _session_locks: dict[str, asyncio.Lock]
+    _session_planners: dict[str, ReactPlanner]
+    _fallback_run_lock: asyncio.Lock
 
     def __init__(
         self,
@@ -430,7 +436,18 @@ class ReactPlanner:
         multi_action_max_tools: int = 2,
         use_native_llm: bool = False,
         guardrail_gateway: Any | None = None,
+        guardrail_conversation_history_turns: int = 1,
     ) -> None:
+        # NOTE: ReactPlanner has mutable per-run state and is not safe to call concurrently on a single
+        # instance. We provide an internal hotfix path that serializes calls per session_id while
+        # allowing concurrency across sessions by routing execution to per-session forked planners.
+        # This avoids API changes for downstream orchestrators that reuse a single ReactPlanner.
+        self._session_dispatch_enabled = True
+        self._session_registry_lock = asyncio.Lock()
+        self._session_locks = {}
+        self._session_planners = {}
+        self._fallback_run_lock = asyncio.Lock()
+
         # Store init kwargs so the planner can be safely forked for background tasks.
         # This is intentionally best-effort and uses references for non-serialisable objects.
         self._init_kwargs = {
@@ -474,6 +491,7 @@ class ReactPlanner:
             "multi_action_max_tools": multi_action_max_tools,
             "use_native_llm": use_native_llm,
             "guardrail_gateway": guardrail_gateway,
+            "guardrail_conversation_history_turns": guardrail_conversation_history_turns,
         }
         _init_react_planner(
             self,
@@ -517,6 +535,7 @@ class ReactPlanner:
             multi_action_max_tools=multi_action_max_tools,
             use_native_llm=use_native_llm,
             guardrail_gateway=guardrail_gateway,
+            guardrail_conversation_history_turns=guardrail_conversation_history_turns,
         )
         self._guardrail_stream_handler = None
         self._guardrail_stream_decision = None
@@ -525,6 +544,8 @@ class ReactPlanner:
         self,
         *,
         catalog_filter: Callable[[NodeSpec], bool] | None = None,
+        tool_policy: ToolPolicy | None = None,
+        inherit_policy: bool = True,
         background_tasks: BackgroundTasksConfig | None | Literal["inherit"] = "inherit",
     ) -> ReactPlanner:
         """Create a new planner instance with the same configuration.
@@ -534,6 +555,23 @@ class ReactPlanner:
         """
 
         init_kwargs = dict(self._init_kwargs or {})
+        if tool_policy is not None:
+            base_policy = init_kwargs.get("tool_policy")
+            if inherit_policy and isinstance(base_policy, ToolPolicy):
+                allowed: set[str] | None
+                if base_policy.allowed_tools is None:
+                    allowed = tool_policy.allowed_tools
+                elif tool_policy.allowed_tools is None:
+                    allowed = base_policy.allowed_tools
+                else:
+                    allowed = base_policy.allowed_tools & tool_policy.allowed_tools
+                init_kwargs["tool_policy"] = ToolPolicy(
+                    allowed_tools=allowed,
+                    denied_tools=set(base_policy.denied_tools) | set(tool_policy.denied_tools),
+                    require_tags=set(base_policy.require_tags) | set(tool_policy.require_tags),
+                )
+            else:
+                init_kwargs["tool_policy"] = tool_policy
         base_catalog = init_kwargs.get("catalog")
         nodes = init_kwargs.get("nodes")
         registry = init_kwargs.get("registry")
@@ -558,7 +596,41 @@ class ReactPlanner:
         if background_tasks != "inherit":
             init_kwargs["background_tasks"] = background_tasks
 
-        return ReactPlanner(**init_kwargs)
+        child = ReactPlanner(**init_kwargs)
+        # Child planners created for background tasks and per-session dispatch should not themselves
+        # perform session dispatch; the dispatch happens at the owning/root planner.
+        child._session_dispatch_enabled = False
+        return child
+
+    def _extract_session_id(
+        self,
+        *,
+        tool_context: Mapping[str, Any] | None,
+        memory_key: MemoryKey | None,
+    ) -> str | None:
+        if tool_context is not None:
+            value = tool_context.get("session_id")
+            if value is not None:
+                return str(value)
+        if memory_key is not None:
+            return str(memory_key.session_id)
+        return None
+
+    async def _get_or_create_session_runtime(self, session_id: str) -> tuple[asyncio.Lock, ReactPlanner]:
+        async with self._session_registry_lock:
+            lock = self._session_locks.get(session_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._session_locks[session_id] = lock
+            planner = self._session_planners.get(session_id)
+            if planner is None:
+                planner = self.fork()
+                # Preserve legacy behaviour where memory state is observable on the original planner
+                # instance. Per-session planners share the same memory map so callers that reuse a
+                # single ReactPlanner can still access `_memory_by_key` after a run.
+                planner._memory_by_key = self._memory_by_key
+                self._session_planners[session_id] = planner
+            return lock, planner
 
     @property
     def artifact_store(self) -> ArtifactStore:
@@ -574,6 +646,7 @@ class ReactPlanner:
         tool_context: Mapping[str, Any] | None = None,
         memory_key: MemoryKey | None = None,
         steering: SteeringInbox | None = None,
+        tool_visibility: ToolVisibilityPolicy | None = None,
     ) -> PlannerFinish | PlannerPause:
         """Execute planner on a query until completion or pause.
 
@@ -607,19 +680,44 @@ class ReactPlanner:
         RuntimeError
             If LLM client fails after all retries.
         """
-        previous = getattr(self, "_steering", None)
-        self._steering = steering
-        try:
-            return await _run_impl(
-                self,
-                query,
-                llm_context=llm_context,
-                context_meta=context_meta,
-                tool_context=tool_context,
-                memory_key=memory_key,
-            )
-        finally:
-            self._steering = previous
+        session_id = None
+        if self._session_dispatch_enabled:
+            session_id = self._extract_session_id(tool_context=tool_context, memory_key=memory_key)
+
+        if session_id:
+            session_lock, session_planner = await self._get_or_create_session_runtime(session_id)
+            previous_callback = getattr(session_planner, "_event_callback", None)
+            session_planner._event_callback = getattr(self, "_event_callback", None)
+            try:
+                async with session_lock:
+                    return await session_planner.run(
+                        query,
+                        llm_context=llm_context,
+                        context_meta=context_meta,
+                        tool_context=tool_context,
+                        memory_key=memory_key,
+                        steering=steering,
+                        tool_visibility=tool_visibility,
+                    )
+            finally:
+                session_planner._event_callback = previous_callback
+
+        # Fallback: serialize when no session_id is provided to avoid corrupting shared mutable state.
+        async with self._fallback_run_lock:
+            previous = getattr(self, "_steering", None)
+            self._steering = steering
+            try:
+                return await _run_impl(
+                    self,
+                    query,
+                    llm_context=llm_context,
+                    context_meta=context_meta,
+                    tool_context=tool_context,
+                    memory_key=memory_key,
+                    tool_visibility=tool_visibility,
+                )
+            finally:
+                self._steering = previous
 
     async def resume(
         self,
@@ -629,6 +727,7 @@ class ReactPlanner:
         tool_context: Mapping[str, Any] | None = None,
         memory_key: MemoryKey | None = None,
         steering: SteeringInbox | None = None,
+        tool_visibility: ToolVisibilityPolicy | None = None,
     ) -> PlannerFinish | PlannerPause:
         """Resume a paused planning session.
 
@@ -659,18 +758,41 @@ class ReactPlanner:
         KeyError
             If resume token is invalid or expired.
         """
-        previous = getattr(self, "_steering", None)
-        self._steering = steering
-        try:
-            return await _resume_impl(
-                self,
-                token,
-                user_input=user_input,
-                tool_context=tool_context,
-                memory_key=memory_key,
-            )
-        finally:
-            self._steering = previous
+        session_id = None
+        if self._session_dispatch_enabled:
+            session_id = self._extract_session_id(tool_context=tool_context, memory_key=memory_key)
+
+        if session_id:
+            session_lock, session_planner = await self._get_or_create_session_runtime(session_id)
+            previous_callback = getattr(session_planner, "_event_callback", None)
+            session_planner._event_callback = getattr(self, "_event_callback", None)
+            try:
+                async with session_lock:
+                    return await session_planner.resume(
+                        token,
+                        user_input=user_input,
+                        tool_context=tool_context,
+                        memory_key=memory_key,
+                        steering=steering,
+                        tool_visibility=tool_visibility,
+                    )
+            finally:
+                session_planner._event_callback = previous_callback
+
+        async with self._fallback_run_lock:
+            previous = getattr(self, "_steering", None)
+            self._steering = steering
+            try:
+                return await _resume_impl(
+                    self,
+                    token,
+                    user_input=user_input,
+                    tool_context=tool_context,
+                    memory_key=memory_key,
+                    tool_visibility=tool_visibility,
+                )
+            finally:
+                self._steering = previous
 
     def _resolve_memory_key(
         self,
@@ -1103,6 +1225,22 @@ class ReactPlanner:
                 if isinstance(scope, str) and scope.strip():
                     payload["task_scope"] = scope.strip()
                     break
+
+        history_turns = int(getattr(self, "_guardrail_conversation_history_turns", 0) or 0)
+        conversation_history: list[dict[str, str]] = []
+        if history_turns > 0 and isinstance(trajectory.llm_context, Mapping):
+            conversation_memory = trajectory.llm_context.get("conversation_memory")
+            if isinstance(conversation_memory, Mapping):
+                recent_turns = conversation_memory.get("recent_turns")
+                if isinstance(recent_turns, list):
+                    for item in recent_turns[-history_turns:]:
+                        if not isinstance(item, Mapping):
+                            continue
+                        user = item.get("user")
+                        assistant = item.get("assistant")
+                        if isinstance(user, str) and isinstance(assistant, str):
+                            conversation_history.append({"user": user, "assistant": assistant})
+        payload["conversation_history"] = conversation_history
 
         return payload
 

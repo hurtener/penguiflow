@@ -9,6 +9,7 @@ from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast
 from pydantic import BaseModel, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
+from ..catalog import NodeSpec
 from .context import PlannerPauseReason
 
 # ---------------------------------------------------------------------------
@@ -402,6 +403,21 @@ class ToolPolicy(BaseModel):
             return False
 
         return True
+
+
+class ToolVisibilityPolicy(Protocol):
+    """Dynamic, per-run filtering for which tools are shown to the LLM.
+
+    This is opt-in and intended for per-tenant/per-user tool visibility without
+    constructing a brand new planner instance. Implementations must only return
+    specs from the provided `specs` sequence.
+    """
+
+    def visible_tools(
+        self,
+        specs: Sequence[NodeSpec],
+        tool_context: Mapping[str, Any],
+    ) -> Sequence[NodeSpec]: ...
 
 
 class BackgroundTasksConfig(BaseModel):

@@ -53,6 +53,192 @@ Background Tasks v2.11 - Design Document
   └─────────────────────────────────────────────────────────────────────────────┘
 
   ---
+  Phased Implementation Plan (Recommended)
+
+  This RFC bundles several changes with very different risk/effort profiles:
+  - Low-risk/high-ROI: consumption + cleanup to prevent context bloat.
+  - Medium-risk/high-ROI: library default proactive generator (opt-in).
+  - Higher-risk: migrate storage from `llm_context["background_results"]` to `Trajectory.background_results`.
+  - Correctness work: `retain_turn` semantics and de-duplication of proactive emissions.
+
+  To keep CI green and enable incremental shipping, implement in phases with explicit
+  acceptance criteria. Each phase should be independently mergeable.
+
+  Guiding constraints:
+  - Preserve backward compatibility by default (feature remains opt-in).
+  - Make each phase pass: ruff, mypy, pytest, and coverage threshold (>=84.5%).
+  - Avoid cross-cutting rewrites until Phase 2.
+
+  Phase 0: Consumption + Cleanup (Quick Win, No Storage Migration)
+
+  Goal:
+  - Stop `llm_context["background_results"]` from growing unbounded across turns.
+  - Provide an explicit “I used it” acknowledgment surface for the agent.
+
+  Design:
+  - Continue storing background results as `ContextPatch` payloads in session llm_context
+    (`StreamingSession.apply_context_patch()` already does this).
+  - Add an explicit cleanup path that removes results by `task_id`.
+
+  Files to modify:
+  - `penguiflow/sessions/session.py`
+    - Add `async def mark_background_consumed(self, *, task_ids: list[str]) -> int`:
+      - Locate entries in:
+        - `llm_context["background_results"]` (list[patch dict]) and remove any with matching `task_id`
+        - `llm_context["background_result"]` (single dict) and delete if matching `task_id`
+      - Return count removed.
+      - Idempotent: calling twice returns 0 on second call.
+    - Ensure cleanup does NOT mutate pending human-gated patches; those are managed separately.
+  - `penguiflow/sessions/task_service.py`
+    - Add a protocol method to allow tools to trigger cleanup through the TaskService surface:
+      `async def acknowledge_background(self, *, session_id: str, task_ids: list[str]) -> int: ...`
+    - Implement in `InProcessTaskService` by resolving the session via `SessionManager` and delegating
+      to `StreamingSession.mark_background_consumed(...)`.
+    - Rationale: planner tools currently get `task_service` injected in `ToolContext`; they do not
+      receive a direct `StreamingSession`.
+  - `penguiflow/sessions/task_tools.py`
+    - Add `tasks_acknowledge_background` tool:
+      - Args: `task_ids: list[str]`
+      - Calls `_ensure_foreground(ctx)` then `service.acknowledge_background(session_id=..., task_ids=...)`
+      - Returns `{acknowledged: [...], cleaned_up: int}`
+    - Naming: keep `tasks_*` prefix to match the existing tool surface.
+  - (Optional) `penguiflow/planner/artifact_registry.py`
+    - No change required for Phase 0. Artifacts embedded in `background_results` remain discoverable
+      because they’re still merged into llm_context and ingested via `ingest_llm_context()`.
+
+  Tests to add/modify:
+  - `tests/test_context_merge.py`
+    - Add coverage for `mark_background_consumed` removing entries from `background_results`.
+  - `tests/test_task_tools.py`
+    - Add a test for `tasks_acknowledge_background` using a dummy TaskService implementing the new method.
+  - `tests/test_task_service.py`
+    - Add a test for `InProcessTaskService.acknowledge_background` removing merged results in the target session.
+
+  Acceptance criteria:
+  - When a background task auto-merges with APPEND, the session context grows by 1 patch.
+  - After acknowledging, that patch is removed from session llm_context (and no longer appears in prompts).
+  - Idempotent cleanup and safe when task_id is unknown.
+
+  Phase 1: Library Default Proactive Generator (Opt-in UX Win)
+
+  Goal:
+  - Ship a “batteries included” proactive report generator that downstream apps can enable with one call.
+  - Keep proactive reporting disabled by default for backward compatibility.
+
+  Design:
+  - Implement `create_default_proactive_generator(...)` that runs a full planner loop to synthesize a natural message.
+  - Add a proactive hop guard to prevent recursive “background → proactive → background” loops.
+
+  Files to create/modify:
+  - `penguiflow/sessions/proactive.py` (NEW)
+    - Implement:
+      - `create_default_proactive_generator(planner_factory, session) -> generator(request)`.
+      - Optional: a second generator for group reports if needed (or unify by request shape).
+    - Generator responsibilities:
+      - Summarize patch/facts/artifacts into a synthesis query.
+      - Execute `ReactPlanner.run(...)` with:
+        - `llm_context` containing a short memory snapshot + proactive flags
+        - `tool_context` inherited from session (so tools/auth are available)
+      - Publish a `StateUpdate.RESULT` with `proactive=True`.
+      - Call `session.mark_background_consumed(task_ids=[...])` after publishing.
+  - `penguiflow/sessions/session.py`
+    - Extend `configure_proactive_reporting(...)` to accept/track:
+      - `max_hops` (default 2)
+    - Extend `_enqueue_proactive_report(...)` to include the memory snapshot and tool_context snapshot if/when
+      the request model is extended (Phase 2). For Phase 1, keep current request shape and pass only what exists.
+  - `penguiflow/cli/playground.py` (or orchestrator template wiring)
+    - Add a `setup_proactive_reporting(...)` helper to opt-in to default generator.
+    - Ensure this is only called when background tasks are enabled AND proactive reporting is enabled.
+
+  Tests to add/modify:
+  - `tests/test_proactive_reports.py`
+    - Add a test that a proactive report is emitted when enabled and that cleanup runs afterward.
+    - Add a negative-path test: proactive generator timeout emits fallback notification (if configured).
+  - Keep proactive reporting disabled by default in existing tests to avoid behavior changes.
+
+  Acceptance criteria:
+  - Opt-in only: no proactive results without explicit configuration.
+  - Default generator produces one result update per completed task/group (subject to Phase 3 de-dupe rules).
+  - Cleanup occurs after report emission.
+
+  Phase 2: Storage Migration to Trajectory (Medium Risk, Bigger Refactor)
+
+  Goal:
+  - Move “background results” out of session llm_context into an ephemeral `Trajectory.background_results` map,
+    enabling consumption tracking and preventing accidental prompt injection/double-rendering.
+
+  Design notes:
+  - This phase touches planner serialization and prompt building; land after Phases 0–1 to reduce blast radius.
+  - Maintain compatibility by:
+    - supporting both storage locations during a migration window, OR
+    - providing a one-time “lift” from llm_context into trajectory at run start.
+
+  Files to modify:
+  - `penguiflow/planner/trajectory.py`
+    - Add `BackgroundTaskResult` dataclass + `Trajectory.background_results: dict[str, BackgroundTaskResult]`.
+    - Add helpers: `add_background_result`, `mark_background_consumed`, `clear_consumed_background`,
+      `get_unconsumed_background`.
+    - Update `Trajectory.serialise()` and `Trajectory.from_serialised()` (additive field).
+  - `penguiflow/sessions/session.py`
+    - Stop writing background results into `llm_context["background_results"]` for APPEND/REPLACE.
+    - Instead, attach results to the active foreground `Trajectory` (requires access to the trajectory object
+      or a designated storage layer in session state).
+    - Update `mark_background_consumed()` to operate on the new trajectory storage, with a backward-compat
+      fallback that also cleans old llm_context keys if present.
+  - `penguiflow/planner/llm.py`
+    - Implement “extract + remove” logic for `background_results` in llm_context during message build
+      (mirrors `conversation_memory` extraction) so background results never bloat the user prompt.
+  - `penguiflow/planner/artifact_registry.py`
+    - Add ingestion path for `Trajectory.background_results` (not just llm_context patches), OR
+    - Ensure proactive generators (Phase 1) convert artifacts into standard artifact registry entries.
+
+  Tests to update:
+  - `tests/test_context_merge.py`
+    - Update assertions to check trajectory storage (not llm_context).
+  - `tests/test_task_service.py`
+    - Update assertions to check trajectory storage (not llm_context).
+  - Add at least one migration-compat test:
+    - Old serialized trajectories without `background_results` still load.
+
+  Acceptance criteria:
+  - Background results do not appear in `build_user_prompt()` llm_context rendering.
+  - Consumption tracking is stored and persists across pause/resume serialization.
+  - Artifact rendering continues to work for background-produced artifacts.
+
+  Phase 3: `retain_turn` Correctness + Proactive De-duplication (Known Issues)
+
+  Goal:
+  - Make `retain_turn` semantics reliable and avoid duplicate proactive emissions when the foreground already
+    incorporated results.
+
+  Issues to address (current known gaps):
+  - `retain_turn` only waits when a group exists and is sealed; behavior should be explicit and documented.
+  - `retain_turn_timeout_s` exists in config but is not consistently enforced.
+  - Background completion can still enqueue proactive reports, causing redundant updates.
+
+  Files to modify:
+  - `penguiflow/sessions/task_service.py`
+    - Wire `BackgroundTasksConfig.retain_turn_timeout_s` into waiting logic.
+    - Ensure group sealing rules are consistent (auto-seal on yield vs explicit seal).
+  - `penguiflow/sessions/session.py`
+    - When the foreground waits and then returns results inline, suppress proactive emission for those task_ids
+      (e.g., mark consumed / mark report queued).
+    - Add idempotency guards to ensure “exactly once” reporting per task/group.
+  - `penguiflow/planner/models.py`
+    - Ensure `background_continuation_*` settings are used (or explicitly deferred if out of scope).
+
+  Tests to add:
+  - `tests/test_task_service.py` or `tests/test_proactive_reports.py`
+    - `retain_turn` waits up to configured timeout.
+    - No proactive result emitted when foreground already included results (de-dupe).
+    - Negative-path: timeout triggers background continuation policy as designed (or asserts deferral).
+
+  Acceptance criteria:
+  - `retain_turn` works predictably with groups (and either errors or no-ops when not grouped, by design).
+  - No duplicate proactive updates for the same completion.
+  - Config knobs (`retain_turn_timeout_s`, `auto_seal_groups_on_foreground_yield`) are actually enforced.
+
+  ---
   Component 1: Trajectory Extension
 
   File: penguiflow/planner/trajectory.py
