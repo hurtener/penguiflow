@@ -36,10 +36,9 @@ It provides:
 * **Remote calls (opt-in)** — `RemoteNode` bridges the runtime to external agents through a
   pluggable `RemoteTransport` interface (A2A-ready) while propagating streaming chunks and
   cancellation.
-* **A2A server adapter (opt-in)** — wrap a PenguiFlow graph in a FastAPI surface using
-  `penguiflow_a2a.A2AServerAdapter` so other agents can call `message/send`,
-  `message/stream`, and `tasks/cancel` while reusing the runtime's backpressure and
-  cancellation semantics.
+* **A2A server bindings (opt-in)** — expose a PenguiFlow graph via the A2A HTTP+JSON or
+  gRPC bindings using `penguiflow_a2a.A2AService`, `create_a2a_http_app`, and
+  `add_a2a_grpc_service`.
 * **Observability & ops polish** — remote calls emit structured metrics (latency, payload
   sizes, cancel reasons) and the `penguiflow-admin` CLI replays trace history from any
   configured `StateStore` for debugging.
@@ -297,17 +296,19 @@ partials back into the graph, and propagates per-trace cancellation to remote ta
 
 ### Exposing a flow over A2A
 
-Install the optional extra to expose PenguiFlow as an A2A-compatible FastAPI service:
+Install the optional extras to expose PenguiFlow via A2A:
 
 ```bash
-pip install "penguiflow[a2a-server]"
+pip install "penguiflow[a2a-server]"  # HTTP+JSON + JSON-RPC
+pip install "penguiflow[a2a-grpc]"    # gRPC binding
 ```
 
-Create the adapter and mount the routes:
+Create the A2A service and mount the HTTP+JSON routes:
 
 ```python
 from penguiflow import Message, Node, create
-from penguiflow_a2a import A2AAgentCard, A2AServerAdapter, A2ASkill, create_a2a_app
+from penguiflow_a2a import A2AConfig, A2AService, create_a2a_http_app
+from penguiflow_a2a.models import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
 
 async def orchestrate(message: Message, ctx):
     await ctx.emit_chunk(parent=message, text="thinking...")
@@ -316,30 +317,46 @@ async def orchestrate(message: Message, ctx):
 node = Node(orchestrate, name="main")
 flow = create(node.to())
 
-card = A2AAgentCard(
+card = AgentCard(
+    protocol_versions=["0.3"],
     name="Main Agent",
     description="Primary entrypoint for orchestration",
+    supported_interfaces=[
+        AgentInterface(url="https://agent.example/a2a", protocol_binding="HTTP+JSON")
+    ],
     version="2.1.0",
-    skills=[A2ASkill(name="orchestrate", description="Handles orchestration")],
+    capabilities=AgentCapabilities(
+        streaming=True,
+        push_notifications=False,
+        extended_agent_card=False,
+        state_transition_history=False,
+    ),
+    default_input_modes=["application/a2a+json", "application/json"],
+    default_output_modes=["application/a2a+json", "application/json"],
+    skills=[
+        AgentSkill(
+            id="orchestrate",
+            name="orchestrate",
+            description="Handles orchestration",
+            tags=["orchestrate"],
+        )
+    ],
 )
 
-adapter = A2AServerAdapter(
+service = A2AService(
     flow,
     agent_card=card,
-    agent_url="https://agent.example",
+    config=A2AConfig(agent_url="https://agent.example/a2a"),
 )
-app = create_a2a_app(adapter)
+app = create_a2a_http_app(service)
 ```
 
-The generated FastAPI app implements:
+The generated FastAPI app implements canonical A2A HTTP+JSON endpoints such as
+`/.well-known/agent-card.json`, `POST /message:send`, `POST /message:stream`, and the
+`/tasks/{task_id}` lifecycle routes. JSON-RPC is available at `POST /rpc`.
 
-* `GET /agent` for discovery (Agent Card)
-* `POST /message/send` for unary execution
-* `POST /message/stream` for SSE streaming
-* `POST /tasks/cancel` to mirror cancellation into PenguiFlow traces
-
-`A2AServerAdapter` reuses the runtime's `StateStore` hooks, so bindings between trace IDs
-and external `taskId`/`contextId` pairs are persisted automatically.
+To expose the same service over gRPC, attach the binding to a `grpc.aio.server` and see
+`examples/a2a_grpc_server/flow.py` for a full end-to-end example.
 
 ### Reliability & guardrails
 

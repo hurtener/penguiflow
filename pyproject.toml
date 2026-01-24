@@ -39,6 +39,11 @@ dev = [
     "uvicorn>=0.32",
     "tenacity>=9.0.0",
     "aiohttp>=3.9.0",
+    "grpcio>=1.70.0",
+    "grpcio-status>=1.70.0",
+    "grpcio-tools>=1.70.0",
+    "googleapis-common-protos>=1.66.0",
+    "protobuf>=5.26.0",
     # LLM provider SDKs for testing native LLM layer
     "openai>=2.0.0",
     "anthropic>=0.75.0",
@@ -53,6 +58,13 @@ cli = [
 ]
 a2a-server = [
     "fastapi>=0.118",
+]
+a2a-grpc = [
+    "grpcio>=1.70.0",
+    "grpcio-status>=1.70.0",
+    "grpcio-tools>=1.70.0",
+    "googleapis-common-protos>=1.66.0",
+    "protobuf>=5.26.0",
 ]
 planner = [
     "litellm>=1.77.3",
@@ -120,12 +132,21 @@ dev = [
     "pyyaml>=6.0",
     "tenacity>=9.0.0",
     "aiohttp>=3.9.0",
+    "grpcio>=1.70.0",
+    "grpcio-status>=1.70.0",
+    "grpcio-tools>=1.70.0",
+    "googleapis-common-protos>=1.66.0",
+    "protobuf>=5.26.0",
 ]
 
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-extend-exclude = ["ooflow.py"]
+extend-exclude = [
+    "ooflow.py",
+    "penguiflow_a2a/grpc/a2a_pb2.py",
+    "penguiflow_a2a/grpc/a2a_pb2_grpc.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "W"]

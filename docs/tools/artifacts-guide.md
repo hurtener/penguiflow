@@ -553,54 +553,43 @@ component = registry.resolve_ref("artifact_0", session_id="sess_123")
 
 ## External Nodes (A2A)
 
-The A2A adapter (`penguiflow_a2a/server.py`) handles artifacts at the protocol level.
+The A2A bindings in `penguiflow_a2a` (via `A2AService`) handle artifacts at the protocol
+level while keeping PenguiFlow as the source of truth for artifact creation.
 
 ### No Special Artifact Handling
 
 A2A operates at the **message level**, not the artifact level. Artifacts are:
 
 1. **Handled by ReactPlanner** before reaching A2A
-2. **Serialized in the final output** as part of the result payload
-3. **Not specially processed** by the A2A HTTP surface
+2. **Persisted on the task** as `Artifact` records
+3. **Emitted to clients** as task artifact updates in the binding layer
 
 ### Artifact Flow in A2A
 
 ```
-Remote Agent (A2A Client)
-        │
-        ▼
-  A2AServerAdapter.handle_send()
-        │
-        ▼
-  PenguiFlow.emit() → ReactPlanner.run()
-        │
-        ▼
-  [Artifact handling happens here in ReactPlanner]
-        │
-        ▼
-  FinalPayload with artifacts dict
-        │
-        ▼
-  A2AServerAdapter._to_jsonable()
-        │
-        ▼
-  JSON response: {"output": {..., "artifacts": {...}}}
+A2A Client
+   │
+   ▼
+A2AService.send_message()
+   │
+   ▼
+PenguiFlow.emit() → ReactPlanner.run()
+   │
+   ▼
+TaskArtifactUpdateEvent
+   │
+   ▼
+StreamResponse(artifact_update=...)
 ```
 
 ### Streaming Artifacts
 
-In SSE streaming mode, artifacts appear in `artifact` events:
+In streaming mode, artifacts are delivered as `StreamResponse` events. Over HTTP+JSON,
+the SSE payloads contain an `artifactUpdate` field; over gRPC, the same structure is
+returned in the `StreamResponse.artifact_update` oneof.
 
-```python
-# From server.py
-yield self._format_event(
-    "artifact",
-    {
-        "taskId": task_id,
-        "contextId": context_id,
-        "output": self._to_jsonable(payload),  # Includes artifacts
-    },
-)
+```json
+data: {"artifactUpdate": {"taskId": "trace-1", "artifact": {"artifactId": "output-0"}}}
 ```
 
 ---
@@ -836,7 +825,7 @@ Check `ttl_seconds` in your retention config. Artifacts accessed within TTL are 
 | **Size Guardrail** | `_clamp_observation()` | Final safety net for large observations |
 | **Registry** | `ArtifactRegistry` | Track artifacts for UI rendering |
 | **Event Emission** | `_EventEmittingArtifactStoreProxy` | Real-time UI updates |
-| **A2A** | `A2AServerAdapter` | Pass-through (no special handling) |
+| **A2A** | `A2AService` | Emits task artifact updates to bindings |
 
 ---
 
