@@ -92,6 +92,36 @@ def _extract_result_from_task(task: Mapping[str, Any]) -> Any:
     return None
 
 
+def _extract_message_text(message: Any) -> str | None:
+    if not isinstance(message, Mapping):
+        return None
+    parts = message.get("parts") or []
+    if not isinstance(parts, list) or not parts:
+        return None
+    first = parts[0]
+    if not isinstance(first, Mapping):
+        return None
+    text = first.get("text")
+    if isinstance(text, str) and text:
+        return text
+    return None
+
+
+def _extract_status_state(status: Any) -> str | None:
+    if not isinstance(status, Mapping):
+        return None
+    state = status.get("state")
+    if isinstance(state, str) and state:
+        return state
+    return None
+
+
+def _extract_status_detail(status: Any) -> str | None:
+    if not isinstance(status, Mapping):
+        return None
+    return _extract_message_text(status.get("message"))
+
+
 def _raise_for_status(response, *, body: str | None = None) -> None:
     if 200 <= response.status_code < 300:
         return
@@ -145,11 +175,11 @@ class A2AHttpTransport(RemoteTransport):
 
         if "task" in data:
             task = data["task"]
-            status = (task.get("status") or {}).get("state")
-            if status in {"failed", "cancelled", "rejected"}:
-                message = (task.get("status") or {}).get("message") or {}
-                detail = message.get("parts", [{}])[0].get("text") if isinstance(message, Mapping) else None
-                raise RuntimeError(f"Remote task failed: {detail or status}")
+            status = task.get("status")
+            state = _extract_status_state(status)
+            if state in {"failed", "cancelled", "rejected"}:
+                detail = _extract_status_detail(status)
+                raise RuntimeError(f"Remote task failed: {detail or state}")
             return RemoteCallResult(
                 result=_extract_result_from_task(task),
                 context_id=task.get("contextId"),
@@ -198,6 +228,36 @@ class A2AHttpTransport(RemoteTransport):
                     if isinstance(task, Mapping):
                         task_id = task.get("id", task_id)
                         context_id = task.get("contextId", context_id)
+                        state = _extract_status_state(task.get("status"))
+                        if state in {"failed", "cancelled", "rejected"}:
+                            detail = _extract_status_detail(task.get("status"))
+                            raise RuntimeError(f"Remote task failed: {detail or state}")
+                        if final_result is None:
+                            candidate = _extract_result_from_task(task)
+                            if candidate is not None:
+                                final_result = candidate
+                        yield RemoteStreamEvent(
+                            context_id=context_id,
+                            task_id=task_id,
+                            agent_url=request.agent_url,
+                        )
+                        continue
+
+                    status_update = event.get("statusUpdate")
+                    if isinstance(status_update, Mapping):
+                        task_id = status_update.get("taskId", task_id)
+                        context_id = status_update.get("contextId", context_id)
+                        status = status_update.get("status")
+                        state = _extract_status_state(status)
+                        if bool(status_update.get("final")) and state in {"failed", "cancelled", "rejected"}:
+                            detail = _extract_status_detail(status)
+                            raise RuntimeError(f"Remote task failed: {detail or state}")
+                        yield RemoteStreamEvent(
+                            done=bool(status_update.get("final")),
+                            context_id=context_id,
+                            task_id=task_id,
+                            agent_url=request.agent_url,
+                        )
                         continue
 
                     artifact_update = event.get("artifactUpdate")
