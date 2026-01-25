@@ -505,6 +505,6 @@ class {{ class_name }}Orchestrator:
 
 {% if with_a2a %}
     async def start_a2a(self) -> None:
-        """Start the A2A server stub."""
+        """Start the A2A HTTP+JSON server."""
         await self._a2a_server.start()
 {% endif %}

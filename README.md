@@ -301,6 +301,7 @@ Install the optional extras to expose PenguiFlow via A2A:
 ```bash
 pip install "penguiflow[a2a-server]"  # HTTP+JSON + JSON-RPC
 pip install "penguiflow[a2a-grpc]"    # gRPC binding
+pip install "penguiflow[a2a-client]"  # RemoteNode HTTP+JSON transport
 ```
 
 Create the A2A service and mount the HTTP+JSON routes:
@@ -349,6 +350,22 @@ service = A2AService(
     config=A2AConfig(agent_url="https://agent.example/a2a"),
 )
 app = create_a2a_http_app(service)
+```
+
+To call a remote A2A agent from a flow, use the built-in HTTP+JSON transport:
+
+```python
+from penguiflow import RemoteNode
+from penguiflow_a2a import A2AHttpTransport
+
+transport = A2AHttpTransport()
+node = RemoteNode(
+    transport=transport,
+    skill="orchestrate",
+    agent_url="https://agent.example/a2a",
+    name="remote-orchestrate",
+    streaming=True,
+)
 ```
 
 The generated FastAPI app implements canonical A2A HTTP+JSON endpoints such as

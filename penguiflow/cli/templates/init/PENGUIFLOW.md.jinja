@@ -41,7 +41,7 @@ agent:
     memory: false             # Memory Iceberg integration
     streaming: false          # Streaming responses
     hitl: false               # Human-in-the-loop
-    a2a: false                # Agent-to-agent
+    a2a: false                # A2A HTTP+JSON binding
 ```
 
 **Templates:**
@@ -51,6 +51,10 @@ agent:
 | `react` | Standard ReAct agent with tool calling |
 | `parallel` | Batch processing with parallel execution |
 | `enterprise` | Full observability, resilience, multi-tenancy |
+
+**A2A binding:**
+If `agent.flags.a2a` is enabled, the scaffold includes an `a2a.py` module that wires
+`A2AService` + `create_a2a_http_app` so you can serve the agent over A2A HTTP+JSON.
 
 ### Tool Definition
 

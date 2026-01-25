@@ -7938,91 +7938,29 @@ await flow.cancel(trace_id)
 
 ### 18.4 Production Transport Examples
 
-#### HTTP A2A Transport (Complete)
+#### A2A HTTP+JSON Transport
+
+Use the built-in transport (install with `pip install "penguiflow[a2a-client]"`):
 
 ```python
-import httpx
-from penguiflow.remote import (
-    RemoteTransport,
-    RemoteCallRequest,
-    RemoteCallResult,
-    RemoteStreamEvent,
+from penguiflow import RemoteNode
+from penguiflow_a2a.transport import A2AHttpTransport
+
+transport = A2AHttpTransport()
+node = RemoteNode(
+    transport=transport,
+    skill="orchestrate",
+    agent_url="https://agent.example/a2a",
+    name="remote-orchestrate",
+    streaming=True,
 )
-import json
-
-class HttpA2ATransport(RemoteTransport):
-    def __init__(self, base_url: str, timeout: float = 60.0) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-        self.client = httpx.AsyncClient(timeout=timeout)
-
-    async def send(self, request: RemoteCallRequest) -> RemoteCallResult:
-        """Unary call via POST /message/send."""
-        response = await self.client.post(
-            f"{self.base_url}/message/send",
-            json={
-                "payload": request.message.payload,
-                "headers": request.message.headers.model_dump(),
-                "meta": getattr(request.message, "meta", {}),
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        if data.get("status") != "succeeded":
-            raise RuntimeError(f"Remote call failed: {data}")
-
-        return RemoteCallResult(
-            result=data["output"],
-            task_id=data.get("taskId"),
-            context_id=data.get("contextId"),
-            agent_url=request.agent_url,
-        )
-
-    async def stream(self, request: RemoteCallRequest):
-        """Streaming call via POST /message/stream (SSE)."""
-        async with self.client.stream(
-            "POST",
-            f"{self.base_url}/message/stream",
-            json={
-                "payload": request.message.payload,
-                "headers": request.message.headers.model_dump(),
-                "meta": getattr(request.message, "meta", {}),
-            },
-        ) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                data = json.loads(line[5:].strip())
-
-                if "text" in data:  # Chunk event
-                    yield RemoteStreamEvent(
-                        text=data["text"],
-                        meta=data.get("meta"),
-                        task_id=data.get("taskId"),
-                        agent_url=request.agent_url,
-                    )
-                elif "output" in data:  # Artifact event
-                    yield RemoteStreamEvent(
-                        result=data["output"],
-                        done=True,
-                        task_id=data.get("taskId"),
-                        context_id=data.get("contextId"),
-                        agent_url=request.agent_url,
-                    )
-
-    async def cancel(self, *, agent_url: str, task_id: str) -> None:
-        """Cancel via POST /tasks/cancel."""
-        await self.client.post(
-            f"{self.base_url}/tasks/cancel",
-            json={"taskId": task_id},
-        )
-
-    async def close(self) -> None:
-        """Cleanup HTTP client."""
-        await self.client.aclose()
 ```
+
+`A2AHttpTransport` speaks the standard A2A HTTP+JSON endpoints:
+
+- `POST /message:send`
+- `POST /message:stream` (SSE)
+- `POST /tasks/{task_id}:cancel`
 
 #### gRPC Transport (Sketch)
 

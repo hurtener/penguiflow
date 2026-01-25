@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import pytest
+{% if with_a2a %}
+import httpx
+{% endif %}
 
 from {{ package_name }}.config import Config
 from {{ package_name }}.orchestrator import {{ class_name }}Orchestrator
@@ -111,7 +114,30 @@ async def test_stop_marks_orchestrator_inactive(config: Config) -> None:
 async def test_a2a_server_stub(config: Config) -> None:
     orchestrator = {{ class_name }}Orchestrator(config)
     await orchestrator.start_a2a()
-    assert orchestrator._a2a_server.started  # type: ignore[attr-defined]
+    app = orchestrator._a2a_server.app  # type: ignore[attr-defined]
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/.well-known/agent-card.json",
+            headers={"A2A-Version": "0.3"},
+        )
+        assert response.status_code == 200
+
+        response = await client.post(
+            "/message:send",
+            headers={"A2A-Version": "0.3"},
+            json={
+                "message": {
+                    "messageId": "msg-1",
+                    "role": "user",
+                    "parts": [{"text": "hello"}],
+                },
+                "configuration": {"blocking": True},
+            },
+        )
+        assert response.status_code == 200
+        task = response.json()["task"]
+        assert task["status"]["state"] == "completed"
     await orchestrator.stop()
 {% endif %}
 

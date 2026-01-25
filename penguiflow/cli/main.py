@@ -183,7 +183,7 @@ def dev(project_root: str, host: str, port: int, no_browser: bool) -> None:
 @click.option(
     "--with-a2a",
     is_flag=True,
-    help="Include A2A server/client stubs.",
+    help="Include A2A HTTP+JSON binding.",
 )
 @click.option(
     "--with-rich-output",

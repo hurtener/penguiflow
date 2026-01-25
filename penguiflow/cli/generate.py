@@ -756,10 +756,12 @@ def _generate_readme(
     # Build tools info for template
     tool_infos = []
     for tool in spec.tools:
-        tool_infos.append({
-            "name": tool.name,
-            "description": tool.description or "No description provided.",
-        })
+        tool_infos.append(
+            {
+                "name": tool.name,
+                "description": tool.description or "No description provided.",
+            }
+        )
 
     content = _render_template(
         "README.md.jinja",
@@ -772,6 +774,7 @@ def _generate_readme(
             "max_iters": spec.planner.max_iters,
             "hop_budget": spec.planner.hop_budget,
             "reflection_enabled": bool(spec.llm.reflection and spec.llm.reflection.enabled),
+            "a2a_enabled": spec.agent.flags.a2a,
             "tools": tool_infos,
         },
     )

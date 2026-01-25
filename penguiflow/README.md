@@ -32,7 +32,7 @@ contributors understand how the pieces fit together.
 The `penguiflow_a2a` package ships separately and contains the A2A HTTP+JSON/JSON-RPC and
 gRPC bindings. Installing the `a2a-server` extra adds `A2AService` and
 `create_a2a_http_app` without introducing FastAPI as a core dependency; `a2a-grpc` adds
-the gRPC helpers.
+the gRPC helpers, and `a2a-client` adds `A2AHttpTransport` for `RemoteNode`.
 
 Install the `planner` extra to pull in LiteLLM when you want the planner to call hosted
 models; otherwise you can inject a deterministic stub via the `llm_client` parameter.

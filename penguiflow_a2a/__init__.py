@@ -11,6 +11,7 @@ from .server import (
     A2ATaskCancelRequest,
     create_a2a_app,
 )
+from .transport import A2AHttpTransport
 
 __all__ = [
     "A2AAgentCard",
@@ -23,6 +24,7 @@ __all__ = [
     "PayloadMode",
     "A2AService",
     "create_a2a_http_app",
+    "A2AHttpTransport",
 ]
 
 try:
