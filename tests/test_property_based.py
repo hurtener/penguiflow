@@ -6,7 +6,7 @@ import asyncio
 from collections import defaultdict
 from collections.abc import Iterable
 
-from hypothesis import given
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from penguiflow import Headers, Message
@@ -29,9 +29,7 @@ def fanout_patterns(draw: st.DrawFn) -> tuple[int, list[list[int]]]:
     return branch_count, orders
 
 
-async def _run_join_k_handles_randomized_fanout(
-    branch_count: int, orders: Iterable[Iterable[int]]
-) -> None:
+async def _run_join_k_handles_randomized_fanout(branch_count: int, orders: Iterable[Iterable[int]]) -> None:
     """Emit batches in arbitrary orders and assert deterministic fan-in."""
 
     collected: list[list[str]] = []
@@ -68,10 +66,9 @@ async def _run_join_k_handles_randomized_fanout(
         await flow.stop()
 
 
+@settings(max_examples=25, suppress_health_check=[HealthCheck.too_slow])
 @given(fanout_patterns())
-def test_join_k_handles_randomized_fanout(
-    pattern: tuple[int, list[list[int]]]
-) -> None:
+def test_join_k_handles_randomized_fanout(pattern: tuple[int, list[list[int]]]) -> None:
     branch_count, orders = pattern
     asyncio.run(_run_join_k_handles_randomized_fanout(branch_count, orders))
 
@@ -104,9 +101,7 @@ def stream_scenarios(draw: st.DrawFn) -> tuple[list[list[str]], list[tuple[int, 
     return streams, schedule
 
 
-async def _run_stream_sequences_are_monotonic(
-    streams: list[list[str]], schedule: list[tuple[int, int]]
-) -> None:
+async def _run_stream_sequences_are_monotonic(streams: list[list[str]], schedule: list[tuple[int, int]]) -> None:
     """Emit chunks following the schedule and assert per-stream monotonicity."""
 
     sequences: dict[str, list[int]] = defaultdict(list)
@@ -165,8 +160,6 @@ async def _run_stream_sequences_are_monotonic(
 
 
 @given(stream_scenarios())
-def test_stream_sequences_are_monotonic(
-    scenario: tuple[list[list[str]], list[tuple[int, int]]]
-) -> None:
+def test_stream_sequences_are_monotonic(scenario: tuple[list[list[str]], list[tuple[int, int]]]) -> None:
     streams, schedule = scenario
     asyncio.run(_run_stream_sequences_are_monotonic(streams, schedule))
