@@ -34,6 +34,9 @@ gRPC bindings. Installing the `a2a-server` extra adds `A2AService` and
 `create_a2a_http_app` without introducing FastAPI as a core dependency; `a2a-grpc` adds
 the gRPC helpers, and `a2a-client` adds `A2AHttpTransport` for `RemoteNode`.
 
+For ReactPlanner integrations, `penguiflow_a2a.A2AAgentToolset` can wrap an A2A agent as a
+planner tool (`NodeSpec`) so remote agents can be invoked through `ToolContext`.
+
 Install the `planner` extra to pull in LiteLLM when you want the planner to call hosted
 models; otherwise you can inject a deterministic stub via the `llm_client` parameter.
 

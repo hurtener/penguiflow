@@ -3,6 +3,7 @@
 from .bindings.http import create_a2a_http_app
 from .config import A2AConfig, PayloadMode
 from .core import A2AService
+from .planner_tools import A2AAgentToolset
 from .server import (
     A2AAgentCard,
     A2AMessagePayload,
@@ -25,6 +26,7 @@ __all__ = [
     "A2AService",
     "create_a2a_http_app",
     "A2AHttpTransport",
+    "A2AAgentToolset",
 ]
 
 try:

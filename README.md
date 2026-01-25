@@ -368,6 +368,43 @@ node = RemoteNode(
 )
 ```
 
+To call a remote A2A agent from the planner (ReactPlanner), expose the remote agent as a
+regular tool using `A2AAgentToolset`:
+
+```python
+from pydantic import BaseModel
+
+from penguiflow.planner import ReactPlanner
+from penguiflow_a2a import A2AAgentToolset, A2AHttpTransport
+
+
+class EchoArgs(BaseModel):
+    text: str
+
+
+class EchoOut(BaseModel):
+    echo: str
+
+
+toolset = A2AAgentToolset(
+    agent_url="https://agent.example/a2a",
+    transport=A2AHttpTransport(),
+)
+remote_echo = toolset.tool(
+    name="remote_echo",
+    skill="echo",
+    args_model=EchoArgs,
+    out_model=EchoOut,
+    desc="Echo via remote A2A agent",
+    streaming=True,
+)
+
+planner = ReactPlanner(llm="gpt-4o-mini", catalog=[remote_echo])
+result = await planner.run("echo hello")
+```
+
+See `docs/tools/a2a-agent-tools.md` for details.
+
 The generated FastAPI app implements canonical A2A HTTP+JSON endpoints such as
 `/.well-known/agent-card.json`, `POST /message:send`, `POST /message:stream`, and the
 `/tasks/{task_id}` lifecycle routes. JSON-RPC is available at `POST /rpc`.

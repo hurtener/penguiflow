@@ -6,14 +6,14 @@ import inspect
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeAlias, cast
 
 from pydantic import BaseModel
 
 from .node import Node
 from .registry import ModelRegistry
 
-SideEffect = Literal["pure", "read", "write", "external", "stateful"]
+SideEffect: TypeAlias = Literal["pure", "read", "write", "external", "stateful"]
 
 
 @dataclass(frozen=True, slots=True)
