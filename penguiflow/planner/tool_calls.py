@@ -25,6 +25,7 @@ from .react_utils import _safe_json_dumps
 from .trajectory import Trajectory
 
 _TASK_SERVICE_KEY = "task_service"
+_PROACTIVE_HOPS_KEY = "proactive_hops_remaining"
 
 
 def _dedupe_key(value: Any) -> str:
@@ -202,6 +203,16 @@ async def execute_tool_call(
                 False,
             )
         )
+        proactive_hops = None
+        if isinstance(ctx.tool_context, Mapping):
+            value = ctx.tool_context.get(_PROACTIVE_HOPS_KEY)
+            if value is not None:
+                try:
+                    proactive_hops = int(value)
+                except (TypeError, ValueError):
+                    proactive_hops = None
+        if proactive_hops is not None and proactive_hops <= 0:
+            background_allowed = False
         if background_allowed and isinstance(background_cfg, Mapping) and background_cfg.get("enabled") is True:
             service = ctx.tool_context.get(_TASK_SERVICE_KEY)
             if service is not None:
@@ -214,9 +225,7 @@ async def execute_tool_call(
                     mode_value = str(mode).lower().strip() if mode is not None else "job"
                     merge_raw = background_cfg.get("default_merge_strategy")
                     merge_value = (
-                        str(merge_raw).lower().strip()
-                        if merge_raw is not None
-                        else MergeStrategy.HUMAN_GATED.value
+                        str(merge_raw).lower().strip() if merge_raw is not None else MergeStrategy.HUMAN_GATED.value
                     )
                     merge_strategy = {
                         "append": MergeStrategy.APPEND,
@@ -227,10 +236,10 @@ async def execute_tool_call(
                     }.get(merge_value, MergeStrategy.HUMAN_GATED)
                     notify_on_complete = background_cfg.get("notify_on_complete", True) is not False
 
+                    context_tool_context = {_PROACTIVE_HOPS_KEY: proactive_hops} if proactive_hops is not None else None
                     if mode_value == "subagent":
                         tool_query = (
-                            f"Run tool {spec.name} with args {args_json}. "
-                            "Return the tool output and a brief digest."
+                            f"Run tool {spec.name} with args {args_json}. Return the tool output and a brief digest."
                         )
                         spawned = await service.spawn(
                             session_id=session_id,
@@ -241,6 +250,7 @@ async def execute_tool_call(
                             propagate_on_cancel="cascade",
                             notify_on_complete=notify_on_complete,
                             context_depth="full",
+                            context_tool_context=context_tool_context,
                         )
                     else:
                         spawned = await service.spawn_tool_job(
@@ -252,6 +262,7 @@ async def execute_tool_call(
                             merge_strategy=merge_strategy,
                             propagate_on_cancel="cascade",
                             notify_on_complete=notify_on_complete,
+                            context_tool_context=context_tool_context,
                         )
                     from .models import BackgroundTaskHandle
 

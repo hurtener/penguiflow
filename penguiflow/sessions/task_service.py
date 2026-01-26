@@ -112,6 +112,7 @@ class TaskService(Protocol):
         context_depth: ContextDepth = "full",
         task_id: str | None = None,
         idempotency_key: str | None = None,
+        context_tool_context: dict[str, Any] | None = None,
         # Group parameters
         group: str | None = None,
         group_id: str | None = None,
@@ -162,6 +163,13 @@ class TaskService(Protocol):
         strategy: MergeStrategy | None = None,
     ) -> bool: ...
 
+    async def acknowledge_background(
+        self,
+        *,
+        session_id: str,
+        task_ids: builtins.list[str],
+    ) -> int: ...
+
     async def spawn_tool_job(
         self,
         *,
@@ -174,6 +182,7 @@ class TaskService(Protocol):
         propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
         notify_on_complete: bool = True,
         task_id: str | None = None,
+        context_tool_context: dict[str, Any] | None = None,
         # Group parameters
         group: str | None = None,
         group_id: str | None = None,
@@ -276,6 +285,7 @@ class InProcessTaskService:
         context_depth: ContextDepth = "full",
         task_id: str | None = None,
         idempotency_key: str | None = None,
+        context_tool_context: dict[str, Any] | None = None,
         # Group parameters
         group: str | None = None,
         group_id: str | None = None,
@@ -313,16 +323,17 @@ class InProcessTaskService:
                 return TaskSpawnResult(task_id=task_id, session_id=session_id, status=existing_task.status)
 
         snapshot = None
-        if context_depth != "full":
+        if context_depth != "full" or context_tool_context:
             llm_context, tool_context = session.get_context()
             if context_depth == "none":
                 llm_context = {}
             elif context_depth == "summary":
                 llm_context = {
-                    "summary": llm_context.get("summary")
-                    or llm_context.get("conversation_summary")
-                    or "",
+                    "summary": llm_context.get("summary") or llm_context.get("conversation_summary") or "",
                 }
+            tool_context = dict(tool_context)
+            if context_tool_context:
+                tool_context.update(context_tool_context)
             from .models import TaskContextSnapshot
 
             snapshot = TaskContextSnapshot(
@@ -334,7 +345,7 @@ class InProcessTaskService:
                 propagate_on_cancel=propagate_on_cancel,
                 notify_on_complete=notify_on_complete,
                 llm_context=dict(llm_context),
-                tool_context=dict(tool_context),
+                tool_context=tool_context,
                 context_version=session.context_version,
                 context_hash=session.context_hash,
             )
@@ -509,6 +520,10 @@ class InProcessTaskService:
             return True
         return await session.apply_pending_patch(patch_id=patch_id, strategy=strategy)
 
+    async def acknowledge_background(self, *, session_id: str, task_ids: builtins.list[str]) -> int:
+        session = await self._sessions.get_or_create(session_id)
+        return await session.mark_background_consumed(task_ids=task_ids)
+
     async def spawn_tool_job(
         self,
         *,
@@ -521,6 +536,7 @@ class InProcessTaskService:
         propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
         notify_on_complete: bool = True,
         task_id: str | None = None,
+        context_tool_context: dict[str, Any] | None = None,
         # Group parameters
         group: str | None = None,
         group_id: str | None = None,
@@ -558,11 +574,32 @@ class InProcessTaskService:
                 retain_turn=retain_turn,
             )
 
+        snapshot = None
+        if context_tool_context:
+            llm_context, tool_context = session.get_context()
+            tool_context = dict(tool_context)
+            tool_context.update(context_tool_context)
+            from .models import TaskContextSnapshot
+
+            snapshot = TaskContextSnapshot(
+                session_id=session_id,
+                task_id=task_id or "pending",
+                spawned_from_task_id=parent_task_id or "foreground",
+                spawn_reason=f"tool:{tool_name}",
+                query=None,
+                propagate_on_cancel=propagate_on_cancel,
+                notify_on_complete=notify_on_complete,
+                llm_context=dict(llm_context),
+                tool_context=tool_context,
+                context_version=session.context_version,
+                context_hash=session.context_hash,
+            )
         pipeline = self._tool_job_factory(tool_name, tool_args)
         created_id = await session.spawn_task(
             pipeline,
             task_type=TaskType.BACKGROUND,
             priority=priority,
+            context_snapshot=snapshot,
             spawn_reason=f"tool:{tool_name}",
             description=f"{tool_name} (background)",
             query=None,
@@ -632,9 +669,7 @@ class InProcessTaskService:
         turn_id: str | None = None,
     ) -> dict[str, Any]:
         session = await self._sessions.get_or_create(session_id)
-        group = await session.get_group(
-            group_id=group_id, group_name=group_name, turn_id=turn_id
-        )
+        group = await session.get_group(group_id=group_id, group_name=group_name, turn_id=turn_id)
         if group is None:
             return {"ok": False, "error": "group_not_found"}
         if group.status != "open":
@@ -739,9 +774,7 @@ class InProcessTaskService:
         turn_id: str | None = None,
     ) -> TaskGroup | None:
         session = await self._sessions.get_or_create(session_id)
-        return await session.get_group(
-            group_id=group_id, group_name=group_name, turn_id=turn_id
-        )
+        return await session.get_group(group_id=group_id, group_name=group_name, turn_id=turn_id)
 
 
 __all__ = [

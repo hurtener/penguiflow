@@ -98,6 +98,16 @@ class ProactiveReportRequest(BaseModel):
     message_id: str = Field(default_factory=lambda: f"proactive_{secrets.token_hex(6)}")
     group_id: str | None = None
 
+    memory_summary: dict[str, Any] = Field(default_factory=dict)
+    tool_context: dict[str, Any] = Field(default_factory=dict)
+    context_version: int | None = None
+    context_hash: str | None = None
+    proactive_hops_remaining: int | None = None
+
+    is_group_report: bool = False
+    group_task_ids: list[str] = Field(default_factory=list)
+    combined_patches: list[ContextPatch] = Field(default_factory=list)
+
 
 GroupReportStrategy = Literal["all", "any", "none"]
 """When to generate proactive report for a task group:
@@ -243,4 +253,3 @@ __all__ = [
     "TaskType",
     "UpdateType",
 ]
-

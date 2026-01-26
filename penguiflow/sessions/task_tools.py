@@ -21,6 +21,7 @@ from .task_service import ContextDepth, TaskDetails, TaskService, TaskSpawnResul
 
 TASK_SERVICE_KEY = "task_service"
 SUBAGENT_FLAG_KEY = "is_subagent"
+_PROACTIVE_HOPS_KEY = "proactive_hops_remaining"
 
 
 def _get_service(ctx: ToolContext) -> TaskService:
@@ -33,6 +34,16 @@ def _get_service(ctx: ToolContext) -> TaskService:
 def _ensure_foreground(ctx: ToolContext) -> None:
     if bool(ctx.tool_context.get(SUBAGENT_FLAG_KEY)):
         raise RuntimeError("subagent_task_management_disabled")
+
+
+def _coerce_proactive_hops(ctx: ToolContext) -> int | None:
+    value = ctx.tool_context.get(_PROACTIVE_HOPS_KEY)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class TasksSpawnArgs(BaseModel):
@@ -154,6 +165,19 @@ class TasksApplyPatchResult(BaseModel):
     action: Literal["apply", "reject"]
 
 
+class TasksAcknowledgeBackgroundArgs(BaseModel):
+    """Arguments for acknowledging background task results."""
+
+    task_ids: list[str] = Field(description="List of background task IDs to acknowledge as used.")
+
+
+class TasksAcknowledgeBackgroundResult(BaseModel):
+    """Result of acknowledging background results."""
+
+    acknowledged: list[str] = Field(default_factory=list)
+    cleaned_up: int = 0
+
+
 # Task Group Tools
 
 
@@ -234,6 +258,10 @@ async def tasks_spawn(args: TasksSpawnArgs, ctx: ToolContext) -> TaskSpawnResult
     turn_id = ctx.tool_context.get("turn_id")
     if not session_id:
         raise RuntimeError("session_id_missing")
+    proactive_hops = _coerce_proactive_hops(ctx)
+    if proactive_hops is not None and proactive_hops <= 0:
+        raise RuntimeError("proactive_hops_exhausted")
+    context_tool_context = {_PROACTIVE_HOPS_KEY: proactive_hops} if proactive_hops is not None else None
     if parent_task_id is not None and not isinstance(parent_task_id, str):
         parent_task_id = None
     if args.mode == "job":
@@ -247,6 +275,7 @@ async def tasks_spawn(args: TasksSpawnArgs, ctx: ToolContext) -> TaskSpawnResult
             propagate_on_cancel=args.propagate_on_cancel,
             notify_on_complete=args.notify_on_complete,
             task_id=args.task_id,
+            context_tool_context=context_tool_context,
             # Group parameters
             group=args.group,
             group_id=args.group_id,
@@ -269,6 +298,7 @@ async def tasks_spawn(args: TasksSpawnArgs, ctx: ToolContext) -> TaskSpawnResult
         context_depth=args.context_depth,
         task_id=args.task_id,
         idempotency_key=args.idempotency_key,
+        context_tool_context=context_tool_context,
         # Group parameters
         group=args.group,
         group_id=args.group_id,
@@ -340,6 +370,26 @@ async def tasks_apply_patch(args: TasksApplyPatchArgs, ctx: ToolContext) -> Task
         strategy=args.strategy,
     )
     return TasksApplyPatchResult(ok=ok, action=args.action)
+
+
+@tool(
+    desc="Acknowledge that you have used background task results and clean them up from context.",
+    tags=["tasks", "background"],
+    side_effects="stateful",
+)
+async def tasks_acknowledge_background(
+    args: TasksAcknowledgeBackgroundArgs, ctx: ToolContext
+) -> TasksAcknowledgeBackgroundResult:
+    _ensure_foreground(ctx)
+    service = _get_service(ctx)
+    session_id = str(ctx.tool_context.get("session_id") or "")
+    if not session_id:
+        raise RuntimeError("session_id_missing")
+    cleaned = await service.acknowledge_background(
+        session_id=session_id,
+        task_ids=list(args.task_ids),
+    )
+    return TasksAcknowledgeBackgroundResult(acknowledged=list(args.task_ids), cleaned_up=cleaned)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -471,6 +521,11 @@ def build_task_tool_specs() -> list[NodeSpec]:
     registry.register("tasks.cancel", TasksCancelArgs, TasksCancelResult)
     registry.register("tasks.prioritize", TasksPrioritizeArgs, TasksPrioritizeResult)
     registry.register("tasks.apply_patch", TasksApplyPatchArgs, TasksApplyPatchResult)
+    registry.register(
+        "tasks.acknowledge_background",
+        TasksAcknowledgeBackgroundArgs,
+        TasksAcknowledgeBackgroundResult,
+    )
     # Group tools
     registry.register("tasks.seal_group", TasksSealGroupArgs, TasksSealGroupResult)
     registry.register("tasks.cancel_group", TasksCancelGroupArgs, TasksCancelGroupResult)
@@ -485,6 +540,7 @@ def build_task_tool_specs() -> list[NodeSpec]:
         Node(tasks_cancel, name="tasks.cancel"),
         Node(tasks_prioritize, name="tasks.prioritize"),
         Node(tasks_apply_patch, name="tasks.apply_patch"),
+        Node(tasks_acknowledge_background, name="tasks.acknowledge_background"),
         # Group tools
         Node(tasks_seal_group, name="tasks.seal_group"),
         Node(tasks_cancel_group, name="tasks.cancel_group"),

@@ -117,11 +117,28 @@ class PlannerEvent:
     extra: Mapping[str, Any] = field(default_factory=dict)
 
     # Keys reserved by Python's logging.LogRecord that must not appear in extra
-    _RESERVED_LOG_KEYS = frozenset({
-        "args", "msg", "levelname", "levelno", "exc_info", "message", "name",
-        "filename", "pathname", "module", "lineno", "funcName", "created",
-        "thread", "threadName", "process", "stack_info", "exc_text",
-    })
+    _RESERVED_LOG_KEYS = frozenset(
+        {
+            "args",
+            "msg",
+            "levelname",
+            "levelno",
+            "exc_info",
+            "message",
+            "name",
+            "filename",
+            "pathname",
+            "module",
+            "lineno",
+            "funcName",
+            "created",
+            "thread",
+            "threadName",
+            "process",
+            "stack_info",
+            "exc_text",
+        }
+    )
 
     def to_payload(self) -> dict[str, Any]:
         """Render a dictionary payload suitable for structured logging."""
@@ -484,6 +501,9 @@ class BackgroundTasksConfig(BaseModel):
 
     proactive_report_timeout_s: float = 30.0
     """Timeout for proactive message generation."""
+
+    proactive_report_max_hops: int = 2
+    """Maximum proactive recursion hops before disabling background spawning."""
 
     proactive_report_fallback_notification: bool = True
     """Fall back to notification panel if generation fails."""

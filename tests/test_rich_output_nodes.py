@@ -6,7 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 from penguiflow.artifacts import InMemoryArtifactStore
+from penguiflow.planner import Trajectory
 from penguiflow.planner.artifact_registry import ArtifactRegistry
+from penguiflow.planner.trajectory import BackgroundTaskResult
 from penguiflow.rich_output.nodes import list_artifacts, render_component, ui_form
 from penguiflow.rich_output.runtime import RichOutputConfig, configure_rich_output, reset_runtime
 from penguiflow.rich_output.tools import ListArtifactsArgs, RenderComponentArgs, UIFormArgs
@@ -182,7 +184,8 @@ async def test_list_artifacts_ingests_background_results_for_artifact_refs() -> 
     )
     registry = ArtifactRegistry()
     ctx = DummyContext()
-    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+    trajectory = Trajectory(query="test")
+    ctx._planner = SimpleNamespace(_artifact_registry=registry, _active_trajectory=trajectory)
     stored_payload = {
         "type": "echarts",
         "config": {"title": {"text": "From background"}, "series": [{"data": [1, 2, 3]}]},
@@ -193,20 +196,16 @@ async def test_list_artifacts_ingests_background_results_for_artifact_refs() -> 
         filename="bg.echarts.json",
         namespace="test",
     )
-    ctx._llm_context = {
-        "background_results": [
+    trajectory.background_results["t-bg"] = BackgroundTaskResult(
+        task_id="t-bg",
+        artifacts=[
             {
-                "task_id": "t-bg",
-                "artifacts": [
-                    {
-                        "node": "gather_data_from_genie",
-                        "field": "chart_artifacts",
-                        "artifact": {"type": "echarts", "artifact": ref.model_dump(mode="json"), "title": "From bg"},
-                    }
-                ],
+                "node": "gather_data_from_genie",
+                "field": "chart_artifacts",
+                "artifact": {"type": "echarts", "artifact": ref.model_dump(mode="json"), "title": "From bg"},
             }
-        ]
-    }
+        ],
+    )
 
     listed = await list_artifacts(ListArtifactsArgs(sourceTool="gather_data_from_genie"), ctx)
     assert listed.artifacts

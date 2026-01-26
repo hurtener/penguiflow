@@ -88,8 +88,20 @@ async def test_inprocess_task_service_controls_and_patch_flow() -> None:
     patch_id = next(iter(patches.keys()))
     ok = await service.apply_patch(session_id="s3", patch_id=patch_id, action="apply")
     assert ok is True
+    background = session.get_background_results()
+    assert spawned.task_id in background
     llm_context, _ = session.get_context()
-    assert llm_context.get("background_results")
+    assert "background_results" not in llm_context
+
+    cleaned = await service.acknowledge_background(
+        session_id="s3",
+        task_ids=[spawned.task_id],
+    )
+    assert cleaned == 1
+    background = session.get_background_results()
+    assert spawned.task_id not in background
+    llm_context, _ = session.get_context()
+    assert "background_results" not in llm_context
 
     # Reject is routed through steering.
     spawned2 = await service.spawn(session_id="s3", query="work2")

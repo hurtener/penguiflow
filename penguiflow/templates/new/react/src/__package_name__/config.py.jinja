@@ -64,6 +64,7 @@ class Config:
     background_tasks_proactive_report_strategies: list[str] = field(default_factory=lambda: ["APPEND", "REPLACE"])
     background_tasks_proactive_report_max_queued: int = 5
     background_tasks_proactive_report_timeout_s: float = 30.0
+    background_tasks_proactive_report_max_hops: int = 2
     background_tasks_proactive_report_fallback_notification: bool = True
     # Task groups configuration
     background_tasks_default_group_merge_strategy: str = "APPEND"
@@ -114,6 +115,7 @@ class Config:
             background_tasks_proactive_report_strategies=_env_csv("BACKGROUND_TASKS_PROACTIVE_REPORT_STRATEGIES", ["APPEND", "REPLACE"]),
             background_tasks_proactive_report_max_queued=_env_int("BACKGROUND_TASKS_PROACTIVE_REPORT_MAX_QUEUED", 5),
             background_tasks_proactive_report_timeout_s=float(os.getenv("BACKGROUND_TASKS_PROACTIVE_REPORT_TIMEOUT_S", "30.0")),
+            background_tasks_proactive_report_max_hops=_env_int("BACKGROUND_TASKS_PROACTIVE_REPORT_MAX_HOPS", 2),
             background_tasks_proactive_report_fallback_notification=_env_flag("BACKGROUND_TASKS_PROACTIVE_REPORT_FALLBACK_NOTIFICATION", True),
             # Task groups configuration
             background_tasks_default_group_merge_strategy=os.getenv("BACKGROUND_TASKS_DEFAULT_GROUP_MERGE_STRATEGY", "APPEND"),

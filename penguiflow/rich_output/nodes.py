@@ -115,7 +115,7 @@ async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> Rende
             f"{exc}\n"
             "To fix this, call `describe_component` with the component name to get the exact props schema, "
             "then retry `render_component` with props matching that schema.\n"
-            f"Example: {{\"next_node\":\"describe_component\",\"args\":{{\"name\":\"{component}\"}}}}"
+            f'Example: {{"next_node":"describe_component","args":{{"name":"{component}"}}}}'
         )
         raise RuntimeError(hint) from exc
 
@@ -182,9 +182,16 @@ async def list_artifacts(args: ListArtifactsArgs, ctx: ToolContext) -> ListArtif
     # when they really mean "any tool-produced artifact" (including ui_component).
     kind = None if args.kind in {"all", "tool_artifact"} else args.kind
 
-    # Background task results are merged into llm_context as ContextPatch payloads.
-    # Those artifacts must be ingested into the in-run registry so they can be
-    # referenced via artifact_ref and resolved later in the same run.
+    # Background task results live on the active trajectory (legacy data may still
+    # be stored in llm_context). Those artifacts must be ingested into the in-run
+    # registry so they can be referenced via artifact_ref and resolved later.
+    planner = getattr(ctx, "_planner", None)
+    trajectory = getattr(planner, "_active_trajectory", None)
+    if trajectory is not None:
+        try:
+            registry.ingest_background_results(getattr(trajectory, "background_results", None))
+        except Exception:
+            pass
     llm_context = getattr(ctx, "llm_context", None)
     if llm_context is not None:
         try:

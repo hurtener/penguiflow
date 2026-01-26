@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -30,6 +31,121 @@ class TrajectorySummary(BaseModel):
         if self.note:
             payload["note"] = self.note
         return payload
+
+
+@dataclass(slots=True)
+class BackgroundTaskResult:
+    """Result from a completed background task, stored in trajectory."""
+
+    task_id: str
+    group_id: str | None = None
+    status: Literal["completed", "failed"] = "completed"
+    summary: str | None = None
+    payload: Any = None
+    facts: dict[str, Any] = field(default_factory=dict)
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    consumed: bool = False
+    completed_at: float = field(default_factory=time.time)
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> BackgroundTaskResult | None:
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            return None
+        status_value = payload.get("status")
+        status: Literal["completed", "failed"] = "failed" if status_value == "failed" else "completed"
+        summary = payload.get("summary")
+        digest = payload.get("digest")
+        if summary is None and isinstance(digest, list):
+            summary = " ".join(str(item) for item in digest if item)
+        facts_value = payload.get("facts")
+        artifacts_value = payload.get("artifacts")
+        completed_at = payload.get("completed_at")
+        if not isinstance(completed_at, (int, float)):
+            completed_at = None
+        return cls(
+            task_id=task_id,
+            group_id=payload.get("group_id") if isinstance(payload.get("group_id"), str) else None,
+            status=status,
+            summary=summary,
+            payload=payload.get("payload"),
+            facts=dict(facts_value) if isinstance(facts_value, Mapping) else {},
+            artifacts=[dict(item) for item in artifacts_value if isinstance(item, Mapping)]
+            if isinstance(artifacts_value, list)
+            else [],
+            consumed=bool(payload.get("consumed", False)),
+            completed_at=float(completed_at) if completed_at is not None else time.time(),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "task_id": self.task_id,
+            "group_id": self.group_id,
+            "status": self.status,
+            "summary": self.summary,
+            "payload": _safe_json_payload(self.payload),
+            "facts": dict(self.facts),
+            "artifacts": [dict(item) for item in self.artifacts],
+            "consumed": self.consumed,
+            "completed_at": self.completed_at,
+        }
+        return payload
+
+
+def _safe_json_payload(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return None
+
+
+def coerce_background_results(raw: Any) -> dict[str, BackgroundTaskResult]:
+    if raw is None:
+        return {}
+    items: list[Any] = []
+    if isinstance(raw, BackgroundTaskResult):
+        items = [raw]
+    elif isinstance(raw, Mapping):
+        if "task_id" in raw:
+            items = [raw]
+        else:
+            items = list(raw.values())
+    elif isinstance(raw, list):
+        items = raw
+    results: dict[str, BackgroundTaskResult] = {}
+    for item in items:
+        result: BackgroundTaskResult | None
+        if isinstance(item, BackgroundTaskResult):
+            result = item
+        elif isinstance(item, Mapping):
+            result = BackgroundTaskResult.from_payload(item)
+        else:
+            result = None
+        if result is None:
+            continue
+        results[result.task_id] = result
+    return results
+
+
+def extract_background_results(
+    llm_context: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, BackgroundTaskResult]]:
+    if not isinstance(llm_context, Mapping):
+        return None, {}
+    extracted: list[Any] = []
+    if "background_result" in llm_context:
+        extracted.append(llm_context.get("background_result"))
+    if "background_results" in llm_context:
+        extracted.append(llm_context.get("background_results"))
+    if not extracted:
+        return dict(llm_context), {}
+    results: dict[str, BackgroundTaskResult] = {}
+    for item in extracted:
+        results.update(coerce_background_results(item))
+    cleaned = {
+        key: value for key, value in llm_context.items() if key not in {"background_result", "background_results"}
+    }
+    return cleaned, results
 
 
 @dataclass(slots=True)
@@ -80,9 +196,28 @@ class Trajectory:
     hint_state: dict[str, Any] = field(default_factory=dict)
     resume_user_input: str | None = None
     steering_inputs: list[str] = field(default_factory=list)
+    background_results: dict[str, BackgroundTaskResult] = field(default_factory=dict)
 
     def to_history(self) -> list[dict[str, Any]]:
         return [step.dump() for step in self.steps]
+
+    def add_background_result(self, result: BackgroundTaskResult) -> None:
+        self.background_results[result.task_id] = result
+
+    def mark_background_consumed(self, task_id: str) -> bool:
+        if task_id in self.background_results:
+            self.background_results[task_id].consumed = True
+            return True
+        return False
+
+    def clear_consumed_background(self) -> int:
+        to_remove = [task_id for task_id, result in self.background_results.items() if result.consumed]
+        for task_id in to_remove:
+            del self.background_results[task_id]
+        return len(to_remove)
+
+    def get_unconsumed_background(self) -> dict[str, BackgroundTaskResult]:
+        return {task_id: result for task_id, result in self.background_results.items() if not result.consumed}
 
     def serialise(self) -> dict[str, Any]:
         tool_context: dict[str, Any] | None = None
@@ -103,6 +238,7 @@ class Trajectory:
             "hint_state": dict(self.hint_state),
             "resume_user_input": self.resume_user_input,
             "steering_inputs": list(self.steering_inputs),
+            "background_results": {task_id: result.to_payload() for task_id, result in self.background_results.items()},
         }
 
     @classmethod
@@ -152,6 +288,9 @@ class Trajectory:
         for src in payload.get("sources") or []:
             if isinstance(src, Mapping):
                 trajectory.sources.append(dict(src))
+        background_payloads = payload.get("background_results")
+        if background_payloads:
+            trajectory.background_results.update(coerce_background_results(background_payloads))
         return trajectory
 
     def compress(self) -> TrajectorySummary:
@@ -184,4 +323,11 @@ class Trajectory:
         return summary
 
 
-__all__ = ["Trajectory", "TrajectoryStep", "TrajectorySummary"]
+__all__ = [
+    "BackgroundTaskResult",
+    "Trajectory",
+    "TrajectoryStep",
+    "TrajectorySummary",
+    "coerce_background_results",
+    "extract_background_results",
+]

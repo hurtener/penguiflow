@@ -1,5 +1,14 @@
 import { getContext, setContext } from 'svelte';
-import type { TimelineStep, TrajectoryPayload, LLMContext, ToolContext, ConversationMemory } from '$lib/types';
+import type {
+  TimelineStep,
+  TrajectoryPayload,
+  LLMContext,
+  ToolContext,
+  ConversationMemory
+} from '$lib/types';
+
+type BackgroundResultsMap = NonNullable<TrajectoryPayload['background_results']>;
+type BackgroundTaskResultPayload = BackgroundResultsMap[string];
 
 const TRAJECTORY_STORE_KEY = Symbol('trajectory-store');
 
@@ -12,6 +21,8 @@ export interface TrajectoryStore {
   readonly query: string | null;
   readonly llmContext: LLMContext | null;
   readonly toolContext: ToolContext | null;
+  readonly backgroundResults: BackgroundResultsMap | null;
+  readonly hasBackgroundResults: boolean;
   readonly conversationMemory: ConversationMemory | null;
   readonly hasMemory: boolean;
   readonly traceId: string | null;
@@ -28,6 +39,7 @@ export function createTrajectoryStore(): TrajectoryStore {
   let query = $state<string | null>(null);
   let llmContext = $state<LLMContext | null>(null);
   let toolContext = $state<ToolContext | null>(null);
+  let backgroundResults = $state<BackgroundResultsMap | null>(null);
   let traceId = $state<string | null>(null);
   let sessionId = $state<string | null>(null);
 
@@ -37,12 +49,19 @@ export function createTrajectoryStore(): TrajectoryStore {
     get query() { return query; },
     get llmContext() { return llmContext; },
     get toolContext() { return toolContext; },
+    get backgroundResults() { return backgroundResults; },
     get traceId() { return traceId; },
     get sessionId() { return sessionId; },
 
     get isEmpty() { return steps.length === 0; },
     get hasArtifacts() { return Object.keys(artifactStreams).length > 0; },
-    get hasContext() { return traceId != null || llmContext != null || toolContext != null; },
+    get hasBackgroundResults() { return backgroundResults != null && Object.keys(backgroundResults).length > 0; },
+    get hasContext() {
+      return traceId != null
+        || llmContext != null
+        || toolContext != null
+        || (backgroundResults != null && Object.keys(backgroundResults).length > 0);
+    },
     get conversationMemory() { return llmContext?.conversation_memory ?? null; },
     get hasMemory() { return llmContext?.conversation_memory != null; },
 
@@ -64,6 +83,7 @@ export function createTrajectoryStore(): TrajectoryStore {
       query = payload?.query ?? null;
       llmContext = payload?.llm_context ?? null;
       toolContext = payload?.tool_context ?? null;
+      backgroundResults = payload?.background_results ?? null;
       traceId = payload?.trace_id ?? null;
       sessionId = payload?.session_id ?? null;
     },
@@ -83,6 +103,7 @@ export function createTrajectoryStore(): TrajectoryStore {
       query = null;
       llmContext = null;
       toolContext = null;
+      backgroundResults = null;
       traceId = null;
       sessionId = null;
     }

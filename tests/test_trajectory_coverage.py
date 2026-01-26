@@ -3,7 +3,14 @@
 from pydantic import BaseModel
 
 from penguiflow.planner.models import PlannerAction
-from penguiflow.planner.trajectory import Trajectory, TrajectoryStep, TrajectorySummary
+from penguiflow.planner.trajectory import (
+    BackgroundTaskResult,
+    Trajectory,
+    TrajectoryStep,
+    TrajectorySummary,
+    coerce_background_results,
+    extract_background_results,
+)
 
 # ─── TrajectorySummary tests ─────────────────────────────────────────────────
 
@@ -200,6 +207,50 @@ def test_trajectory_from_serialised_with_streams():
     assert "stream1" in trajectory.steps[0].streams
 
 
+def test_background_result_roundtrip_and_extract():
+    result = BackgroundTaskResult(
+        task_id="t-bg",
+        summary="done",
+        facts={"count": 1},
+        artifacts=[{"node": "n", "artifact": {"id": "a1"}}],
+    )
+    payload = result.to_payload()
+    restored = BackgroundTaskResult.from_payload(payload)
+    assert restored is not None
+    assert restored.task_id == "t-bg"
+    assert restored.summary == "done"
+
+    llm_context = {"foo": "bar", "background_results": [payload]}
+    cleaned, extracted = extract_background_results(llm_context)
+    assert cleaned is not None
+    assert cleaned.get("foo") == "bar"
+    assert "background_results" not in cleaned
+    assert "t-bg" in extracted
+
+
+def test_coerce_background_results_and_consumption():
+    payload = {"task_id": "t2", "digest": ["ok"], "artifacts": []}
+    results = coerce_background_results([payload])
+    assert "t2" in results
+
+    trajectory = Trajectory(query="q")
+    trajectory.add_background_result(results["t2"])
+    assert trajectory.get_unconsumed_background()
+    assert trajectory.mark_background_consumed("t2") is True
+    removed = trajectory.clear_consumed_background()
+    assert removed == 1
+
+
+def test_trajectory_serialise_includes_background_results():
+    trajectory = Trajectory(query="test")
+    trajectory.add_background_result(BackgroundTaskResult(task_id="t3", summary="ok"))
+    payload = trajectory.serialise()
+    assert "background_results" in payload
+
+    restored = Trajectory.from_serialised(payload)
+    assert "t3" in restored.background_results
+
+
 def test_trajectory_from_serialised_with_invalid_stream_chunks():
     """from_serialised should skip invalid stream chunks."""
     payload = {
@@ -247,9 +298,7 @@ def test_trajectory_compress_with_error():
     """compress should capture last error."""
     trajectory = Trajectory(query="test query")
     action = PlannerAction(thought="test", next_node="failing_node")
-    trajectory.steps.append(
-        TrajectoryStep(action=action, error="Something failed")
-    )
+    trajectory.steps.append(TrajectoryStep(action=action, error="Something failed"))
 
     summary = trajectory.compress()
 
@@ -272,9 +321,7 @@ def test_trajectory_compress_with_observation():
     """compress should capture last observation digest."""
     trajectory = Trajectory(query="test query")
     action = PlannerAction(thought="test", next_node="test_node")
-    trajectory.steps.append(
-        TrajectoryStep(action=action, observation={"result": "data"})
-    )
+    trajectory.steps.append(TrajectoryStep(action=action, observation={"result": "data"}))
 
     summary = trajectory.compress()
 

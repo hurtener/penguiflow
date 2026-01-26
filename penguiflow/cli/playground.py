@@ -65,7 +65,7 @@ except Exception:  # pragma: no cover - optional dependency
     DEFAULT_ALLOWLIST = ()  # type: ignore[assignment]
     RichOutputConfig = None  # type: ignore[assignment,misc]
     configure_rich_output = None  # type: ignore[assignment]
-    RichOutputValidationError = None  # type: ignore[assignment,misc]
+    RichOutputValidationError = Exception  # type: ignore[assignment,misc]
     validate_interaction_result = None  # type: ignore[assignment]
 
 from .playground_sse import EventBroker, SSESentinel, format_sse, stream_queue
@@ -329,23 +329,23 @@ def _meta_from_spec(spec: Spec | None) -> MetaPayload:
     }
     services = []
     if spec:
-            services = [
-                {
-                    "name": "memory_iceberg",
-                    "enabled": spec.services.memory_iceberg.enabled,
-                    "url": spec.services.memory_iceberg.base_url,
-                },
-                {
-                    "name": "rag_server",
-                    "enabled": spec.services.rag_server.enabled,
-                    "url": spec.services.rag_server.base_url,
-                },
-                {
-                    "name": "wayfinder",
-                    "enabled": spec.services.wayfinder.enabled,
-                    "url": spec.services.wayfinder.base_url,
-                },
-            ]
+        services = [
+            {
+                "name": "memory_iceberg",
+                "enabled": spec.services.memory_iceberg.enabled,
+                "url": spec.services.memory_iceberg.base_url,
+            },
+            {
+                "name": "rag_server",
+                "enabled": spec.services.rag_server.enabled,
+                "url": spec.services.rag_server.base_url,
+            },
+            {
+                "name": "wayfinder",
+                "enabled": spec.services.wayfinder.enabled,
+                "url": spec.services.wayfinder.base_url,
+            },
+        ]
     tools = []
     if spec:
         for tool in spec.tools:
@@ -765,9 +765,7 @@ def load_agent(
     state_store = state_store or InMemoryStateStore()
 
     if result.kind == "orchestrator":
-        orchestrator = _instantiate_orchestrator(
-            result.target, config, session_manager=session_manager
-        )
+        orchestrator = _instantiate_orchestrator(result.target, config, session_manager=session_manager)
         wrapper: AgentWrapper = OrchestratorAgentWrapper(
             orchestrator,
             state_store=state_store,
@@ -832,9 +830,7 @@ def create_playground_app(
 
     # Now load the agent, passing the shared SessionManager
     if agent_wrapper is None:
-        agent_wrapper, discovery = load_agent(
-            project_root, state_store=store, session_manager=session_manager
-        )
+        agent_wrapper, discovery = load_agent(project_root, state_store=store, session_manager=session_manager)
         planner_factory = _build_planner_factory(discovery)
     else:
         planner_factory = None
@@ -866,6 +862,7 @@ def create_playground_app(
                 await agent_wrapper.shutdown()
 
     app = FastAPI(title="PenguiFlow Playground", version="0.1.0", lifespan=_lifespan)
+    proactive_setup: Callable[[Any], None] | None = None
 
     # Optional: enable platform task-management meta-tools when a planner factory is available.
     # This is a Playground convenience to make background tasks discoverable without requiring
@@ -918,6 +915,23 @@ def create_playground_app(
                     planner._background_tasks = existing_cfg.model_copy(
                         update={"enabled": True, "allow_tool_background": True}
                     )
+                    background_cfg = planner._background_tasks
+                    if background_cfg.enabled and background_cfg.proactive_report_enabled:
+                        from penguiflow.sessions.proactive import setup_proactive_reporting
+
+                        def _setup(session: Any) -> None:
+                            setup_proactive_reporting(
+                                session,
+                                planner_factory,
+                                enabled=True,
+                                strategies=list(background_cfg.proactive_report_strategies),
+                                max_queued=background_cfg.proactive_report_max_queued,
+                                timeout_s=background_cfg.proactive_report_timeout_s,
+                                max_hops=background_cfg.proactive_report_max_hops,
+                                fallback_notification=background_cfg.proactive_report_fallback_notification,
+                            )
+
+                        proactive_setup = _setup
                 extend_tool_catalog(planner, build_task_tool_specs())
             # Inject TaskService into PlannerAgentWrapper tool_context defaults if available.
             defaults = getattr(agent_wrapper, "_tool_context_defaults", None)
@@ -926,6 +940,14 @@ def create_playground_app(
                 defaults.setdefault(SUBAGENT_FLAG_KEY, False)
         except Exception as exc:  # pragma: no cover - optional wiring
             _LOGGER.debug("task_tools_unavailable", extra={"error": str(exc)})
+
+    async def _get_session(session_id: str) -> Any:
+        session = await session_manager.get_or_create(session_id)
+        if proactive_setup is not None:
+            config = getattr(session, "_proactive_config", None)
+            if not isinstance(config, dict) or not config.get("enabled"):
+                proactive_setup(session)
+        return session
 
     def _discover_planner() -> Any | None:
         """Discover the underlying planner instance from the agent wrapper."""
@@ -1157,7 +1179,7 @@ def create_playground_app(
     async def chat(request: ChatRequest) -> ChatResponse:
         session_id = request.session_id or secrets.token_hex(8)
         trace_holder: dict[str, str | None] = {"id": request.session_id}
-        session = await session_manager.get_or_create(session_id)
+        session = await _get_session(session_id)
         try:
             await session.ensure_capacity(TaskType.FOREGROUND)
         except RuntimeError as exc:
@@ -1284,7 +1306,7 @@ def create_playground_app(
         queue: asyncio.Queue[bytes | object] = asyncio.Queue()
         trace_holder: dict[str, str | None] = {"id": secrets.token_hex(8)}
         stream_message_id = f"msg_{secrets.token_hex(8)}"
-        session = await session_manager.get_or_create(session_value)
+        session = await _get_session(session_value)
         try:
             await session.ensure_capacity(TaskType.FOREGROUND)
         except RuntimeError as exc:
@@ -1475,7 +1497,7 @@ def create_playground_app(
         task_ids: list[str] | None = None,
         update_types: list[UpdateType] | None = None,
     ) -> StreamingResponse:
-        session = await session_manager.get_or_create(session_id)
+        session = await _get_session(session_id)
         updates_iter = await session.subscribe(
             since_id=since_id,
             task_ids=task_ids,
@@ -1497,7 +1519,7 @@ def create_playground_app(
 
     @app.get("/sessions/{session_id}", response_model=SessionInfo)
     async def session_info(session_id: str) -> SessionInfo:
-        session = await session_manager.get_or_create(session_id)
+        session = await _get_session(session_id)
         tasks = await session.list_tasks()
         active = len(
             [task for task in tasks if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.PAUSED}]
@@ -1514,7 +1536,7 @@ def create_playground_app(
     @app.get("/session/{session_id}/task-state", response_model=TaskStateResponse)
     async def get_task_state(session_id: str) -> TaskStateResponse:
         """Get current foreground/background task state for steering decisions."""
-        session = await session_manager.get_or_create(session_id)
+        session = await _get_session(session_id)
 
         foreground_id = session._foreground_task_id
         foreground_status = None
@@ -1550,7 +1572,7 @@ def create_playground_app(
 
     @app.patch("/sessions/{session_id}/context")
     async def session_update_context(session_id: str, payload: SessionContextUpdate) -> Mapping[str, Any]:
-        session = await session_manager.get_or_create(session_id)
+        session = await _get_session(session_id)
         if payload.merge:
             llm_context, tool_context = session.get_context()
             if payload.llm_context:
@@ -1570,7 +1592,7 @@ def create_playground_app(
         session_id: str,
         payload: ApplyContextPatchRequest,
     ) -> Mapping[str, Any]:
-        session = await session_manager.get_or_create(session_id)
+        session = await _get_session(session_id)
         if payload.action == "reject":
             await session.steer(
                 SteeringEvent(
@@ -1592,7 +1614,7 @@ def create_playground_app(
 
     @app.post("/steer", response_model=SteerResponse)
     async def steer(request: SteerRequest) -> SteerResponse:
-        session = await session_manager.get_or_create(request.session_id)
+        session = await _get_session(request.session_id)
         event = SteeringEvent(
             session_id=request.session_id,
             task_id=request.task_id,
@@ -1615,13 +1637,13 @@ def create_playground_app(
         session_id: str,
         status: TaskStatus | None = None,
     ) -> list[TaskStateModel]:
-        session = await session_manager.get_or_create(session_id)
+        session = await _get_session(session_id)
         tasks = await session.list_tasks(status=status)
         return [TaskStateModel.from_state(task) for task in tasks]
 
     @app.get("/tasks/{task_id}", response_model=TaskStateModel)
     async def get_task(task_id: str, session_id: str) -> TaskStateModel:
-        session = await session_manager.get_or_create(session_id)
+        session = await _get_session(session_id)
         task = await session.get_task(task_id)
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1629,7 +1651,7 @@ def create_playground_app(
 
     @app.delete("/tasks/{task_id}")
     async def delete_task(task_id: str, session_id: str) -> Mapping[str, Any]:
-        session = await session_manager.get_or_create(session_id)
+        session = await _get_session(session_id)
         accepted = await session.cancel_task(task_id, reason="api_cancel")
         if not accepted:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1639,7 +1661,7 @@ def create_playground_app(
     async def spawn_task(request: TaskSpawnRequest) -> TaskSpawnResponse:
         if planner_factory is None:
             raise HTTPException(status_code=501, detail="Background tasks require a planner factory")
-        session = await session_manager.get_or_create(request.session_id)
+        session = await _get_session(request.session_id)
         session.update_context(
             llm_context=dict(request.llm_context or {}),
             tool_context=dict(request.tool_context or {}),
@@ -1752,6 +1774,7 @@ def create_playground_app(
             )
 
     else:  # pragma: no cover - optional dependency guard
+
         @app.post("/agui/agent")
         async def agui_agent_unavailable() -> None:
             raise HTTPException(

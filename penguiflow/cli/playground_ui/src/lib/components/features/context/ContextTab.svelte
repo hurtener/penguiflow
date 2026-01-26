@@ -2,17 +2,42 @@
   import { Empty } from '$lib/components/composites';
   import { getTrajectoryStore } from '$lib/stores';
 
+  type BackgroundTaskResultPayload = {
+    task_id: string;
+    group_id?: string | null;
+    status?: string;
+    summary?: string | null;
+    payload?: unknown;
+    facts?: Record<string, unknown>;
+    artifacts?: Record<string, unknown>[];
+    consumed?: boolean;
+    completed_at?: number;
+  };
+
   const trajectoryStore = getTrajectoryStore();
 
   let memoryExpanded = $state(true);
   let llmContextExpanded = $state(true);
+  let backgroundExpanded = $state(true);
   let toolContextExpanded = $state(false);
 
   // Extract conversation_memory from llmContext for separate display
   const llmContextWithoutMemory = $derived.by(() => {
     if (!trajectoryStore.llmContext) return null;
-    const { conversation_memory, ...rest } = trajectoryStore.llmContext;
+    const { conversation_memory, background_result, background_results, ...rest } = trajectoryStore.llmContext;
     return Object.keys(rest).length > 0 ? rest : null;
+  });
+
+  const backgroundResults = $derived.by((): BackgroundTaskResultPayload[] => {
+    const results = (trajectoryStore as unknown as {
+      backgroundResults?: Record<string, BackgroundTaskResultPayload> | null;
+    }).backgroundResults;
+    if (!results) return [];
+    return (Object.values(results) as BackgroundTaskResultPayload[]).sort((a, b) => {
+      const aTime = typeof a.completed_at === 'number' ? a.completed_at : 0;
+      const bTime = typeof b.completed_at === 'number' ? b.completed_at : 0;
+      return bTime - aTime;
+    });
   });
 
   const formatJson = (obj: unknown): string => {
@@ -26,6 +51,19 @@
   const truncate = (text: string, maxLength: number = 100): string => {
     if (text.length <= maxLength) return text;
     return text.slice(0, maxLength) + '...';
+  };
+
+  const formatTimestamp = (epochSeconds?: number): string => {
+    if (typeof epochSeconds !== 'number') return '';
+    const date = new Date(epochSeconds * 1000);
+    return date.toLocaleTimeString();
+  };
+
+  const statusBadgeClass = (status?: string): string => {
+    const normalized = status?.toLowerCase();
+    if (normalized === 'failed') return 'badge error';
+    if (normalized === 'completed') return 'badge success';
+    return 'badge';
   };
 </script>
 
@@ -160,6 +198,81 @@
           {:else}
             <div class="empty-section">
               No additional LLM context was injected (besides memory).
+            </div>
+          {/if}
+        </div>
+      {/if}
+    </section>
+
+    <!-- Background Results Section -->
+    <section class="context-section">
+      <button
+        class="section-header"
+        onclick={() => backgroundExpanded = !backgroundExpanded}
+        aria-expanded={backgroundExpanded}
+      >
+        <span class="section-title">
+          Background Results
+          {#if backgroundResults.length > 0}
+            <span class="badge active">{backgroundResults.length}</span>
+          {/if}
+        </span>
+        <span class="chevron" class:expanded={backgroundExpanded}>
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+            <path d="M4 5L6 7L8 5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+          </svg>
+        </span>
+      </button>
+
+      {#if backgroundExpanded}
+        <div class="section-content">
+          {#if backgroundResults.length > 0}
+            <div class="background-results">
+              {#each backgroundResults as result (result.task_id)}
+                <div class="background-result">
+                  <div class="result-header">
+                    <div class="result-title">Task {result.task_id.slice(0, 8)}</div>
+                    <div class="result-badges">
+                      <span class={statusBadgeClass(result.status)}>
+                        {(result.status ?? 'completed').toUpperCase()}
+                      </span>
+                      {#if result.consumed}
+                        <span class="badge muted">Consumed</span>
+                      {/if}
+                    </div>
+                  </div>
+                  {#if result.summary}
+                    <div class="result-summary">{result.summary}</div>
+                  {/if}
+                  <div class="result-meta">
+                    {#if result.group_id}
+                      <span>Group {result.group_id.slice(0, 8)}</span>
+                    {/if}
+                    {#if result.completed_at}
+                      <span>{formatTimestamp(result.completed_at)}</span>
+                    {/if}
+                    {#if result.artifacts?.length}
+                      <span>{result.artifacts.length} artifacts</span>
+                    {/if}
+                    {#if result.facts && Object.keys(result.facts).length > 0}
+                      <span>{Object.keys(result.facts).length} facts</span>
+                    {/if}
+                  </div>
+                  {#if result.facts && Object.keys(result.facts).length > 0}
+                    <pre class="json-block">{formatJson(result.facts)}</pre>
+                  {/if}
+                  {#if result.payload != null}
+                    <details class="result-details">
+                      <summary>Payload</summary>
+                      <pre class="json-block">{formatJson(result.payload)}</pre>
+                    </details>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="empty-section">
+              No background task results yet.
             </div>
           {/if}
         </div>
@@ -379,6 +492,85 @@
     max-height: 200px;
     overflow-y: auto;
     color: var(--color-text, #1f1f1f);
+  }
+
+  .background-results {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .background-result {
+    padding: 10px;
+    background: var(--color-card-bg, #fcfaf7);
+    border: 1px solid var(--color-border, #e8e1d7);
+    border-radius: 8px;
+  }
+
+  .result-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .result-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text, #1f1f1f);
+  }
+
+  .result-badges {
+    display: inline-flex;
+    gap: 6px;
+  }
+
+  .badge.success {
+    background: #e9f7ef;
+    color: #1b5e20;
+  }
+
+  .badge.error {
+    background: #fef2f2;
+    color: #c62828;
+  }
+
+  .badge.muted {
+    background: var(--color-tab-bg, #f2eee8);
+    color: var(--color-text-secondary, #3c3a36);
+  }
+
+  .result-summary {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: var(--color-code-bg, #fbf8f3);
+    border: 1px solid var(--color-border, #e8e1d7);
+    border-radius: 6px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--color-text, #1f1f1f);
+    white-space: pre-wrap;
+  }
+
+  .result-meta {
+    margin-top: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 10px;
+    color: var(--color-text-secondary, #3c3a36);
+  }
+
+  .result-details {
+    margin-top: 8px;
+  }
+
+  .result-details summary {
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-secondary, #3c3a36);
+    margin-bottom: 6px;
   }
 
   .empty-section {
