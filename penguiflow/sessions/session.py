@@ -10,10 +10,11 @@ import logging
 import secrets
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
+from penguiflow.planner.models import BackgroundTasksConfig
 from penguiflow.planner.trajectory import BackgroundTaskResult, extract_background_results
 from penguiflow.state import StateStore
 from penguiflow.steering import (
@@ -266,6 +267,10 @@ class StreamingSession:
         self._proactive_generator: Callable[[ProactiveReportRequest], Awaitable[None]] | None = None
         self._group_report_generator: Callable[[ProactiveReportRequest], Awaitable[None]] | None = None
         self._proactive_config: dict[str, Any] | None = None
+        self._background_task_config: BackgroundTasksConfig | None = None
+        self._proactive_suppressed_task_ids: set[str] = set()
+        self._proactive_suppressed_group_ids: set[str] = set()
+        self._group_continuations: dict[str, asyncio.Task[None]] = {}
         # Task group state
         self._groups: dict[str, TaskGroup] = {}
         self._current_turn_id: str | None = None
@@ -296,6 +301,106 @@ class StreamingSession:
 
     def get_background_results(self) -> dict[str, BackgroundTaskResult]:
         return dict(self._context.background_results)
+
+    def configure_background_tasks(
+        self,
+        config: BackgroundTasksConfig | None = None,
+        **overrides: Any,
+    ) -> BackgroundTasksConfig:
+        """Configure runtime background task behavior."""
+        if config is None:
+            config = self._background_task_config or BackgroundTasksConfig()
+        if overrides:
+            config = config.model_copy(update=overrides)
+        self._background_task_config = config
+        return config
+
+    def get_background_task_config(self) -> BackgroundTasksConfig:
+        if self._background_task_config is None:
+            self._background_task_config = BackgroundTasksConfig()
+        return self._background_task_config
+
+    def set_foreground_busy(self, *, busy: bool) -> None:
+        if busy:
+            self._foreground_busy.clear()
+        else:
+            self._foreground_busy.set()
+
+    async def on_foreground_yield(self, *, turn_id: str | None = None) -> int:
+        config = self.get_background_task_config()
+        if not config.auto_seal_groups_on_foreground_yield:
+            return 0
+        return await self.auto_seal_open_groups(turn_id=turn_id)
+
+    def suppress_proactive_reports(
+        self,
+        *,
+        task_ids: Iterable[str] | None = None,
+        group_id: str | None = None,
+    ) -> int:
+        added = 0
+        if group_id:
+            if group_id not in self._proactive_suppressed_group_ids:
+                self._proactive_suppressed_group_ids.add(group_id)
+                added += 1
+        if task_ids:
+            for task_id in task_ids:
+                if not task_id:
+                    continue
+                if task_id in self._proactive_suppressed_task_ids:
+                    continue
+                self._proactive_suppressed_task_ids.add(task_id)
+                added += 1
+        return added
+
+    def _is_proactive_suppressed(
+        self,
+        *,
+        task_id: str | None,
+        group_id: str | None,
+        is_group_report: bool,
+        group_task_ids: Iterable[str] | None,
+    ) -> bool:
+        if group_id and group_id in self._proactive_suppressed_group_ids:
+            return True
+        if task_id and task_id in self._proactive_suppressed_task_ids:
+            return True
+        if is_group_report and group_task_ids:
+            remaining = [task for task in group_task_ids if task]
+            if remaining and all(task in self._proactive_suppressed_task_ids for task in remaining):
+                return True
+        return False
+
+    def schedule_group_continuation(
+        self,
+        *,
+        group_id: str,
+        timeout_s: float | None,
+        max_hops: int,
+        cooldown_s: float,
+    ) -> None:
+        if max_hops <= 0:
+            return
+        existing = self._group_continuations.get(group_id)
+        if existing is not None and not existing.done():
+            return
+
+        async def _runner() -> None:
+            hops = max_hops
+            while hops > 0:
+                group, timed_out = await self.wait_for_group_completion(group_id, timeout_s=timeout_s)
+                if group is None or not timed_out:
+                    return
+                hops -= 1
+                if hops <= 0:
+                    return
+                if cooldown_s > 0:
+                    await asyncio.sleep(cooldown_s)
+
+        self._group_continuations[group_id] = asyncio.create_task(
+            _runner(),
+            name=f"group_continuation:{group_id}",
+        )
 
     async def connect(self, transport: Transport) -> SessionConnection:
         return SessionConnection(self, transport)
@@ -405,6 +510,13 @@ class StreamingSession:
         hops_remaining = int(proactive_hops_remaining) if proactive_hops_remaining is not None else max_hops
         if hops_remaining <= 0:
             return
+        if self._is_proactive_suppressed(
+            task_id=task_id,
+            group_id=group_id,
+            is_group_report=is_group_report,
+            group_task_ids=group_task_ids,
+        ):
+            return
         # Enforce queue size limit (drop oldest if full)
         max_queued = config.get("max_queued", 5)
         while self._proactive_queue.qsize() >= max_queued:
@@ -452,6 +564,13 @@ class StreamingSession:
         """Generate a proactive message for a completed background task."""
         config = self._proactive_config
         if config is None or self._proactive_generator is None:
+            return
+        if self._is_proactive_suppressed(
+            task_id=request.task_id,
+            group_id=request.group_id,
+            is_group_report=request.is_group_report,
+            group_task_ids=request.group_task_ids,
+        ):
             return
         timeout_s = config.get("timeout_s", 30.0)
         fallback = config.get("fallback_notification", True)
@@ -675,6 +794,7 @@ class StreamingSession:
             self._steering_inboxes.pop(task_id, None)
             if task_type == TaskType.FOREGROUND:
                 self._foreground_busy.set()  # Mark foreground as idle
+                await self.on_foreground_yield(turn_id=self._current_turn_id)
 
     async def steer(self, event: SteeringEvent) -> bool:
         if event.session_id != self.session_id:
@@ -1101,6 +1221,10 @@ class StreamingSession:
         if self._proactive_task is not None and not self._proactive_task.done():
             self._proactive_task.cancel()
             self._proactive_task = None
+        for handle in list(self._group_continuations.values()):
+            if handle is not None and not handle.done():
+                handle.cancel()
+        self._group_continuations.clear()
         for task_id, handle in list(self._task_handles.items()):
             if not handle.done():
                 handle.cancel()

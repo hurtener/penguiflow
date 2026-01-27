@@ -17,6 +17,8 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
+from penguiflow.planner.models import BackgroundTasksConfig
+
 from .models import GroupReportStrategy, GroupStatus, MergeStrategy, TaskGroup, TaskStatus, TaskType
 from .planner import PlannerFactory, PlannerTaskPipeline
 from .session import SessionManager, TaskPipeline
@@ -263,14 +265,22 @@ class InProcessTaskService:
         subagent_planner_factory: PlannerFactory | None = None,
         tool_job_factory: Callable[[str, Any], TaskPipeline] | None = None,
         spawn_guard: SpawnGuard | None = None,
+        background_config: BackgroundTasksConfig | None = None,
     ) -> None:
         self._sessions = sessions
         self._planner_factory = planner_factory
         self._subagent_factory = subagent_planner_factory or planner_factory
         self._tool_job_factory = tool_job_factory
         self._spawn_guard = spawn_guard or NoOpSpawnGuard()
+        self._background_config = background_config
         self._lock = asyncio.Lock()
         self._idempotency: dict[tuple[str, str], str] = {}
+
+    def _apply_background_config(self, session: Any) -> None:
+        if self._background_config is None:
+            return
+        if hasattr(session, "configure_background_tasks"):
+            session.configure_background_tasks(self._background_config)
 
     async def spawn(
         self,
@@ -310,6 +320,8 @@ class InProcessTaskService:
         if not decision.allowed:
             raise RuntimeError(decision.reason or "spawn_blocked")
         session = await self._sessions.get_or_create(session_id)
+        self._apply_background_config(session)
+        self._apply_background_config(session)
         if idempotency_key is not None:
             async with self._lock:
                 existing = self._idempotency.get((session_id, idempotency_key))
@@ -384,6 +396,12 @@ class InProcessTaskService:
             await session.add_task_to_group(resolved_group.group_id, created_id)
             if group_sealed:
                 await session.seal_group(resolved_group.group_id)
+            if retain_turn and resolved_group.status == "open":
+                await session.seal_group(resolved_group.group_id)
+            resolved_group = await session.get_group(group_id=resolved_group.group_id) or resolved_group
+            if retain_turn and resolved_group.status == "open":
+                await session.seal_group(resolved_group.group_id)
+            resolved_group = await session.get_group(group_id=resolved_group.group_id) or resolved_group
 
         if idempotency_key is not None:
             async with self._lock:
@@ -399,8 +417,9 @@ class InProcessTaskService:
                 pass  # Fall through to normal return
             else:
                 retained = True
-                # Get timeout from config - default 30s
-                timeout_s = 30.0  # TODO: get from config
+                config = session.get_background_task_config()
+                timeout_s_raw = float(config.retain_turn_timeout_s)
+                timeout_s: float | None = timeout_s_raw if timeout_s_raw > 0 else None
                 completed_group, timed_out = await session.wait_for_group_completion(
                     resolved_group.group_id,
                     timeout_s=timeout_s,
@@ -416,6 +435,20 @@ class InProcessTaskService:
                         failed_task_ids=list(completed_group.failed_task_ids),
                         results=results,
                         timed_out=timed_out,
+                    )
+                if completed_group is not None and not timed_out:
+                    task_ids = list(completed_group.task_ids)
+                    session.suppress_proactive_reports(task_ids=task_ids, group_id=completed_group.group_id)
+                    await session.mark_background_consumed(task_ids=task_ids)
+                elif timed_out:
+                    config = session.get_background_task_config()
+                    continuation_hops = int(config.background_continuation_max_hops or 0)
+                    cooldown_s = float(config.background_continuation_cooldown_s or 0.0)
+                    session.schedule_group_continuation(
+                        group_id=resolved_group.group_id,
+                        timeout_s=timeout_s,
+                        max_hops=continuation_hops,
+                        cooldown_s=cooldown_s,
                     )
 
         task = await session.get_task(created_id)
@@ -561,6 +594,7 @@ class InProcessTaskService:
         if not decision.allowed:
             raise RuntimeError(decision.reason or "spawn_blocked")
         session = await self._sessions.get_or_create(session_id)
+        self._apply_background_config(session)
 
         # Resolve/create task group if group parameters provided
         resolved_group: TaskGroup | None = None
@@ -627,8 +661,9 @@ class InProcessTaskService:
                 pass  # Fall through to normal return
             else:
                 retained = True
-                # Get timeout from config - default 30s
-                timeout_s = 30.0  # TODO: get from config
+                config = session.get_background_task_config()
+                timeout_s_raw = float(config.retain_turn_timeout_s)
+                timeout_s: float | None = timeout_s_raw if timeout_s_raw > 0 else None
                 completed_group, timed_out = await session.wait_for_group_completion(
                     resolved_group.group_id,
                     timeout_s=timeout_s,
@@ -644,6 +679,20 @@ class InProcessTaskService:
                         failed_task_ids=list(completed_group.failed_task_ids),
                         results=results,
                         timed_out=timed_out,
+                    )
+                if completed_group is not None and not timed_out:
+                    task_ids = list(completed_group.task_ids)
+                    session.suppress_proactive_reports(task_ids=task_ids, group_id=completed_group.group_id)
+                    await session.mark_background_consumed(task_ids=task_ids)
+                elif timed_out:
+                    config = session.get_background_task_config()
+                    continuation_hops = int(config.background_continuation_max_hops or 0)
+                    cooldown_s = float(config.background_continuation_cooldown_s or 0.0)
+                    session.schedule_group_continuation(
+                        group_id=resolved_group.group_id,
+                        timeout_s=timeout_s,
+                        max_hops=continuation_hops,
+                        cooldown_s=cooldown_s,
                     )
 
         task = await session.get_task(created_id)

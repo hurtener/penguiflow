@@ -111,9 +111,7 @@ class TestSessionApplyPendingPatch:
         return StreamingSession("test-session")
 
     @pytest.mark.asyncio
-    async def test_apply_pending_patch_not_found(
-        self, session: StreamingSession
-    ) -> None:
+    async def test_apply_pending_patch_not_found(self, session: StreamingSession) -> None:
         """Test applying a patch that doesn't exist."""
         result = await session.apply_pending_patch(patch_id="nonexistent")
         assert result is False
@@ -484,9 +482,7 @@ class TestSteeringSanitization:
         # We need: num_keys * (key_len + value_len + overhead) > MAX_PAYLOAD_BYTES
         # With MAX_KEYS=64 and MAX_STRING=4096, we can get: 64 * (64 + 4096 + ~10) ~ 267K
         # MAX_PAYLOAD_BYTES is 16384, so this should exceed it
-        large_payload = {
-            f"key_{i:03d}": "x" * MAX_STEERING_STRING for i in range(MAX_STEERING_KEYS)
-        }
+        large_payload = {f"key_{i:03d}": "x" * MAX_STEERING_STRING for i in range(MAX_STEERING_KEYS)}
         result = sanitize_payload(large_payload)
         assert result.get("truncated") is True
         assert "summary" in result
@@ -949,7 +945,7 @@ class TestBackgroundTasksConfig:
         assert config.group_partial_on_failure is True
         assert config.max_tasks_per_group == 10
         assert config.auto_seal_groups_on_foreground_yield is True
-        assert config.retain_turn_timeout_s == 30.0
+        assert config.retain_turn_timeout_s == 60.0
         assert config.background_continuation_max_hops == 2
         assert config.background_continuation_cooldown_s == 0.0
 

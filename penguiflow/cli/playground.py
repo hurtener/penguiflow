@@ -883,6 +883,7 @@ def create_playground_app(
             except Exception:
                 planner = None
             tool_job_factory = None
+            background_cfg: BackgroundTasksConfig | None = None
             if isinstance(planner, ReactPlanner):
                 spec_by_name = getattr(planner, "_spec_by_name", {}) or {}
                 artifact_store = getattr(planner, "artifact_store", None)
@@ -898,12 +899,6 @@ def create_playground_app(
                     )
 
                 tool_job_factory = _tool_job_factory
-
-            task_service = InProcessTaskService(
-                sessions=session_manager,
-                planner_factory=planner_factory,
-                tool_job_factory=tool_job_factory,
-            )
             if isinstance(planner, ReactPlanner):
                 existing_extra = getattr(planner, "_system_prompt_extra", None)
                 planner._system_prompt_extra = planner_prompts.merge_prompt_extras(
@@ -933,6 +928,12 @@ def create_playground_app(
 
                         proactive_setup = _setup
                 extend_tool_catalog(planner, build_task_tool_specs())
+            task_service = InProcessTaskService(
+                sessions=session_manager,
+                planner_factory=planner_factory,
+                tool_job_factory=tool_job_factory,
+                background_config=background_cfg,
+            )
             # Inject TaskService into PlannerAgentWrapper tool_context defaults if available.
             defaults = getattr(agent_wrapper, "_tool_context_defaults", None)
             if isinstance(defaults, dict):

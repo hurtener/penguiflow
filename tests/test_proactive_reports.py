@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from penguiflow.planner.models import BackgroundTasksConfig
 from penguiflow.sessions import StreamingSession, TaskResult, TaskType, UpdateType
 from penguiflow.sessions.models import (
     ContextPatch,
@@ -158,6 +159,66 @@ class TestEnqueueProactiveReport:
         assert request.proactive_hops_remaining == 2
 
         # Clean up
+        if session._proactive_task:
+            session._proactive_task.cancel()
+            try:
+                await session._proactive_task
+            except asyncio.CancelledError:
+                pass
+
+
+class TestProactiveSuppression:
+    """Tests for proactive suppression behavior."""
+
+    @pytest.mark.asyncio
+    async def test_suppressed_task_not_enqueued(self, session: StreamingSession, sample_patch: ContextPatch) -> None:
+        generator = AsyncMock()
+        session.configure_proactive_reporting(generator=generator, enabled=True)
+        session.suppress_proactive_reports(task_ids=["task-1"])
+
+        session._enqueue_proactive_report(
+            task_id="task-1",
+            trace_id="trace-1",
+            description="Test task",
+            execution_time_ms=100,
+            patch=sample_patch,
+            merge_strategy=MergeStrategy.APPEND,
+        )
+
+        assert session._proactive_queue.qsize() == 0
+
+        if session._proactive_task:
+            session._proactive_task.cancel()
+            try:
+                await session._proactive_task
+            except asyncio.CancelledError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_suppressed_request_skips_generation(
+        self, session: StreamingSession, sample_patch: ContextPatch
+    ) -> None:
+        called: list[str] = []
+
+        async def generator(request: ProactiveReportRequest) -> None:
+            called.append(request.task_id)
+
+        session.configure_proactive_reporting(generator=generator, enabled=True)
+        session.suppress_proactive_reports(task_ids=["task-1"])
+        request = ProactiveReportRequest(
+            task_id="task-1",
+            session_id=session.session_id,
+            trace_id="trace-1",
+            task_description="Test task",
+            execution_time_ms=100,
+            patch=sample_patch,
+            merge_strategy=MergeStrategy.APPEND,
+        )
+
+        await session._generate_proactive_message(request)
+
+        assert called == []
+
         if session._proactive_task:
             session._proactive_task.cancel()
             try:
@@ -874,6 +935,28 @@ class TestTaskGroups:
         sealed_count = await session.auto_seal_open_groups(turn_id="turn-1")
         assert sealed_count == 1
 
+        sealed_group = await session.get_group(group_id=group.group_id)
+        assert sealed_group is not None
+        assert sealed_group.status == "sealed"
+
+    @pytest.mark.asyncio
+    async def test_foreground_yield_respects_auto_seal_config(self, session: StreamingSession) -> None:
+        group = await session.resolve_or_create_group(
+            group_name="test-group",
+            turn_id="turn-1",
+        )
+        await session.add_task_to_group(group.group_id, "task-1")
+
+        session.configure_background_tasks(BackgroundTasksConfig(auto_seal_groups_on_foreground_yield=False))
+        sealed_count = await session.on_foreground_yield(turn_id="turn-1")
+        assert sealed_count == 0
+        open_group = await session.get_group(group_id=group.group_id)
+        assert open_group is not None
+        assert open_group.status == "open"
+
+        session.configure_background_tasks(BackgroundTasksConfig(auto_seal_groups_on_foreground_yield=True))
+        sealed_count = await session.on_foreground_yield(turn_id="turn-1")
+        assert sealed_count == 1
         sealed_group = await session.get_group(group_id=group.group_id)
         assert sealed_group is not None
         assert sealed_group.status == "sealed"

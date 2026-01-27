@@ -527,7 +527,7 @@ class BackgroundTasksConfig(BaseModel):
     auto_seal_groups_on_foreground_yield: bool = True
     """Auto-seal OPEN groups when foreground yields to user."""
 
-    retain_turn_timeout_s: float = 30.0
+    retain_turn_timeout_s: float = 60.0
     """Max time foreground waits for retained tasks/groups before force-yield."""
 
     background_continuation_max_hops: int = 2
