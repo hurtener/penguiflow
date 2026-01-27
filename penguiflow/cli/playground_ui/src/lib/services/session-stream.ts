@@ -3,11 +3,11 @@ import { listTasks } from './api';
 import type { AppStores } from '$lib/stores';
 import type { NotificationLevel } from '$lib/stores/ui/notifications.svelte';
 import type { BackgroundTaskInfo } from '$lib/stores/features/tasks.svelte';
-import type { ArtifactRef, ArtifactStoredEvent, StateUpdate } from '$lib/types';
+import type { ArtifactChunkPayload, ArtifactRef, ArtifactStoredEvent, StateUpdate } from '$lib/types';
 
 type SessionStreamStores = Pick<
   AppStores,
-  'tasksStore' | 'notificationsStore' | 'chatStore' | 'artifactsStore'
+  'tasksStore' | 'notificationsStore' | 'chatStore' | 'artifactsStore' | 'interactionsStore'
 >;
 
 /**
@@ -144,6 +144,9 @@ class SessionStreamManager {
               : (groupId ? 'Background tasks completed.' : 'Background task completed.');
             const agentMsg = this.stores.chatStore.addAgentMessage();
             const artifactRefs = artifacts.length ? artifacts.map(toArtifactRef) : undefined;
+            const uiComponents = toArtifactChunkPayloads(
+              (content as Record<string, unknown>).ui_components
+            );
             this.stores.chatStore.updateMessage(agentMsg.id, {
               text: chatMessage,
               isStreaming: false,
@@ -156,6 +159,13 @@ class SessionStreamManager {
             if (artifacts.length) {
               for (const artifact of artifacts) {
                 this.stores.artifactsStore.addArtifact(artifact);
+              }
+            }
+
+            // Render any ui_component artifacts under this proactive message.
+            if (uiComponents.length) {
+              for (const payload of uiComponents) {
+                this.stores.interactionsStore.addArtifactChunk(payload, { message_id: agentMsg.id });
               }
             }
           }
@@ -221,6 +231,33 @@ function getString(value: unknown): string | undefined {
 
 function getNumber(value: unknown): number | undefined {
   return typeof value === 'number' ? value : undefined;
+}
+
+function getBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function toArtifactChunkPayloads(raw: unknown): ArtifactChunkPayload[] {
+  if (!Array.isArray(raw)) return [];
+  const results: ArtifactChunkPayload[] = [];
+  for (const item of raw) {
+    const entry = asRecord(item);
+    if (!entry) continue;
+    const chunk = entry.chunk;
+    if (!chunk || typeof chunk !== 'object') continue;
+    const artifact_type = getString(entry.artifact_type);
+    if (artifact_type !== 'ui_component') continue;
+    results.push({
+      stream_id: getString(entry.stream_id),
+      seq: getNumber(entry.seq),
+      done: getBoolean(entry.done),
+      artifact_type,
+      chunk,
+      meta: asRecord(entry.meta) ?? undefined,
+      ts: getNumber(entry.ts)
+    });
+  }
+  return results;
 }
 
 function toArtifactStoredEvents(raw: unknown, update: StateUpdate): ArtifactStoredEvent[] {

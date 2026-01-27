@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
@@ -80,8 +81,10 @@ def create_default_proactive_generator(
             tool_context=tool_context,
         )
         payload = getattr(result, "payload", None)
+        metadata = getattr(result, "metadata", None)
         answer = _extract_answer(payload) or "Background task completed."
         artifacts = _collect_artifact_refs(request)
+        ui_components = _collect_ui_component_chunks(metadata)
 
         session._publish(
             StateUpdate(
@@ -97,6 +100,7 @@ def create_default_proactive_generator(
                     "background_task_id": request.task_id,
                     "group_id": request.group_id,
                     "artifacts": artifacts or None,
+                    "ui_components": ui_components or None,
                 },
             )
         )
@@ -250,6 +254,84 @@ def _format_results_summary(request: ProactiveReportRequest) -> str:
     if patch.recommended_next_steps:
         summary_parts.append("Suggested next steps: " + ", ".join(patch.recommended_next_steps))
     return "\n".join(summary_parts) or "Task completed successfully."
+
+
+def _collect_ui_component_chunks(metadata: Any) -> list[dict[str, Any]]:
+    """Extract ui_component artifact chunks from planner metadata.
+
+    When proactive reporting runs a planner loop, rich UI tools emit `artifact_chunk`
+    events that end up stored under trajectory steps as `streams`.
+
+    The Playground session stream doesn't follow planner event streams for these
+    proactive runs, so we include the ui_component chunks in the proactive RESULT
+    payload for the frontend to render.
+    """
+
+    if not isinstance(metadata, Mapping):
+        return []
+    steps = metadata.get("steps")
+    if not isinstance(steps, Sequence):
+        return []
+
+    collected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for step in steps:
+        if not isinstance(step, Mapping):
+            continue
+        streams = step.get("streams")
+        if not isinstance(streams, Mapping):
+            continue
+        for stream_id, stream_chunks in streams.items():
+            if not isinstance(stream_id, str) or not stream_id:
+                continue
+            if not isinstance(stream_chunks, Sequence):
+                continue
+            for item in stream_chunks:
+                if not isinstance(item, Mapping):
+                    continue
+                if item.get("artifact_type") != "ui_component":
+                    continue
+                chunk_value = item.get("chunk")
+                if not isinstance(chunk_value, Mapping):
+                    continue
+                component = chunk_value.get("component")
+                props = chunk_value.get("props")
+                if not isinstance(component, str) or not component:
+                    continue
+                if not isinstance(props, Mapping):
+                    continue
+
+                # Dedupe by stable fingerprint of component+props.
+                try:
+                    dedupe_raw = json.dumps(
+                        {"component": component, "props": dict(props)},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                except Exception:
+                    dedupe_raw = f"{component}:{repr(props)}"
+                if dedupe_raw in seen:
+                    continue
+                seen.add(dedupe_raw)
+
+                payload: dict[str, Any] = {
+                    "stream_id": stream_id,
+                    "seq": item.get("seq"),
+                    "done": bool(item.get("done", True)),
+                    "artifact_type": "ui_component",
+                    "chunk": dict(chunk_value),
+                }
+                meta = item.get("meta")
+                if isinstance(meta, Mapping):
+                    payload["meta"] = dict(meta)
+                ts = item.get("ts")
+                if isinstance(ts, (int, float)):
+                    payload["ts"] = float(ts)
+                collected.append(payload)
+
+    return collected
 
 
 __all__ = [

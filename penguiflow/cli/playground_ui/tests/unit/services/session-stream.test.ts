@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { createArtifactsStore, createChatStore, createNotificationsStore, createTasksStore } from '$lib/stores';
+import {
+  createArtifactsStore,
+  createChatStore,
+  createInteractionsStore,
+  createNotificationsStore,
+  createTasksStore
+} from '$lib/stores';
 import { createSessionStreamManager } from '$lib/services/session-stream';
 import { MockEventSource } from '../../setup';
 
@@ -17,11 +23,13 @@ describe('sessionStreamManager', () => {
     const notificationsStore = createNotificationsStore();
     const chatStore = createChatStore();
     const artifactsStore = createArtifactsStore();
+    const interactionsStore = createInteractionsStore();
     const manager = createSessionStreamManager({
       tasksStore,
       notificationsStore,
       chatStore,
-      artifactsStore
+      artifactsStore,
+      interactionsStore
     });
 
     manager.start('session-1');
@@ -36,6 +44,15 @@ describe('sessionStreamManager', () => {
         proactive: true,
         text: 'Background task finished.',
         background_task_id: 'task-1',
+        ui_components: [
+          {
+            stream_id: 'ui',
+            seq: 0,
+            done: true,
+            artifact_type: 'ui_component',
+            chunk: { id: null, component: 'report', props: { title: 'Hello' } }
+          }
+        ],
         artifacts: [
           {
             id: 'artifact-1',
@@ -57,5 +74,11 @@ describe('sessionStreamManager', () => {
     expect(chatStore.messages[0]?.artifacts?.length).toBe(1);
     expect(artifactsStore.count).toBe(1);
     expect(artifactsStore.has('artifact-1')).toBe(true);
+
+    // ui_component artifacts are rendered via interactions store.
+    expect(interactionsStore.artifacts.length).toBe(1);
+    expect(interactionsStore.artifacts[0]?.component).toBe('report');
+    expect(interactionsStore.artifacts[0]?.props.title).toBe('Hello');
+    expect(interactionsStore.artifacts[0]?.message_id).toBe(chatStore.messages[0]?.id);
   });
 });
