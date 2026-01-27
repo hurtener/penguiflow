@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from penguiflow.planner import ReactPlanner
