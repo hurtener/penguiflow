@@ -943,10 +943,46 @@ def create_playground_app(
 
     async def _get_session(session_id: str) -> Any:
         session = await session_manager.get_or_create(session_id)
-        if proactive_setup is not None:
-            config = getattr(session, "_proactive_config", None)
-            if not isinstance(config, dict) or not config.get("enabled"):
-                proactive_setup(session)
+        config = getattr(session, "_proactive_config", None)
+        already_enabled = isinstance(config, dict) and bool(config.get("enabled"))
+        if proactive_setup is not None and not already_enabled:
+            proactive_setup(session)
+            return session
+
+        # If proactive_setup wasn't configured (common for orchestrator-based agents),
+        # try enabling proactive reporting dynamically based on the discovered planner.
+        if proactive_setup is None and not already_enabled:
+            try:
+                from penguiflow.planner import ReactPlanner
+                from penguiflow.planner.models import BackgroundTasksConfig
+                from penguiflow.sessions.proactive import setup_proactive_reporting
+
+                planner = _discover_planner()
+                if isinstance(planner, ReactPlanner):
+                    background_cfg = getattr(planner, "_background_tasks", None)
+                    if isinstance(background_cfg, BackgroundTasksConfig):
+                        if background_cfg.enabled and background_cfg.proactive_report_enabled:
+                            # Prefer the discovered builder planner_factory, otherwise fork the live planner.
+                            effective_planner_factory = planner_factory
+                            if effective_planner_factory is None:
+
+                                def _fork_factory() -> Any:
+                                    return planner.fork()
+
+                                effective_planner_factory = _fork_factory
+                            setup_proactive_reporting(
+                                session,
+                                effective_planner_factory,
+                                enabled=True,
+                                strategies=list(background_cfg.proactive_report_strategies),
+                                max_queued=background_cfg.proactive_report_max_queued,
+                                timeout_s=background_cfg.proactive_report_timeout_s,
+                                max_hops=background_cfg.proactive_report_max_hops,
+                                fallback_notification=background_cfg.proactive_report_fallback_notification,
+                            )
+            except Exception:
+                # Optional wiring; avoid breaking session creation.
+                pass
         return session
 
     def _discover_planner() -> Any | None:
@@ -1734,8 +1770,11 @@ def create_playground_app(
         agui_adapter = PenguiFlowAdapter(agent_wrapper, session_manager=session_manager)
 
         @app.post("/agui/agent")
-        async def agui_agent(input: RunAgentInput, request: Request) -> StreamingResponse:
-            return await create_agui_endpoint(agui_adapter.run)(input, request)  # type: ignore[misc]
+        async def agui_agent(input: dict[str, Any], request: Request) -> StreamingResponse:
+            if RunAgentInput is None:
+                raise HTTPException(status_code=501, detail="AG-UI support requires ag-ui-protocol.")
+            parsed = RunAgentInput(**dict(input))
+            return await create_agui_endpoint(agui_adapter.run)(parsed, request)  # type: ignore[misc]
 
         @app.post("/agui/resume")
         async def agui_resume(input: AguiResumeRequest, request: Request) -> StreamingResponse:

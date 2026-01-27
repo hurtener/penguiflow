@@ -78,9 +78,7 @@ class GoogleProvider(Provider):
         try:
             from google import genai
         except ImportError as e:
-            raise ImportError(
-                "Google GenAI SDK not installed. Install with: pip install google-genai>=1.57.0"
-            ) from e
+            raise ImportError("Google GenAI SDK not installed. Install with: pip install google-genai>=1.57.0") from e
 
         self._model = model
         self._profile = profile or get_profile(model)
@@ -112,7 +110,7 @@ class GoogleProvider(Provider):
     ) -> CompletionResponse:
         """Execute a completion request."""
         if cancel and cancel.is_cancelled():
-            raise LLMCancelledError(message="Request cancelled", provider="google")
+            raise LLMCancelledError(message="Request cancelled", provider="google", retryable=False)
 
         contents = self._to_google_contents(request.messages)
         config = self._build_config(request)
@@ -138,9 +136,7 @@ class GoogleProvider(Provider):
                 raw=e,
             ) from e
         except asyncio.CancelledError:
-            raise LLMCancelledError(
-                message="Request cancelled", provider="google"
-            ) from None
+            raise LLMCancelledError(message="Request cancelled", provider="google") from None
         except Exception as e:
             raise self._map_error(e) from e
 
@@ -153,6 +149,7 @@ class GoogleProvider(Provider):
         cancel: CancelToken | None,
     ) -> CompletionResponse:
         """Handle streaming completion."""
+
         def _accumulate(prev: str, incoming: str) -> tuple[str, str]:
             """Return (delta, next_full) for cumulative or delta streams."""
             if not incoming:
@@ -176,7 +173,7 @@ class GoogleProvider(Provider):
                     config=config,
                 ):
                     if cancel and cancel.is_cancelled():
-                        raise LLMCancelledError(message="Request cancelled", provider="google")
+                        raise LLMCancelledError(message="Request cancelled", provider="google", retryable=False)
 
                     emitted_text = False
 
@@ -243,7 +240,6 @@ class GoogleProvider(Provider):
             reasoning_content=full_reasoning or None,
             finish_reason=finish_reason,
         )
-
 
     def _to_google_contents(self, messages: tuple[LLMMessage, ...] | list[LLMMessage]) -> list[Content]:
         """Convert typed messages to Google Content format."""

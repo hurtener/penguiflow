@@ -15,31 +15,37 @@
   // Track pending steering acknowledgment
   let steeringPending = $state(false);
 
-  // Derived: check if foreground task is currently running
+  // Derived: resolve active foreground task from session task-state
   const activeForegroundTask = $derived.by(() => {
-    const active = tasksStore.tasks.filter((task: TaskState) => {
-      if (task.task_type !== 'FOREGROUND') return false;
-      return task.status === 'RUNNING' || task.status === 'PENDING' || task.status === 'PAUSED';
-    });
-    if (!active.length) return null;
-    // Prefer RUNNING task when present, otherwise pick the most recently updated.
-    const running = active.find(task => task.status === 'RUNNING');
-    if (running) return running;
-    return active
-      .slice()
-      .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))[0];
+    const taskId = tasksStore.foregroundTaskId;
+    if (!taskId) return null;
+    return tasksStore.tasks.find((task: TaskState) => task.task_id === taskId) ?? null;
   });
 
-  // Derived: get active background tasks for steering context
-  const activeBackgroundTasks = $derived.by(() => {
-    return tasksStore.tasks.filter(
-      (task: TaskState) => task.task_type === 'BACKGROUND' &&
-        (task.status === 'RUNNING' || task.status === 'PENDING' || task.status === 'PAUSED')
-    );
+  const steeringAvailable = $derived.by(() => {
+    if (!activeForegroundTask) return false;
+    const status = tasksStore.foregroundStatus ?? activeForegroundTask.status;
+    return status === 'RUNNING' || status === 'PENDING' || status === 'PAUSED';
   });
 
-  // Determine if we're in steering mode
-  const isSteeringMode = $derived(!!activeForegroundTask);
+  // Steering context uses background task-state snapshot (avoids misclassification).
+  const activeBackgroundTasks = $derived(tasksStore.backgroundTasks);
+
+  let inputMode = $state<'steer' | 'new'>('new');
+  let modeOverride = $state(false);
+
+  $effect(() => {
+    if (!steeringAvailable) {
+      inputMode = 'new';
+      modeOverride = false;
+      return;
+    }
+    if (!modeOverride && !chatStore.input.trim()) {
+      inputMode = 'steer';
+    }
+  });
+
+  const isSteeringMode = $derived(steeringAvailable && inputMode === 'steer');
 
   const handleKeydown = (e: KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -63,7 +69,7 @@
     steeringPending = true;
 
     // Build context about active background tasks
-    const backgroundContext = activeBackgroundTasks.map((task: TaskState) => ({
+    const backgroundContext = activeBackgroundTasks.map(task => ({
       task_id: task.task_id,
       description: task.description || '',
       status: task.status,
@@ -99,39 +105,111 @@
     }
     return sessionStore.isSending || !chatStore.input.trim();
   });
+
+  const selectMode = (mode: 'steer' | 'new') => {
+    inputMode = mode;
+    modeOverride = true;
+  };
 </script>
 
 <div class="chat-input" class:steering-mode={isSteeringMode}>
+  {#if steeringAvailable}
+    <div class="input-modes">
+      <span class="mode-label">Mode</span>
+      <div class="mode-toggle">
+        <button
+          type="button"
+          class="mode-btn"
+          class:active={inputMode === 'new'}
+          onclick={() => selectMode('new')}
+        >
+          New message
+        </button>
+        <button
+          type="button"
+          class="mode-btn"
+          class:active={inputMode === 'steer'}
+          onclick={() => selectMode('steer')}
+        >
+          Steer task
+        </button>
+      </div>
+    </div>
+  {/if}
   {#if steeringPending}
     <div class="steering-indicator">
       <span class="steering-dot"></span>
       Steering...
     </div>
   {/if}
-  <textarea
-    placeholder={isSteeringMode ? "Steer the agent with new instructions..." : "Ask your agent something..."}
-    bind:value={chatStore.input}
-    onkeydown={handleKeydown}
-  ></textarea>
-  <button
-    class="send-btn"
-    class:steer-btn={isSteeringMode}
-    onclick={handleSubmit}
-    disabled={isButtonDisabled}
-    title={isSteeringMode ? "Send steering instruction to running task" : "Send message"}
-  >
-    {isSteeringMode ? "!" : ">"}
-  </button>
+  <div class="input-row">
+    <textarea
+      placeholder={isSteeringMode ? "Steer the agent with new instructions..." : "Ask your agent something..."}
+      bind:value={chatStore.input}
+      onkeydown={handleKeydown}
+    ></textarea>
+    <button
+      class="send-btn"
+      class:steer-btn={isSteeringMode}
+      onclick={handleSubmit}
+      disabled={isButtonDisabled}
+      title={isSteeringMode ? "Send steering instruction to running task" : "Send message"}
+    >
+      {isSteeringMode ? "!" : ">"}
+    </button>
+  </div>
 </div>
 
 <style>
   .chat-input {
     display: flex;
-    gap: var(--space-md);
+    gap: var(--space-sm);
     padding: var(--space-md);
     background: #ffffff; /* Intentionally pure white for chat input area */
     border-top: 1px solid var(--color-border);
     position: relative;
+    flex-direction: column;
+  }
+
+  .input-row {
+    display: flex;
+    gap: var(--space-md);
+    align-items: stretch;
+  }
+
+  .input-modes {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    font-size: 11px;
+    color: var(--color-muted);
+  }
+
+  .mode-label {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .mode-toggle {
+    display: inline-flex;
+    gap: 6px;
+  }
+
+  .mode-btn {
+    border: 1px solid var(--color-border);
+    background: var(--color-bg, #f9f6f1);
+    color: var(--color-text);
+    padding: 4px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .mode-btn.active {
+    background: var(--color-btn-primary-gradient);
+    color: #ffffff;
+    border-color: transparent;
   }
 
   .chat-input.steering-mode {

@@ -82,7 +82,10 @@ class LLMAuthError(LLMError):
 class LLMCancelledError(LLMError):
     """Request was cancelled."""
 
-    retryable: bool = False
+    # Provider/client cancellations can be transient (connection resets, upstream aborts).
+    # If the caller cancelled intentionally (CancelToken), raise LLMCancelledError with
+    # retryable=False at the call site.
+    retryable: bool = True
 
 
 @dataclass

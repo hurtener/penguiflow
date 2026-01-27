@@ -76,9 +76,7 @@ class AnthropicProvider(Provider):
         try:
             from anthropic import AsyncAnthropic
         except ImportError as e:
-            raise ImportError(
-                "Anthropic SDK not installed. Install with: pip install anthropic>=0.75.0"
-            ) from e
+            raise ImportError("Anthropic SDK not installed. Install with: pip install anthropic>=0.75.0") from e
 
         self._model = model
         self._profile = profile or get_profile(model)
@@ -114,7 +112,7 @@ class AnthropicProvider(Provider):
     ) -> CompletionResponse:
         """Execute a completion request."""
         if cancel and cancel.is_cancelled():
-            raise LLMCancelledError(message="Request cancelled", provider="anthropic")
+            raise LLMCancelledError(message="Request cancelled", provider="anthropic", retryable=False)
 
         system_text, messages = self._to_anthropic_messages(request.messages)
         params = self._build_params(request, system_text, messages)
@@ -136,9 +134,7 @@ class AnthropicProvider(Provider):
                 raw=e,
             ) from e
         except asyncio.CancelledError:
-            raise LLMCancelledError(
-                message="Request cancelled", provider="anthropic"
-            ) from None
+            raise LLMCancelledError(message="Request cancelled", provider="anthropic") from None
         except Exception as e:
             raise self._map_error(e) from e
 
@@ -163,7 +159,7 @@ class AnthropicProvider(Provider):
                 async with self._client.messages.stream(**params) as stream:
                     async for event in stream:
                         if cancel and cancel.is_cancelled():
-                            raise LLMCancelledError(message="Request cancelled", provider="anthropic")
+                            raise LLMCancelledError(message="Request cancelled", provider="anthropic", retryable=False)
 
                         if event.type == "content_block_start":
                             current_block_type = event.content_block.type
@@ -186,9 +182,7 @@ class AnthropicProvider(Provider):
                         elif event.type == "content_block_delta":
                             if current_block_type in ("thinking", "redacted_thinking"):
                                 delta_thinking = (
-                                    getattr(event.delta, "thinking", None)
-                                    or getattr(event.delta, "text", None)
-                                    or ""
+                                    getattr(event.delta, "thinking", None) or getattr(event.delta, "text", None) or ""
                                 )
                                 if delta_thinking:
                                     reasoning_acc.append(str(delta_thinking))
@@ -256,9 +250,7 @@ class AnthropicProvider(Provider):
             finish_reason=finish_reason,
         )
 
-    def _to_anthropic_messages(
-        self, messages: tuple[Any, ...] | list[Any]
-    ) -> tuple[str | None, list[dict[str, Any]]]:
+    def _to_anthropic_messages(self, messages: tuple[Any, ...] | list[Any]) -> tuple[str | None, list[dict[str, Any]]]:
         """Convert typed messages to Anthropic format.
 
         Returns:
@@ -282,39 +274,49 @@ class AnthropicProvider(Provider):
                     import base64
 
                     b64 = base64.b64encode(part.data).decode("utf-8")
-                    content.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": part.media_type,
-                            "data": b64,
-                        },
-                    })
+                    content.append(
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": part.media_type,
+                                "data": b64,
+                            },
+                        }
+                    )
                 elif isinstance(part, ToolCallPart):
-                    content.append({
-                        "type": "tool_use",
-                        "id": part.call_id or f"call_{uuid.uuid4().hex[:16]}",
-                        "name": part.name,
-                        "input": json.loads(part.arguments_json) if part.arguments_json else {},
-                    })
+                    content.append(
+                        {
+                            "type": "tool_use",
+                            "id": part.call_id or f"call_{uuid.uuid4().hex[:16]}",
+                            "name": part.name,
+                            "input": json.loads(part.arguments_json) if part.arguments_json else {},
+                        }
+                    )
                 elif isinstance(part, ToolResultPart):
                     # Tool results are separate messages in Anthropic
-                    result.append({
-                        "role": "user",
-                        "content": [{
-                            "type": "tool_result",
-                            "tool_use_id": part.call_id or "",
-                            "content": part.result_json,
-                            "is_error": part.is_error,
-                        }],
-                    })
+                    result.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": part.call_id or "",
+                                    "content": part.result_json,
+                                    "is_error": part.is_error,
+                                }
+                            ],
+                        }
+                    )
                     continue
 
             if content:
-                result.append({
-                    "role": msg.role if msg.role != "tool" else "user",
-                    "content": content,
-                })
+                result.append(
+                    {
+                        "role": msg.role if msg.role != "tool" else "user",
+                        "content": content,
+                    }
+                )
 
         return system_text, result
 
@@ -366,9 +368,7 @@ class AnthropicProvider(Provider):
             for tool in tools
         ]
 
-    def _add_structured_output(
-        self, params: dict[str, Any], structured_output: Any
-    ) -> dict[str, Any]:
+    def _add_structured_output(self, params: dict[str, Any], structured_output: Any) -> dict[str, Any]:
         """Add structured output via forced tool use."""
         # Anthropic uses tool_use for structured output
         tool_def = {
@@ -393,11 +393,7 @@ class AnthropicProvider(Provider):
             if block.type == "text":
                 parts.append(TextPart(text=block.text))
             elif block.type in ("thinking", "redacted_thinking"):
-                thinking_text = (
-                    getattr(block, "thinking", None)
-                    or getattr(block, "text", None)
-                    or ""
-                )
+                thinking_text = getattr(block, "thinking", None) or getattr(block, "text", None) or ""
                 if thinking_text:
                     reasoning_acc.append(str(thinking_text))
             elif block.type == "tool_use":
