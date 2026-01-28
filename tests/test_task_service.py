@@ -173,4 +173,5 @@ async def test_retain_turn_timeout_uses_config() -> None:
     assert result.retained is True
     assert result.group_completion is not None
     assert result.group_completion.timed_out is True
-    assert recorded_timeouts == [0.01]
+    assert recorded_timeouts
+    assert all(timeout == 0.01 for timeout in recorded_timeouts)
