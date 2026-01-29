@@ -218,6 +218,6 @@ class SkillsLearningConfig(BaseModel):
 
 ## Open Questions
 
-* What is the minimum safe schema for “learned” skills to avoid accidental secret retention?
-* How should we gate learning in multi-tenant apps (opt-in per tenant/project)?
-* Should feedback be exposed as tools to the LLM, or only to host apps/UIs?
+* What is the minimum safe schema for “learned” skills to avoid accidental secret retention? Big question mark that supports the deferred status of this system.
+* How should we gate learning in multi-tenant apps (opt-in per tenant/project)? Again, library wise this is getting too into implementation details. To be discussed further
+* Should feedback be exposed as tools to the LLM, or only to host apps/UIs? Same, how do we get this system to be opt-in, genralizable without entering the territory of product itself.
