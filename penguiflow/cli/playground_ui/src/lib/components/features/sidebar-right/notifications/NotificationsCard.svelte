@@ -35,7 +35,7 @@
         {#each notificationsStore.items as note (note.id)}
           <div class="notification-row {levelClass(note.level)}">
             <div class="notification-message">{note.message}</div>
-            <time class="notification-time" datetime={note.ts}>
+            <time class="notification-time" datetime={new Date(note.ts).toISOString()}>
               {new Date(note.ts).toLocaleTimeString()}
             </time>
             {#if note.actions && note.actions.length > 0}

@@ -20,7 +20,7 @@ from .models import (
     PlannerAction,
     ReflectionCritique,
 )
-from .trajectory import Trajectory, TrajectorySummary
+from .trajectory import Trajectory, TrajectorySummary, extract_background_results
 
 logger = logging.getLogger("penguiflow.planner")
 
@@ -567,11 +567,7 @@ class _LiteLLMJSONClient:
         # Some providers (e.g., Databricks) crash during parameter mapping if
         # reasoning_effort is passed to non-reasoning models, even with drop_params=True.
         model_name = self._llm if isinstance(self._llm, str) else self._llm.get("model", "")
-        if (
-            self._use_native_reasoning
-            and self._reasoning_effort is not None
-            and _supports_reasoning(model_name)
-        ):
+        if self._use_native_reasoning and self._reasoning_effort is not None and _supports_reasoning(model_name):
             params["reasoning_effort"] = self._reasoning_effort
             # Providers vary in support; drop unsupported params instead of failing.
             params.setdefault("drop_params", True)
@@ -662,9 +658,7 @@ class _LiteLLMJSONClient:
 
                         async for chunk in response:
                             chunk_usage = (
-                                chunk.get("usage")
-                                if isinstance(chunk, Mapping)
-                                else getattr(chunk, "usage", None)
+                                chunk.get("usage") if isinstance(chunk, Mapping) else getattr(chunk, "usage", None)
                             )
                             if chunk_usage:
                                 usage_payload = chunk_usage
@@ -803,12 +797,8 @@ class _LiteLLMJSONClient:
                             else:
                                 _tool_calls_info = f"type={type(_tool_calls).__name__}"
 
-                        response_keys = (
-                            list(response.keys()) if isinstance(response, Mapping) else "not_mapping"
-                        )
-                        choices_count = (
-                            len(response.get("choices", [])) if isinstance(response, Mapping) else "n/a"
-                        )
+                        response_keys = list(response.keys()) if isinstance(response, Mapping) else "not_mapping"
+                        choices_count = len(response.get("choices", [])) if isinstance(response, Mapping) else "n/a"
                         message_keys = (
                             list(_debug_message.keys())
                             if isinstance(_debug_message, Mapping)
@@ -854,9 +844,7 @@ class _LiteLLMJSONClient:
                             "attempt": attempt + 1,
                             "cost_usd": cost,
                             "tokens": (
-                                response.get("usage", {}).get("total_tokens", 0)
-                                if isinstance(response, Mapping)
-                                else 0
+                                response.get("usage", {}).get("total_tokens", 0) if isinstance(response, Mapping) else 0
                             ),
                         },
                     )
@@ -921,6 +909,12 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
             llm_context = {k: v for k, v in llm_context.items() if k != "conversation_memory"}
         if "proactive_report" in llm_context:
             proactive_report = llm_context.get("proactive_report")
+        cleaned, extracted = extract_background_results(llm_context)
+        if extracted:
+            for task_id, result in extracted.items():
+                if task_id not in trajectory.background_results:
+                    trajectory.background_results[task_id] = result
+        llm_context = cleaned or {}
 
     # Build system prompt with optional guidance
     system_prompt = planner._system_prompt
@@ -946,44 +940,59 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
     if finish_guidance is not None:
         tier = "critical" if finish_repair_count >= 3 else ("warning" if finish_repair_count >= 2 else "reminder")
         logger.info("injecting_finish_guidance", extra={"tier": tier, "count": finish_repair_count})
-        system_prompt = prompts.merge_prompt_extras(
-            system_prompt,
-            finish_guidance,
-        ) or system_prompt
+        system_prompt = (
+            prompts.merge_prompt_extras(
+                system_prompt,
+                finish_guidance,
+            )
+            or system_prompt
+        )
 
     # Inject arg_fill guidance if model has repeatedly failed to provide valid args
     arg_fill_guidance = prompts.render_arg_fill_guidance(arg_fill_count)
     if arg_fill_guidance is not None:
         tier = "critical" if arg_fill_count >= 3 else ("warning" if arg_fill_count >= 2 else "reminder")
         logger.info("injecting_arg_fill_guidance", extra={"tier": tier, "count": arg_fill_count})
-        system_prompt = prompts.merge_prompt_extras(
-            system_prompt,
-            arg_fill_guidance,
-        ) or system_prompt
+        system_prompt = (
+            prompts.merge_prompt_extras(
+                system_prompt,
+                arg_fill_guidance,
+            )
+            or system_prompt
+        )
 
     multi_action_guidance = prompts.render_multi_action_guidance(multi_action_count)
     if multi_action_guidance is not None:
         tier = "critical" if multi_action_count >= 3 else ("warning" if multi_action_count >= 2 else "reminder")
         logger.info("injecting_multi_action_guidance", extra={"tier": tier, "count": multi_action_count})
-        system_prompt = prompts.merge_prompt_extras(
-            system_prompt,
-            multi_action_guidance,
-        ) or system_prompt
+        system_prompt = (
+            prompts.merge_prompt_extras(
+                system_prompt,
+                multi_action_guidance,
+            )
+            or system_prompt
+        )
 
     render_component_guidance = prompts.render_render_component_guidance(render_component_count)
     if render_component_guidance is not None:
         tier = "critical" if render_component_count >= 3 else ("warning" if render_component_count >= 2 else "reminder")
         logger.info("injecting_render_component_guidance", extra={"tier": tier, "count": render_component_count})
-        system_prompt = prompts.merge_prompt_extras(
-            system_prompt,
-            render_component_guidance,
-        ) or system_prompt
+        system_prompt = (
+            prompts.merge_prompt_extras(
+                system_prompt,
+                render_component_guidance,
+            )
+            or system_prompt
+        )
 
     if proactive_report is not None:
-        system_prompt = prompts.merge_prompt_extras(
-            system_prompt,
-            prompts.render_proactive_report_guidance(),
-        ) or system_prompt
+        system_prompt = (
+            prompts.merge_prompt_extras(
+                system_prompt,
+                prompts.render_proactive_report_guidance(),
+            )
+            or system_prompt
+        )
 
     messages: list[dict[str, str]] = [
         {"role": "system", "content": system_prompt},
@@ -997,13 +1006,13 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
         )
     messages.extend(
         [
-        {
-            "role": "user",
-            "content": prompts.build_user_prompt(
-                trajectory.query,
-                llm_context,
-            ),
-        },
+            {
+                "role": "user",
+                "content": prompts.build_user_prompt(
+                    trajectory.query,
+                    llm_context,
+                ),
+            },
         ]
     )
 

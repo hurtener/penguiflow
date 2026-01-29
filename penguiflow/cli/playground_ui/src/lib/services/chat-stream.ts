@@ -8,6 +8,7 @@ import type {
 import { safeParse } from '$lib/utils';
 import { ANSWER_GATE_SENTINEL } from '$lib/utils/constants';
 import type { AppStores } from '$lib/stores';
+import type { NotificationLevel } from '$lib/stores/ui/notifications.svelte';
 import { HttpAgent } from '@ag-ui/client';
 import {
   EventType,
@@ -230,11 +231,11 @@ class ChatStreamManager {
   }
 
   private handleStateUpdate(data: Record<string, unknown>): void {
-    this.stores.tasksStore.applyUpdate(data as StateUpdate);
+    this.stores.tasksStore.applyUpdate(data as unknown as StateUpdate);
     const updateType = data.update_type as string | undefined;
     if (updateType === 'NOTIFICATION') {
       const content = data.content as Record<string, unknown> | undefined;
-      const severity = String(content?.severity ?? 'info');
+      const severity = toNotificationLevel(content?.severity);
       const body = String(content?.body ?? '');
       const title = String(content?.title ?? '');
       const message = title ? `${title}: ${body}` : body;
@@ -249,7 +250,7 @@ class ChatStreamManager {
             }))
             .filter(item => item.id)
         : undefined;
-      this.stores.notificationsStore.add(message || 'Notification', severity as any, actions);
+      this.stores.notificationsStore.add(message || 'Notification', severity, actions);
     }
   }
 
@@ -826,11 +827,11 @@ class ChatStreamManager {
 
         // Handle state_update events for task tracking
         if (name === 'state_update' && record) {
-          this.stores.tasksStore.applyUpdate(record as StateUpdate);
+          this.stores.tasksStore.applyUpdate(record as unknown as StateUpdate);
           const updateType = record.update_type as string | undefined;
           if (updateType === 'NOTIFICATION') {
             const content = record.content as Record<string, unknown> | undefined;
-            const severity = String(content?.severity ?? 'info');
+            const severity = toNotificationLevel(content?.severity);
             const body = String(content?.body ?? '');
             const title = String(content?.title ?? '');
             const message = title ? `${title}: ${body}` : body;
@@ -845,7 +846,7 @@ class ChatStreamManager {
                   }))
                   .filter(item => item.id)
               : undefined;
-            this.stores.notificationsStore.add(message || 'Notification', severity as any, actions);
+            this.stores.notificationsStore.add(message || 'Notification', severity, actions);
           }
         }
 
@@ -1000,6 +1001,14 @@ function getNumber(value: unknown): number | undefined {
 
 function getBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
+}
+
+function toNotificationLevel(value: unknown): NotificationLevel {
+  const raw = typeof value === 'string' ? value : 'info';
+  if (raw === 'info' || raw === 'success' || raw === 'warning' || raw === 'error') {
+    return raw;
+  }
+  return 'info';
 }
 
 function toArtifactChunkPayload(data: Record<string, unknown>): ArtifactChunkPayload {

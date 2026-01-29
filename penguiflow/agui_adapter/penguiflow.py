@@ -54,6 +54,43 @@ class PenguiFlowAdapter(AGUIAdapter):
         self._task_id: str | None = None
         self._trace_id: str | None = None
 
+    def _discover_background_config(self) -> Any | None:
+        try:
+            from penguiflow.planner import ReactPlanner
+            from penguiflow.planner.models import BackgroundTasksConfig
+        except Exception:
+            return None
+
+        planner = getattr(self._agent, "_planner", None)
+        if planner is None:
+            orchestrator = getattr(self._agent, "_orchestrator", None)
+            planner = getattr(orchestrator, "_planner", None) if orchestrator is not None else None
+        if not isinstance(planner, ReactPlanner):
+            return None
+        background_cfg = getattr(planner, "_background_tasks", None)
+        if isinstance(background_cfg, BackgroundTasksConfig):
+            return background_cfg
+        return None
+
+    def _configure_session_background(self, session: Any) -> None:
+        background_cfg = self._discover_background_config()
+        if background_cfg is None:
+            return
+        if hasattr(session, "configure_background_tasks"):
+            session.configure_background_tasks(background_cfg)
+
+    def _set_foreground_busy(self, session: Any, busy: bool) -> None:
+        if hasattr(session, "set_foreground_busy"):
+            session.set_foreground_busy(busy=busy)
+
+    async def _finalize_foreground(self, session: Any) -> None:
+        if hasattr(session, "on_foreground_yield"):
+            try:
+                await session.on_foreground_yield(turn_id=self._task_id)
+            except Exception as exc:
+                _LOGGER.debug("foreground_yield_failed", extra={"error": str(exc)})
+        self._set_foreground_busy(session, False)
+
     async def run(self, input: RunAgentInput) -> AsyncIterator[AGUIEvent]:  # type: ignore[override,misc]
         self._streamed_answer = False
 
@@ -65,13 +102,20 @@ class PenguiFlowAdapter(AGUIAdapter):
         llm_context, tool_context = _extract_forwarded_contexts(input)
         _LOGGER.info(
             "AG-UI run: messages=%d, thread_id=%s, run_id=%s",
-            len(input.messages or []), input.thread_id, input.run_id,
+            len(input.messages or []),
+            input.thread_id,
+            input.run_id,
         )
         for i, msg in enumerate(input.messages or []):
             role = getattr(msg, "role", None) or (msg.get("role") if isinstance(msg, Mapping) else None)
             content = getattr(msg, "content", None) or (msg.get("content") if isinstance(msg, Mapping) else None)
-            _LOGGER.info("  message[%d]: role=%s, content_type=%s, content_preview=%s",
-                        i, role, type(content).__name__, repr(content)[:100] if content else "None")
+            _LOGGER.info(
+                "  message[%d]: role=%s, content_type=%s, content_preview=%s",
+                i,
+                role,
+                type(content).__name__,
+                repr(content)[:100] if content else "None",
+            )
         query = _pick_query(input.messages)
         _LOGGER.info("AG-UI extracted query: %r", query[:200] if query else "(empty)")
 
@@ -82,6 +126,8 @@ class PenguiFlowAdapter(AGUIAdapter):
             session.update_context(llm_context=dict(llm_context), tool_context=dict(tool_context))
             if hasattr(session, "set_turn_id"):
                 session.set_turn_id(self._task_id)
+            self._configure_session_background(session)
+            self._set_foreground_busy(session, True)
             try:
                 await session.ensure_capacity(TaskType.FOREGROUND)
             except RuntimeError as exc:
@@ -201,6 +247,8 @@ class PenguiFlowAdapter(AGUIAdapter):
                             },
                         )
                     )
+                if session is not None:
+                    await self._finalize_foreground(session)
                 yield self._make_status_update("FAILED", error=str(run_result.error))
                 raise run_result.error
 
@@ -222,18 +270,24 @@ class PenguiFlowAdapter(AGUIAdapter):
                             },
                         )
                     )
+                if session is not None:
+                    await self._finalize_foreground(session)
                 yield self._make_status_update("COMPLETE")
                 return
 
             _LOGGER.info(
                 "AG-UI result: answer=%s, pause=%s, streamed=%s",
-                bool(result.answer), bool(result.pause), self._streamed_answer,
+                bool(result.answer),
+                bool(result.pause),
+                self._streamed_answer,
             )
 
             if result.pause:
                 if session is not None and self._task_id is not None and self._session_id is not None:
                     await session.registry.update_task(
-                        self._task_id, status=TaskStatus.PAUSED, trace_id=self._trace_id
+                        self._task_id,
+                        status=TaskStatus.PAUSED,
+                        trace_id=self._trace_id,
                     )
                     session._publish(
                         StateUpdate(
@@ -248,6 +302,8 @@ class PenguiFlowAdapter(AGUIAdapter):
                             },
                         )
                     )
+                if session is not None:
+                    await self._finalize_foreground(session)
                 yield self._make_status_update("PAUSED", reason=result.pause.get("reason", "pause"))
                 yield self.custom("pause", result.pause)
                 pause_message = _format_pause_message(result.pause)
@@ -279,6 +335,7 @@ class PenguiFlowAdapter(AGUIAdapter):
                         },
                     )
                 )
+                await self._finalize_foreground(session)
             yield self._make_status_update("COMPLETE")
 
         initial_state = getattr(input, "state", None)
@@ -287,7 +344,7 @@ class PenguiFlowAdapter(AGUIAdapter):
         async for event in self.with_run_lifecycle(
             input, _stream(), initial_state=dict(initial_state) if initial_state else None
         ):
-            _LOGGER.debug("AG-UI yielding event: type=%s", getattr(event, 'type', type(event).__name__))
+            _LOGGER.debug("AG-UI yielding event: type=%s", getattr(event, "type", type(event).__name__))
             yield event
 
     async def resume(
@@ -433,11 +490,16 @@ class PenguiFlowAdapter(AGUIAdapter):
             # Emit thinking/observation content as CUSTOM events
             if channel == "thinking":
                 if text:
-                    mapped.append(self.custom("thinking", {
-                        "text": text,
-                        "phase": phase,
-                        "done": done,
-                    }))
+                    mapped.append(
+                        self.custom(
+                            "thinking",
+                            {
+                                "text": text,
+                                "phase": phase,
+                                "done": done,
+                            },
+                        )
+                    )
                 return mapped
 
             # Emit revision content as CUSTOM events

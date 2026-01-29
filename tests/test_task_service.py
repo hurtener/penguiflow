@@ -6,8 +6,10 @@ import pytest
 
 from penguiflow.catalog import build_catalog
 from penguiflow.planner import ReactPlanner
+from penguiflow.planner.models import BackgroundTasksConfig
 from penguiflow.registry import ModelRegistry
-from penguiflow.sessions import InMemorySessionStateStore, SessionManager, TaskStatus
+from penguiflow.sessions import InMemorySessionStateStore, SessionManager, TaskResult, TaskStatus
+from penguiflow.sessions.models import MergeStrategy
 from penguiflow.sessions.task_service import InProcessTaskService
 
 
@@ -88,8 +90,20 @@ async def test_inprocess_task_service_controls_and_patch_flow() -> None:
     patch_id = next(iter(patches.keys()))
     ok = await service.apply_patch(session_id="s3", patch_id=patch_id, action="apply")
     assert ok is True
+    background = session.get_background_results()
+    assert spawned.task_id in background
     llm_context, _ = session.get_context()
-    assert llm_context.get("background_results")
+    assert "background_results" not in llm_context
+
+    cleaned = await service.acknowledge_background(
+        session_id="s3",
+        task_ids=[spawned.task_id],
+    )
+    assert cleaned == 1
+    background = session.get_background_results()
+    assert spawned.task_id not in background
+    llm_context, _ = session.get_context()
+    assert "background_results" not in llm_context
 
     # Reject is routed through steering.
     spawned2 = await service.spawn(session_id="s3", query="work2")
@@ -111,3 +125,53 @@ async def test_inprocess_task_service_controls_and_patch_flow() -> None:
     spawned3 = await service.spawn(session_id="s3", query="work3")
     ok = await service.cancel(session_id="s3", task_id=spawned3.task_id, reason="stop")
     assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_retain_turn_timeout_uses_config() -> None:
+    sessions = SessionManager(state_store=InMemorySessionStateStore())
+
+    async def quick_pipeline(runtime):  # type: ignore[no-untyped-def]
+        _ = runtime
+        return TaskResult(payload={"ok": True})
+
+    def tool_job_factory(tool_name, tool_args):  # type: ignore[no-untyped-def]
+        _ = tool_name, tool_args
+        return quick_pipeline
+
+    background_cfg = BackgroundTasksConfig(retain_turn_timeout_s=0.01)
+    service = InProcessTaskService(
+        sessions=sessions,
+        planner_factory=None,
+        tool_job_factory=tool_job_factory,
+        background_config=background_cfg,
+    )
+
+    session = await sessions.get_or_create("s-timeout")
+    recorded_timeouts: list[float | None] = []
+
+    async def fake_wait(group_id, *, timeout_s=None):  # type: ignore[no-untyped-def]
+        recorded_timeouts.append(timeout_s)
+        group = await session.get_group(group_id=group_id)
+        return group, True
+
+    session.wait_for_group_completion = fake_wait  # type: ignore[method-assign]
+
+    result = await asyncio.wait_for(
+        service.spawn_tool_job(
+            session_id="s-timeout",
+            tool_name="slow",
+            tool_args={},
+            group="timeout-group",
+            group_sealed=True,
+            retain_turn=True,
+            group_merge_strategy=MergeStrategy.APPEND,
+        ),
+        timeout=0.3,
+    )
+
+    assert result.retained is True
+    assert result.group_completion is not None
+    assert result.group_completion.timed_out is True
+    assert recorded_timeouts
+    assert all(timeout == 0.01 for timeout in recorded_timeouts)

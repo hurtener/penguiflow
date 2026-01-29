@@ -17,6 +17,8 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
+from penguiflow.planner.models import BackgroundTasksConfig
+
 from .models import GroupReportStrategy, GroupStatus, MergeStrategy, TaskGroup, TaskStatus, TaskType
 from .planner import PlannerFactory, PlannerTaskPipeline
 from .session import SessionManager, TaskPipeline
@@ -112,6 +114,7 @@ class TaskService(Protocol):
         context_depth: ContextDepth = "full",
         task_id: str | None = None,
         idempotency_key: str | None = None,
+        context_tool_context: dict[str, Any] | None = None,
         # Group parameters
         group: str | None = None,
         group_id: str | None = None,
@@ -162,6 +165,13 @@ class TaskService(Protocol):
         strategy: MergeStrategy | None = None,
     ) -> bool: ...
 
+    async def acknowledge_background(
+        self,
+        *,
+        session_id: str,
+        task_ids: builtins.list[str],
+    ) -> int: ...
+
     async def spawn_tool_job(
         self,
         *,
@@ -174,6 +184,7 @@ class TaskService(Protocol):
         propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
         notify_on_complete: bool = True,
         task_id: str | None = None,
+        context_tool_context: dict[str, Any] | None = None,
         # Group parameters
         group: str | None = None,
         group_id: str | None = None,
@@ -254,14 +265,22 @@ class InProcessTaskService:
         subagent_planner_factory: PlannerFactory | None = None,
         tool_job_factory: Callable[[str, Any], TaskPipeline] | None = None,
         spawn_guard: SpawnGuard | None = None,
+        background_config: BackgroundTasksConfig | None = None,
     ) -> None:
         self._sessions = sessions
         self._planner_factory = planner_factory
         self._subagent_factory = subagent_planner_factory or planner_factory
         self._tool_job_factory = tool_job_factory
         self._spawn_guard = spawn_guard or NoOpSpawnGuard()
+        self._background_config = background_config
         self._lock = asyncio.Lock()
         self._idempotency: dict[tuple[str, str], str] = {}
+
+    def _apply_background_config(self, session: Any) -> None:
+        if self._background_config is None:
+            return
+        if hasattr(session, "configure_background_tasks"):
+            session.configure_background_tasks(self._background_config)
 
     async def spawn(
         self,
@@ -276,6 +295,7 @@ class InProcessTaskService:
         context_depth: ContextDepth = "full",
         task_id: str | None = None,
         idempotency_key: str | None = None,
+        context_tool_context: dict[str, Any] | None = None,
         # Group parameters
         group: str | None = None,
         group_id: str | None = None,
@@ -300,6 +320,8 @@ class InProcessTaskService:
         if not decision.allowed:
             raise RuntimeError(decision.reason or "spawn_blocked")
         session = await self._sessions.get_or_create(session_id)
+        self._apply_background_config(session)
+        self._apply_background_config(session)
         if idempotency_key is not None:
             async with self._lock:
                 existing = self._idempotency.get((session_id, idempotency_key))
@@ -313,16 +335,17 @@ class InProcessTaskService:
                 return TaskSpawnResult(task_id=task_id, session_id=session_id, status=existing_task.status)
 
         snapshot = None
-        if context_depth != "full":
+        if context_depth != "full" or context_tool_context:
             llm_context, tool_context = session.get_context()
             if context_depth == "none":
                 llm_context = {}
             elif context_depth == "summary":
                 llm_context = {
-                    "summary": llm_context.get("summary")
-                    or llm_context.get("conversation_summary")
-                    or "",
+                    "summary": llm_context.get("summary") or llm_context.get("conversation_summary") or "",
                 }
+            tool_context = dict(tool_context)
+            if context_tool_context:
+                tool_context.update(context_tool_context)
             from .models import TaskContextSnapshot
 
             snapshot = TaskContextSnapshot(
@@ -334,7 +357,7 @@ class InProcessTaskService:
                 propagate_on_cancel=propagate_on_cancel,
                 notify_on_complete=notify_on_complete,
                 llm_context=dict(llm_context),
-                tool_context=dict(tool_context),
+                tool_context=tool_context,
                 context_version=session.context_version,
                 context_hash=session.context_hash,
             )
@@ -373,6 +396,12 @@ class InProcessTaskService:
             await session.add_task_to_group(resolved_group.group_id, created_id)
             if group_sealed:
                 await session.seal_group(resolved_group.group_id)
+            if retain_turn and resolved_group.status == "open":
+                await session.seal_group(resolved_group.group_id)
+            resolved_group = await session.get_group(group_id=resolved_group.group_id) or resolved_group
+            if retain_turn and resolved_group.status == "open":
+                await session.seal_group(resolved_group.group_id)
+            resolved_group = await session.get_group(group_id=resolved_group.group_id) or resolved_group
 
         if idempotency_key is not None:
             async with self._lock:
@@ -388,8 +417,9 @@ class InProcessTaskService:
                 pass  # Fall through to normal return
             else:
                 retained = True
-                # Get timeout from config - default 30s
-                timeout_s = 30.0  # TODO: get from config
+                config = session.get_background_task_config()
+                timeout_s_raw = float(config.retain_turn_timeout_s)
+                timeout_s: float | None = timeout_s_raw if timeout_s_raw > 0 else None
                 completed_group, timed_out = await session.wait_for_group_completion(
                     resolved_group.group_id,
                     timeout_s=timeout_s,
@@ -405,6 +435,20 @@ class InProcessTaskService:
                         failed_task_ids=list(completed_group.failed_task_ids),
                         results=results,
                         timed_out=timed_out,
+                    )
+                if completed_group is not None and not timed_out:
+                    task_ids = list(completed_group.task_ids)
+                    session.suppress_proactive_reports(task_ids=task_ids, group_id=completed_group.group_id)
+                    await session.mark_background_consumed(task_ids=task_ids)
+                elif timed_out:
+                    config = session.get_background_task_config()
+                    continuation_hops = int(config.background_continuation_max_hops or 0)
+                    cooldown_s = float(config.background_continuation_cooldown_s or 0.0)
+                    session.schedule_group_continuation(
+                        group_id=resolved_group.group_id,
+                        timeout_s=timeout_s,
+                        max_hops=continuation_hops,
+                        cooldown_s=cooldown_s,
                     )
 
         task = await session.get_task(created_id)
@@ -509,6 +553,10 @@ class InProcessTaskService:
             return True
         return await session.apply_pending_patch(patch_id=patch_id, strategy=strategy)
 
+    async def acknowledge_background(self, *, session_id: str, task_ids: builtins.list[str]) -> int:
+        session = await self._sessions.get_or_create(session_id)
+        return await session.mark_background_consumed(task_ids=task_ids)
+
     async def spawn_tool_job(
         self,
         *,
@@ -521,6 +569,7 @@ class InProcessTaskService:
         propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
         notify_on_complete: bool = True,
         task_id: str | None = None,
+        context_tool_context: dict[str, Any] | None = None,
         # Group parameters
         group: str | None = None,
         group_id: str | None = None,
@@ -545,6 +594,7 @@ class InProcessTaskService:
         if not decision.allowed:
             raise RuntimeError(decision.reason or "spawn_blocked")
         session = await self._sessions.get_or_create(session_id)
+        self._apply_background_config(session)
 
         # Resolve/create task group if group parameters provided
         resolved_group: TaskGroup | None = None
@@ -558,11 +608,32 @@ class InProcessTaskService:
                 retain_turn=retain_turn,
             )
 
+        snapshot = None
+        if context_tool_context:
+            llm_context, tool_context = session.get_context()
+            tool_context = dict(tool_context)
+            tool_context.update(context_tool_context)
+            from .models import TaskContextSnapshot
+
+            snapshot = TaskContextSnapshot(
+                session_id=session_id,
+                task_id=task_id or "pending",
+                spawned_from_task_id=parent_task_id or "foreground",
+                spawn_reason=f"tool:{tool_name}",
+                query=None,
+                propagate_on_cancel=propagate_on_cancel,
+                notify_on_complete=notify_on_complete,
+                llm_context=dict(llm_context),
+                tool_context=tool_context,
+                context_version=session.context_version,
+                context_hash=session.context_hash,
+            )
         pipeline = self._tool_job_factory(tool_name, tool_args)
         created_id = await session.spawn_task(
             pipeline,
             task_type=TaskType.BACKGROUND,
             priority=priority,
+            context_snapshot=snapshot,
             spawn_reason=f"tool:{tool_name}",
             description=f"{tool_name} (background)",
             query=None,
@@ -590,8 +661,9 @@ class InProcessTaskService:
                 pass  # Fall through to normal return
             else:
                 retained = True
-                # Get timeout from config - default 30s
-                timeout_s = 30.0  # TODO: get from config
+                config = session.get_background_task_config()
+                timeout_s_raw = float(config.retain_turn_timeout_s)
+                timeout_s: float | None = timeout_s_raw if timeout_s_raw > 0 else None
                 completed_group, timed_out = await session.wait_for_group_completion(
                     resolved_group.group_id,
                     timeout_s=timeout_s,
@@ -607,6 +679,20 @@ class InProcessTaskService:
                         failed_task_ids=list(completed_group.failed_task_ids),
                         results=results,
                         timed_out=timed_out,
+                    )
+                if completed_group is not None and not timed_out:
+                    task_ids = list(completed_group.task_ids)
+                    session.suppress_proactive_reports(task_ids=task_ids, group_id=completed_group.group_id)
+                    await session.mark_background_consumed(task_ids=task_ids)
+                elif timed_out:
+                    config = session.get_background_task_config()
+                    continuation_hops = int(config.background_continuation_max_hops or 0)
+                    cooldown_s = float(config.background_continuation_cooldown_s or 0.0)
+                    session.schedule_group_continuation(
+                        group_id=resolved_group.group_id,
+                        timeout_s=timeout_s,
+                        max_hops=continuation_hops,
+                        cooldown_s=cooldown_s,
                     )
 
         task = await session.get_task(created_id)
@@ -632,9 +718,7 @@ class InProcessTaskService:
         turn_id: str | None = None,
     ) -> dict[str, Any]:
         session = await self._sessions.get_or_create(session_id)
-        group = await session.get_group(
-            group_id=group_id, group_name=group_name, turn_id=turn_id
-        )
+        group = await session.get_group(group_id=group_id, group_name=group_name, turn_id=turn_id)
         if group is None:
             return {"ok": False, "error": "group_not_found"}
         if group.status != "open":
@@ -739,9 +823,7 @@ class InProcessTaskService:
         turn_id: str | None = None,
     ) -> TaskGroup | None:
         session = await self._sessions.get_or_create(session_id)
-        return await session.get_group(
-            group_id=group_id, group_name=group_name, turn_id=turn_id
-        )
+        return await session.get_group(group_id=group_id, group_name=group_name, turn_id=turn_id)
 
 
 __all__ = [

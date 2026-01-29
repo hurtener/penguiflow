@@ -13,6 +13,7 @@ from penguiflow.planner import PlannerFinish, PlannerPause
 {% if with_background_tasks %}
 from penguiflow.planner import BackgroundTasksConfig, ReactPlanner
 from penguiflow.sessions import SessionLimits, SessionManager
+from penguiflow.sessions.proactive import setup_proactive_reporting
 from penguiflow.sessions.task_service import InProcessTaskService
 from penguiflow.sessions.task_tools import SUBAGENT_FLAG_KEY, TASK_SERVICE_KEY
 from penguiflow.sessions.telemetry import LoggingTaskTelemetrySink
@@ -245,6 +246,20 @@ class {{ class_name }}Orchestrator:
 {% if with_background_tasks %}
         if self._session_manager is not None:
             session = await self._session_manager.get_or_create(session_id)
+            if (
+                self._config.background_tasks_enabled
+                and self._config.background_tasks_proactive_report_enabled
+            ):
+                setup_proactive_reporting(
+                    session,
+                    self._planner.fork,
+                    enabled=True,
+                    strategies=list(self._config.background_tasks_proactive_report_strategies),
+                    max_queued=self._config.background_tasks_proactive_report_max_queued,
+                    timeout_s=self._config.background_tasks_proactive_report_timeout_s,
+                    max_hops=self._config.background_tasks_proactive_report_max_hops,
+                    fallback_notification=self._config.background_tasks_proactive_report_fallback_notification,
+                )
             snapshot_tool_context = dict(merged_tool_context)
             snapshot_tool_context.pop(TASK_SERVICE_KEY, None)
             session.update_context(llm_context=dict(llm_context), tool_context=snapshot_tool_context)
@@ -331,6 +346,20 @@ class {{ class_name }}Orchestrator:
 {% if with_background_tasks %}
         if self._session_manager is not None:
             session = await self._session_manager.get_or_create(session_id)
+            if (
+                self._config.background_tasks_enabled
+                and self._config.background_tasks_proactive_report_enabled
+            ):
+                setup_proactive_reporting(
+                    session,
+                    self._planner.fork,
+                    enabled=True,
+                    strategies=list(self._config.background_tasks_proactive_report_strategies),
+                    max_queued=self._config.background_tasks_proactive_report_max_queued,
+                    timeout_s=self._config.background_tasks_proactive_report_timeout_s,
+                    max_hops=self._config.background_tasks_proactive_report_max_hops,
+                    fallback_notification=self._config.background_tasks_proactive_report_fallback_notification,
+                )
             snapshot_tool_context = dict(merged_tool_context)
             snapshot_tool_context.pop(TASK_SERVICE_KEY, None)
             session.update_context(llm_context={}, tool_context=snapshot_tool_context)

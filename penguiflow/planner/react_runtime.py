@@ -22,7 +22,7 @@ from .models import PlannerAction, PlannerEvent, PlannerFinish, PlannerPause, Re
 from .streaming import _StreamingArgsExtractor
 from .tool_aliasing import build_aliased_tool_catalog, rewrite_action_node
 from .tool_calls import execute_tool_call
-from .trajectory import Trajectory, TrajectoryStep
+from .trajectory import Trajectory, TrajectoryStep, extract_background_results
 from .validation_repair import _autofill_missing_args, _coerce_tool_context, _validate_llm_context
 
 logger = logging.getLogger("penguiflow.planner")
@@ -220,11 +220,7 @@ def _apply_steering(planner: Any, trajectory: Trajectory) -> None:
             raise SteeringCancelled(str(event.payload.get("reason") or "cancelled"))
         if event.event_type in {SteeringEventType.INJECT_CONTEXT, SteeringEventType.REDIRECT}:
             if event.event_type == SteeringEventType.REDIRECT:
-                new_goal = (
-                    event.payload.get("instruction")
-                    or event.payload.get("goal")
-                    or event.payload.get("query")
-                )
+                new_goal = event.payload.get("instruction") or event.payload.get("goal") or event.payload.get("query")
                 if isinstance(new_goal, str) and new_goal.strip():
                     trajectory.query = new_goal.strip()
             trajectory.steering_inputs.append(event.to_injection())
@@ -294,12 +290,15 @@ async def run(
     normalised_llm_context = _validate_llm_context(llm_context)
     resolved_key = planner._resolve_memory_key(memory_key, normalised_tool_context)
     normalised_llm_context = await planner._apply_memory_context(normalised_llm_context, resolved_key)
+    cleaned_llm_context, extracted_results = extract_background_results(normalised_llm_context)
     planner._cost_tracker = _CostTracker()
     trajectory = Trajectory(
         query=query,
-        llm_context=normalised_llm_context,
+        llm_context=cleaned_llm_context,
         tool_context=normalised_tool_context,
     )
+    if extracted_results:
+        trajectory.background_results.update(extracted_results)
     planner._artifact_registry = ArtifactRegistry.from_snapshot(trajectory.metadata.get("artifact_registry"))
     planner._artifact_registry.write_snapshot(trajectory.metadata)
     error_recovery_cfg = getattr(planner, "_error_recovery_config", None)
@@ -323,6 +322,10 @@ async def resume(
     record = await planner._load_pause_record(token)
     trajectory = record.trajectory
     trajectory.llm_context = _validate_llm_context(trajectory.llm_context) or {}
+    cleaned_llm_context, extracted_results = extract_background_results(trajectory.llm_context)
+    trajectory.llm_context = cleaned_llm_context or {}
+    if extracted_results:
+        trajectory.background_results.update(extracted_results)
     if provided_tool_context is not None:
         trajectory.tool_context = provided_tool_context
     elif record.tool_context is not None:
@@ -340,7 +343,10 @@ async def resume(
         dict(trajectory.llm_context or {}),
         resolved_key,
     )
-    trajectory.llm_context = merged_llm_context
+    cleaned_llm_context, extracted_results = extract_background_results(merged_llm_context)
+    trajectory.llm_context = cleaned_llm_context or {}
+    if extracted_results:
+        trajectory.background_results.update(extracted_results)
     tracker: _ConstraintTracker | None = None
     if record.constraints is not None:
         tracker = _ConstraintTracker.from_snapshot(
@@ -1082,9 +1088,8 @@ async def run_loop(
                 # 1. Second autofill rejection for THIS tool (gave model one chance with explicit field names)
                 # 2. Consecutive failures threshold reached for THIS tool
                 force_finish = (
-                    (autofilled_fields and autofill_rejection_count >= 2)
-                    or consecutive_failures >= planner._max_consecutive_arg_failures
-                )
+                    autofilled_fields and autofill_rejection_count >= 2
+                ) or consecutive_failures >= planner._max_consecutive_arg_failures
 
                 if force_finish:
                     failure_reason = (
@@ -1248,9 +1253,7 @@ async def run_loop(
                                             try:
                                                 parsed_args = spec.args_model.model_validate(merged_again)
                                             except ValidationError as merge_exc:
-                                                revalidation_error = json.dumps(
-                                                    merge_exc.errors(), ensure_ascii=False
-                                                )
+                                                revalidation_error = json.dumps(merge_exc.errors(), ensure_ascii=False)
                                             else:
                                                 action.args = merged_again
                                                 revalidation_error = planner._apply_arg_validation(
@@ -1266,9 +1269,7 @@ async def run_loop(
                                                     trajectory.metadata[f"autofill_rejection_count_{spec.name}"] = 0
                                                     trajectory.metadata[f"arg_fill_attempted_{spec.name}"] = False
                                                     if isinstance(trajectory.metadata, MutableMapping):
-                                                        trajectory.metadata.pop(
-                                                            "render_component_schema_error", None
-                                                        )
+                                                        trajectory.metadata.pop("render_component_schema_error", None)
                                                         trajectory.metadata.pop(
                                                             "render_component_props_arg_fill_attempted", None
                                                         )

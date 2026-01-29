@@ -26,9 +26,11 @@ from .react import (
     TrajectoryStep,
     TrajectorySummary,
 )
+from .trajectory import BackgroundTaskResult
 
 __all__ = [
     "AnyContext",
+    "BackgroundTaskResult",
     "DSPyLLMClient",
     "BackgroundTasksConfig",
     "BackgroundTaskHandle",

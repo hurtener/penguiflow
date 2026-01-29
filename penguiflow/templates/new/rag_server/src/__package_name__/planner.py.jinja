@@ -121,6 +121,7 @@ def _build_background_tasks_config(config: Config) -> BackgroundTasksConfig:
         proactive_report_strategies=config.background_tasks_proactive_report_strategies,
         proactive_report_max_queued=config.background_tasks_proactive_report_max_queued,
         proactive_report_timeout_s=config.background_tasks_proactive_report_timeout_s,
+        proactive_report_max_hops=config.background_tasks_proactive_report_max_hops,
         proactive_report_fallback_notification=config.background_tasks_proactive_report_fallback_notification,
     )
 

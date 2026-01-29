@@ -49,6 +49,21 @@ export interface ConversationMemory {
 }
 
 /**
+ * Background task result stored on trajectories.
+ */
+export interface BackgroundTaskResultPayload {
+  task_id: string;
+  group_id?: string | null;
+  status?: string;
+  summary?: string | null;
+  payload?: unknown;
+  facts?: Record<string, unknown>;
+  artifacts?: Record<string, unknown>[];
+  consumed?: boolean;
+  completed_at?: number;
+}
+
+/**
  * LLM context passed to the model (includes conversation_memory if STM enabled).
  */
 export interface LLMContext {
@@ -72,6 +87,7 @@ export interface TrajectoryPayload {
   steps?: TrajectoryStep[];
   llm_context?: LLMContext;
   tool_context?: ToolContext;
+  background_results?: Record<string, BackgroundTaskResultPayload>;
   artifacts?: Record<string, unknown>;
   sources?: Record<string, unknown>[];
   metadata?: Record<string, unknown>;

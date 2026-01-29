@@ -27,8 +27,9 @@ class DummyTaskService:
         propagate_on_cancel="cascade",
         notify_on_complete=True,
         task_id=None,
+        context_tool_context=None,
     ):
-        _ = tool_args, parent_task_id, priority, propagate_on_cancel, task_id
+        _ = tool_args, parent_task_id, priority, propagate_on_cancel, task_id, context_tool_context
         self.job_calls.append((session_id, tool_name, merge_strategy, notify_on_complete))
 
         class _Result:
@@ -54,6 +55,7 @@ class DummyTaskService:
         context_depth="full",
         task_id=None,
         idempotency_key=None,
+        context_tool_context=None,
     ):
         _ = (
             query,
@@ -63,6 +65,7 @@ class DummyTaskService:
             context_depth,
             task_id,
             idempotency_key,
+            context_tool_context,
         )
         self.subagent_calls.append((session_id, "subagent", merge_strategy, notify_on_complete))
 
@@ -117,11 +120,7 @@ class ScriptedClient:
         _ = messages, response_format, stream, on_stream_chunk
         self.calls += 1
         if self.calls == 1:
-            return (
-                '{"thought":"spawn","next_node":"'
-                + self._tool_name
-                + '","args":{"x":1}}'
-            )
+            return '{"thought":"spawn","next_node":"' + self._tool_name + '","args":{"x":1}}'
         return '{"thought":"done","next_node":null,"args":{"raw_answer":"ok"}}'
 
 

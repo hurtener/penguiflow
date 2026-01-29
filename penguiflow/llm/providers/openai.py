@@ -79,9 +79,7 @@ class OpenAIProvider(OpenAICompatibleProvider):
         try:
             from openai import AsyncOpenAI
         except ImportError as e:
-            raise ImportError(
-                "OpenAI SDK not installed. Install with: pip install openai>=2.0.0"
-            ) from e
+            raise ImportError("OpenAI SDK not installed. Install with: pip install openai>=2.0.0") from e
 
         self._model = model
         self._profile = profile or get_profile(model)
@@ -118,7 +116,7 @@ class OpenAIProvider(OpenAICompatibleProvider):
     ) -> CompletionResponse:
         """Execute a completion request."""
         if cancel and cancel.is_cancelled():
-            raise LLMCancelledError(message="Request cancelled", provider="openai")
+            raise LLMCancelledError(message="Request cancelled", provider="openai", retryable=False)
 
         params = self._build_params(request)
         timeout = timeout_s or self._timeout
@@ -147,9 +145,7 @@ class OpenAIProvider(OpenAICompatibleProvider):
                 raw=e,
             ) from e
         except asyncio.CancelledError:
-            raise LLMCancelledError(
-                message="Request cancelled", provider="openai"
-            ) from None
+            raise LLMCancelledError(message="Request cancelled", provider="openai") from None
         except Exception as e:
             raise self._map_error(e) from e
 
@@ -175,7 +171,7 @@ class OpenAIProvider(OpenAICompatibleProvider):
                 stream = await self._client.chat.completions.create(**params)
                 async for chunk in stream:
                     if cancel and cancel.is_cancelled():
-                        raise LLMCancelledError(message="Request cancelled", provider="openai")
+                        raise LLMCancelledError(message="Request cancelled", provider="openai", retryable=False)
 
                     if not chunk.choices:
                         # Usage chunk at the end

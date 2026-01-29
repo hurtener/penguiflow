@@ -108,6 +108,14 @@ class TestIsRetryable:
         error = LLMTimeoutError(message="Timed out")
         assert is_retryable(error) is True
 
+    def test_cancelled_is_retryable_by_default(self) -> None:
+        error = LLMCancelledError(message="Request cancelled")
+        assert is_retryable(error) is True
+
+    def test_cancelled_can_be_non_retryable(self) -> None:
+        error = LLMCancelledError(message="Request cancelled", retryable=False)
+        assert is_retryable(error) is False
+
     def test_auth_not_retryable(self) -> None:
         error = LLMAuthError(message="Invalid key")
         assert is_retryable(error) is False
@@ -146,6 +154,11 @@ class TestMapStatusToError:
     def test_map_unknown(self) -> None:
         error = map_status_to_error(418, "I'm a teapot")
         assert isinstance(error, LLMError)
+
+    def test_map_success_status_returns_generic_llm_error(self) -> None:
+        error = map_status_to_error(200, "OK")
+        assert isinstance(error, LLMError)
+        assert not isinstance(error, (LLMAuthError, LLMRateLimitError, LLMServerError, LLMInvalidRequestError))
 
 
 class TestIsContextLengthError:
@@ -251,3 +264,13 @@ class TestExtractCleanErrorMessage:
         error = ValueError("plain error")
         result = extract_clean_error_message(error)
         assert result == "plain error"
+
+    def test_nested_extraction_handles_regex_failure(self, monkeypatch) -> None:
+        import re
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("regex broken")
+
+        monkeypatch.setattr(re, "findall", _boom)
+        error = ValueError('{"message":"outer","details":{"message":"inner"}}')
+        assert extract_clean_error_message(error) == error.__str__()

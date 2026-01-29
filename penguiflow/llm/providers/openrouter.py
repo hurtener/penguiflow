@@ -101,9 +101,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         try:
             from openai import AsyncOpenAI
         except ImportError as e:
-            raise ImportError(
-                "OpenAI SDK not installed. Install with: pip install openai>=1.58.0"
-            ) from e
+            raise ImportError("OpenAI SDK not installed. Install with: pip install openai>=1.58.0") from e
 
         # Parse model string
         self._original_model = model
@@ -120,8 +118,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
             raise ValueError(
-                "OpenRouter API key required. Set OPENROUTER_API_KEY "
-                "environment variable or pass api_key explicitly."
+                "OpenRouter API key required. Set OPENROUTER_API_KEY environment variable or pass api_key explicitly."
             )
 
         app_url = app_url or os.environ.get("OPENROUTER_APP_URL", "")
@@ -182,7 +179,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
     ) -> CompletionResponse:
         """Execute a completion request."""
         if cancel and cancel.is_cancelled():
-            raise LLMCancelledError(message="Request cancelled", provider="openrouter")
+            raise LLMCancelledError(message="Request cancelled", provider="openrouter", retryable=False)
 
         params = self._build_params(request)
         timeout = timeout_s or self._timeout
@@ -211,9 +208,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
                 raw=e,
             ) from e
         except asyncio.CancelledError:
-            raise LLMCancelledError(
-                message="Request cancelled", provider="openrouter"
-            ) from None
+            raise LLMCancelledError(message="Request cancelled", provider="openrouter") from None
         except Exception as e:
             raise self._map_error(e) from e
 
@@ -241,7 +236,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
                 stream = await self._client.chat.completions.create(**params)
                 async for chunk in stream:
                     if cancel and cancel.is_cancelled():
-                        raise LLMCancelledError(message="Request cancelled", provider="openrouter")
+                        raise LLMCancelledError(message="Request cancelled", provider="openrouter", retryable=False)
 
                     if not chunk.choices:
                         if hasattr(chunk, "usage") and chunk.usage:

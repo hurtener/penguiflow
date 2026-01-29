@@ -182,7 +182,7 @@ class DatabricksProvider(OpenAICompatibleProvider):
         from openai.types.chat import ChatCompletion
 
         if cancel and cancel.is_cancelled():
-            raise LLMCancelledError(message="Request cancelled", provider="databricks")
+            raise LLMCancelledError(message="Request cancelled", provider="databricks", retryable=False)
 
         self.validate_request(request)
         params = self._build_params(request)
@@ -274,7 +274,7 @@ class DatabricksProvider(OpenAICompatibleProvider):
                 )
                 async for chunk in stream:
                     if cancel and cancel.is_cancelled():
-                        raise LLMCancelledError(message="Request cancelled", provider="databricks")
+                        raise LLMCancelledError(message="Request cancelled", provider="databricks", retryable=False)
 
                     if not chunk.choices:
                         # Usage chunk at the end (if supported)

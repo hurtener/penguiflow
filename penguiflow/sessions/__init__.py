@@ -17,6 +17,7 @@ from .models import (
 from .persistence import InMemorySessionStateStore, SessionStateStore, StateStoreSessionAdapter
 from .planner import PlannerTaskPipeline
 from .policy import ControlPolicy
+from .proactive import create_default_proactive_generator, setup_proactive_reporting
 from .registry import TaskRegistry
 from .scheduler import (
     InMemoryJobStore,
@@ -67,6 +68,7 @@ __all__ = [
     "ScheduleConfig",
     "SessionConnection",
     "SessionLimits",
+    "setup_proactive_reporting",
     "SessionManager",
     "SessionStateStore",
     "StateStoreSessionAdapter",
@@ -95,6 +97,7 @@ __all__ = [
     "TaskTelemetrySink",
     "NoOpTaskTelemetrySink",
     "build_task_tool_specs",
+    "create_default_proactive_generator",
     "UpdateBroker",
     "UpdateType",
     "InMemorySessionStateStore",

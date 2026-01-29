@@ -13,7 +13,7 @@ describe('tasksStore', () => {
       created_at: new Date().toISOString()
     });
     expect(store.count).toBe(1);
-    expect(store.tasks[0].status).toBe('RUNNING');
+    expect(store.tasks[0]!.status).toBe('RUNNING');
   });
 
   it('stores results', () => {
@@ -26,9 +26,9 @@ describe('tasksStore', () => {
       content: { payload: { answer: 'done' }, patch_id: 'patch-1' },
       created_at: new Date().toISOString()
     });
-    expect(store.tasks[0].status).toBe('COMPLETE');
-    expect(store.tasks[0].result).toEqual({ payload: { answer: 'done' }, patch_id: 'patch-1' });
-    expect(store.tasks[0].patch_id).toBe('patch-1');
+    expect(store.tasks[0]!.status).toBe('COMPLETE');
+    expect(store.tasks[0]!.result).toEqual({ payload: { answer: 'done' }, patch_id: 'patch-1' });
+    expect(store.tasks[0]!.patch_id).toBe('patch-1');
   });
 
   it('stores progress updates', () => {
@@ -41,6 +41,6 @@ describe('tasksStore', () => {
       content: { label: 'step', current: 1, total: 3 },
       created_at: new Date().toISOString()
     });
-    expect(store.tasks[0].progress).toEqual({ label: 'step', current: 1, total: 3 });
+    expect(store.tasks[0]!.progress).toEqual({ label: 'step', current: 1, total: 3 });
   });
 });

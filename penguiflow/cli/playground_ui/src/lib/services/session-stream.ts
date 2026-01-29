@@ -1,10 +1,14 @@
 import { safeParse } from '$lib/utils';
 import { listTasks } from './api';
 import type { AppStores } from '$lib/stores';
+import type { NotificationLevel } from '$lib/stores/ui/notifications.svelte';
 import type { BackgroundTaskInfo } from '$lib/stores/features/tasks.svelte';
-import type { StateUpdate } from '$lib/types';
+import type { ArtifactChunkPayload, ArtifactRef, ArtifactStoredEvent, StateUpdate } from '$lib/types';
 
-type SessionStreamStores = Pick<AppStores, 'tasksStore' | 'notificationsStore'>;
+type SessionStreamStores = Pick<
+  AppStores,
+  'tasksStore' | 'notificationsStore' | 'chatStore' | 'artifactsStore' | 'interactionsStore'
+>;
 
 /**
  * Payload for steering message requests.
@@ -111,20 +115,66 @@ class SessionStreamManager {
       if (data.update_type == null) {
         return;
       }
-      const update = data as StateUpdate;
+      const update = data as unknown as StateUpdate;
       // Ensure task_id is present before applying task updates
       if (!update.task_id) {
         return;
       }
       this.lastUpdateId = update.update_id ?? this.lastUpdateId;
       this.stores.tasksStore.applyUpdate(update);
+      if (update.update_type === 'RESULT') {
+        const content = update.content;
+        if (content && typeof content === 'object' && !Array.isArray(content)) {
+          const proactive = Boolean((content as Record<string, unknown>).proactive);
+          if (proactive) {
+            const text = (content as Record<string, unknown>).text
+              ?? (content as Record<string, unknown>).message
+              ?? (content as Record<string, unknown>).answer;
+            const artifacts = toArtifactStoredEvents((content as Record<string, unknown>).artifacts, update);
+            const groupId = (content as Record<string, unknown>).group_id;
+            const taskId = (content as Record<string, unknown>).background_task_id;
+            const prefix = groupId ? 'Background tasks update' : 'Background task update';
+            const message = text ? String(text) : `${prefix} ready.`;
+            const suffix = typeof taskId === 'string' ? ` (task ${taskId.slice(0, 8)})` : '';
+            const fullMessage = text ? `${prefix}: ${message}${suffix}` : `${message}${suffix}`;
+            this.stores.notificationsStore.add(fullMessage, 'info');
+
+            const chatMessage = text
+              ? String(text)
+              : (groupId ? 'Background tasks completed.' : 'Background task completed.');
+            const agentMsg = this.stores.chatStore.addAgentMessage();
+            const artifactRefs = artifacts.length ? artifacts.map(toArtifactRef) : undefined;
+            const uiComponents = toArtifactChunkPayloads(
+              (content as Record<string, unknown>).ui_components
+            );
+            this.stores.chatStore.updateMessage(agentMsg.id, {
+              text: chatMessage,
+              isStreaming: false,
+              isThinking: false,
+              answerStreamDone: true,
+              revisionStreamActive: false,
+              traceId: update.trace_id ?? undefined,
+              artifacts: artifactRefs
+            });
+            if (artifacts.length) {
+              for (const artifact of artifacts) {
+                this.stores.artifactsStore.addArtifact(artifact);
+              }
+            }
+
+            // Render any ui_component artifacts under this proactive message.
+            if (uiComponents.length) {
+              for (const payload of uiComponents) {
+                this.stores.interactionsStore.addArtifactChunk(payload, { message_id: agentMsg.id });
+              }
+            }
+          }
+        }
+      }
       if (update.update_type === 'NOTIFICATION') {
         const content = update.content;
         if (content && typeof content === 'object' && !Array.isArray(content)) {
-          const severityRaw = String((content as Record<string, unknown>).severity ?? 'info');
-          const severity = ['info', 'success', 'warning', 'error'].includes(severityRaw)
-            ? severityRaw
-            : 'info';
+          const severity = toNotificationLevel((content as Record<string, unknown>).severity);
           const body = String((content as Record<string, unknown>).body ?? '');
           const title = String((content as Record<string, unknown>).title ?? '');
           const message = title ? `${title}: ${body}` : body;
@@ -139,7 +189,7 @@ class SessionStreamManager {
                 }))
                 .filter(item => item.id)
             : undefined;
-          this.stores.notificationsStore.add(message || 'Notification', severity as any, actions);
+          this.stores.notificationsStore.add(message || 'Notification', severity, actions);
         }
       }
     };
@@ -160,4 +210,98 @@ class SessionStreamManager {
 
 export function createSessionStreamManager(stores: SessionStreamStores): SessionStreamManager {
   return new SessionStreamManager(stores);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function toNotificationLevel(value: unknown): NotificationLevel {
+  const raw = typeof value === 'string' ? value : 'info';
+  if (raw === 'info' || raw === 'success' || raw === 'warning' || raw === 'error') {
+    return raw;
+  }
+  return 'info';
+}
+
+function getString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function getNumber(value: unknown): number | undefined {
+  return typeof value === 'number' ? value : undefined;
+}
+
+function getBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function toArtifactChunkPayloads(raw: unknown): ArtifactChunkPayload[] {
+  if (!Array.isArray(raw)) return [];
+  const results: ArtifactChunkPayload[] = [];
+  for (const item of raw) {
+    const entry = asRecord(item);
+    if (!entry) continue;
+    const chunk = entry.chunk;
+    if (!chunk || typeof chunk !== 'object') continue;
+    const artifact_type = getString(entry.artifact_type);
+    if (artifact_type !== 'ui_component') continue;
+    results.push({
+      stream_id: getString(entry.stream_id),
+      seq: getNumber(entry.seq),
+      done: getBoolean(entry.done),
+      artifact_type,
+      chunk,
+      meta: asRecord(entry.meta) ?? undefined,
+      ts: getNumber(entry.ts)
+    });
+  }
+  return results;
+}
+
+function toArtifactStoredEvents(raw: unknown, update: StateUpdate): ArtifactStoredEvent[] {
+  if (!Array.isArray(raw)) return [];
+  const results: ArtifactStoredEvent[] = [];
+  for (const item of raw) {
+    const stored = toArtifactStoredEvent(item, update);
+    if (stored) {
+      results.push(stored);
+    }
+  }
+  return results;
+}
+
+function toArtifactStoredEvent(raw: unknown, update: StateUpdate): ArtifactStoredEvent | null {
+  const entry = asRecord(raw);
+  if (!entry) return null;
+  const payload = asRecord(entry.artifact) ?? entry;
+  const ref = asRecord(payload.artifact) ?? payload;
+  const artifact_id = getString(ref.id) ?? getString(ref.artifact_id);
+  if (!artifact_id) return null;
+  const filename = getString(ref.filename) ?? artifact_id;
+  const mime_type = getString(ref.mime_type) ?? 'application/octet-stream';
+  const size_bytes = getNumber(ref.size_bytes) ?? 0;
+  const source = asRecord(ref.source) ?? {};
+  return {
+    artifact_id,
+    mime_type,
+    size_bytes,
+    filename,
+    source,
+    trace_id: update.trace_id ?? 'background',
+    session_id: update.session_id,
+    ts: Date.now()
+  };
+}
+
+function toArtifactRef(stored: ArtifactStoredEvent): ArtifactRef {
+  return {
+    id: stored.artifact_id,
+    mime_type: stored.mime_type ?? null,
+    size_bytes: stored.size_bytes ?? null,
+    filename: stored.filename ?? null,
+    sha256: null,
+    source: stored.source ?? {}
+  };
 }

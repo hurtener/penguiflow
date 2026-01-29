@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from penguiflow.sessions.models import TaskStatus
+from penguiflow.sessions.models import TaskStatus, TaskType
 from penguiflow.sessions.task_service import TaskDetails, TaskService, TaskSpawnResult, TaskSummary
 from penguiflow.sessions.task_tools import SUBAGENT_FLAG_KEY, TASK_SERVICE_KEY, build_task_tool_specs
 
@@ -43,6 +43,7 @@ class DummyService(TaskService):
         self.job_calls: list[tuple[str, str]] = []
         self.list_calls: list[str] = []
         self.get_calls: list[tuple[str, str, bool]] = []
+        self.ack_calls: list[tuple[str, list[str]]] = []
 
     async def spawn(  # type: ignore[no-untyped-def]
         self,
@@ -57,6 +58,7 @@ class DummyService(TaskService):
         context_depth="full",
         task_id=None,
         idempotency_key=None,
+        context_tool_context=None,
         # Group parameters
         group=None,
         group_id=None,
@@ -75,6 +77,7 @@ class DummyService(TaskService):
             context_depth,
             task_id,
             idempotency_key,
+            context_tool_context,
             group,
             group_id,
             group_sealed,
@@ -94,7 +97,7 @@ class DummyService(TaskService):
                 task_id="t1",
                 session_id=session_id,
                 status=TaskStatus.PENDING,
-                task_type="BACKGROUND",
+                task_type=TaskType.BACKGROUND,
                 priority=0,
             )
         ]
@@ -105,7 +108,7 @@ class DummyService(TaskService):
             task_id=task_id,
             session_id=session_id,
             status=TaskStatus.PENDING,
-            task_type="BACKGROUND",
+            task_type=TaskType.BACKGROUND,
             priority=0,
         )
 
@@ -121,6 +124,10 @@ class DummyService(TaskService):
         _ = session_id, patch_id, action, strategy
         return True
 
+    async def acknowledge_background(self, *, session_id, task_ids):  # type: ignore[no-untyped-def]
+        self.ack_calls.append((session_id, list(task_ids)))
+        return len(task_ids)
+
     async def spawn_tool_job(  # type: ignore[no-untyped-def]
         self,
         *,
@@ -133,6 +140,7 @@ class DummyService(TaskService):
         propagate_on_cancel="cascade",
         notify_on_complete=True,
         task_id=None,
+        context_tool_context=None,
         # Group parameters
         group=None,
         group_id=None,
@@ -150,6 +158,7 @@ class DummyService(TaskService):
             propagate_on_cancel,
             notify_on_complete,
             task_id,
+            context_tool_context,
             group,
             group_id,
             group_sealed,
@@ -207,6 +216,7 @@ class DummyService(TaskService):
     ):
         _ = status
         from penguiflow.sessions.models import MergeStrategy, TaskGroup
+
         return [
             TaskGroup(
                 group_id="g1",
@@ -228,6 +238,7 @@ class DummyService(TaskService):
     ):
         _ = group_name, turn_id
         from penguiflow.sessions.models import MergeStrategy, TaskGroup
+
         return TaskGroup(
             group_id=group_id or "g1",
             name="test-group",
@@ -244,6 +255,7 @@ async def test_task_tools_specs_build() -> None:
     names = {spec.name for spec in specs}
     assert "tasks.spawn" in names
     assert "tasks.list" in names
+    assert "tasks.acknowledge_background" in names
 
 
 @pytest.mark.asyncio
@@ -297,11 +309,13 @@ async def test_task_spawn_calls_service() -> None:
 @pytest.mark.asyncio
 async def test_task_tools_other_methods() -> None:
     from penguiflow.sessions.task_tools import (
+        TasksAcknowledgeBackgroundArgs,
         TasksApplyPatchArgs,
         TasksCancelArgs,
         TasksGetArgs,
         TasksListArgs,
         TasksPrioritizeArgs,
+        tasks_acknowledge_background,
         tasks_apply_patch,
         tasks_cancel,
         tasks_get,
@@ -335,6 +349,14 @@ async def test_task_tools_other_methods() -> None:
     applied = await tasks_apply_patch(TasksApplyPatchArgs(patch_id="p1", action="reject"), ctx)  # type: ignore[arg-type]
     assert applied.ok is True
     assert applied.action == "reject"
+
+    acknowledged = await tasks_acknowledge_background(
+        TasksAcknowledgeBackgroundArgs(task_ids=["t1", "t2"]),
+        ctx,  # type: ignore[arg-type]
+    )
+    assert acknowledged.acknowledged == ["t1", "t2"]
+    assert acknowledged.cleaned_up == 2
+    assert service.ack_calls == [("s1", ["t1", "t2"])]
 
 
 @pytest.mark.asyncio

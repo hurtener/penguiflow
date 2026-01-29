@@ -11,6 +11,8 @@ from pydantic import BaseModel
 
 from penguiflow.artifacts import ArtifactRef
 
+from .trajectory import BackgroundTaskResult
+
 ArtifactKind = Literal["ui_component", "binary", "tool_artifact"]
 
 
@@ -217,11 +219,13 @@ class ArtifactRegistry:
     def ingest_llm_context(self, llm_context: Any, *, step_index: int | None = None) -> None:
         """Ingest artifacts embedded in llm_context ContextPatch payloads.
 
-        Background task results are merged into session llm_context as serialized
-        ContextPatch dicts (typically under `background_result(s)`), including an
-        `artifacts` list. Those need to be registered into the in-run
-        ArtifactRegistry so they can be referenced via `artifact_ref` and later
-        resolved into UI component payloads.
+        Legacy background task results were merged into session llm_context as
+        serialized ContextPatch dicts (typically under `background_result(s)`),
+        including an `artifacts` list. Those need to be registered into the
+        in-run ArtifactRegistry so they can be referenced via `artifact_ref` and
+        later resolved into UI component payloads.
+
+        Newer runs should prefer ingest_background_results(trajectory.background_results).
 
         This is best-effort and idempotent for a given task/artifact key.
         """
@@ -241,44 +245,73 @@ class ArtifactRegistry:
 
         for patch in patches:
             task_id = patch.get("task_id")
-            task_id_str = str(task_id) if task_id is not None else ""
-            artifacts = patch.get("artifacts")
-            if not isinstance(artifacts, list):
-                continue
-            for entry in artifacts:
-                if not isinstance(entry, Mapping):
-                    continue
-                node = entry.get("node")
-                if not isinstance(node, str) or not node:
-                    continue
-                field = entry.get("field")
-                if not isinstance(field, str) or not field:
-                    field = "artifact"
-                item_index = entry.get("item_index")
-                if item_index is None:
-                    item_index = entry.get("index")
-                if not isinstance(item_index, int):
-                    item_index = None
-                payload = entry.get("artifact")
-                if payload is None:
-                    continue
+            self._ingest_patch_artifacts(task_id=task_id, artifacts=patch.get("artifacts"), step_index=target_step)
 
-                external_key = f"bg:{task_id_str}:{node}:{field}:{item_index}"
-                if external_key in self._external_keys:
-                    continue
-                self._external_keys.add(external_key)
-
-                self.register_tool_artifact(
-                    node,
-                    field,
-                    payload,
+    def ingest_background_results(self, background_results: Any, *, step_index: int | None = None) -> None:
+        if background_results is None:
+            return
+        target_step = 0 if step_index is None else int(step_index)
+        items: list[Any] = []
+        if isinstance(background_results, Mapping):
+            items = list(background_results.values())
+        elif isinstance(background_results, list):
+            items = background_results
+        else:
+            return
+        for item in items:
+            if isinstance(item, BackgroundTaskResult):
+                self._ingest_patch_artifacts(
+                    task_id=item.task_id,
+                    artifacts=item.artifacts,
                     step_index=target_step,
-                    item_index=item_index,
-                    metadata_extra={
-                        "_external_key": external_key,
-                        "background_task_id": task_id_str,
-                    },
                 )
+                continue
+            if not isinstance(item, Mapping):
+                continue
+            task_id = item.get("task_id")
+            artifacts = item.get("artifacts")
+            if artifacts is None and isinstance(item.get("payload"), Mapping):
+                artifacts = item["payload"].get("artifacts")
+            self._ingest_patch_artifacts(task_id=task_id, artifacts=artifacts, step_index=target_step)
+
+    def _ingest_patch_artifacts(self, *, task_id: Any, artifacts: Any, step_index: int) -> None:
+        if not isinstance(artifacts, list):
+            return
+        task_id_str = str(task_id) if task_id is not None else ""
+        for entry in artifacts:
+            if not isinstance(entry, Mapping):
+                continue
+            node = entry.get("node")
+            if not isinstance(node, str) or not node:
+                continue
+            field = entry.get("field")
+            if not isinstance(field, str) or not field:
+                field = "artifact"
+            item_index = entry.get("item_index")
+            if item_index is None:
+                item_index = entry.get("index")
+            if not isinstance(item_index, int):
+                item_index = None
+            payload = entry.get("artifact")
+            if payload is None:
+                continue
+
+            external_key = f"bg:{task_id_str}:{node}:{field}:{item_index}"
+            if external_key in self._external_keys:
+                continue
+            self._external_keys.add(external_key)
+
+            self.register_tool_artifact(
+                node,
+                field,
+                payload,
+                step_index=step_index,
+                item_index=item_index,
+                metadata_extra={
+                    "_external_key": external_key,
+                    "background_task_id": task_id_str,
+                },
+            )
 
     def register_binary_artifact(
         self,

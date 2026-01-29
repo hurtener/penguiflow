@@ -1,3 +1,5 @@
+import type { ArtifactRef } from './artifacts';
+
 export type PauseInfo = {
   reason?: string;
   payload?: Record<string, unknown>;
@@ -19,6 +21,7 @@ export type ChatMessage = {
   traceId?: string;
   latencyMs?: number;
   pause?: PauseInfo;
+  artifacts?: ArtifactRef[];
 };
 
 export type PlannerEventPayload = {
