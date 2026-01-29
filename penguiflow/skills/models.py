@@ -50,6 +50,7 @@ class SkillPackConfig(BaseModel):
     scope_mode: SkillScopeMode = "project"
     enabled: bool = True
     update_existing_pack_skills: bool = True
+    prune_missing_pack_skills: bool = True
     pinned_skill_names: list[str] = Field(default_factory=list)
 
 
@@ -71,6 +72,10 @@ class SkillsConfig(BaseModel):
     directory: SkillsDirectoryConfig = Field(default_factory=SkillsDirectoryConfig)
     fts_fallback_to_regex: bool = True
     top_k: int = Field(default=6, ge=1, le=20)
+
+    # If enabled, remove pack-origin skills for packs that are no longer present
+    # (or are disabled) in the current config.
+    prune_packs_not_in_config: bool = True
 
 
 class SkillDefinition(BaseModel):
@@ -216,6 +221,7 @@ class SkillPackLoadResult:
     pack_name: str
     skill_count: int
     updated_count: int
+    pruned_count: int = 0
 
 
 __all__ = [

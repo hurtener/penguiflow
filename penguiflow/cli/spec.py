@@ -767,6 +767,7 @@ class PlannerSkillPackSpec(BaseModel):
     scope_mode: Literal["project", "tenant", "global"] = "project"
     enabled: bool = True
     update_existing_pack_skills: bool = True
+    prune_missing_pack_skills: bool = True
     pinned_skill_names: list[str] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="forbid")
@@ -783,6 +784,7 @@ class PlannerSkillsSpec(BaseModel):
     scope_mode: Literal["project", "tenant", "global"] = "project"
     top_k: int = Field(default=6, ge=1, le=20)
     fts_fallback_to_regex: bool = True
+    prune_packs_not_in_config: bool = True
     skill_packs: list[PlannerSkillPackSpec] = Field(default_factory=list)
     directory: PlannerSkillsDirectorySpec = Field(default_factory=PlannerSkillsDirectorySpec)
 

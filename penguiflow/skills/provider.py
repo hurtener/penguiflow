@@ -19,6 +19,7 @@ from .models import (
     SkillRecord,
     SkillResultDetailed,
     SkillsConfig,
+    SkillScopeMode,
     SkillsDirectoryConfig,
     SkillSearchQuery,
     SkillSearchResponse,
@@ -266,6 +267,9 @@ class LocalSkillProvider:
 
     def load_packs(self) -> list[SkillPackLoadResult]:
         results: list[SkillPackLoadResult] = []
+        keep_packs: set[tuple[str, SkillScopeMode]] = {
+            (pack.name, pack.scope_mode) for pack in self._config.skill_packs if pack.enabled
+        }
         for pack in self._config.skill_packs:
             if not pack.enabled:
                 continue
@@ -280,13 +284,34 @@ class LocalSkillProvider:
                 )
                 if inserted or changed:
                     updated += 1
+
+            pruned = 0
+            if pack.prune_missing_pack_skills:
+                pruned = self._store.prune_pack_skills(
+                    pack_name=pack.name,
+                    scope_mode=pack.scope_mode,
+                    keep_names=[skill.name for skill in skills if skill.name],
+                )
             results.append(
                 SkillPackLoadResult(
                     pack_name=pack.name,
                     skill_count=len(skills),
                     updated_count=updated,
+                    pruned_count=pruned,
                 )
             )
+
+        if self._config.prune_packs_not_in_config:
+            removed = self._store.prune_packs_not_in_config(keep_packs=keep_packs)
+            for pack_name, scope_mode, removed_count in removed:
+                results.append(
+                    SkillPackLoadResult(
+                        pack_name=f"{pack_name} ({scope_mode})",
+                        skill_count=0,
+                        updated_count=0,
+                        pruned_count=removed_count,
+                    )
+                )
         return results
 
     async def get_relevant(

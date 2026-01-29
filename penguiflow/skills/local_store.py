@@ -161,6 +161,72 @@ class LocalSkillStore:
                 updated = True
         return inserted, updated
 
+    def prune_pack_skills(
+        self,
+        *,
+        pack_name: str,
+        scope_mode: SkillScopeMode,
+        keep_names: Sequence[str],
+    ) -> int:
+        """Remove pack-origin skills that are no longer present in the pack."""
+
+        self._ensure_schema()
+        keep = [name for name in keep_names if name]
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            if keep:
+                placeholders = ", ".join("?" for _ in keep)
+                sql = (
+                    "DELETE FROM skills "
+                    "WHERE origin = 'pack' AND origin_ref = ? AND scope_mode = ? "
+                    f"AND name NOT IN ({placeholders})"
+                )
+                cur = conn.execute(sql, (pack_name, scope_mode, *keep))
+            else:
+                cur = conn.execute(
+                    "DELETE FROM skills WHERE origin = 'pack' AND origin_ref = ? AND scope_mode = ?",
+                    (pack_name, scope_mode),
+                )
+        return int(cur.rowcount or 0)
+
+    def prune_packs_not_in_config(
+        self,
+        *,
+        keep_packs: set[tuple[str, SkillScopeMode]],
+    ) -> list[tuple[str, SkillScopeMode, int]]:
+        """Remove pack-origin skills whose pack is not in keep_packs.
+
+        Returns a list of (pack_name, scope_mode, removed_count) for removed packs.
+        """
+
+        self._ensure_schema()
+        removed: list[tuple[str, SkillScopeMode, int]] = []
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            rows = conn.execute(
+                "SELECT origin_ref, scope_mode, COUNT(1) FROM skills "
+                "WHERE origin = 'pack' AND origin_ref IS NOT NULL "
+                "GROUP BY origin_ref, scope_mode"
+            ).fetchall()
+            for origin_ref, scope_mode, count in rows:
+                scope_text = str(scope_mode)
+                if scope_text == "tenant":
+                    coerced_scope: SkillScopeMode = "tenant"
+                elif scope_text == "global":
+                    coerced_scope = "global"
+                else:
+                    coerced_scope = "project"
+
+                key = (str(origin_ref), coerced_scope)
+                if key in keep_packs:
+                    continue
+                cur = conn.execute(
+                    "DELETE FROM skills WHERE origin = 'pack' AND origin_ref = ? AND scope_mode = ?",
+                    (str(origin_ref), scope_text),
+                )
+                removed.append((str(origin_ref), coerced_scope, int(cur.rowcount or count or 0)))
+        return removed
+
     def get_by_name(
         self,
         names: Sequence[str],
