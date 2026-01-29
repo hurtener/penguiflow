@@ -13,7 +13,7 @@ from .artifacts import (
     discover_artifact_store,
 )
 from .bus import BusEnvelope, MessageBus
-from .catalog import NodeSpec, SideEffect, build_catalog, tool
+from .catalog import NodeSpec, SideEffect, ToolInputExample, ToolLoadingMode, build_catalog, tool
 from .core import (
     DEFAULT_QUEUE_MAXSIZE,
     Context,
@@ -33,6 +33,11 @@ from .planner import (
     PlannerAction,
     PlannerFinish,
     ReactPlanner,
+    SkillPackConfig,
+    SkillsConfig,
+    SkillsDirectoryConfig,
+    ToolExamplesConfig,
+    ToolSearchConfig,
     Trajectory,
     TrajectoryStep,
 )
@@ -104,6 +109,8 @@ __all__ = [
     "ModelRegistry",
     "NodeSpec",
     "SideEffect",
+    "ToolInputExample",
+    "ToolLoadingMode",
     "build_catalog",
     "tool",
     "Middleware",
@@ -176,6 +183,11 @@ __all__ = [
     "ReactPlanner",
     "PlannerAction",
     "PlannerFinish",
+    "SkillPackConfig",
+    "SkillsConfig",
+    "SkillsDirectoryConfig",
+    "ToolExamplesConfig",
+    "ToolSearchConfig",
     "Trajectory",
     "TrajectoryStep",
 ]

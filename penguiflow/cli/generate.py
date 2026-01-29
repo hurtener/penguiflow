@@ -816,6 +816,8 @@ def _generate_config(
     rich_allowlist = rich_output.allowlist or _DEFAULT_RICH_OUTPUT_ALLOWLIST
     bg = spec.planner.background_tasks
     with_background_tasks = bool(spec.agent.flags.background_tasks or bg.enabled)
+    tool_search = spec.planner.tool_search
+    skills = spec.planner.skills
 
     content = _render_template(
         "config.py.jinja",
@@ -837,6 +839,31 @@ def _generate_config(
             "planner_multi_action_sequential": spec.planner.multi_action_sequential,
             "planner_multi_action_read_only_only": spec.planner.multi_action_read_only_only,
             "planner_multi_action_max_tools": spec.planner.multi_action_max_tools,
+            # Tool search
+            "tool_search_enabled": bool(tool_search.enabled),
+            "tool_search_cache_dir": tool_search.cache_dir,
+            "tool_search_default_loading_mode": tool_search.default_loading_mode,
+            "tool_search_always_loaded_patterns": repr(list(tool_search.always_loaded_patterns)),
+            "tool_search_activation_scope": tool_search.activation_scope,
+            "tool_search_preferred_namespaces": repr(list(tool_search.preferred_namespaces)),
+            "tool_search_fts_fallback_to_regex": bool(tool_search.fts_fallback_to_regex),
+            "tool_search_enable_incremental_index": bool(tool_search.enable_incremental_index),
+            "tool_search_rebuild_cache_on_init": bool(tool_search.rebuild_cache_on_init),
+            "tool_search_max_search_results": int(tool_search.max_search_results),
+            # Skills
+            "skills_enabled": bool(skills.enabled),
+            "skills_cache_dir": skills.cache_dir,
+            "skills_max_tokens": int(skills.max_tokens),
+            "skills_summarize": bool(skills.summarize),
+            "skills_redact_pii": bool(skills.redact_pii),
+            "skills_scope_mode": skills.scope_mode,
+            "skills_top_k": int(skills.top_k),
+            "skills_fts_fallback_to_regex": bool(skills.fts_fallback_to_regex),
+            "skills_directory_enabled": bool(skills.directory.enabled),
+            "skills_directory_max_entries": int(skills.directory.max_entries),
+            "skills_directory_include_fields": repr(list(skills.directory.include_fields)),
+            "skills_directory_selection_strategy": skills.directory.selection_strategy,
+            "skills_skill_packs": repr([pack.model_dump() for pack in skills.skill_packs]),
             "artifact_store_enabled": bool(artifact_cfg.enabled),
             "artifact_store_ttl_seconds": artifact_retention.ttl_seconds,
             "artifact_store_max_artifact_bytes": artifact_retention.max_artifact_bytes,
@@ -922,6 +949,8 @@ def _generate_env_example(
     rich_allowlist_csv = ",".join(rich_allowlist)
     bg = spec.planner.background_tasks
     with_background_tasks = bool(spec.agent.flags.background_tasks or bg.enabled)
+    tool_search = spec.planner.tool_search
+    skills = spec.planner.skills
 
     content = _render_template(
         "env.example.jinja",
@@ -941,6 +970,30 @@ def _generate_env_example(
             "planner_multi_action_sequential": spec.planner.multi_action_sequential,
             "planner_multi_action_read_only_only": spec.planner.multi_action_read_only_only,
             "planner_multi_action_max_tools": spec.planner.multi_action_max_tools,
+            # Tool search
+            "tool_search_enabled": str(bool(tool_search.enabled)).lower(),
+            "tool_search_cache_dir": tool_search.cache_dir,
+            "tool_search_default_loading_mode": tool_search.default_loading_mode,
+            "tool_search_always_loaded_patterns": ",".join(tool_search.always_loaded_patterns),
+            "tool_search_activation_scope": tool_search.activation_scope,
+            "tool_search_preferred_namespaces": ",".join(tool_search.preferred_namespaces),
+            "tool_search_fts_fallback_to_regex": str(bool(tool_search.fts_fallback_to_regex)).lower(),
+            "tool_search_enable_incremental_index": str(bool(tool_search.enable_incremental_index)).lower(),
+            "tool_search_rebuild_cache_on_init": str(bool(tool_search.rebuild_cache_on_init)).lower(),
+            "tool_search_max_search_results": int(tool_search.max_search_results),
+            # Skills
+            "skills_enabled": str(bool(skills.enabled)).lower(),
+            "skills_cache_dir": skills.cache_dir,
+            "skills_max_tokens": int(skills.max_tokens),
+            "skills_summarize": str(bool(skills.summarize)).lower(),
+            "skills_redact_pii": str(bool(skills.redact_pii)).lower(),
+            "skills_scope_mode": skills.scope_mode,
+            "skills_top_k": int(skills.top_k),
+            "skills_fts_fallback_to_regex": str(bool(skills.fts_fallback_to_regex)).lower(),
+            "skills_directory_enabled": str(bool(skills.directory.enabled)).lower(),
+            "skills_directory_max_entries": int(skills.directory.max_entries),
+            "skills_directory_include_fields": ",".join(skills.directory.include_fields),
+            "skills_directory_selection_strategy": skills.directory.selection_strategy,
             "artifact_store_enabled": str(bool(artifact_cfg.enabled)).lower(),
             "artifact_store_ttl_seconds": artifact_retention.ttl_seconds,
             "artifact_store_max_artifact_bytes": artifact_retention.max_artifact_bytes,

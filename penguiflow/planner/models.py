@@ -9,7 +9,8 @@ from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast
 from pydantic import BaseModel, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from ..catalog import NodeSpec
+from ..catalog import NodeSpec, ToolLoadingMode
+from ..skills.models import SkillPackConfig, SkillsConfig, SkillsDirectoryConfig  # noqa: F401
 from .context import PlannerPauseReason
 
 # ---------------------------------------------------------------------------
@@ -422,6 +423,25 @@ class ToolPolicy(BaseModel):
         return True
 
 
+class ToolSearchConfig(BaseModel):
+    enabled: bool = False
+    cache_dir: str = ".penguiflow"
+    default_loading_mode: ToolLoadingMode = ToolLoadingMode.ALWAYS
+    always_loaded_patterns: list[str] = ["tasks.*", "tool_search", "tool_get", "finish"]
+    activation_scope: Literal["run", "session"] = "run"
+    preferred_namespaces: list[str] = []
+    fts_fallback_to_regex: bool = True
+    enable_incremental_index: bool = True
+    rebuild_cache_on_init: bool = False
+    max_search_results: int = 10
+
+
+class ToolExamplesConfig(BaseModel):
+    enabled: bool = True
+    max_examples_per_tool: int = Field(default=3, ge=1, le=10)
+    include_descriptions: bool = True
+
+
 class ToolVisibilityPolicy(Protocol):
     """Dynamic, per-run filtering for which tools are shown to the LLM.
 
@@ -660,7 +680,12 @@ __all__ = [
     "ReflectionCritique",
     "ReflectionCriteria",
     "FinalPayload",
+    "SkillPackConfig",
+    "SkillsConfig",
+    "SkillsDirectoryConfig",
     "Source",
     "SuggestedAction",
     "ToolPolicy",
+    "ToolExamplesConfig",
+    "ToolSearchConfig",
 ]

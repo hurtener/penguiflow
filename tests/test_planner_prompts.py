@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from penguiflow.planner import prompts
+from penguiflow.planner import ToolExamplesConfig, prompts
 
 
 def test_render_tool_includes_optional_fields() -> None:
@@ -25,16 +25,54 @@ def test_render_tool_includes_optional_fields() -> None:
     assert "extra" in rendered
 
 
+def test_render_tool_includes_examples_in_priority_order() -> None:
+    record = {
+        "name": "search",
+        "desc": "Lookup",
+        "side_effects": "read",
+        "args_schema": {"title": "Args"},
+        "out_schema": {"title": "Out"},
+        "examples": [
+            {"args": {"query": "edge"}, "description": "Edge", "tags": ["edge-case"]},
+            {"args": {"query": "minimal"}, "description": "Minimal", "tags": ["minimal"]},
+            {"args": {"query": "common"}, "description": "Common", "tags": ["common"]},
+        ],
+    }
+    config = ToolExamplesConfig(max_examples_per_tool=2)
+    rendered = prompts.render_tool(record, tool_examples=config)
+    assert rendered.count("    - args:") == 2
+    assert rendered.find('"minimal"') < rendered.find('"common"')
+
+
+def test_render_tool_can_hide_example_descriptions() -> None:
+    record = {
+        "name": "search",
+        "desc": "Lookup",
+        "side_effects": "read",
+        "args_schema": {"title": "Args"},
+        "out_schema": {"title": "Out"},
+        "examples": [
+            {"args": {"query": "basic"}, "description": "Basic", "tags": ["minimal"]},
+        ],
+    }
+    config = ToolExamplesConfig(include_descriptions=False)
+    rendered = prompts.render_tool(record, tool_examples=config)
+    assert "description:" not in rendered
+
+
 def test_build_system_prompt_appends_extra_guidance() -> None:
-    prompt = prompts.build_system_prompt([
-        {
-            "name": "tool",
-            "desc": "do",
-            "side_effects": "pure",
-            "args_schema": {},
-            "out_schema": {},
-        }
-    ], extra="Stay focused.")
+    prompt = prompts.build_system_prompt(
+        [
+            {
+                "name": "tool",
+                "desc": "do",
+                "side_effects": "pure",
+                "args_schema": {},
+                "out_schema": {},
+            }
+        ],
+        extra="Stay focused.",
+    )
     assert "Stay focused." in prompt
 
 
@@ -87,7 +125,7 @@ def test_build_system_prompt_has_tagged_sections() -> None:
 def test_build_system_prompt_action_schema_snapshot_markers() -> None:
     """Guardrails: keep core schema markers stable for repair behavior and UI tooling."""
     prompt = prompts.build_system_prompt([])
-    assert 'Emit keys in this order for stability: next_node, args.' in prompt
+    assert "Emit keys in this order for stability: next_node, args." in prompt
     assert "args.answer" in prompt
     assert 'next_node is "final_response"' in prompt
 

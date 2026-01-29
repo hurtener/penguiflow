@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import Any
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -89,6 +90,33 @@ class Config:
     planner_multi_action_sequential: bool = {{ planner_multi_action_sequential }}
     planner_multi_action_read_only_only: bool = {{ planner_multi_action_read_only_only }}
     planner_multi_action_max_tools: int = {{ planner_multi_action_max_tools }}
+
+    # Tool Search + Deferred Activation
+    tool_search_enabled: bool = {{ tool_search_enabled }}
+    tool_search_cache_dir: str = "{{ tool_search_cache_dir }}"
+    tool_search_default_loading_mode: str = "{{ tool_search_default_loading_mode }}"
+    tool_search_always_loaded_patterns: list[str] = field(default_factory=lambda: {{ tool_search_always_loaded_patterns }})
+    tool_search_activation_scope: str = "{{ tool_search_activation_scope }}"
+    tool_search_preferred_namespaces: list[str] = field(default_factory=lambda: {{ tool_search_preferred_namespaces }})
+    tool_search_fts_fallback_to_regex: bool = {{ tool_search_fts_fallback_to_regex }}
+    tool_search_enable_incremental_index: bool = {{ tool_search_enable_incremental_index }}
+    tool_search_rebuild_cache_on_init: bool = {{ tool_search_rebuild_cache_on_init }}
+    tool_search_max_search_results: int = {{ tool_search_max_search_results }}
+
+    # Skills (Local Skill Packs)
+    skills_enabled: bool = {{ skills_enabled }}
+    skills_cache_dir: str = "{{ skills_cache_dir }}"
+    skills_max_tokens: int = {{ skills_max_tokens }}
+    skills_summarize: bool = {{ skills_summarize }}
+    skills_redact_pii: bool = {{ skills_redact_pii }}
+    skills_scope_mode: str = "{{ skills_scope_mode }}"
+    skills_top_k: int = {{ skills_top_k }}
+    skills_fts_fallback_to_regex: bool = {{ skills_fts_fallback_to_regex }}
+    skills_directory_enabled: bool = {{ skills_directory_enabled }}
+    skills_directory_max_entries: int = {{ skills_directory_max_entries }}
+    skills_directory_include_fields: list[str] = field(default_factory=lambda: {{ skills_directory_include_fields }})
+    skills_directory_selection_strategy: str = "{{ skills_directory_selection_strategy }}"
+    skills_skill_packs: list[dict[str, Any]] = field(default_factory=lambda: {{ skills_skill_packs }})
 
     # Artifact Store (binary/large text)
     artifact_store_enabled: bool = {{ artifact_store_enabled }}
@@ -183,6 +211,71 @@ class Config:
             planner_multi_action_max_tools=_env_int(
                 "PLANNER_MULTI_ACTION_MAX_TOOLS",
                 {{ planner_multi_action_max_tools }},
+            ),
+
+            # Tool Search
+            tool_search_enabled=_env_flag("TOOL_SEARCH_ENABLED", {{ tool_search_enabled }}),
+            tool_search_cache_dir=_env_str("TOOL_SEARCH_CACHE_DIR", "{{ tool_search_cache_dir }}"),
+            tool_search_default_loading_mode=_env_str(
+                "TOOL_SEARCH_DEFAULT_LOADING_MODE",
+                "{{ tool_search_default_loading_mode }}",
+            ),
+            tool_search_always_loaded_patterns=_env_csv(
+                "TOOL_SEARCH_ALWAYS_LOADED_PATTERNS",
+                {{ tool_search_always_loaded_patterns }},
+            ),
+            tool_search_activation_scope=_env_str(
+                "TOOL_SEARCH_ACTIVATION_SCOPE",
+                "{{ tool_search_activation_scope }}",
+            ),
+            tool_search_preferred_namespaces=_env_csv(
+                "TOOL_SEARCH_PREFERRED_NAMESPACES",
+                {{ tool_search_preferred_namespaces }},
+            ),
+            tool_search_fts_fallback_to_regex=_env_flag(
+                "TOOL_SEARCH_FTS_FALLBACK_TO_REGEX",
+                {{ tool_search_fts_fallback_to_regex }},
+            ),
+            tool_search_enable_incremental_index=_env_flag(
+                "TOOL_SEARCH_ENABLE_INCREMENTAL_INDEX",
+                {{ tool_search_enable_incremental_index }},
+            ),
+            tool_search_rebuild_cache_on_init=_env_flag(
+                "TOOL_SEARCH_REBUILD_CACHE_ON_INIT",
+                {{ tool_search_rebuild_cache_on_init }},
+            ),
+            tool_search_max_search_results=_env_int(
+                "TOOL_SEARCH_MAX_SEARCH_RESULTS",
+                {{ tool_search_max_search_results }},
+            ),
+
+            # Skills
+            skills_enabled=_env_flag("SKILLS_ENABLED", {{ skills_enabled }}),
+            skills_cache_dir=_env_str("SKILLS_CACHE_DIR", "{{ skills_cache_dir }}"),
+            skills_max_tokens=_env_int("SKILLS_MAX_TOKENS", {{ skills_max_tokens }}),
+            skills_summarize=_env_flag("SKILLS_SUMMARIZE", {{ skills_summarize }}),
+            skills_redact_pii=_env_flag("SKILLS_REDACT_PII", {{ skills_redact_pii }}),
+            skills_scope_mode=_env_str("SKILLS_SCOPE_MODE", "{{ skills_scope_mode }}"),
+            skills_top_k=_env_int("SKILLS_TOP_K", {{ skills_top_k }}),
+            skills_fts_fallback_to_regex=_env_flag(
+                "SKILLS_FTS_FALLBACK_TO_REGEX",
+                {{ skills_fts_fallback_to_regex }},
+            ),
+            skills_directory_enabled=_env_flag(
+                "SKILLS_DIRECTORY_ENABLED",
+                {{ skills_directory_enabled }},
+            ),
+            skills_directory_max_entries=_env_int(
+                "SKILLS_DIRECTORY_MAX_ENTRIES",
+                {{ skills_directory_max_entries }},
+            ),
+            skills_directory_include_fields=_env_csv(
+                "SKILLS_DIRECTORY_INCLUDE_FIELDS",
+                {{ skills_directory_include_fields }},
+            ),
+            skills_directory_selection_strategy=_env_str(
+                "SKILLS_DIRECTORY_SELECTION_STRATEGY",
+                "{{ skills_directory_selection_strategy }}",
             ),
 
             # Artifact Store (binary/large text)
