@@ -3,12 +3,13 @@
 agent:
   name: my-agent
   description: Example agent project
-  template: react  # minimal|react|parallel|lighthouse|wayfinder|analyst|enterprise
+  template: react  # minimal|react|parallel|rag_server|wayfinder|analyst|enterprise
   flags:
     streaming: true
     hitl: false
     a2a: false
     memory: true
+    background_tasks: false  # Enable background task orchestration
 
 tools:
   - name: fetch_data
@@ -21,6 +22,11 @@ tools:
       limit: Optional[int]
     result:
       items: list[str]
+    # background:  # Optional: Enable background execution for this tool
+    #   enabled: false
+    #   mode: job  # job|subagent
+    #   default_merge_strategy: HUMAN_GATED  # APPEND|REPLACE|HUMAN_GATED
+    #   notify_on_complete: true
 
 flows:
   - name: pipeline
@@ -39,7 +45,7 @@ services:
   memory_iceberg:
     enabled: false
     base_url: http://localhost:8000
-  lighthouse:
+  rag_server:
     enabled: false
     base_url: http://localhost:8081
   wayfinder:
@@ -65,6 +71,9 @@ planner:
   max_iters: 12
   hop_budget: 8
   absolute_max_parallel: 5
+  # multi_action_sequential: false       # Execute extra tool calls if model emits multiple JSON objects
+  # multi_action_read_only_only: true    # Only auto-execute extra actions for pure/read tools
+  # multi_action_max_tools: 2            # Max extra tool calls per LLM response
   system_prompt_extra: |
     You are a helpful agent.
   memory_prompt: |
@@ -74,3 +83,15 @@ planner:
     parallel_groups: []
     sequential_only: []
     disallow: []
+  # background_tasks:  # Optional: Background task orchestration config
+  #   enabled: false
+  #   allow_tool_background: false  # Allow tool-declared background execution
+  #   default_mode: subagent  # subagent|job
+  #   default_merge_strategy: HUMAN_GATED  # APPEND|REPLACE|HUMAN_GATED
+  #   context_depth: full  # full|summary|none
+  #   propagate_on_cancel: cascade  # cascade|isolate
+  #   spawn_requires_confirmation: false  # Requires hitl flag
+  #   include_prompt_guidance: true
+  #   max_concurrent_tasks: 5
+  #   max_tasks_per_session: 50
+  #   task_timeout_s: 3600

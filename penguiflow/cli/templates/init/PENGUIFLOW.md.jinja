@@ -41,7 +41,7 @@ agent:
     memory: false             # Memory Iceberg integration
     streaming: false          # Streaming responses
     hitl: false               # Human-in-the-loop
-    a2a: false                # Agent-to-agent
+    a2a: false                # A2A HTTP+JSON binding
 ```
 
 **Templates:**
@@ -51,6 +51,10 @@ agent:
 | `react` | Standard ReAct agent with tool calling |
 | `parallel` | Batch processing with parallel execution |
 | `enterprise` | Full observability, resilience, multi-tenancy |
+
+**A2A binding:**
+If `agent.flags.a2a` is enabled, the scaffold includes an `a2a.py` module that wires
+`A2AService` + `create_a2a_http_app` so you can serve the agent over A2A HTTP+JSON.
 
 ### Tool Definition
 
@@ -108,6 +112,9 @@ planner:
   max_iters: 12                # Max planning iterations
   hop_budget: 8                # Max tool calls per run
   absolute_max_parallel: 5     # Max concurrent tools
+  # multi_action_sequential: false       # Execute extra tool calls if model emits multiple JSON objects
+  # multi_action_read_only_only: true    # Only auto-execute extra actions for pure/read tools
+  # multi_action_max_tools: 2            # Max extra tool calls per LLM response
 
   system_prompt_extra: |
     Define your agent's personality, capabilities, and guidelines here.
@@ -283,6 +290,25 @@ planner:
 planner:
   hints:
     ordering: [search, filter, summarize]
+```
+
+### Rich Output Components (Playground UI)
+
+```yaml
+planner:
+  rich_output:
+    enabled: true
+    allowlist: ["markdown", "json", "echarts", "datagrid", "report", "grid", "form", "confirm", "select_option"]
+    include_prompt_catalog: true
+    include_prompt_examples: false
+```
+
+If you enable interactive components (`form`, `confirm`, `select_option`), also set:
+
+```yaml
+agent:
+  flags:
+    hitl: true
 ```
 
 ### Error Handling in Tools

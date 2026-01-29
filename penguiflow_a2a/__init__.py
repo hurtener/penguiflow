@@ -1,5 +1,9 @@
 """Optional A2A adapters for PenguiFlow."""
 
+from .bindings.http import create_a2a_http_app
+from .config import A2AConfig, PayloadMode
+from .core import A2AService
+from .planner_tools import A2AAgentToolset
 from .server import (
     A2AAgentCard,
     A2AMessagePayload,
@@ -8,6 +12,7 @@ from .server import (
     A2ATaskCancelRequest,
     create_a2a_app,
 )
+from .transport import A2AHttpTransport
 
 __all__ = [
     "A2AAgentCard",
@@ -16,4 +21,17 @@ __all__ = [
     "A2ATaskCancelRequest",
     "A2AServerAdapter",
     "create_a2a_app",
+    "A2AConfig",
+    "PayloadMode",
+    "A2AService",
+    "create_a2a_http_app",
+    "A2AHttpTransport",
+    "A2AAgentToolset",
 ]
+
+try:
+    from .bindings.grpc import A2AGrpcServicer, add_a2a_grpc_service  # noqa: F401
+
+    __all__.extend(["A2AGrpcServicer", "add_a2a_grpc_service"])
+except RuntimeError:
+    pass

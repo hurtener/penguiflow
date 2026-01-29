@@ -27,6 +27,7 @@ import json
 import logging
 import re
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -83,6 +84,7 @@ class ToolNode:
     _resources: list[ResourceInfo] = field(default_factory=list, repr=False)
     _resource_templates: list[ResourceTemplateInfo] = field(default_factory=list, repr=False)
     _resources_supported: bool = field(default=False, repr=False)
+    _resource_update_callback: Callable[[str], None] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
@@ -665,7 +667,11 @@ class ToolNode:
 
             bound_fn = functools.partial(_make_call, namespaced)
 
-            extra: dict[str, Any] = {"source": "mcp", "namespace": self.config.name}
+            extra: dict[str, Any] = {
+                "source": "mcp",
+                "namespace": self.config.name,
+                "tool_node": self,
+            }
             if isinstance(self.config.arg_validation, dict):
                 extra["arg_validation"] = dict(self.config.arg_validation)
 
@@ -718,7 +724,11 @@ class ToolNode:
 
             bound_fn = functools.partial(_make_call, namespaced)
 
-            extra: dict[str, Any] = {"source": "utcp", "namespace": self.config.name}
+            extra: dict[str, Any] = {
+                "source": "utcp",
+                "namespace": self.config.name,
+                "tool_node": self,
+            }
             if isinstance(self.config.arg_validation, dict):
                 extra["arg_validation"] = dict(self.config.arg_validation)
 
@@ -1428,6 +1438,7 @@ class ToolNode:
                 out_model=ResourceListOutput,
                 node=Node(self._handle_resources_list, name=f"{namespace}.resources_list"),
                 tags=["mcp", "resources", namespace],
+                extra={"source": "mcp", "namespace": namespace, "tool_node": self, "resource_tool": True},
             )
         )
 
@@ -1440,6 +1451,7 @@ class ToolNode:
                 out_model=ResourceReadOutput,
                 node=Node(self._handle_resources_read, name=f"{namespace}.resources_read"),
                 tags=["mcp", "resources", namespace],
+                extra={"source": "mcp", "namespace": namespace, "tool_node": self, "resource_tool": True},
             )
         )
 
@@ -1452,6 +1464,7 @@ class ToolNode:
                 out_model=TemplatesListOutput,
                 node=Node(self._handle_resources_templates_list, name=f"{namespace}.resources_templates_list"),
                 tags=["mcp", "resources", namespace],
+                extra={"source": "mcp", "namespace": namespace, "tool_node": self, "resource_tool": True},
             )
         )
 
@@ -1744,6 +1757,12 @@ class ToolNode:
         if self._resource_cache is not None:
             self._resource_cache.invalidate(uri)
 
+        if self._resource_update_callback is not None:
+            try:
+                self._resource_update_callback(uri)
+            except Exception:
+                logger.debug("resource_update_callback_failed", exc_info=True)
+
         # Notify subscribers (only if in async context)
         if self._subscription_manager is not None:
             try:
@@ -1752,6 +1771,10 @@ class ToolNode:
             except RuntimeError:
                 # No running loop - skip subscriber notification
                 pass
+
+    def set_resource_updated_callback(self, callback: Callable[[str], None] | None) -> None:
+        """Register a callback invoked when MCP resources are updated."""
+        self._resource_update_callback = callback
 
     @property
     def resources_supported(self) -> bool:

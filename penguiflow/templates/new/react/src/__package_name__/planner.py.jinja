@@ -7,9 +7,25 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from penguiflow.catalog import build_catalog
 from penguiflow.planner import PlannerEventCallback, ReactPlanner
+{% if with_background_tasks %}
+from penguiflow.planner import BackgroundTasksConfig
+from penguiflow.sessions.task_tools import build_task_tool_specs
+{% endif %}
+from penguiflow.rich_output import DEFAULT_ALLOWLIST, RichOutputConfig, attach_rich_output_nodes, get_runtime
 from .config import Config
 from .tools import build_catalog_bundle
+
+
+SYSTEM_PROMPT_EXTRA = ""
+
+
+def _build_system_prompt(rich_output_prompt: str) -> str:
+    prompt = SYSTEM_PROMPT_EXTRA
+    if rich_output_prompt:
+        prompt = f"{prompt}\n\n{rich_output_prompt}" if prompt else rich_output_prompt
+    return prompt
 
 
 @dataclass
@@ -69,6 +85,43 @@ class ScriptedLLM:
         return self._scripted.pop(0)
 
 
+def _build_rich_output_config(config: Config) -> RichOutputConfig:
+    allowlist = config.rich_output_allowlist or list(DEFAULT_ALLOWLIST)
+    return RichOutputConfig(
+        enabled=config.rich_output_enabled,
+        allowlist=allowlist,
+        include_prompt_catalog=config.rich_output_include_prompt_catalog,
+        include_prompt_examples=config.rich_output_include_prompt_examples,
+        max_payload_bytes=config.rich_output_max_payload_bytes,
+        max_total_bytes=config.rich_output_max_total_bytes,
+    )
+
+{% if with_background_tasks %}
+
+def _build_background_tasks_config(config: Config) -> BackgroundTasksConfig:
+    return BackgroundTasksConfig(
+        enabled=config.background_tasks_enabled,
+        include_prompt_guidance=config.background_tasks_include_prompt_guidance,
+        allow_tool_background=config.background_tasks_allow_tool_background,
+        default_mode=config.background_tasks_default_mode,
+        default_merge_strategy=config.background_tasks_default_merge_strategy,
+        context_depth=config.background_tasks_context_depth,
+        propagate_on_cancel=config.background_tasks_propagate_on_cancel,
+        spawn_requires_confirmation=config.background_tasks_spawn_requires_confirmation,
+        max_concurrent_tasks=config.background_tasks_max_concurrent_tasks,
+        max_tasks_per_session=config.background_tasks_max_tasks_per_session,
+        task_timeout_s=config.background_tasks_task_timeout_s,
+        max_pending_steering=config.background_tasks_max_pending_steering,
+        # Proactive report-back settings
+        proactive_report_enabled=config.background_tasks_proactive_report_enabled,
+        proactive_report_strategies=config.background_tasks_proactive_report_strategies,
+        proactive_report_max_queued=config.background_tasks_proactive_report_max_queued,
+        proactive_report_timeout_s=config.background_tasks_proactive_report_timeout_s,
+        proactive_report_fallback_notification=config.background_tasks_proactive_report_fallback_notification,
+    )
+
+{% endif %}
+
 def build_planner(
     config: Config,
     *,
@@ -84,13 +137,26 @@ def build_planner(
     Prompt tweaks: pass system_prompt_extra (string) or planning_hints (mapping) to ReactPlanner to append
     guidance without editing penguiflow.planner.prompts.
     """
-    del config  # kept for future expansion
     nodes, registry = build_catalog_bundle()
+    rich_output_config = _build_rich_output_config(config)
+    nodes.extend(attach_rich_output_nodes(registry, config=rich_output_config))
+    rich_output_prompt = get_runtime().prompt_section()
+    catalog = build_catalog(nodes, registry)
+{% if with_background_tasks %}
+    if config.background_tasks_enabled:
+        catalog.extend(build_task_tool_specs())
+{% endif %}
     llm_client = ScriptedLLM()
     planner = ReactPlanner(
         llm_client=llm_client,
-        nodes=nodes,
-        registry=registry,
+        catalog=catalog,
+        system_prompt_extra=_build_system_prompt(rich_output_prompt),
         event_callback=event_callback,
+        multi_action_sequential=config.multi_action_sequential,
+        multi_action_read_only_only=config.multi_action_read_only_only,
+        multi_action_max_tools=config.multi_action_max_tools,
+{% if with_background_tasks %}
+        background_tasks=_build_background_tasks_config(config),
+{% endif %}
     )
     return PlannerBundle(planner=planner, llm_client=llm_client)

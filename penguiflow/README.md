@@ -10,7 +10,7 @@ contributors understand how the pieces fit together.
 | --- | --- |
 | `core.py` | Runtime graph builder, execution engine, retries/timeouts, controller loop semantics, and playbook helper. |
 | `errors.py` | Defines `FlowError` and `FlowErrorCode` used for traceable exceptions. |
-| `state.py` | Protocols for pluggable state stores plus the `StoredEvent`/`RemoteBinding` dataclasses. |
+| `state/` | Unified StateStore protocol, models, and reference in-memory implementation. |
 | `bus.py` | Message bus protocol used to fan out floe traffic to remote workers. |
 | `node.py` | `Node` wrapper and `NodePolicy` configuration (validation scope, timeout, retry/backoff). |
 | `catalog.py` | `NodeSpec` dataclass, tool decorator, and catalog builder feeding the planner. |
@@ -29,10 +29,13 @@ contributors understand how the pieces fit together.
 
 ### Optional extras
 
-The `penguiflow_a2a` package ships separately and contains the FastAPI adapter used to
-expose PenguiFlow graphs via the A2A protocol. Installing the `a2a-server` extra adds the
-`A2AServerAdapter`, request models, and the `create_a2a_app` helper without introducing
-FastAPI as a core dependency.
+The `penguiflow_a2a` package ships separately and contains the A2A HTTP+JSON/JSON-RPC and
+gRPC bindings. Installing the `a2a-server` extra adds `A2AService` and
+`create_a2a_http_app` without introducing FastAPI as a core dependency; `a2a-grpc` adds
+the gRPC helpers, and `a2a-client` adds `A2AHttpTransport` for `RemoteNode`.
+
+For ReactPlanner integrations, `penguiflow_a2a.A2AAgentToolset` can wrap an A2A agent as a
+planner tool (`NodeSpec`) so remote agents can be invoked through `ToolContext`.
 
 Install the `planner` extra to pull in LiteLLM when you want the planner to call hosted
 models; otherwise you can inject a deterministic stub via the `llm_client` parameter.
@@ -68,6 +71,9 @@ models; otherwise you can inject a deterministic stub via the `llm_client` param
   builds a `FlowError` capturing the trace id, node metadata, and failure code. Setting
   `emit_errors_to_rookery=True` on `penguiflow.core.create` pushes the `FlowError`
   directly to Rookery so callers can inspect it.
+* **Trace-scoped roundtrips**: when reusing one running flow across concurrent callers,
+  use `flow.emit(..., trace_id=...)` and `flow.fetch(trace_id=...)` to avoid cross-consuming
+  Rookery results between traces.
 * **Metadata propagation**: every `Message` includes a mutable `meta` dictionary. The
   runtime clones it when emitting streaming chunks, preserving debugging or billing
   breadcrumbs across retries, controller loops, and playbook subflows.

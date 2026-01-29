@@ -103,7 +103,9 @@ async def test_state_store_isolates_sessions() -> None:
     await store.save_trajectory("trace-1", "session-a", t1)
     await store.save_trajectory("trace-2", "session-a", t2)
 
-    assert await store.get_trajectory("trace-1", "session-a") is t1
+    trajectory = await store.get_trajectory("trace-1", "session-a")
+    assert trajectory is not None
+    assert trajectory.query == "hello"
     assert await store.get_trajectory("trace-1", "session-b") is None
     assert await store.list_traces("session-a") == ["trace-2", "trace-1"]
     assert await store.list_traces("session-b") == []

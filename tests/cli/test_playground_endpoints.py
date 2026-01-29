@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+from ag_ui.core import RunAgentInput
 from fastapi.testclient import TestClient
 
 from penguiflow.cli.playground import create_playground_app
@@ -34,6 +35,22 @@ class MockAgentWrapper(AgentWrapper):
     async def shutdown(self) -> None:
         pass
 
+    async def resume(
+        self,
+        resume_token: str,
+        *,
+        session_id: str,
+        user_input: str | None = None,
+        tool_context: dict[str, Any] | None = None,
+        event_consumer: Any = None,
+        trace_id_hint: str | None = None,
+        steering: Any = None,
+    ) -> ChatResult:
+        del resume_token, session_id, user_input, tool_context, event_consumer, trace_id_hint, steering
+        if self._raise_on_chat:
+            raise self._raise_on_chat
+        return self._chat_result
+
     async def chat(
         self,
         query: str,
@@ -43,7 +60,9 @@ class MockAgentWrapper(AgentWrapper):
         tool_context: dict[str, Any] | None = None,
         event_consumer: Any = None,
         trace_id_hint: str | None = None,
+        steering: Any = None,
     ) -> ChatResult:
+        del steering
         if self._raise_on_chat:
             raise self._raise_on_chat
         return self._chat_result
@@ -139,6 +158,45 @@ class TestUIMetaEndpoint:
         assert "planner" in data
         assert "services" in data
         assert "tools" in data
+
+
+class TestUIComponentsEndpoint:
+    """Tests for /ui/components endpoint."""
+
+    def test_ui_components_returns_allowlisted_registry(self, tmp_path: Path) -> None:
+        spec_content = """\
+agent:
+  name: test-agent
+  description: Test
+  template: react
+  flags:
+    memory: false
+    hitl: true
+tools:
+  - name: fetch
+    description: Fetch data
+llm:
+  primary:
+    model: gpt-4o
+planner:
+  system_prompt_extra: Test
+  rich_output:
+    enabled: true
+    allowlist: ["markdown"]
+"""
+        (tmp_path / "agent.yaml").write_text(spec_content, encoding="utf-8")
+
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/ui/components")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["enabled"] is True
+        assert set(data["allowlist"]) == {"markdown"}
+        assert "markdown" in data["components"]
+        assert "echarts" not in data["components"]
 
 
 class TestUIValidateEndpoint:
@@ -405,6 +463,58 @@ class TestEventsEndpoint:
         assert "Trace not found" in response.json()["detail"]
 
 
+class TestAguiResumeEndpoint:
+    """Tests for /agui/resume endpoint."""
+
+    def test_agui_resume_requires_token(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post("/agui/resume", json={"thread_id": "thread-1", "run_id": "run-1"})
+        # 422 = FastAPI validation error when resume_token is missing
+        assert response.status_code == 422
+
+    def test_agui_resume_rejects_invalid_result(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/agui/resume",
+            headers={"accept": "text/event-stream"},
+            json={
+                "resume_token": "resume-123",
+                "thread_id": "thread-1",
+                "run_id": "run-1",
+                "tool_name": "ui_confirm",
+                "component": "confirm",
+                "result": "nope",
+            },
+        )
+        assert response.status_code == 400
+
+    def test_agui_resume_streams_events(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/agui/resume",
+            headers={"accept": "text/event-stream"},
+            json={
+                "resume_token": "resume-123",
+                "thread_id": "thread-1",
+                "run_id": "run-1",
+                "tool_name": "ui_confirm",
+                "component": "confirm",
+                "result": True,
+            },
+        )
+        assert response.status_code == 200
+        assert response.text
+
+
 class TestTrajectoryEndpoint:
     """Tests for /trajectory endpoint (lines 944-954)."""
 
@@ -530,3 +640,71 @@ class TestStateStoreInitialization:
         app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
 
         assert app.state.state_store is store
+
+
+class TestAGUIEndpoint:
+    """Tests for /agui/agent endpoint."""
+
+    def test_agui_agent_streams_answer(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        input_payload = RunAgentInput(
+            thread_id="thread-1",
+            run_id="run-1",
+            messages=[{"id": "msg-1", "role": "user", "content": "Hello"}],
+            tools=[],
+            context=[],
+            state={},
+            forwarded_props={},
+        )
+
+        response = client.post(
+            "/agui/agent",
+            json=input_payload.model_dump(by_alias=True, mode="json"),
+            headers={"accept": "text/event-stream"},
+        )
+
+        assert response.status_code == 200
+        assert "Test answer" in response.text
+
+
+class TestSessionEndpoints:
+    def test_session_info(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/sessions/test-session")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["session_id"] == "test-session"
+        assert "context_version" in payload
+
+    def test_session_context_update(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.patch(
+            "/sessions/test-session/context",
+            json={"llm_context": {"hello": "world"}, "merge": False},
+        )
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+
+    def test_delete_task_endpoint(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post("/chat", json={"query": "Hello", "session_id": "sess-1"})
+        assert response.status_code == 200
+
+        tasks = client.get("/tasks", params={"session_id": "sess-1"})
+        assert tasks.status_code == 200
+        task_id = tasks.json()[0]["task_id"]
+
+        delete_response = client.delete(f"/tasks/{task_id}", params={"session_id": "sess-1"})
+        assert delete_response.status_code == 200

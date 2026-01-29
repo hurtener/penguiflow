@@ -1143,7 +1143,7 @@ def _from_status(status_code: int | None, exc_msg: str, exc: Exception) -> ToolN
 
 ### StateStore for Distributed Deployments
 
-Penguiflow already provides the `StateStore` protocol (`penguiflow/state.py:47-63`) with optional pause/resume support. The planner checks for `save_planner_state` and `load_planner_state` methods via duck typing.
+Penguiflow already provides the `StateStore` protocol (`penguiflow/state/protocol.py`) with optional pause/resume support. The planner checks for `save_planner_state` and `load_planner_state` methods via duck typing.
 
 **Existing Protocol:**
 ```python

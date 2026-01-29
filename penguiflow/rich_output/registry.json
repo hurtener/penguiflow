@@ -1,0 +1,789 @@
+{
+  "version": "2025-12-24",
+  "components": {
+    "echarts": {
+      "name": "echarts",
+      "description": "Render interactive charts using Apache ECharts. Supports line, bar, pie, scatter, heatmap, radar, sankey, and more.",
+      "category": "visualization",
+      "interactive": false,
+      "tags": ["chart", "graph", "plot", "visualization", "data"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["option"],
+        "properties": {
+          "option": {
+            "type": "object",
+            "description": "ECharts option configuration object."
+          },
+          "height": {
+            "type": "string",
+            "default": "400px",
+            "description": "Chart height (CSS value)"
+          },
+          "width": {
+            "type": "string",
+            "default": "100%",
+            "description": "Chart width (CSS value)"
+          },
+          "theme": {
+            "type": "string",
+            "enum": ["light", "dark", "vintage", "macarons", "roma", "shine"],
+            "default": "light",
+            "description": "ECharts theme"
+          },
+          "loading": {
+            "type": "boolean",
+            "default": false,
+            "description": "Show loading animation"
+          }
+        }
+      },
+      "example": {
+        "description": "Monthly sales trend with area fill",
+        "props": {
+          "option": {
+            "title": {"text": "Monthly Sales 2024"},
+            "tooltip": {"trigger": "axis"},
+            "xAxis": {"type": "category", "data": ["Jan", "Feb", "Mar", "Apr", "May", "Jun"]},
+            "yAxis": {"type": "value", "name": "Sales ($)"},
+            "series": [
+              {
+                "name": "Sales",
+                "type": "line",
+                "smooth": true,
+                "areaStyle": {},
+                "data": [12000, 15000, 14000, 18000, 22000, 21000]
+              }
+            ]
+          },
+          "height": "350px"
+        }
+      }
+    },
+    "mermaid": {
+      "name": "mermaid",
+      "description": "Render diagrams from text using Mermaid syntax (flowchart, sequence, class, ERD, state, gantt, journey).",
+      "category": "visualization",
+      "interactive": false,
+      "tags": ["diagram", "flowchart", "sequence", "erd", "uml"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["code"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Mermaid diagram definition"
+          },
+          "theme": {
+            "type": "string",
+            "enum": ["default", "dark", "forest", "neutral", "base"],
+            "default": "default"
+          }
+        }
+      },
+      "example": {
+        "description": "User authentication flow",
+        "props": {
+          "code": "sequenceDiagram\n    participant U as User\n    participant F as Frontend\n    participant A as Auth API\n    participant D as Database\n    U->>F: Enter credentials\n    F->>A: POST /login\n    A->>D: Validate user\n    D-->>A: User record\n    A-->>F: JWT token\n    F-->>U: Redirect to dashboard"
+        }
+      }
+    },
+    "plotly": {
+      "name": "plotly",
+      "description": "Render interactive charts using Plotly.js (best for 3D and scientific visualizations).",
+      "category": "visualization",
+      "interactive": false,
+      "tags": ["chart", "3d", "scientific", "interactive"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["data"],
+        "properties": {
+          "data": {
+            "type": "array",
+            "description": "Plotly trace objects"
+          },
+          "layout": {
+            "type": "object",
+            "description": "Plotly layout configuration"
+          },
+          "config": {
+            "type": "object",
+            "description": "Plotly config options"
+          },
+          "height": {
+            "type": "string",
+            "default": "400px"
+          }
+        }
+      }
+    },
+    "datagrid": {
+      "name": "datagrid",
+      "description": "Render tabular data with sorting, filtering, pagination, and export.",
+      "category": "data",
+      "interactive": false,
+      "tags": ["table", "grid", "data", "spreadsheet"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["columns", "rows"],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "description": "Column definitions",
+            "items": {
+              "type": "object",
+              "required": ["field"],
+              "properties": {
+                "field": {"type": "string", "description": "Property name in row objects"},
+                "header": {"type": "string", "description": "Display header"},
+                "width": {"type": "number"},
+                "minWidth": {"type": "number"},
+                "sortable": {"type": "boolean", "default": true},
+                "filterable": {"type": "boolean", "default": false},
+                "format": {
+                  "type": "string",
+                  "enum": ["text", "number", "currency", "percent", "date", "datetime", "boolean"],
+                  "default": "text"
+                },
+                "align": {"type": "string", "enum": ["left", "center", "right"]}
+              }
+            }
+          },
+          "rows": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Row data objects"
+          },
+          "pageSize": {"type": "number", "default": 10, "description": "Rows per page (0 for no pagination)"},
+          "sortable": {"type": "boolean", "default": true},
+          "filterable": {"type": "boolean", "default": false},
+          "selectable": {"type": "boolean", "default": false},
+          "exportable": {"type": "boolean", "default": false},
+          "striped": {"type": "boolean", "default": true},
+          "compact": {"type": "boolean", "default": false}
+        }
+      },
+      "example": {
+        "description": "Sales data by region",
+        "props": {
+          "columns": [
+            {"field": "region", "header": "Region", "width": 150},
+            {"field": "sales", "header": "Sales", "format": "currency", "align": "right"},
+            {"field": "growth", "header": "YoY Growth", "format": "percent", "align": "right"},
+            {"field": "date", "header": "Last Updated", "format": "date"}
+          ],
+          "rows": [
+            {"region": "North America", "sales": 1250000, "growth": 0.12, "date": "2024-03-15"},
+            {"region": "Europe", "sales": 980000, "growth": 0.08, "date": "2024-03-15"},
+            {"region": "Asia Pacific", "sales": 1100000, "growth": 0.22, "date": "2024-03-15"}
+          ],
+          "pageSize": 10,
+          "exportable": true
+        }
+      }
+    },
+    "json": {
+      "name": "json",
+      "description": "Render JSON data as an interactive, collapsible tree viewer.",
+      "category": "data",
+      "interactive": false,
+      "tags": ["json", "tree", "data", "debug"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["data"],
+        "properties": {
+          "data": {"description": "Any JSON-serializable value"},
+          "expandLevel": {"type": "number", "default": 2, "description": "Initial expansion depth"},
+          "sortKeys": {"type": "boolean", "default": false},
+          "theme": {"type": "string", "enum": ["light", "dark"], "default": "light"}
+        }
+      }
+    },
+    "metric": {
+      "name": "metric",
+      "description": "Display a single KPI/metric with optional trend indicator and sparkline.",
+      "category": "data",
+      "interactive": false,
+      "tags": ["kpi", "number", "metric", "dashboard"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["value", "label"],
+        "properties": {
+          "value": {"oneOf": [{"type": "number"}, {"type": "string"}], "description": "Metric value"},
+          "label": {"type": "string", "description": "Metric label"},
+          "format": {"type": "string", "enum": ["number", "currency", "percent", "compact"], "default": "number"},
+          "prefix": {"type": "string"},
+          "suffix": {"type": "string"},
+          "change": {"type": "number", "description": "Change from previous period"},
+          "changeLabel": {"type": "string", "default": "vs last period"},
+          "sparkline": {"type": "array", "items": {"type": "number"}},
+          "icon": {"type": "string"},
+          "color": {"type": "string"}
+        }
+      },
+      "example": {
+        "description": "Monthly revenue metric",
+        "props": {
+          "value": 125000,
+          "label": "Monthly Revenue",
+          "format": "currency",
+          "change": 0.12,
+          "changeLabel": "vs last month",
+          "sparkline": [95000, 102000, 98000, 115000, 108000, 125000],
+          "icon": "dollar"
+        }
+      }
+    },
+    "markdown": {
+      "name": "markdown",
+      "description": "Render rich markdown content with tables, code blocks, and optional math.",
+      "category": "document",
+      "interactive": false,
+      "tags": ["text", "markdown", "document", "content"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["content"],
+        "properties": {
+          "content": {"type": "string", "description": "Markdown text"},
+          "allowHtml": {"type": "boolean", "default": false},
+          "syntaxHighlight": {"type": "boolean", "default": true},
+          "mathEnabled": {"type": "boolean", "default": true}
+        }
+      }
+    },
+    "code": {
+      "name": "code",
+      "description": "Render source code with syntax highlighting, line numbers, and optional diff view.",
+      "category": "document",
+      "interactive": false,
+      "tags": ["code", "syntax", "programming"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["code"],
+        "properties": {
+          "code": {"type": "string", "description": "Source code content"},
+          "language": {"type": "string", "description": "Language for syntax highlighting"},
+          "filename": {"type": "string"},
+          "showLineNumbers": {"type": "boolean", "default": true},
+          "startLine": {"type": "number", "default": 1},
+          "highlightLines": {"type": "array", "items": {"type": "number"}},
+          "diff": {"type": "boolean", "default": false},
+          "maxHeight": {"type": "string"},
+          "copyable": {"type": "boolean", "default": true}
+        }
+      },
+      "example": {
+        "description": "Python function with highlighted lines",
+        "props": {
+          "code": "def calculate_metrics(data: list[dict]) -> dict:\n    total = sum(d['value'] for d in data)\n    average = total / len(data) if data else 0\n\n    return {\n        'total': total,\n        'average': average,\n        'count': len(data),\n    }",
+          "language": "python",
+          "filename": "metrics.py",
+          "highlightLines": [2, 3]
+        }
+      }
+    },
+    "latex": {
+      "name": "latex",
+      "description": "Render mathematical equations using LaTeX notation.",
+      "category": "document",
+      "interactive": false,
+      "tags": ["math", "latex", "equation", "formula"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["expression"],
+        "properties": {
+          "expression": {"type": "string", "description": "LaTeX math expression"},
+          "displayMode": {"type": "boolean", "default": true}
+        }
+      },
+      "example": {
+        "description": "Quadratic formula",
+        "props": {
+          "expression": "x = \\\\frac{-b \\\\pm \\\\sqrt{b^2 - 4ac}}{2a}",
+          "displayMode": true
+        }
+      }
+    },
+    "callout": {
+      "name": "callout",
+      "description": "Render an attention-grabbing callout box for warnings, tips, or notes.",
+      "category": "document",
+      "interactive": false,
+      "tags": ["alert", "warning", "info", "note"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["content"],
+        "properties": {
+          "content": {"type": "string", "description": "Callout text (supports markdown)"},
+          "type": {
+            "type": "string",
+            "enum": ["info", "warning", "error", "success", "tip", "note"],
+            "default": "info"
+          },
+          "title": {"type": "string"},
+          "collapsible": {"type": "boolean", "default": false}
+        }
+      }
+    },
+    "form": {
+      "name": "form",
+      "description": "Render a dynamic form to collect user input (pauses execution until submit).",
+      "category": "interactive",
+      "interactive": true,
+      "tags": ["form", "input", "collect", "hitl"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["fields"],
+        "properties": {
+          "title": {"type": "string"},
+          "description": {"type": "string"},
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "type"],
+              "properties": {
+                "name": {"type": "string"},
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "text", "number", "email", "password", "url", "tel",
+                    "textarea", "select", "multiselect",
+                    "checkbox", "radio", "switch",
+                    "date", "datetime", "time",
+                    "file", "range", "color"
+                  ]
+                },
+                "label": {"type": "string"},
+                "placeholder": {"type": "string"},
+                "required": {"type": "boolean", "default": false},
+                "disabled": {"type": "boolean", "default": false},
+                "default": {},
+                "options": {
+                  "type": "array",
+                  "items": {
+                    "oneOf": [
+                      {"type": "string"},
+                      {
+                        "type": "object",
+                        "properties": {
+                          "value": {"type": "string"},
+                          "label": {"type": "string"}
+                        }
+                      }
+                    ]
+                  }
+                },
+                "validation": {
+                  "type": "object",
+                  "properties": {
+                    "min": {"type": "number"},
+                    "max": {"type": "number"},
+                    "minLength": {"type": "number"},
+                    "maxLength": {"type": "number"},
+                    "pattern": {"type": "string"},
+                    "message": {"type": "string"}
+                  }
+                },
+                "helpText": {"type": "string"},
+                "width": {
+                  "type": "string",
+                  "enum": ["full", "half", "third"],
+                  "default": "full"
+                }
+              }
+            }
+          },
+          "submitLabel": {"type": "string", "default": "Submit"},
+          "cancelLabel": {"type": "string"},
+          "layout": {
+            "type": "string",
+            "enum": ["vertical", "horizontal", "inline"],
+            "default": "vertical"
+          }
+        }
+      },
+      "example": {
+        "description": "Report parameters form",
+        "props": {
+          "title": "Generate Report",
+          "description": "Configure the report parameters",
+          "fields": [
+            {
+              "name": "dateRange",
+              "type": "select",
+              "label": "Date Range",
+              "required": true,
+              "options": ["Last 7 days", "Last 30 days", "Last quarter", "Custom"]
+            },
+            {
+              "name": "regions",
+              "type": "multiselect",
+              "label": "Regions",
+              "options": ["North America", "Europe", "Asia Pacific", "Latin America"],
+              "default": ["North America"]
+            },
+            {
+              "name": "includeCharts",
+              "type": "checkbox",
+              "label": "Include visualizations",
+              "default": true
+            },
+            {
+              "name": "email",
+              "type": "email",
+              "label": "Send copy to",
+              "placeholder": "email@example.com",
+              "required": false
+            }
+          ],
+          "submitLabel": "Generate Report"
+        }
+      }
+    },
+    "confirm": {
+      "name": "confirm",
+      "description": "Display a confirmation dialog (pauses execution until confirmed or canceled).",
+      "category": "interactive",
+      "interactive": true,
+      "tags": ["confirm", "dialog", "approve", "hitl"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["message"],
+        "properties": {
+          "title": {"type": "string"},
+          "message": {"type": "string"},
+          "confirmLabel": {"type": "string", "default": "Confirm"},
+          "cancelLabel": {"type": "string", "default": "Cancel"},
+          "variant": {
+            "type": "string",
+            "enum": ["info", "warning", "danger", "success"],
+            "default": "info"
+          },
+          "details": {"type": "string"}
+        }
+      },
+      "example": {
+        "description": "Confirm data deletion",
+        "props": {
+          "title": "Delete Records",
+          "message": "Are you sure you want to delete 23 records?",
+          "confirmLabel": "Yes, Delete",
+          "cancelLabel": "Keep Records",
+          "variant": "danger",
+          "details": "This action cannot be undone."
+        }
+      }
+    },
+    "select_option": {
+      "name": "select_option",
+      "description": "Present a list of options for the user to choose from (pauses execution).",
+      "category": "interactive",
+      "interactive": true,
+      "tags": ["select", "choice", "options", "hitl"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["options"],
+        "properties": {
+          "title": {"type": "string"},
+          "description": {"type": "string"},
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["value", "label"],
+              "properties": {
+                "value": {"type": "string"},
+                "label": {"type": "string"},
+                "description": {"type": "string"},
+                "icon": {"type": "string"},
+                "disabled": {"type": "boolean", "default": false},
+                "metadata": {"type": "object"}
+              }
+            }
+          },
+          "multiple": {"type": "boolean", "default": false},
+          "minSelections": {"type": "number", "default": 1},
+          "maxSelections": {"type": "number"},
+          "layout": {"type": "string", "enum": ["list", "grid", "cards"], "default": "list"},
+          "searchable": {"type": "boolean", "default": false}
+        }
+      },
+      "example": {
+        "description": "Choose a chart type",
+        "props": {
+          "title": "Select Visualization Type",
+          "description": "Choose how you want to visualize this data:",
+          "layout": "cards",
+          "options": [
+            {"value": "line", "label": "Line Chart", "description": "Best for trends over time", "icon": "chart-line"},
+            {"value": "bar", "label": "Bar Chart", "description": "Best for comparisons", "icon": "chart-bar"},
+            {"value": "pie", "label": "Pie Chart", "description": "Best for proportions", "icon": "chart-pie"},
+            {"value": "table", "label": "Data Table", "description": "Show raw numbers", "icon": "table"}
+          ]
+        }
+      }
+    },
+    "report": {
+      "name": "report",
+      "description": "Document-style layout for structured reports with sections and embedded components.",
+      "category": "layout",
+      "interactive": false,
+      "tags": ["report", "document", "layout", "sections"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["sections"],
+        "properties": {
+          "title": {"type": "string"},
+          "subtitle": {"type": "string"},
+          "metadata": {
+            "type": "object",
+            "properties": {
+              "author": {"type": "string"},
+              "date": {"type": "string"},
+              "version": {"type": "string"}
+            }
+          },
+          "toc": {"type": "boolean", "default": false},
+          "sections": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {"type": "string"},
+                "title": {"type": "string"},
+                "content": {"type": "string"},
+                "components": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["component", "props"],
+                    "properties": {
+                      "component": {"type": "string"},
+                      "props": {"type": "object"},
+                      "caption": {"type": "string"}
+                    }
+                  }
+                },
+                "subsections": {
+                  "type": "array",
+                  "items": {"type": "object"}
+                }
+              }
+            }
+          },
+          "footer": {"type": "string"}
+        }
+      },
+      "example": {
+        "description": "Quarterly sales report",
+        "props": {
+          "title": "Q3 2024 Sales Report",
+          "subtitle": "North America Region",
+          "metadata": {"author": "Analytics Team", "date": "2024-10-01"},
+          "toc": true,
+          "sections": [
+            {
+              "title": "Executive Summary",
+              "content": "Q3 showed strong growth with 15% increase in overall revenue."
+            },
+            {
+              "title": "Sales by Region",
+              "content": "Regional breakdown shows varied performance:",
+              "components": [
+                {
+                  "component": "echarts",
+                  "props": {"option": {"title": {"text": "Regional Sales"}}},
+                  "caption": "Figure 1: Regional sales distribution"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "grid": {
+      "name": "grid",
+      "description": "Responsive grid layout for arranging multiple components in columns.",
+      "category": "layout",
+      "interactive": false,
+      "tags": ["grid", "layout", "dashboard", "columns"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "columns": {"type": "number", "default": 2, "description": "Number of columns (1-4)"},
+          "gap": {"type": "string", "default": "1rem"},
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["component", "props"],
+              "properties": {
+                "component": {"type": "string"},
+                "props": {"type": "object"},
+                "colSpan": {"type": "number", "default": 1},
+                "rowSpan": {"type": "number", "default": 1},
+                "title": {"type": "string"}
+              }
+            }
+          },
+          "equalHeight": {"type": "boolean", "default": true}
+        }
+      },
+      "example": {
+        "description": "Dashboard grid",
+        "props": {
+          "columns": 4,
+          "gap": "1rem",
+          "items": [
+            {"component": "metric", "props": {"label": "Revenue", "value": 125000, "format": "currency"}},
+            {"component": "metric", "props": {"label": "Users", "value": 8420}},
+            {"component": "metric", "props": {"label": "Conversion", "value": 0.032, "format": "percent"}},
+            {"component": "metric", "props": {"label": "Avg Order", "value": 85, "format": "currency"}},
+            {"component": "echarts", "props": {"option": {}}, "colSpan": 2, "title": "Revenue Trend"},
+            {"component": "echarts", "props": {"option": {}}, "colSpan": 2, "title": "User Growth"}
+          ]
+        }
+      }
+    },
+    "tabs": {
+      "name": "tabs",
+      "description": "Tabbed interface for organizing multiple components or content sections.",
+      "category": "layout",
+      "interactive": false,
+      "tags": ["tabs", "layout", "navigation"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["tabs"],
+        "properties": {
+          "tabs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["label"],
+              "properties": {
+                "id": {"type": "string"},
+                "label": {"type": "string"},
+                "icon": {"type": "string"},
+                "component": {"type": "string"},
+                "props": {"type": "object"},
+                "content": {"type": "string"},
+                "disabled": {"type": "boolean", "default": false}
+              }
+            }
+          },
+          "defaultTab": {"type": "number", "default": 0},
+          "variant": {"type": "string", "enum": ["line", "enclosed", "pills"], "default": "line"}
+        }
+      }
+    },
+    "accordion": {
+      "name": "accordion",
+      "description": "Collapsible sections for organizing content.",
+      "category": "layout",
+      "interactive": false,
+      "tags": ["accordion", "collapse", "expandable"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["title"],
+              "properties": {
+                "title": {"type": "string"},
+                "content": {"type": "string"},
+                "component": {"type": "string"},
+                "props": {"type": "object"},
+                "defaultOpen": {"type": "boolean", "default": false}
+              }
+            }
+          },
+          "allowMultiple": {"type": "boolean", "default": false}
+        }
+      }
+    },
+    "image": {
+      "name": "image",
+      "description": "Display an image with optional caption, zoom, and lightbox.",
+      "category": "media",
+      "interactive": false,
+      "tags": ["image", "picture", "media"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["src"],
+        "properties": {
+          "src": {"type": "string", "description": "Image URL or base64 data URI"},
+          "alt": {"type": "string"},
+          "caption": {"type": "string"},
+          "width": {"type": "string"},
+          "maxWidth": {"type": "string"},
+          "height": {"type": "string"},
+          "objectFit": {"type": "string", "enum": ["contain", "cover", "fill", "none"], "default": "contain"},
+          "zoomable": {"type": "boolean", "default": false},
+          "border": {"type": "boolean", "default": false}
+        }
+      }
+    },
+    "html": {
+      "name": "html",
+      "description": "Render custom HTML/CSS/JS in a sandboxed iframe.",
+      "category": "media",
+      "interactive": false,
+      "tags": ["html", "iframe", "custom", "embed"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["html"],
+        "properties": {
+          "html": {"type": "string", "description": "HTML content"},
+          "css": {"type": "string", "description": "CSS styles"},
+          "js": {"type": "string", "description": "JavaScript code"},
+          "height": {"type": "string", "default": "400px"},
+          "sandbox": {"type": "string", "default": "allow-scripts"}
+        }
+      }
+    },
+    "video": {
+      "name": "video",
+      "description": "Embed a video from URL or file.",
+      "category": "media",
+      "interactive": false,
+      "tags": ["video", "media", "embed"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["src"],
+        "properties": {
+          "src": {"type": "string"},
+          "poster": {"type": "string"},
+          "autoplay": {"type": "boolean", "default": false},
+          "controls": {"type": "boolean", "default": true},
+          "loop": {"type": "boolean", "default": false},
+          "muted": {"type": "boolean", "default": false},
+          "width": {"type": "string"},
+          "height": {"type": "string"}
+        }
+      }
+    },
+    "embed": {
+      "name": "embed",
+      "description": "Embed external content via URL (YouTube, maps, documents, etc.).",
+      "category": "media",
+      "interactive": false,
+      "tags": ["embed", "iframe", "external"],
+      "propsSchema": {
+        "type": "object",
+        "required": ["url"],
+        "properties": {
+          "url": {"type": "string"},
+          "title": {"type": "string"},
+          "width": {"type": "string", "default": "100%"},
+          "height": {"type": "string", "default": "400px"},
+          "allowFullscreen": {"type": "boolean", "default": true}
+        }
+      }
+    }
+  }
+}

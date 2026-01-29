@@ -15,15 +15,58 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
+
+try:
+    from ag_ui.core import RunAgentInput
+    from ag_ui.encoder import EventEncoder
+except Exception:  # pragma: no cover - optional dependency
+    RunAgentInput = None  # type: ignore[assignment,misc]
+    EventEncoder = None  # type: ignore[assignment,misc]
 
 from penguiflow.cli.generate import run_generate
 from penguiflow.cli.spec import Spec, load_spec
 from penguiflow.cli.spec_errors import SpecValidationError
 from penguiflow.planner import PlannerEvent
+from penguiflow.sessions import (
+    MergeStrategy,
+    PlannerTaskPipeline,
+    SessionLimits,
+    SessionManager,
+    StateUpdate,
+    TaskContextSnapshot,
+    TaskStateModel,
+    TaskStatus,
+    TaskType,
+    UpdateType,
+)
+from penguiflow.sessions.projections import PlannerEventProjector
+from penguiflow.steering import (
+    SteeringEvent,
+    SteeringEventType,
+    SteeringInbox,
+    SteeringValidationError,
+    sanitize_steering_event,
+    validate_steering_event,
+)
+
+try:
+    from penguiflow.agui_adapter import PenguiFlowAdapter, create_agui_endpoint
+except Exception:  # pragma: no cover - optional dependency
+    PenguiFlowAdapter = None  # type: ignore[assignment,misc]
+    create_agui_endpoint = None  # type: ignore[assignment]
+try:
+    from penguiflow.rich_output import DEFAULT_ALLOWLIST, RichOutputConfig, configure_rich_output
+    from penguiflow.rich_output.validate import RichOutputValidationError, validate_interaction_result
+except Exception:  # pragma: no cover - optional dependency
+    DEFAULT_ALLOWLIST = ()  # type: ignore[assignment]
+    RichOutputConfig = None  # type: ignore[assignment,misc]
+    configure_rich_output = None  # type: ignore[assignment]
+    RichOutputValidationError = None  # type: ignore[assignment,misc]
+    validate_interaction_result = None  # type: ignore[assignment]
 
 from .playground_sse import EventBroker, SSESentinel, format_sse, stream_queue
 from .playground_state import InMemoryStateStore, PlaygroundStateStore
@@ -32,6 +75,7 @@ from .playground_wrapper import (
     ChatResult,
     OrchestratorAgentWrapper,
     PlannerAgentWrapper,
+    _normalise_answer,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -82,6 +126,72 @@ class ChatResponse(BaseModel):
     pause: dict[str, Any] | None = None
 
 
+class SteerRequest(BaseModel):
+    session_id: str
+    task_id: str
+    event_type: SteeringEventType
+    payload: dict[str, Any] = Field(default_factory=dict)
+    trace_id: str | None = None
+    source: str = "user"
+    event_id: str | None = None
+
+
+class SteerResponse(BaseModel):
+    accepted: bool
+
+
+class TaskSpawnRequest(BaseModel):
+    session_id: str
+    query: str | None = None
+    task_type: Literal["foreground", "background"] = "background"
+    priority: int = 0
+    llm_context: dict[str, Any] = Field(default_factory=dict)
+    tool_context: dict[str, Any] = Field(default_factory=dict)
+    spawn_reason: str | None = None
+    description: str | None = None
+    wait: bool = False
+    merge_strategy: MergeStrategy | None = None
+    parent_task_id: str | None = None
+    spawned_from_event_id: str | None = None
+
+
+class TaskSpawnResponse(BaseModel):
+    task_id: str
+    session_id: str
+    status: TaskStatus
+    trace_id: str | None = None
+    result: dict[str, Any] | None = None
+
+
+class SessionInfo(BaseModel):
+    session_id: str
+    task_count: int
+    active_tasks: int
+    pending_patches: int
+    context_version: int
+    context_hash: str | None = None
+
+
+class TaskStateResponse(BaseModel):
+    """Response for task state query."""
+
+    foreground_task_id: str | None
+    foreground_status: str | None
+    background_tasks: list[dict[str, Any]]
+
+
+class SessionContextUpdate(BaseModel):
+    llm_context: dict[str, Any] | None = None
+    tool_context: dict[str, Any] | None = None
+    merge: bool = False
+
+
+class ApplyContextPatchRequest(BaseModel):
+    patch_id: str
+    strategy: MergeStrategy | None = None
+    action: Literal["apply", "reject"] = "apply"
+
+
 class SpecPayload(BaseModel):
     content: str
     valid: bool
@@ -94,6 +204,25 @@ class MetaPayload(BaseModel):
     planner: dict[str, Any]
     services: list[dict[str, Any]]
     tools: list[dict[str, Any]]
+
+
+class ComponentRegistryPayload(BaseModel):
+    version: str
+    enabled: bool
+    allowlist: list[str]
+    components: dict[str, Any]
+
+
+class AguiResumeRequest(BaseModel):
+    resume_token: str
+    thread_id: str
+    run_id: str
+    tool_name: str | None = None
+    component: str | None = None
+    result: Any | None = None
+    tool_context: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = ConfigDict(extra="ignore")
 
 
 def _parse_context_arg(raw: str | None) -> dict[str, Any]:
@@ -112,6 +241,22 @@ def _merge_contexts(primary: dict[str, Any], secondary: dict[str, Any] | None) -
     merged = dict(primary)
     merged.update(secondary)
     return merged
+
+
+def _format_resume_input(input: AguiResumeRequest) -> str | None:
+    payload: dict[str, Any] = {}
+    if input.tool_name:
+        payload["tool"] = input.tool_name
+    if input.component:
+        payload["component"] = input.component
+    if input.result is not None:
+        payload["result"] = input.result
+    if not payload:
+        return None
+    try:
+        return json.dumps(payload, ensure_ascii=False)
+    except TypeError:
+        return str(payload)
 
 
 def _discover_spec_path(project_root: Path) -> Path | None:
@@ -177,26 +322,30 @@ def _meta_from_spec(spec: Spec | None) -> MetaPayload:
         "hop_budget": spec.planner.hop_budget if spec else None,
         "absolute_max_parallel": spec.planner.absolute_max_parallel if spec else None,
         "reflection": spec.planner.memory_prompt is not None if spec else False,
+        "rich_output_enabled": spec.planner.rich_output.enabled if spec else None,
+        "rich_output_allowlist": (
+            ", ".join(spec.planner.rich_output.allowlist) if spec and spec.planner.rich_output.allowlist else None
+        ),
     }
     services = []
     if spec:
-        services = [
-            {
-                "name": "memory_iceberg",
-                "enabled": spec.services.memory_iceberg.enabled,
-                "url": spec.services.memory_iceberg.base_url,
-            },
-            {
-                "name": "lighthouse",
-                "enabled": spec.services.lighthouse.enabled,
-                "url": spec.services.lighthouse.base_url,
-            },
-            {
-                "name": "wayfinder",
-                "enabled": spec.services.wayfinder.enabled,
-                "url": spec.services.wayfinder.base_url,
-            },
-        ]
+            services = [
+                {
+                    "name": "memory_iceberg",
+                    "enabled": spec.services.memory_iceberg.enabled,
+                    "url": spec.services.memory_iceberg.base_url,
+                },
+                {
+                    "name": "rag_server",
+                    "enabled": spec.services.rag_server.enabled,
+                    "url": spec.services.rag_server.base_url,
+                },
+                {
+                    "name": "wayfinder",
+                    "enabled": spec.services.wayfinder.enabled,
+                    "url": spec.services.wayfinder.base_url,
+                },
+            ]
     tools = []
     if spec:
         for tool in spec.tools:
@@ -211,7 +360,13 @@ def _meta_from_spec(spec: Spec | None) -> MetaPayload:
     return MetaPayload(agent=agent, planner=planner, services=services, tools=tools)
 
 
-def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> bytes | None:
+def _event_frame(
+    event: PlannerEvent,
+    trace_id: str | None,
+    session_id: str,
+    *,
+    default_message_id: str | None = None,
+) -> bytes | None:
     """Convert a planner event into an SSE frame."""
     if trace_id is None:
         return None
@@ -222,6 +377,12 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
         "step": event.trajectory_step,
     }
     extra = dict(event.extra or {})
+    message_id: str | None = None
+    extra_message_id = extra.get("message_id")
+    if isinstance(extra_message_id, str) and extra_message_id.strip():
+        message_id = extra_message_id
+    elif isinstance(default_message_id, str) and default_message_id.strip():
+        message_id = default_message_id
     if event.event_type == "stream_chunk":
         phase = "observation"
         meta = extra.get("meta")
@@ -248,6 +409,8 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
                 "channel": channel,
             }
         )
+        if message_id is not None:
+            payload["message_id"] = message_id
         return format_sse("chunk", payload)
 
     if event.event_type == "artifact_chunk":
@@ -302,14 +465,18 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
             channel_llm = "revision"
         else:
             channel_llm = "thinking"
+        action_seq = extra.get("action_seq")
         payload.update(
             {
                 "text": extra.get("text", ""),
                 "done": extra.get("done", False),
                 "phase": phase_llm,
                 "channel": channel_llm,
+                "action_seq": action_seq,
             }
         )
+        if message_id is not None:
+            payload["message_id"] = message_id
         return format_sse("llm_stream_chunk", payload)
 
     if event.node_name:
@@ -326,6 +493,47 @@ def _event_frame(event: PlannerEvent, trace_id: str | None, session_id: str) -> 
     if event.event_type in {"step_start", "step_complete"}:
         payload["event"] = event.event_type
         return format_sse("step", payload)
+
+    # Emit dedicated SSE event types for tool calls (enables streaming pattern)
+    if event.event_type == "tool_call_start":
+        tool_call_id = extra.get("tool_call_id")
+        tool_name = extra.get("tool_name")
+        args_json = extra.get("args_json", "")
+        # Emit tool_call_start first
+        frames = format_sse(
+            "tool_call_start",
+            {
+                **payload,
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                **({"message_id": message_id} if message_id is not None else {}),
+            },
+        )
+        # Emit args as a single delta chunk for streaming compatibility
+        if args_json:
+            frames += format_sse(
+                "tool_call_args",
+                {
+                    "tool_call_id": tool_call_id,
+                    "delta": args_json,
+                    "trace_id": trace_id,
+                    "session_id": session_id,
+                    "ts": event.ts,
+                    **({"message_id": message_id} if message_id is not None else {}),
+                },
+            )
+        return frames
+
+    if event.event_type == "tool_call_end":
+        return format_sse(
+            "tool_call_end",
+            {
+                **payload,
+                "tool_call_id": extra.get("tool_call_id"),
+                "tool_name": extra.get("tool_name"),
+                **({"message_id": message_id} if message_id is not None else {}),
+            },
+        )
 
     payload["event"] = event.event_type
     return format_sse("event", payload)
@@ -345,6 +553,11 @@ def _done_frame(result: ChatResult, session_id: str) -> bytes:
             ),
         },
     )
+
+
+def _state_update_frame(update: StateUpdate) -> bytes:
+    payload = update.model_dump(mode="json")
+    return format_sse("state_update", payload)
 
 
 def _error_frame(message: str, *, trace_id: str | None = None, session_id: str | None = None) -> bytes:
@@ -476,7 +689,12 @@ def discover_agent(project_root: Path | None = None) -> DiscoveryResult:
     raise PlaygroundError(f"Could not discover agent in {base_dir}: {hint}")
 
 
-def _instantiate_orchestrator(cls: type[Any], config: Any | None) -> Any:
+def _instantiate_orchestrator(
+    cls: type[Any],
+    config: Any | None,
+    *,
+    session_manager: Any | None = None,
+) -> Any:
     signature = inspect.signature(cls)
     params = [param for name, param in signature.parameters.items() if name != "self"]
     if not params:
@@ -484,8 +702,16 @@ def _instantiate_orchestrator(cls: type[Any], config: Any | None) -> Any:
     first = params[0]
     if config is None and first.default is inspect._empty:
         raise PlaygroundError(f"Orchestrator {cls.__name__} requires a config")
+
+    # Build kwargs for optional parameters the orchestrator may accept
+    kwargs: dict[str, Any] = {}
+    if session_manager is not None and "session_manager" in signature.parameters:
+        kwargs["session_manager"] = session_manager
+
     try:
-        return cls(config) if config is not None else cls()
+        if config is not None:
+            return cls(config, **kwargs)
+        return cls(**kwargs) if kwargs else cls()
     except TypeError as exc:
         raise PlaygroundError(f"Failed to instantiate orchestrator {cls.__name__}: {exc}") from exc
 
@@ -522,15 +748,26 @@ def load_agent(
     project_root: Path | None = None,
     *,
     state_store: PlaygroundStateStore | None = None,
+    session_manager: Any | None = None,
 ) -> tuple[AgentWrapper, DiscoveryResult]:
-    """Discover and wrap the first available agent entry point."""
+    """Discover and wrap the first available agent entry point.
+
+    Args:
+        project_root: Path to the project root directory.
+        state_store: State store for agent wrapper.
+        session_manager: SessionManager instance to share with orchestrator for
+            background task visibility. If provided and the orchestrator accepts it,
+            the same instance will be used for both UI endpoints and orchestrator.
+    """
 
     result = discover_agent(project_root)
     config = result.config_factory() if result.config_factory else None
     state_store = state_store or InMemoryStateStore()
 
     if result.kind == "orchestrator":
-        orchestrator = _instantiate_orchestrator(result.target, config)
+        orchestrator = _instantiate_orchestrator(
+            result.target, config, session_manager=session_manager
+        )
         wrapper: AgentWrapper = OrchestratorAgentWrapper(
             orchestrator,
             state_store=state_store,
@@ -546,6 +783,18 @@ def load_agent(
     return wrapper, result
 
 
+def _build_planner_factory(result: DiscoveryResult | None) -> Callable[[], Any] | None:
+    if result is None or result.kind != "planner":
+        return None
+
+    def _factory() -> Any:
+        config = result.config_factory() if result.config_factory else None
+        builder_output = _call_builder(result.target, config)
+        return _unwrap_planner(builder_output)
+
+    return _factory
+
+
 def create_playground_app(
     project_root: Path | None = None,
     *,
@@ -558,16 +807,46 @@ def create_playground_app(
     agent_wrapper = agent
     store = state_store
     broker = EventBroker()
+    session_limits = SessionLimits()
+    planner_factory: Callable[[], Any] | None = None
     ui_dir = Path(__file__).resolve().parent / "playground_ui" / "dist"
     spec_payload, parsed_spec = _load_spec_payload(Path(project_root or ".").resolve())
     meta_payload = _meta_from_spec(parsed_spec)
 
+    # Determine session_store first so we can create SessionManager before load_agent.
+    # This allows the orchestrator to share the same SessionManager for background task visibility.
     if agent_wrapper is None:
         store = state_store or InMemoryStateStore()
-        agent_wrapper, discovery = load_agent(project_root, state_store=store)
     else:
         if store is None:
             store = getattr(agent_wrapper, "_state_store", None) or InMemoryStateStore()
+
+    # Share the same store with the SessionManager when it supports task persistence.
+    # Otherwise, keep session/task state in-memory (the Playground can still store trajectories/events).
+    session_store: Any | None = None
+    if store is not None and (
+        hasattr(store, "save_task") or (hasattr(store, "save_event") and hasattr(store, "load_history"))
+    ):
+        session_store = store
+    session_manager = SessionManager(limits=session_limits, state_store=session_store)
+
+    # Now load the agent, passing the shared SessionManager
+    if agent_wrapper is None:
+        agent_wrapper, discovery = load_agent(
+            project_root, state_store=store, session_manager=session_manager
+        )
+        planner_factory = _build_planner_factory(discovery)
+    else:
+        planner_factory = None
+    try:
+        supports_steering_chat = "steering" in inspect.signature(agent_wrapper.chat).parameters
+    except (TypeError, ValueError):
+        supports_steering_chat = False
+
+    _LOGGER.info(
+        "playground_steering_support",
+        extra={"supports_steering_chat": supports_steering_chat},
+    )
 
     @asynccontextmanager
     async def _lifespan(_: FastAPI):
@@ -587,6 +866,66 @@ def create_playground_app(
                 await agent_wrapper.shutdown()
 
     app = FastAPI(title="PenguiFlow Playground", version="0.1.0", lifespan=_lifespan)
+
+    # Optional: enable platform task-management meta-tools when a planner factory is available.
+    # This is a Playground convenience to make background tasks discoverable without requiring
+    # downstream project code changes.
+    if planner_factory is not None:
+        try:
+            from penguiflow.planner import ReactPlanner
+            from penguiflow.planner import prompts as planner_prompts
+            from penguiflow.planner.catalog_extension import extend_tool_catalog
+            from penguiflow.planner.models import BackgroundTasksConfig
+            from penguiflow.sessions.task_service import InProcessTaskService
+            from penguiflow.sessions.task_tools import SUBAGENT_FLAG_KEY, TASK_SERVICE_KEY, build_task_tool_specs
+            from penguiflow.sessions.tool_jobs import build_tool_job_pipeline
+
+            planner = None
+            try:
+                planner = getattr(agent_wrapper, "_planner", None)
+            except Exception:
+                planner = None
+            tool_job_factory = None
+            if isinstance(planner, ReactPlanner):
+                spec_by_name = getattr(planner, "_spec_by_name", {}) or {}
+                artifact_store = getattr(planner, "artifact_store", None)
+
+                def _tool_job_factory(tool_name: str, tool_args: Any):
+                    spec = spec_by_name.get(tool_name)
+                    if spec is None:
+                        raise RuntimeError(f"tool_not_found:{tool_name}")
+                    return build_tool_job_pipeline(
+                        spec=spec,
+                        args_payload=dict(tool_args or {}),
+                        artifacts=artifact_store,
+                    )
+
+                tool_job_factory = _tool_job_factory
+
+            task_service = InProcessTaskService(
+                sessions=session_manager,
+                planner_factory=planner_factory,
+                tool_job_factory=tool_job_factory,
+            )
+            if isinstance(planner, ReactPlanner):
+                existing_extra = getattr(planner, "_system_prompt_extra", None)
+                planner._system_prompt_extra = planner_prompts.merge_prompt_extras(
+                    existing_extra,
+                    planner_prompts.render_background_task_guidance(),
+                )
+                existing_cfg = getattr(planner, "_background_tasks", None)
+                if isinstance(existing_cfg, BackgroundTasksConfig):
+                    planner._background_tasks = existing_cfg.model_copy(
+                        update={"enabled": True, "allow_tool_background": True}
+                    )
+                extend_tool_catalog(planner, build_task_tool_specs())
+            # Inject TaskService into PlannerAgentWrapper tool_context defaults if available.
+            defaults = getattr(agent_wrapper, "_tool_context_defaults", None)
+            if isinstance(defaults, dict):
+                defaults.setdefault(TASK_SERVICE_KEY, task_service)
+                defaults.setdefault(SUBAGENT_FLAG_KEY, False)
+        except Exception as exc:  # pragma: no cover - optional wiring
+            _LOGGER.debug("task_tools_unavailable", extra={"error": str(exc)})
 
     def _discover_planner() -> Any | None:
         """Discover the underlying planner instance from the agent wrapper."""
@@ -621,6 +960,22 @@ def create_playground_app(
         if not isinstance(store, ArtifactStore):
             return None
         return store
+
+    def _rich_output_config_from_spec(spec: Spec | None) -> Any | None:
+        if configure_rich_output is None or RichOutputConfig is None:
+            return None
+        if spec is None:
+            return RichOutputConfig(enabled=False)
+        rich = spec.planner.rich_output
+        allowlist = rich.allowlist if rich.allowlist else list(DEFAULT_ALLOWLIST)
+        return RichOutputConfig(
+            enabled=rich.enabled,
+            allowlist=allowlist,
+            include_prompt_catalog=rich.include_prompt_catalog,
+            include_prompt_examples=rich.include_prompt_examples,
+            max_payload_bytes=rich.max_payload_bytes,
+            max_total_bytes=rich.max_total_bytes,
+        )
 
     class _ScopedArtifactStore:
         """ArtifactStore wrapper that injects a default scope when missing."""
@@ -752,6 +1107,15 @@ def create_playground_app(
     async def ui_meta() -> MetaPayload:
         return meta_payload
 
+    @app.get("/ui/components", response_model=ComponentRegistryPayload)
+    async def ui_components() -> ComponentRegistryPayload:
+        config = _rich_output_config_from_spec(parsed_spec)
+        if configure_rich_output is None or config is None:
+            raise HTTPException(status_code=501, detail="Rich output support requires jsonschema dependency.")
+        runtime = configure_rich_output(config)
+        payload = runtime.registry_payload()
+        return ComponentRegistryPayload(**payload)
+
     @app.post("/ui/generate")
     async def ui_generate(payload: dict[str, Any]) -> Mapping[str, Any]:
         spec_text = payload.get("spec_text")
@@ -793,6 +1157,34 @@ def create_playground_app(
     async def chat(request: ChatRequest) -> ChatResponse:
         session_id = request.session_id or secrets.token_hex(8)
         trace_holder: dict[str, str | None] = {"id": request.session_id}
+        session = await session_manager.get_or_create(session_id)
+        try:
+            await session.ensure_capacity(TaskType.FOREGROUND)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        task_id = secrets.token_hex(8)
+        snapshot = TaskContextSnapshot(
+            session_id=session_id,
+            task_id=task_id,
+            query=request.query,
+            llm_context=dict(request.llm_context or {}),
+            tool_context=dict(request.tool_context or {}),
+            spawn_reason="foreground_chat",
+        )
+        task_state = await session.registry.create_task(
+            session_id=session_id,
+            task_type=TaskType.FOREGROUND,
+            priority=0,
+            context_snapshot=snapshot,
+            description=request.query,
+            trace_id=trace_holder["id"],
+            task_id=task_id,
+        )
+        session._emit_status_change(task_state, reason="created")
+        updated_state = await session.registry.update_status(task_id, TaskStatus.RUNNING)
+        session._emit_status_change(updated_state or task_state, reason="running")
+        steering = SteeringInbox()
+        session._steering_inboxes[task_id] = steering
 
         def _event_consumer(event: PlannerEvent, trace_id: str | None) -> None:
             tid = trace_id or trace_holder["id"]
@@ -802,23 +1194,73 @@ def create_playground_app(
             frame = _event_frame(event, tid, session_id)
             if frame:
                 broker.publish(tid, frame)
+            for update in PlannerEventProjector(
+                session_id=session_id,
+                task_id=task_id,
+                trace_id=tid,
+            ).project(event):
+                session._publish(update)
 
         try:
             llm_context = _merge_contexts(dict(request.llm_context or {}), request.context)
-            result: ChatResult = await agent_wrapper.chat(
-                query=request.query,
-                session_id=session_id,
-                llm_context=llm_context,
+            session.update_context(
+                llm_context=dict(llm_context or {}),
                 tool_context=dict(request.tool_context or {}),
-                event_consumer=_event_consumer,
-                trace_id_hint=trace_holder["id"],
             )
+            chat_kwargs: dict[str, Any] = {
+                "query": request.query,
+                "session_id": session_id,
+                "llm_context": llm_context,
+                "tool_context": {
+                    **dict(request.tool_context or {}),
+                    "task_id": task_id,
+                    "is_subagent": False,
+                },
+                "event_consumer": _event_consumer,
+                "trace_id_hint": trace_holder["id"],
+            }
+            if supports_steering_chat:
+                chat_kwargs["steering"] = steering
+            result: ChatResult = await agent_wrapper.chat(**chat_kwargs)
         except Exception as exc:
             _LOGGER.exception("playground_chat_failed", exc_info=exc)
+            updated_state = await session.registry.update_task(task_id, status=TaskStatus.FAILED, error=str(exc))
+            session._emit_status_change(updated_state or task_state, reason="failed")
             raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
+        finally:
+            session._steering_inboxes.pop(task_id, None)
 
         trace_holder["id"] = result.trace_id
         broker.publish(result.trace_id, _done_frame(result, session_id))
+        if result.pause:
+            updated_state = await session.registry.update_task(
+                task_id,
+                status=TaskStatus.PAUSED,
+                trace_id=result.trace_id,
+            )
+            session._emit_status_change(updated_state or task_state, reason="paused")
+            session._publish(
+                StateUpdate(
+                    session_id=session_id,
+                    task_id=task_id,
+                    trace_id=result.trace_id,
+                    update_type=UpdateType.CHECKPOINT,
+                    content={
+                        "kind": "approval_required",
+                        "resume_token": result.pause.get("resume_token"),
+                        "prompt": result.pause.get("payload", {}).get("prompt", "Awaiting input"),
+                        "options": ["approve", "reject"],
+                    },
+                )
+            )
+        else:
+            updated_state = await session.registry.update_task(
+                task_id,
+                status=TaskStatus.COMPLETE,
+                result=result.answer,
+                trace_id=result.trace_id,
+            )
+            session._emit_status_change(updated_state or task_state, reason="complete")
 
         return ChatResponse(
             trace_id=result.trace_id,
@@ -841,37 +1283,183 @@ def create_playground_app(
         tool_payload = _parse_context_arg(tool_context)
         queue: asyncio.Queue[bytes | object] = asyncio.Queue()
         trace_holder: dict[str, str | None] = {"id": secrets.token_hex(8)}
+        stream_message_id = f"msg_{secrets.token_hex(8)}"
+        session = await session_manager.get_or_create(session_value)
+        try:
+            await session.ensure_capacity(TaskType.FOREGROUND)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        session.update_context(
+            llm_context=dict(llm_payload or {}),
+            tool_context=dict(tool_payload or {}),
+        )
+        task_id = secrets.token_hex(8)
+        snapshot = TaskContextSnapshot(
+            session_id=session_value,
+            task_id=task_id,
+            query=query,
+            llm_context=dict(llm_payload or {}),
+            tool_context=dict(tool_payload or {}),
+            spawn_reason="foreground_chat",
+        )
+        await session.registry.create_task(
+            session_id=session_value,
+            task_type=TaskType.FOREGROUND,
+            priority=0,
+            context_snapshot=snapshot,
+            description=query,
+            trace_id=trace_holder["id"],
+            task_id=task_id,
+        )
+        steering = SteeringInbox()
+        session._steering_inboxes[task_id] = steering
+
+        def _emit_state_update(update: StateUpdate) -> None:
+            session._publish(update)
+            try:
+                queue.put_nowait(_state_update_frame(update))
+            except asyncio.QueueFull:
+                pass
+
+        _emit_state_update(
+            StateUpdate(
+                session_id=session_value,
+                task_id=task_id,
+                trace_id=trace_holder["id"],
+                update_type=UpdateType.STATUS_CHANGE,
+                content={
+                    "status": TaskStatus.PENDING.value,
+                    "reason": "created",
+                    "task_type": TaskType.FOREGROUND.value,
+                },
+            )
+        )
+        await session.registry.update_status(task_id, TaskStatus.RUNNING)
+        _emit_state_update(
+            StateUpdate(
+                session_id=session_value,
+                task_id=task_id,
+                trace_id=trace_holder["id"],
+                update_type=UpdateType.STATUS_CHANGE,
+                content={
+                    "status": TaskStatus.RUNNING.value,
+                    "reason": "running",
+                    "task_type": TaskType.FOREGROUND.value,
+                },
+            )
+        )
 
         def _event_consumer(event: PlannerEvent, trace_id: str | None) -> None:
             tid = trace_id or trace_holder["id"]
             if tid is None:
                 return
             trace_holder["id"] = tid
-            frame = _event_frame(event, tid, session_value)
+            frame = _event_frame(event, tid, session_value, default_message_id=stream_message_id)
             if frame:
                 try:
                     queue.put_nowait(frame)
                 except asyncio.QueueFull:
                     pass
                 broker.publish(tid, frame)
+            for update in PlannerEventProjector(
+                session_id=session_value,
+                task_id=task_id,
+                trace_id=tid,
+            ).project(event):
+                _emit_state_update(update)
 
         async def _run_chat() -> None:
             try:
-                result: ChatResult = await agent_wrapper.chat(
-                    query=query,
-                    session_id=session_value,
-                    llm_context=llm_payload,
-                    tool_context=tool_payload,
-                    event_consumer=_event_consumer,
-                    trace_id_hint=trace_holder["id"],
-                )
+                chat_kwargs: dict[str, Any] = {
+                    "query": query,
+                    "session_id": session_value,
+                    "llm_context": llm_payload,
+                    "tool_context": {
+                        **dict(tool_payload or {}),
+                        "task_id": task_id,
+                        "is_subagent": False,
+                    },
+                    "event_consumer": _event_consumer,
+                    "trace_id_hint": trace_holder["id"],
+                }
+                if supports_steering_chat:
+                    chat_kwargs["steering"] = steering
+                result: ChatResult = await agent_wrapper.chat(**chat_kwargs)
                 trace_holder["id"] = result.trace_id
                 frame = _done_frame(result, session_value)
                 broker.publish(result.trace_id, frame)
                 await queue.put(frame)
+                if result.pause:
+                    await session.registry.update_task(
+                        task_id,
+                        status=TaskStatus.PAUSED,
+                        trace_id=result.trace_id,
+                    )
+                    _emit_state_update(
+                        StateUpdate(
+                            session_id=session_value,
+                            task_id=task_id,
+                            trace_id=result.trace_id,
+                            update_type=UpdateType.STATUS_CHANGE,
+                            content={
+                                "status": TaskStatus.PAUSED.value,
+                                "reason": "paused",
+                                "task_type": TaskType.FOREGROUND.value,
+                            },
+                        )
+                    )
+                    _emit_state_update(
+                        StateUpdate(
+                            session_id=session_value,
+                            task_id=task_id,
+                            trace_id=result.trace_id,
+                            update_type=UpdateType.CHECKPOINT,
+                            content={
+                                "kind": "approval_required",
+                                "resume_token": result.pause.get("resume_token"),
+                                "prompt": result.pause.get("payload", {}).get("prompt", "Awaiting input"),
+                                "options": ["approve", "reject"],
+                            },
+                        )
+                    )
+                else:
+                    await session.registry.update_task(
+                        task_id,
+                        status=TaskStatus.COMPLETE,
+                        result=result.answer,
+                        trace_id=result.trace_id,
+                    )
+                    _emit_state_update(
+                        StateUpdate(
+                            session_id=session_value,
+                            task_id=task_id,
+                            trace_id=result.trace_id,
+                            update_type=UpdateType.STATUS_CHANGE,
+                            content={
+                                "status": TaskStatus.COMPLETE.value,
+                                "reason": "complete",
+                                "task_type": TaskType.FOREGROUND.value,
+                            },
+                        )
+                    )
             except Exception as exc:  # pragma: no cover - defensive
+                await session.registry.update_task(task_id, status=TaskStatus.FAILED, error=str(exc))
+                _emit_state_update(
+                    StateUpdate(
+                        session_id=session_value,
+                        task_id=task_id,
+                        trace_id=trace_holder["id"],
+                        update_type=UpdateType.STATUS_CHANGE,
+                        content={
+                            "status": TaskStatus.FAILED.value,
+                            "reason": "failed",
+                            "task_type": TaskType.FOREGROUND.value,
+                        },
+                    )
+                )
                 await queue.put(_error_frame(str(exc), trace_id=trace_holder["id"], session_id=session_value))
             finally:
+                session._steering_inboxes.pop(task_id, None)
                 await queue.put(SSESentinel)
 
         asyncio.create_task(_run_chat())
@@ -879,6 +1467,297 @@ def create_playground_app(
             stream_queue(queue),
             media_type="text/event-stream",
         )
+
+    @app.get("/session/stream")
+    async def session_stream(
+        session_id: str,
+        since_id: str | None = None,
+        task_ids: list[str] | None = None,
+        update_types: list[UpdateType] | None = None,
+    ) -> StreamingResponse:
+        session = await session_manager.get_or_create(session_id)
+        updates_iter = await session.subscribe(
+            since_id=since_id,
+            task_ids=task_ids,
+            update_types=update_types,
+        )
+
+        async def _event_stream() -> AsyncIterator[bytes]:
+            try:
+                yield format_sse("state_update", {"event": "connected", "session_id": session_id})
+                async for update in updates_iter:
+                    yield _state_update_frame(update)
+            except asyncio.CancelledError:
+                pass
+
+        return StreamingResponse(
+            _event_stream(),
+            media_type="text/event-stream",
+        )
+
+    @app.get("/sessions/{session_id}", response_model=SessionInfo)
+    async def session_info(session_id: str) -> SessionInfo:
+        session = await session_manager.get_or_create(session_id)
+        tasks = await session.list_tasks()
+        active = len(
+            [task for task in tasks if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.PAUSED}]
+        )
+        return SessionInfo(
+            session_id=session_id,
+            task_count=len(tasks),
+            active_tasks=active,
+            pending_patches=len(session.pending_patches),
+            context_version=session.context_version,
+            context_hash=session.context_hash,
+        )
+
+    @app.get("/session/{session_id}/task-state", response_model=TaskStateResponse)
+    async def get_task_state(session_id: str) -> TaskStateResponse:
+        """Get current foreground/background task state for steering decisions."""
+        session = await session_manager.get_or_create(session_id)
+
+        foreground_id = session._foreground_task_id
+        foreground_status = None
+        if foreground_id:
+            fg_state = await session.registry.get_task(foreground_id)
+            foreground_status = fg_state.status.value if fg_state else None
+
+        # Get active background tasks
+        all_tasks = await session.registry.list_tasks(session_id)
+        active_statuses = {TaskStatus.RUNNING, TaskStatus.PENDING, TaskStatus.PAUSED}
+        background_tasks = [
+            {
+                "task_id": t.task_id,
+                "description": t.description,
+                "status": t.status.value,
+                "task_type": t.task_type.value,
+                "priority": t.priority,
+            }
+            for t in all_tasks
+            if t.task_type == TaskType.BACKGROUND and t.status in active_statuses
+        ]
+
+        return TaskStateResponse(
+            foreground_task_id=foreground_id if foreground_status == "RUNNING" else None,
+            foreground_status=foreground_status,
+            background_tasks=background_tasks,
+        )
+
+    @app.delete("/sessions/{session_id}")
+    async def session_delete(session_id: str) -> Mapping[str, Any]:
+        await session_manager.drop(session_id)
+        return {"deleted": True, "session_id": session_id}
+
+    @app.patch("/sessions/{session_id}/context")
+    async def session_update_context(session_id: str, payload: SessionContextUpdate) -> Mapping[str, Any]:
+        session = await session_manager.get_or_create(session_id)
+        if payload.merge:
+            llm_context, tool_context = session.get_context()
+            if payload.llm_context:
+                llm_context.update(payload.llm_context)
+            if payload.tool_context:
+                tool_context.update(payload.tool_context)
+            session.update_context(llm_context=llm_context, tool_context=tool_context)
+        else:
+            session.update_context(
+                llm_context=payload.llm_context,
+                tool_context=payload.tool_context,
+            )
+        return {"ok": True, "context_version": session.context_version}
+
+    @app.post("/sessions/{session_id}/apply-context-patch")
+    async def session_apply_context_patch(
+        session_id: str,
+        payload: ApplyContextPatchRequest,
+    ) -> Mapping[str, Any]:
+        session = await session_manager.get_or_create(session_id)
+        if payload.action == "reject":
+            await session.steer(
+                SteeringEvent(
+                    session_id=session_id,
+                    task_id="context_patch",
+                    event_type=SteeringEventType.REJECT,
+                    payload={"patch_id": payload.patch_id},
+                    source="user",
+                )
+            )
+            return {"ok": True, "action": "rejected"}
+        applied = await session.apply_pending_patch(
+            patch_id=payload.patch_id,
+            strategy=payload.strategy,
+        )
+        if not applied:
+            raise HTTPException(status_code=404, detail="Patch not found")
+        return {"ok": True, "action": "applied"}
+
+    @app.post("/steer", response_model=SteerResponse)
+    async def steer(request: SteerRequest) -> SteerResponse:
+        session = await session_manager.get_or_create(request.session_id)
+        event = SteeringEvent(
+            session_id=request.session_id,
+            task_id=request.task_id,
+            event_id=request.event_id or secrets.token_hex(8),
+            event_type=request.event_type,
+            payload=dict(request.payload or {}),
+            trace_id=request.trace_id,
+            source=request.source or "user",
+        )
+        event = sanitize_steering_event(event)
+        try:
+            validate_steering_event(event)
+        except SteeringValidationError as exc:
+            raise HTTPException(status_code=422, detail={"errors": exc.errors}) from exc
+        accepted = await session.steer(event)
+        return SteerResponse(accepted=accepted)
+
+    @app.get("/tasks", response_model=list[TaskStateModel])
+    async def list_tasks(
+        session_id: str,
+        status: TaskStatus | None = None,
+    ) -> list[TaskStateModel]:
+        session = await session_manager.get_or_create(session_id)
+        tasks = await session.list_tasks(status=status)
+        return [TaskStateModel.from_state(task) for task in tasks]
+
+    @app.get("/tasks/{task_id}", response_model=TaskStateModel)
+    async def get_task(task_id: str, session_id: str) -> TaskStateModel:
+        session = await session_manager.get_or_create(session_id)
+        task = await session.get_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return TaskStateModel.from_state(task)
+
+    @app.delete("/tasks/{task_id}")
+    async def delete_task(task_id: str, session_id: str) -> Mapping[str, Any]:
+        session = await session_manager.get_or_create(session_id)
+        accepted = await session.cancel_task(task_id, reason="api_cancel")
+        if not accepted:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return {"ok": True, "task_id": task_id}
+
+    @app.post("/tasks", response_model=TaskSpawnResponse)
+    async def spawn_task(request: TaskSpawnRequest) -> TaskSpawnResponse:
+        if planner_factory is None:
+            raise HTTPException(status_code=501, detail="Background tasks require a planner factory")
+        session = await session_manager.get_or_create(request.session_id)
+        session.update_context(
+            llm_context=dict(request.llm_context or {}),
+            tool_context=dict(request.tool_context or {}),
+        )
+        task_id = secrets.token_hex(8)
+        snapshot = TaskContextSnapshot(
+            session_id=request.session_id,
+            task_id=task_id,
+            query=request.query,
+            spawn_reason=request.spawn_reason,
+            llm_context=dict(request.llm_context or {}),
+            tool_context=dict(request.tool_context or {}),
+        )
+        task_type = TaskType.BACKGROUND if request.task_type == "background" else TaskType.FOREGROUND
+        pipeline = PlannerTaskPipeline(planner_factory=planner_factory)
+        merge_strategy = request.merge_strategy or (
+            MergeStrategy.HUMAN_GATED if task_type == TaskType.BACKGROUND else MergeStrategy.APPEND
+        )
+        if request.wait or task_type == TaskType.FOREGROUND:
+            try:
+                result = await session.run_task(
+                    pipeline,
+                    task_type=task_type,
+                    priority=request.priority,
+                    context_snapshot=snapshot,
+                    description=request.description,
+                    query=request.query,
+                    task_id=task_id,
+                    merge_strategy=merge_strategy,
+                    parent_task_id=request.parent_task_id,
+                    spawned_from_event_id=request.spawned_from_event_id,
+                )
+            except RuntimeError as exc:
+                raise HTTPException(status_code=429, detail=str(exc)) from exc
+            task_state = await session.get_task(task_id)
+            response_payload = {
+                "answer": _normalise_answer(result.payload),
+                "metadata": result.metadata,
+            }
+            return TaskSpawnResponse(
+                task_id=task_id,
+                session_id=request.session_id,
+                status=TaskStatus.COMPLETE,
+                trace_id=task_state.trace_id if task_state is not None else snapshot.trace_id,
+                result=response_payload,
+            )
+        try:
+            task_id = await session.spawn_task(
+                pipeline,
+                task_type=task_type,
+                priority=request.priority,
+                context_snapshot=snapshot,
+                description=request.description,
+                query=request.query,
+                task_id=task_id,
+                merge_strategy=merge_strategy,
+                parent_task_id=request.parent_task_id,
+                spawned_from_event_id=request.spawned_from_event_id,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        return TaskSpawnResponse(
+            task_id=task_id,
+            session_id=request.session_id,
+            status=TaskStatus.PENDING,
+            trace_id=snapshot.trace_id,
+        )
+
+    if PenguiFlowAdapter is not None and create_agui_endpoint is not None and RunAgentInput is not None:
+        agui_adapter = PenguiFlowAdapter(agent_wrapper, session_manager=session_manager)
+
+        @app.post("/agui/agent")
+        async def agui_agent(input: RunAgentInput, request: Request) -> StreamingResponse:
+            return await create_agui_endpoint(agui_adapter.run)(input, request)  # type: ignore[misc]
+
+        @app.post("/agui/resume")
+        async def agui_resume(input: AguiResumeRequest, request: Request) -> StreamingResponse:
+            if EventEncoder is None:
+                raise HTTPException(status_code=501, detail="AG-UI support requires ag-ui-protocol.")
+            if not input.resume_token:
+                raise HTTPException(status_code=400, detail="resume_token is required")
+
+            user_input = _format_resume_input(input)
+            if validate_interaction_result is not None and input.component:
+                try:
+                    validate_interaction_result(input.component, input.result)
+                except RichOutputValidationError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            encoder = EventEncoder(accept=request.headers.get("accept", "text/event-stream"))
+
+            async def stream():
+                async for event in agui_adapter.resume(
+                    resume_token=input.resume_token,
+                    thread_id=input.thread_id,
+                    run_id=input.run_id,
+                    user_input=user_input,
+                    tool_context=input.tool_context,
+                ):
+                    yield encoder.encode(event)
+
+            return StreamingResponse(
+                stream(),
+                media_type=encoder.get_content_type(),
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+    else:  # pragma: no cover - optional dependency guard
+        @app.post("/agui/agent")
+        async def agui_agent_unavailable() -> None:
+            raise HTTPException(
+                status_code=501,
+                detail="AG-UI support requires ag-ui-protocol; install penguiflow[cli].",
+            )
 
     @app.get("/events")
     async def events(
@@ -898,7 +1777,7 @@ def create_playground_app(
         if follow:
             queue, unsubscribe = await broker.subscribe(trace_id)
 
-        stored_events = await store.get_events(trace_id)
+        stored_events = await store.list_planner_events(trace_id)
         session_payload = session_id or ""
         stored_frames: list[bytes] = []
         for event in stored_events:
@@ -1190,6 +2069,7 @@ __all__ = [
     "InMemoryStateStore",
     "PlaygroundError",
     "PlaygroundStateStore",
+    "TaskStateResponse",
     "create_playground_app",
     "discover_agent",
     "load_agent",

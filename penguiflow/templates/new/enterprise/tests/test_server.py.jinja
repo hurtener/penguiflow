@@ -6,7 +6,7 @@ import pytest
 
 from {{ package_name }}.config import Config
 from {{ package_name }}.orchestrator import {{ class_name }}Orchestrator, AgentResponse
-from {{ package_name }}.server import create_http_handler{% if with_a2a %}, create_grpc_handler{% endif %}
+from {{ package_name }}.server import create_http_handler{% if with_a2a %}, create_a2a_app{% endif %}
 
 
 @pytest.fixture
@@ -118,11 +118,7 @@ async def test_http_handler_metrics(orchestrator: {{ class_name }}Orchestrator) 
 
 {% if with_a2a %}
 @pytest.mark.asyncio
-async def test_grpc_handler_stub(orchestrator: {{ class_name }}Orchestrator) -> None:
-    """gRPC handler should be a stub."""
-    handler = create_grpc_handler(orchestrator)
-
-    # Should raise NotImplementedError as it's a stub
-    with pytest.raises(NotImplementedError):
-        await handler.execute_grpc(None)
+async def test_a2a_app_factory(orchestrator: {{ class_name }}Orchestrator) -> None:
+    app = create_a2a_app(orchestrator)
+    assert hasattr(app, "router")
 {% endif %}

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import inspect
+import logging
 import secrets
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from typing import Any, Protocol
 
-from penguiflow.planner import (
+_LOGGER = logging.getLogger(__name__)
+from collections.abc import Callable, Mapping  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
+from typing import Any, Protocol  # noqa: E402
+
+from penguiflow.planner import (  # noqa: E402
     PlannerEvent,
     PlannerEventCallback,
     PlannerFinish,
@@ -15,8 +19,9 @@ from penguiflow.planner import (
     ReactPlanner,
     Trajectory,
 )
+from penguiflow.steering import SteeringInbox  # noqa: E402
 
-from .playground_state import PlaygroundStateStore
+from .playground_state import PlaygroundStateStore  # noqa: E402
 
 
 @dataclass
@@ -46,6 +51,19 @@ class AgentWrapper(Protocol):
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
+    ) -> ChatResult: ...
+
+    async def resume(
+        self,
+        resume_token: str,
+        *,
+        session_id: str,
+        user_input: str | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+        event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
+        trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult: ...
 
     async def shutdown(self) -> None: ...
@@ -84,7 +102,7 @@ class _EventRecorder:
         events = list(self._buffer)
         self._buffer.clear()
         for event in events:
-            await self._state_store.save_event(trace_id, event)
+            await self._state_store.save_planner_event(trace_id, event)
 
 
 def _combine_callbacks(
@@ -166,11 +184,15 @@ def _build_trajectory(
     steps = metadata.get("steps")
     if not isinstance(steps, list):
         return None
+    # Prefer llm_context/tool_context from metadata (contains actual injected values
+    # including conversation_memory) over the input parameters
+    actual_llm_context = metadata.get("llm_context") or llm_context or {}
+    actual_tool_context = metadata.get("tool_context") or tool_context or {}
     payload: dict[str, Any] = {
         "query": query,
-        "llm_context": dict(llm_context or {}),
+        "llm_context": dict(actual_llm_context),
         "tool_context": {
-            **(dict(tool_context or {})),
+            **(dict(actual_tool_context)),
             "session_id": session_id,
             "trace_id": trace_id,
         },
@@ -217,6 +239,7 @@ class PlannerAgentWrapper:
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult:
         llm_context = dict(llm_context or {})
         trace_id = trace_id_hint or secrets.token_hex(8)
@@ -239,11 +262,19 @@ class PlannerAgentWrapper:
                 "session_id": session_id,
                 "trace_id": trace_id,
             }
-            result = await self._planner.run(
-                query=query,
-                llm_context=llm_context,
-                tool_context=merged_tool_context,
-            )
+            if "steering" in inspect.signature(self._planner.run).parameters:
+                result = await self._planner.run(
+                    query=query,
+                    llm_context=llm_context,
+                    tool_context=merged_tool_context,
+                    steering=steering,
+                )
+            else:
+                result = await self._planner.run(
+                    query=query,
+                    llm_context=llm_context,
+                    tool_context=merged_tool_context,
+                )
         finally:
             if callback is not None:
                 self._planner._event_callback = original_callback
@@ -267,9 +298,19 @@ class PlannerAgentWrapper:
             raise RuntimeError("Planner did not finish execution")
 
         metadata = _normalise_metadata(getattr(result, "metadata", None))
+        _LOGGER.info(
+            "chat complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s, has_store=%s",
+            trace_id, session_id,
+            list(metadata.keys()) if metadata else None,
+            bool(metadata and isinstance(metadata.get("steps"), list)),
+            self._state_store is not None,
+        )
         trajectory = _build_trajectory(query, session_id, trace_id, metadata, llm_context, merged_tool_context)
         if trajectory is not None and self._state_store is not None:
             await self._state_store.save_trajectory(trace_id, session_id, trajectory)
+            _LOGGER.info("trajectory saved: trace_id=%s, session_id=%s", trace_id, session_id)
+        elif trajectory is None:
+            _LOGGER.warning("trajectory not saved: trajectory is None (metadata=%s)", metadata is not None)
 
         # Extract answer from payload, falling back to thought in metadata
         answer = _normalise_answer(result.payload)
@@ -286,6 +327,100 @@ class PlannerAgentWrapper:
     async def shutdown(self) -> None:
         """Planner wrappers do not own additional resources."""
 
+    async def resume(
+        self,
+        resume_token: str,
+        *,
+        session_id: str,
+        user_input: str | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+        event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
+        trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
+    ) -> ChatResult:
+        trace_id = trace_id_hint or secrets.token_hex(8)
+
+        def _trace_id_supplier() -> str:
+            return trace_id
+
+        callback = self._event_recorder.callback(
+            trace_id_supplier=_trace_id_supplier,
+            event_consumer=event_consumer,
+        )
+        original_callback = getattr(self._planner, "_event_callback", None)
+        if callback is not None:
+            self._planner._event_callback = _combine_callbacks(original_callback, callback)
+
+        try:
+            merged_tool_context = {
+                **self._tool_context_defaults,
+                **dict(tool_context or {}),
+                "session_id": session_id,
+                "trace_id": trace_id,
+            }
+            if "steering" in inspect.signature(self._planner.resume).parameters:
+                result = await self._planner.resume(
+                    resume_token,
+                    user_input=user_input,
+                    tool_context=merged_tool_context,
+                    steering=steering,
+                )
+            else:
+                result = await self._planner.resume(
+                    resume_token,
+                    user_input=user_input,
+                    tool_context=merged_tool_context,
+                )
+        finally:
+            if callback is not None:
+                self._planner._event_callback = original_callback
+
+        await self._event_recorder.persist(trace_id)
+
+        if isinstance(result, PlannerPause):
+            pause_payload = {
+                "reason": result.reason,
+                "payload": result.payload,
+                "resume_token": result.resume_token,
+            }
+            return ChatResult(
+                answer=None,
+                trace_id=trace_id,
+                session_id=session_id,
+                metadata={"pause": pause_payload},
+                pause=pause_payload,
+            )
+        if not isinstance(result, PlannerFinish):
+            raise RuntimeError("Planner did not finish execution")
+
+        metadata = _normalise_metadata(getattr(result, "metadata", None))
+        _LOGGER.info(
+            "resume complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s, has_store=%s",
+            trace_id, session_id,
+            list(metadata.keys()) if metadata else None,
+            bool(metadata and isinstance(metadata.get("steps"), list)),
+            self._state_store is not None,
+        )
+
+        # Save trajectory (same as chat method)
+        trajectory = _build_trajectory(user_input or "", session_id, trace_id, metadata, {}, merged_tool_context)
+        if trajectory is not None and self._state_store is not None:
+            await self._state_store.save_trajectory(trace_id, session_id, trajectory)
+            _LOGGER.info("trajectory saved: trace_id=%s, session_id=%s", trace_id, session_id)
+        elif trajectory is None:
+            _LOGGER.warning("trajectory not saved: trajectory is None (metadata=%s)", metadata is not None)
+
+        answer = _normalise_answer(result.payload)
+        if answer is None and metadata is not None:
+            answer = metadata.get("thought")
+
+        return ChatResult(
+            answer=answer,
+            trace_id=trace_id,
+            session_id=session_id,
+            metadata=metadata,
+        )
+
 
 class OrchestratorAgentWrapper:
     """Adapter for orchestrators exposing an execute coroutine."""
@@ -297,13 +432,86 @@ class OrchestratorAgentWrapper:
         state_store: PlaygroundStateStore | None = None,
         tenant_id: str = "playground-tenant",
         user_id: str = "playground-user",
+        tool_context_defaults: Mapping[str, Any] | None = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._state_store = state_store
         self._tenant_id = tenant_id
         self._user_id = user_id
+        self._tool_context_defaults = dict(tool_context_defaults or {})
         self._event_recorder = _EventRecorder(state_store)
         self._initialized = False
+
+    async def _call_execute(
+        self,
+        *,
+        query: str,
+        session_id: str,
+        tool_context: Mapping[str, Any],
+        steering: SteeringInbox | None = None,
+    ) -> Any:
+        execute = self._orchestrator.execute
+        try:
+            sig = inspect.signature(execute)
+        except (TypeError, ValueError):
+            sig = None
+
+        kwargs: dict[str, Any] = {
+            "query": query,
+            "tenant_id": tool_context.get("tenant_id", self._tenant_id),
+            "user_id": tool_context.get("user_id", self._user_id),
+            "session_id": session_id,
+        }
+
+        if sig is not None:
+            params = sig.parameters
+            if "tool_context" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                kwargs["tool_context"] = dict(tool_context)
+            if "steering" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                kwargs["steering"] = steering
+
+        try:
+            return await execute(**kwargs)
+        except TypeError:
+            kwargs.pop("tool_context", None)
+            kwargs.pop("steering", None)
+            return await execute(**kwargs)
+
+    async def _call_resume(
+        self,
+        resume_token: str,
+        *,
+        session_id: str,
+        user_input: str | None,
+        tool_context: Mapping[str, Any],
+        steering: SteeringInbox | None = None,
+    ) -> Any:
+        resume_fn = self._orchestrator.resume
+        try:
+            sig = inspect.signature(resume_fn)
+        except (TypeError, ValueError):
+            sig = None
+
+        kwargs: dict[str, Any] = {
+            "tenant_id": tool_context.get("tenant_id", self._tenant_id),
+            "user_id": tool_context.get("user_id", self._user_id),
+            "session_id": session_id,
+            "user_input": user_input,
+        }
+
+        if sig is not None:
+            params = sig.parameters
+            if "tool_context" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                kwargs["tool_context"] = dict(tool_context)
+            if "steering" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                kwargs["steering"] = steering
+
+        try:
+            return await resume_fn(resume_token, **kwargs)
+        except TypeError:
+            kwargs.pop("tool_context", None)
+            kwargs.pop("steering", None)
+            return await resume_fn(resume_token, **kwargs)
 
     async def initialize(self) -> None:
         """Eagerly initialize the orchestrator if it supports lazy initialization.
@@ -329,9 +537,13 @@ class OrchestratorAgentWrapper:
         tool_context: Mapping[str, Any] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
         trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
     ) -> ChatResult:
         ctx = dict(llm_context or {})
-        tool_ctx = dict(tool_context or {})
+        tool_ctx = {
+            **self._tool_context_defaults,
+            **dict(tool_context or {}),
+        }
         planner = getattr(self._orchestrator, "_planner", None)
         trace_holder: dict[str, str | None] = {"id": trace_id_hint}
 
@@ -350,27 +562,64 @@ class OrchestratorAgentWrapper:
             planner._event_callback = _combine_callbacks(original_callback, callback)
 
         try:
-            response = await self._orchestrator.execute(
-                query=query,
-                tenant_id=tool_ctx.get("tenant_id", self._tenant_id),
-                user_id=tool_ctx.get("user_id", self._user_id),
-                session_id=session_id,
+            response = await self._call_execute(
+                query=query, session_id=session_id, tool_context=tool_ctx, steering=steering
             )
         finally:
             if planner is not None and callback is not None:
                 planner._event_callback = original_callback
 
-        trace_id = _get_attr(response, "trace_id") or _trace_id_supplier() or secrets.token_hex(8)
+        # Prefer trace_id_hint (from AG-UI run_id) over response.trace_id
+        # This ensures the frontend's run_id is used for trajectory storage
+        trace_id = trace_id_hint or _get_attr(response, "trace_id") or _trace_id_supplier() or secrets.token_hex(8)
         trace_holder["id"] = trace_id
         await self._event_recorder.persist(trace_id)
 
         metadata = _normalise_metadata(_get_attr(response, "metadata"))
+        _LOGGER.debug(
+            "orchestrator chat complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s, has_store=%s",
+            trace_id, session_id,
+            list(metadata.keys()) if metadata else None,
+            bool(metadata and isinstance(metadata.get("steps"), list)),
+            self._state_store is not None,
+        )
         trajectory = _build_trajectory(query, session_id, trace_id, metadata, ctx, tool_ctx)
         if trajectory is not None and self._state_store is not None:
             await self._state_store.save_trajectory(trace_id, session_id, trajectory)
+            _LOGGER.debug("trajectory saved: trace_id=%s, session_id=%s", trace_id, session_id)
+        elif trajectory is None:
+            _LOGGER.warning("trajectory not saved: trajectory is None (metadata=%s)", metadata is not None)
 
+        # Check if orchestrator returned a pause (HITL flow)
+        pause_token = _get_attr(response, "pause_token")
+        if pause_token:
+            pause_reason = None
+            pause_payload = {}
+            if metadata:
+                pause_reason = metadata.get("reason")
+                pause_payload = metadata.get("payload", {})
+            pause_dict = {
+                "reason": pause_reason or "await_input",
+                "payload": pause_payload,
+                "resume_token": pause_token,
+            }
+            return ChatResult(
+                answer=None,
+                trace_id=trace_id,
+                session_id=session_id,
+                metadata=metadata,
+                pause=pause_dict,
+            )
+
+        raw_answer = _get_attr(response, "answer")
+        normalised_answer = _normalise_answer(raw_answer)
+        _LOGGER.debug(
+            "orchestrator_answer_extract: has_answer=%s, answer_len=%s",
+            normalised_answer is not None,
+            len(normalised_answer) if normalised_answer else 0,
+        )
         return ChatResult(
-            answer=_normalise_answer(_get_attr(response, "answer")),
+            answer=normalised_answer,
             trace_id=trace_id,
             session_id=session_id,
             metadata=metadata,
@@ -380,6 +629,99 @@ class OrchestratorAgentWrapper:
         stop_fn = getattr(self._orchestrator, "stop", None)
         if stop_fn is not None:
             await stop_fn()
+
+    async def resume(
+        self,
+        resume_token: str,
+        *,
+        session_id: str,
+        user_input: str | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+        event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
+        trace_id_hint: str | None = None,
+        steering: SteeringInbox | None = None,
+    ) -> ChatResult:
+        # Check if orchestrator has a resume method (HITL support)
+        resume_fn = getattr(self._orchestrator, "resume", None)
+        if resume_fn is None or not callable(resume_fn):
+            raise RuntimeError(
+                "Resume is not supported for this orchestrator. "
+                "Ensure your agent was created with --with-hitl flag."
+            )
+
+        tool_ctx = {
+            **self._tool_context_defaults,
+            **dict(tool_context or {}),
+        }
+        planner = getattr(self._orchestrator, "_planner", None)
+        trace_holder: dict[str, str | None] = {"id": trace_id_hint}
+
+        def _trace_id_supplier() -> str | None:
+            if trace_holder["id"]:
+                return trace_holder["id"]
+            return _planner_trace_id(planner)
+
+        callback = self._event_recorder.callback(
+            trace_id_supplier=_trace_id_supplier,
+            event_consumer=event_consumer,
+        )
+        original_callback = None
+        if planner is not None and callback is not None:
+            original_callback = getattr(planner, "_event_callback", None)
+            planner._event_callback = _combine_callbacks(original_callback, callback)
+
+        try:
+            response = await self._call_resume(
+                resume_token,
+                session_id=session_id,
+                user_input=user_input,
+                tool_context=tool_ctx,
+                steering=steering,
+            )
+        finally:
+            if planner is not None and callback is not None:
+                planner._event_callback = original_callback
+
+        trace_id = trace_id_hint or _get_attr(response, "trace_id") or _trace_id_supplier() or secrets.token_hex(8)
+        trace_holder["id"] = trace_id
+        await self._event_recorder.persist(trace_id)
+
+        metadata = _normalise_metadata(_get_attr(response, "metadata"))
+
+        # Check if orchestrator returned another pause
+        pause_token = _get_attr(response, "pause_token")
+        if pause_token:
+            pause_reason = None
+            pause_payload = {}
+            if metadata:
+                pause_reason = metadata.get("reason")
+                pause_payload = metadata.get("payload", {})
+            pause_dict = {
+                "reason": pause_reason or "await_input",
+                "payload": pause_payload,
+                "resume_token": pause_token,
+            }
+            return ChatResult(
+                answer=None,
+                trace_id=trace_id,
+                session_id=session_id,
+                metadata=metadata,
+                pause=pause_dict,
+            )
+
+        raw_answer = _get_attr(response, "answer")
+        normalised_answer = _normalise_answer(raw_answer)
+        _LOGGER.info(
+            "orchestrator_resume_answer_extract: has_answer=%s, answer_len=%s",
+            normalised_answer is not None,
+            len(normalised_answer) if normalised_answer else 0,
+        )
+        return ChatResult(
+            answer=normalised_answer,
+            trace_id=trace_id,
+            session_id=session_id,
+            metadata=metadata,
+        )
 
 
 def _get_attr(obj: Any, name: str) -> Any:

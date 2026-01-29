@@ -129,53 +129,13 @@ def create_http_handler(orchestrator: {{ class_name }}Orchestrator) -> HTTPHandl
 
 
 {% if with_a2a %}
-class GRPCHandler:
-    """gRPC handler stub for A2A integration.
+from fastapi import FastAPI
 
-    This is a minimal stub. For full gRPC support:
-    1. Define .proto files for your service
-    2. Generate Python code with protoc
-    3. Implement the generated service interface
-    4. Use grpcio for server setup
-
-    Example structure:
-        >>> import grpc
-        >>> from concurrent import futures
-        >>> from . import agent_pb2_grpc  # generated
-        >>>
-        >>> class AgentServicer(agent_pb2_grpc.AgentServicer):
-        ...     def Execute(self, request, context):
-        ...         # Convert protobuf request to dict
-        ...         # Call orchestrator
-        ...         # Convert response to protobuf
-        ...         pass
-        >>>
-        >>> server = grpc.aio.server(futures.ThreadPoolExecutor(max_workers=10))
-        >>> agent_pb2_grpc.add_AgentServicer_to_server(AgentServicer(), server)
-        >>> server.add_insecure_port('[::]:50051')
-        >>> await server.start()
-    """
-
-    def __init__(self, orchestrator: {{ class_name }}Orchestrator) -> None:
-        self._orchestrator = orchestrator
-
-    async def execute_grpc(self, request_proto: Any) -> Any:
-        """Handle gRPC execute request.
-
-        Args:
-            request_proto: Generated protobuf request message
-
-        Returns:
-            Generated protobuf response message
-        """
-        # This is a stub - implement with actual protobuf types
-        _LOGGER.warning("grpc_handler_stub_called")
-        raise NotImplementedError(
-            "gRPC handler is a stub. Implement with actual protobuf definitions."
-        )
+from ..a2a import A2AServer
 
 
-def create_grpc_handler(orchestrator: {{ class_name }}Orchestrator) -> GRPCHandler:
-    """Factory function to create a gRPC handler."""
-    return GRPCHandler(orchestrator)
+def create_a2a_app(orchestrator: {{ class_name }}Orchestrator) -> FastAPI:
+    """Create the A2A HTTP+JSON app for this service."""
+    server = A2AServer(orchestrator)
+    return server.app
 {% endif %}

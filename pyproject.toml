@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "penguiflow"
-version = "2.8.1"
+version = "2.11.4"
 description = "Async-first orchestration library for multi-agent and data pipelines"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,6 +18,7 @@ dependencies = [
     "pyyaml>=6.0",
     "fastapi>=0.118",
     "uvicorn>=0.32",
+    "databricks-mcp>=0.6.0",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +30,8 @@ dev = [
     "coverage[toml]>=7.0",
     "hypothesis>=6.103",
     "ruff>=0.2",
+    "ag-ui-protocol>=0.0.42",
+    "jsonschema>=4.23",
     "fastapi>=0.118",
     "httpx>=0.27",
     "jinja2>=3.1",
@@ -36,14 +39,35 @@ dev = [
     "uvicorn>=0.32",
     "tenacity>=9.0.0",
     "aiohttp>=3.9.0",
+    "grpcio>=1.70.0",
+    "grpcio-status>=1.70.0",
+    "grpcio-tools>=1.70.0",
+    "googleapis-common-protos>=1.66.0",
+    "protobuf>=5.26.0",
+    # LLM provider SDKs for testing native LLM layer
+    "openai>=2.0.0",
+    "anthropic>=0.75.0",
+    "google-genai>=1.57.0",
+    "boto3>=1.42.0",
 ]
 cli = [
+    "ag-ui-protocol>=0.0.42",
     "jinja2>=3.1",
     "fastapi>=0.118",
     "uvicorn>=0.32",
 ]
 a2a-server = [
     "fastapi>=0.118",
+]
+a2a-grpc = [
+    "grpcio>=1.70.0",
+    "grpcio-status>=1.70.0",
+    "grpcio-tools>=1.70.0",
+    "googleapis-common-protos>=1.66.0",
+    "protobuf>=5.26.0",
+]
+a2a-client = [
+    "httpx>=0.27",
 ]
 planner = [
     "litellm>=1.77.3",
@@ -53,6 +77,14 @@ planner = [
     "utcp-http>=1.0.0",
     "tenacity>=9.0.0",
     "aiohttp>=3.9.0",
+    "jsonschema>=4.23",
+]
+llm = [
+    "openai>=2.0.0",
+    "anthropic>=0.75.0",
+    "google-genai>=1.57.0",
+    "boto3>=1.42.0",
+    "databricks-sdk>=0.77.0",
 ]
 tools-cli = ["utcp-cli>=1.0.0"]
 tools-websocket = ["utcp-websocket>=1.0.0"]
@@ -76,6 +108,7 @@ exclude-package-data = { "penguiflow" = ["cli/playground_ui/src/*", "cli/playgro
     "templates/*.yaml",
     "cli/templates/*",
     "cli/templates/**/*",
+    "rich_output/registry.json",
     "cli/playground_ui/dist/*",
     "cli/playground_ui/dist/**/*",
 ]
@@ -94,18 +127,29 @@ dev = [
     "coverage[toml]>=7.0",
     "hypothesis>=6.103",
     "ruff>=0.2",
+    "ag-ui-protocol>=0.0.42",
+    "jsonschema>=4.23",
     "fastapi>=0.118",
     "httpx>=0.27",
     "jinja2>=3.1",
     "pyyaml>=6.0",
     "tenacity>=9.0.0",
     "aiohttp>=3.9.0",
+    "grpcio>=1.70.0",
+    "grpcio-status>=1.70.0",
+    "grpcio-tools>=1.70.0",
+    "googleapis-common-protos>=1.66.0",
+    "protobuf>=5.26.0",
 ]
 
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-extend-exclude = ["ooflow.py"]
+extend-exclude = [
+    "ooflow.py",
+    "penguiflow_a2a/grpc/a2a_pb2.py",
+    "penguiflow_a2a/grpc/a2a_pb2_grpc.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "W"]
@@ -136,9 +180,11 @@ omit = [
     "*/__pycache__/*",
     "*/.venv/*",
     "*/planner/dspy_client.py",
+    "*/cli/*",
 ]
 
 [tool.coverage.report]
+fail_under = 84.5
 exclude_lines = [
     "pragma: no cover",
     "if TYPE_CHECKING:",

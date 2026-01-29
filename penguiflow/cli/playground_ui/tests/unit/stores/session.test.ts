@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { sessionStore } from '$lib/stores/session.svelte';
-import { artifactsStore } from '$lib/stores/artifacts.svelte';
-import type { ArtifactStoredEvent } from '$lib/types';
+import { createSessionStore } from '$lib/stores';
+
+const sessionStore = createSessionStore();
 
 describe('sessionStore', () => {
   beforeEach(() => {
@@ -73,23 +73,6 @@ describe('sessionStore', () => {
       expect(sessionStore.isSending).toBe(true);
     });
 
-    it('clears artifacts', () => {
-      const mockEvent: ArtifactStoredEvent = {
-        artifact_id: 'artifact-123',
-        mime_type: 'application/pdf',
-        size_bytes: 1024,
-        filename: 'test.pdf',
-        source: {},
-        trace_id: 'trace-1',
-        session_id: 'session-1',
-        ts: Date.now()
-      };
-      artifactsStore.addArtifact(mockEvent);
-      expect(artifactsStore.count).toBe(1);
-
-      sessionStore.newSession();
-      expect(artifactsStore.count).toBe(0);
-    });
   });
 
   describe('reset', () => {
@@ -106,22 +89,5 @@ describe('sessionStore', () => {
       expect(sessionStore.isSending).toBe(false);
     });
 
-    it('clears artifacts', () => {
-      const mockEvent: ArtifactStoredEvent = {
-        artifact_id: 'artifact-456',
-        mime_type: 'image/png',
-        size_bytes: 2048,
-        filename: 'screenshot.png',
-        source: { tool: 'screenshot' },
-        trace_id: 'trace-2',
-        session_id: 'session-2',
-        ts: Date.now()
-      };
-      artifactsStore.addArtifact(mockEvent);
-      expect(artifactsStore.count).toBe(1);
-
-      sessionStore.reset();
-      expect(artifactsStore.count).toBe(0);
-    });
   });
 });

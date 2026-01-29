@@ -631,6 +631,23 @@ def test_toolnode_handle_resource_updated_no_cache():
     node.handle_resource_updated("file:///test.txt")
 
 
+def test_toolnode_handle_resource_updated_invokes_callback():
+    """handle_resource_updated should call registered callback."""
+    config = build_config()
+    registry = ModelRegistry()
+    node = ToolNode(config=config, registry=registry)
+
+    seen: list[str] = []
+
+    def _callback(uri: str) -> None:
+        seen.append(uri)
+
+    node.set_resource_updated_callback(_callback)
+    node.handle_resource_updated("file:///callback.txt")
+
+    assert seen == ["file:///callback.txt"]
+
+
 # ─── Handler Tests ────────────────────────────────────────────────────────────
 
 

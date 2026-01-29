@@ -1,6 +1,6 @@
 # {{ project_name }}
 
-Analyst remote agent (A2A-friendly) scaffold with PenguiFlow ReactPlanner, service stubs, and tests.
+Analyst remote agent (A2A-friendly) scaffold with PenguiFlow ReactPlanner, service wiring, and tests.
 
 ## Quickstart
 
@@ -13,7 +13,7 @@ uv run python -m {{ package_name }}
 
 - Implement analysis logic in `src/{{ package_name }}/clients/analyst.py`.
 - Extend tools in `src/{{ package_name }}/tools/` for code/data inspection patterns.
-- Enable `--with-a2a` to scaffold the A2A server stub; integrate with your transport.
+- Enable `--with-a2a` to scaffold the A2A HTTP+JSON binding.
 
 ## Use a real LLM and adjust prompts
 

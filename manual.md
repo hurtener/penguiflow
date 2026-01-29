@@ -170,6 +170,13 @@ message = Message(
 )
 await flow.emit(message)
 
+# If multiple concurrent callers share the same running flow instance,
+# use trace-scoped roundtrips to avoid cross-consuming results.
+# (Pick a unique trace_id per request.)
+# trace_id = "..."
+# await flow.emit(message, trace_id=trace_id)
+# result = await flow.fetch(trace_id=trace_id)
+
 # 8. Fetch the result from Rookery
 result = await flow.fetch()  # Returns: Message(payload=PackOut(...))
 print(result.payload.prompt)  # "[metrics] summarize 2 docs"
@@ -7931,91 +7938,29 @@ await flow.cancel(trace_id)
 
 ### 18.4 Production Transport Examples
 
-#### HTTP A2A Transport (Complete)
+#### A2A HTTP+JSON Transport
+
+Use the built-in transport (install with `pip install "penguiflow[a2a-client]"`):
 
 ```python
-import httpx
-from penguiflow.remote import (
-    RemoteTransport,
-    RemoteCallRequest,
-    RemoteCallResult,
-    RemoteStreamEvent,
+from penguiflow import RemoteNode
+from penguiflow_a2a.transport import A2AHttpTransport
+
+transport = A2AHttpTransport()
+node = RemoteNode(
+    transport=transport,
+    skill="orchestrate",
+    agent_url="https://agent.example/a2a",
+    name="remote-orchestrate",
+    streaming=True,
 )
-import json
-
-class HttpA2ATransport(RemoteTransport):
-    def __init__(self, base_url: str, timeout: float = 60.0) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-        self.client = httpx.AsyncClient(timeout=timeout)
-
-    async def send(self, request: RemoteCallRequest) -> RemoteCallResult:
-        """Unary call via POST /message/send."""
-        response = await self.client.post(
-            f"{self.base_url}/message/send",
-            json={
-                "payload": request.message.payload,
-                "headers": request.message.headers.model_dump(),
-                "meta": getattr(request.message, "meta", {}),
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        if data.get("status") != "succeeded":
-            raise RuntimeError(f"Remote call failed: {data}")
-
-        return RemoteCallResult(
-            result=data["output"],
-            task_id=data.get("taskId"),
-            context_id=data.get("contextId"),
-            agent_url=request.agent_url,
-        )
-
-    async def stream(self, request: RemoteCallRequest):
-        """Streaming call via POST /message/stream (SSE)."""
-        async with self.client.stream(
-            "POST",
-            f"{self.base_url}/message/stream",
-            json={
-                "payload": request.message.payload,
-                "headers": request.message.headers.model_dump(),
-                "meta": getattr(request.message, "meta", {}),
-            },
-        ) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                data = json.loads(line[5:].strip())
-
-                if "text" in data:  # Chunk event
-                    yield RemoteStreamEvent(
-                        text=data["text"],
-                        meta=data.get("meta"),
-                        task_id=data.get("taskId"),
-                        agent_url=request.agent_url,
-                    )
-                elif "output" in data:  # Artifact event
-                    yield RemoteStreamEvent(
-                        result=data["output"],
-                        done=True,
-                        task_id=data.get("taskId"),
-                        context_id=data.get("contextId"),
-                        agent_url=request.agent_url,
-                    )
-
-    async def cancel(self, *, agent_url: str, task_id: str) -> None:
-        """Cancel via POST /tasks/cancel."""
-        await self.client.post(
-            f"{self.base_url}/tasks/cancel",
-            json={"taskId": task_id},
-        )
-
-    async def close(self) -> None:
-        """Cleanup HTTP client."""
-        await self.client.aclose()
 ```
+
+`A2AHttpTransport` speaks the standard A2A HTTP+JSON endpoints:
+
+- `POST /message:send`
+- `POST /message:stream` (SSE)
+- `POST /tasks/{task_id}:cancel`
 
 #### gRPC Transport (Sketch)
 
@@ -8058,129 +8003,119 @@ class GrpcTransport(RemoteTransport):
 
 ---
 
-### 18.5 A2A Server Adapter
+### 18.5 A2A Server Bindings
 
-Sometimes PenguiFlow itself must behave as an A2A agent. The optional `penguiflow_a2a` package provides a FastAPI adapter that exposes any flow as an A2A-compliant HTTP service.
+PenguiFlow can expose a flow as an A2A-compatible service. The HTTP+JSON binding uses
+FastAPI (plus JSON-RPC on `/rpc`), while the gRPC binding runs on `grpc.aio`.
 
 **Installation:**
 
 ```bash
-pip install "penguiflow[a2a-server]"
+pip install "penguiflow[a2a-server]"  # HTTP+JSON + JSON-RPC
+pip install "penguiflow[a2a-grpc]"    # gRPC binding
 ```
 
-**Example:**
+**HTTP+JSON example:**
 
 ```python
-from penguiflow import Message, Node, create, Headers
-from penguiflow_a2a import (
-    A2AAgentCard,
-    A2AServerAdapter,
-    A2ASkill,
-    create_a2a_app,
-)
+from penguiflow import Message, Node, create
+from penguiflow_a2a import A2AConfig, A2AService, create_a2a_http_app
+from penguiflow_a2a.models import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
 
 # Define your flow
 async def orchestrate(message: Message, ctx):
-    """Primary orchestration logic."""
     await ctx.emit_chunk(parent=message, text="thinking...", meta={"step": 0})
-    # ... do work ...
     return {"result": "ok", "confidence": 0.95}
 
 node = Node(orchestrate, name="main")
 flow = create(node.to(), state_store=postgres_store)
 
-# Define agent card (advertised capabilities)
-card = A2AAgentCard(
+card = AgentCard(
+    protocol_versions=["0.3"],
     name="Main Agent",
     description="Primary orchestration entrypoint",
+    supported_interfaces=[
+        AgentInterface(url="https://main-agent.example/a2a", protocol_binding="HTTP+JSON")
+    ],
     version="2.6.0",
+    capabilities=AgentCapabilities(
+        streaming=True,
+        push_notifications=False,
+        extended_agent_card=False,
+        state_transition_history=False,
+    ),
+    default_input_modes=["application/a2a+json", "application/json"],
+    default_output_modes=["application/a2a+json", "application/json"],
     skills=[
-        A2ASkill(
+        AgentSkill(
+            id="orchestrate",
             name="orchestrate",
             description="Route and execute complex tasks",
-            mode="both",  # Supports unary and streaming
+            tags=["orchestrate"],
         )
     ],
 )
 
-# Create adapter
-adapter = A2AServerAdapter(
+service = A2AService(
     flow,
     agent_card=card,
-    agent_url="https://main-agent.example",
+    config=A2AConfig(agent_url="https://main-agent.example/a2a"),
 )
-
-# Create FastAPI app
-app = create_a2a_app(adapter, include_docs=True)  # OpenAPI docs at /docs
+app = create_a2a_http_app(service, include_docs=True)  # OpenAPI docs at /docs
 
 # Run with uvicorn
 # uvicorn my_module:app --host 0.0.0.0 --port 8000
 ```
 
-**Endpoints:**
+**gRPC binding:**
+
+```python
+import grpc
+
+from penguiflow_a2a.bindings.grpc import add_a2a_grpc_service
+
+server = grpc.aio.server()
+add_a2a_grpc_service(server, service)
+# server.add_insecure_port("0.0.0.0:50051")
+# await server.start()
+```
+
+See `examples/a2a_grpc_server/flow.py` for an end-to-end gRPC server + client demo.
+
+**HTTP endpoints:**
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/agent` | Agent card discovery (returns `A2AAgentCard` JSON) |
-| `POST` | `/message/send` | Unary call (returns `{status, output, taskId, contextId}`) |
-| `POST` | `/message/stream` | Streaming call (SSE stream: handshake, chunks, artifact, done) |
-| `POST` | `/tasks/cancel` | Cancel task (returns `{cancelled: bool}`) |
-| `GET` | `/docs` | OpenAPI docs (if `include_docs=True`) |
+| `GET` | `/.well-known/agent-card.json` | Agent card discovery (returns `AgentCard`) |
+| `POST` | `/message:send` | Unary call (returns `SendMessageResponse`) |
+| `POST` | `/message:stream` | Streaming call (SSE `StreamResponse` events) |
+| `GET` | `/tasks/{task_id}` | Get task status/history |
+| `POST` | `/tasks/{task_id}:cancel` | Cancel task |
+| `POST` | `/rpc` | JSON-RPC binding |
 
-**Request/Response Examples:**
-
-**Unary call:**
+**Unary request example:**
 
 ```bash
-curl -X POST https://main-agent.example/message/send \
-  -H "Content-Type: application/json" \
+curl -X POST https://main-agent.example/message:send \
+  -H "Content-Type: application/a2a+json" \
+  -H "A2A-Version: 0.3" \
   -d '{
-    "payload": {"task": "search"},
-    "headers": {"tenant": "acme"},
-    "meta": {"request_id": "req-123"}
+    "message": {
+      "messageId": "msg-1",
+      "role": "user",
+      "parts": [{"text": "search"}]
+    },
+    "configuration": {"blocking": true}
   }'
 
 # Response:
 # {
-#   "status": "succeeded",
-#   "output": {"result": "ok", "confidence": 0.95},
-#   "taskId": "trace-abc123",
-#   "contextId": "trace-abc123",
-#   "traceId": "trace-abc123"
+#   "task": {
+#     "id": "trace-abc123",
+#     "contextId": "trace-abc123",
+#     "status": {"state": "completed"}
+#   }
 # }
-```
-
-**Streaming call:**
-
-```bash
-curl -X POST https://main-agent.example/message/stream \
-  -H "Content-Type: application/json" \
-  -d '{"payload": {"prompt": "hello"}, "headers": {"tenant": "acme"}}'
-
-# Response (SSE stream):
-# event: handshake
-# data: {"status": "accepted", "taskId": "trace-xyz", "contextId": "trace-xyz"}
-#
-# event: chunk
-# data: thinking...
-# data: {"taskId": "trace-xyz", "contextId": "trace-xyz", "meta": {"step": 0}}
-#
-# event: artifact
-# data: {"output": {"result": "ok", "confidence": 0.95}, "taskId": "trace-xyz", "contextId": "trace-xyz"}
-#
-# event: done
-# data: {"taskId": "trace-xyz"}
-```
-
-**Cancellation:**
-
-```bash
-curl -X POST https://main-agent.example/tasks/cancel \
-  -H "Content-Type: application/json" \
-  -d '{"taskId": "trace-abc123"}'
-
-# Response:
-# {"cancelled": true}
 ```
 
 ---

@@ -774,3 +774,338 @@ def test_memory_prompt_can_be_omitted_when_disabled() -> None:
 
 def test_memory_prompt_validator_allows_none() -> None:
     assert PlannerSpec._non_empty_memory_prompt(None) is None
+
+
+def test_rich_output_requires_hitl_for_interactive_allowlist(tmp_path: Path) -> None:
+    content = dedent(
+        """\
+        agent:
+          name: rich-output-agent
+          description: Demo
+          template: react
+          flags:
+            memory: false
+            hitl: false
+        tools:
+          - name: fetch
+            description: Fetch data
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: Hello
+          rich_output:
+            enabled: true
+            allowlist: ["form"]
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    with pytest.raises(SpecValidationError) as excinfo:
+        load_spec(path)
+
+    assert "Interactive rich output components require agent.flags.hitl" in str(excinfo.value)
+
+
+def test_rich_output_allows_passive_components_without_hitl(tmp_path: Path) -> None:
+    content = dedent(
+        """\
+        agent:
+          name: rich-output-agent
+          description: Demo
+          template: react
+          flags:
+            memory: false
+            hitl: false
+        tools:
+          - name: fetch
+            description: Fetch data
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: Hello
+          rich_output:
+            enabled: true
+            allowlist: ["markdown", "json"]
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    spec = load_spec(path)
+    assert spec.planner.rich_output.enabled is True
+
+
+# =============================================================================
+# Background Tasks Tests
+# =============================================================================
+
+
+def test_background_tasks_config_parses(tmp_path: Path) -> None:
+    """Test that background_tasks configuration parses correctly."""
+    content = dedent(
+        """\
+        agent:
+          name: bg-agent
+          description: Demo agent
+          template: react
+          flags:
+            memory: false
+            hitl: true
+            background_tasks: true
+        tools:
+          - name: search
+            description: Search the web
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: Hello
+          background_tasks:
+            enabled: true
+            allow_tool_background: true
+            default_mode: subagent
+            default_merge_strategy: HUMAN_GATED
+            context_depth: full
+            propagate_on_cancel: cascade
+            spawn_requires_confirmation: false
+            include_prompt_guidance: true
+            max_concurrent_tasks: 5
+            max_tasks_per_session: 50
+            task_timeout_s: 3600
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    spec = load_spec(path)
+    assert spec.agent.flags.background_tasks is True
+    assert spec.planner.background_tasks.enabled is True
+    assert spec.planner.background_tasks.allow_tool_background is True
+    assert spec.planner.background_tasks.default_mode == "subagent"
+    assert spec.planner.background_tasks.default_merge_strategy == "HUMAN_GATED"
+    assert spec.planner.background_tasks.context_depth == "full"
+    assert spec.planner.background_tasks.max_concurrent_tasks == 5
+
+
+def test_background_tasks_human_gated_requires_hitl(tmp_path: Path) -> None:
+    """Test that HUMAN_GATED merge strategy requires hitl flag."""
+    content = dedent(
+        """\
+        agent:
+          name: bg-agent
+          description: Demo agent
+          template: react
+          flags:
+            memory: false
+            hitl: false
+            background_tasks: true
+        tools:
+          - name: search
+            description: Search the web
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: Hello
+          background_tasks:
+            enabled: true
+            default_merge_strategy: HUMAN_GATED
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    with pytest.raises(SpecValidationError) as excinfo:
+        load_spec(path)
+
+    assert "HUMAN_GATED merge strategy requires agent.flags.hitl" in str(excinfo.value)
+
+
+def test_background_tasks_spawn_confirmation_requires_hitl(tmp_path: Path) -> None:
+    """Test that spawn_requires_confirmation requires hitl flag."""
+    content = dedent(
+        """\
+        agent:
+          name: bg-agent
+          description: Demo agent
+          template: react
+          flags:
+            memory: false
+            hitl: false
+            background_tasks: true
+        tools:
+          - name: search
+            description: Search the web
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: Hello
+          background_tasks:
+            enabled: true
+            default_merge_strategy: APPEND
+            spawn_requires_confirmation: true
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    with pytest.raises(SpecValidationError) as excinfo:
+        load_spec(path)
+
+    assert "spawn_requires_confirmation requires agent.flags.hitl" in str(excinfo.value)
+
+
+def test_tool_background_requires_agent_flag(tmp_path: Path) -> None:
+    """Test that tool background requires agent.flags.background_tasks."""
+    content = dedent(
+        """\
+        agent:
+          name: tool-bg-agent
+          description: Demo agent
+          template: react
+          flags:
+            memory: false
+            background_tasks: false
+        tools:
+          - name: search
+            description: Search the web
+            background:
+              enabled: true
+              mode: job
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: Hello
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    with pytest.raises(SpecValidationError) as excinfo:
+        load_spec(path)
+
+    assert "agent.flags.background_tasks" in str(excinfo.value)
+
+
+def test_tool_background_requires_allow_tool_background(tmp_path: Path) -> None:
+    """Test that tool background requires planner.background_tasks.allow_tool_background."""
+    content = dedent(
+        """\
+        agent:
+          name: tool-bg-agent
+          description: Demo agent
+          template: react
+          flags:
+            memory: false
+            background_tasks: true
+        tools:
+          - name: search
+            description: Search the web
+            background:
+              enabled: true
+              mode: job
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: Hello
+          background_tasks:
+            enabled: true
+            allow_tool_background: false
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    with pytest.raises(SpecValidationError) as excinfo:
+        load_spec(path)
+
+    assert "allow_tool_background" in str(excinfo.value)
+
+
+def test_tool_background_valid_config(tmp_path: Path) -> None:
+    """Test that tool background config works when properly configured."""
+    content = dedent(
+        """\
+        agent:
+          name: tool-bg-agent
+          description: Demo agent
+          template: react
+          flags:
+            memory: false
+            hitl: true
+            background_tasks: true
+        tools:
+          - name: search
+            description: Search the web
+            background:
+              enabled: true
+              mode: job
+              default_merge_strategy: HUMAN_GATED
+              notify_on_complete: true
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: Hello
+          background_tasks:
+            enabled: true
+            allow_tool_background: true
+            default_merge_strategy: HUMAN_GATED
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    spec = load_spec(path)
+    assert spec.tools[0].background is not None
+    assert spec.tools[0].background.enabled is True
+    assert spec.tools[0].background.mode == "job"
+    assert spec.tools[0].background.default_merge_strategy == "HUMAN_GATED"
+    assert spec.tools[0].background.notify_on_complete is True
+
+
+def test_background_tasks_with_non_hitl_merge_strategy(tmp_path: Path) -> None:
+    """Test that APPEND/REPLACE merge strategies don't require hitl."""
+    content = dedent(
+        """\
+        agent:
+          name: bg-agent
+          description: Demo agent
+          template: react
+          flags:
+            memory: false
+            hitl: false
+            background_tasks: true
+        tools:
+          - name: search
+            description: Search the web
+        llm:
+          primary:
+            model: gpt-4o
+        planner:
+          system_prompt_extra: Hello
+          background_tasks:
+            enabled: true
+            default_merge_strategy: APPEND
+        """
+    )
+
+    path = tmp_path / "spec.yaml"
+    path.write_text(content)
+
+    spec = load_spec(path)
+    assert spec.planner.background_tasks.default_merge_strategy == "APPEND"

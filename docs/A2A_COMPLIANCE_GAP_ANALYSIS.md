@@ -2,13 +2,13 @@
 
 > **Document role**: This is the canonical, spec-grounded plan for bringing PenguiFlow to **A2A Protocol** compliance and keeping it current. It is intended to be used as the shared implementation reference by engineering, docs, and QA.
 >
-> **Document version**: 2.1 (grounded to `docs/spec/a2a_specification.md`)
+> **Document version**: 2.2 (proto-first; grounded to `docs/spec/a2a.proto`)
 >
-> **Last updated**: 2025-12-16
+> **Last updated**: 2026-01-23
 >
-> **Target spec**: A2A Protocol **v0.3.0** (latest released), per `docs/spec/a2a_specification.md` (“A2A Protocol Specification (DRAFT v1.0)” document with latest released version note).
+> **Target spec**: Proto-first A2A per `docs/spec/a2a.proto` (matches upstream `a2aproject/A2A` `/latest`); keep practical compatibility with the latest released `0.3.x` ecosystem via route + AgentCard aliases where feasible.
 >
-> **Normative source of truth** (per spec): `a2a.proto`. This repo vendors the proto at `docs/spec/a2a.proto` (and a render-helper copy at `docs/specification/grpc/a2a.proto`). This plan is grounded to that proto plus the narrative spec in `docs/spec/a2a_specification.md`.
+> **Normative source of truth** (per spec): `a2a.proto`. This repo vendors the proto at `docs/spec/a2a.proto` (and a render-helper copy at `docs/specification/grpc/a2a.proto`). This plan is grounded primarily to that proto; the rendered spec text/examples are helpful but may drift.
 
 ---
 
@@ -20,7 +20,7 @@ To become **100% A2A-compatible and up to version**, we must:
 
 1. Implement the **canonical A2A data model** (Task/Message/Part/Artifact/events) with correct JSON conventions.
 2. Implement all **core A2A operations** with the correct **HTTP+JSON/REST binding** (recommended first) and streaming semantics (SSE).
-3. Provide correct **Agent Card discovery** at `/.well-known/agent-card.json` using the spec’s AgentCard schema (including `supportedInterfaces`, `capabilities`, `securitySchemes`, etc.).
+3. Provide correct **Agent Card discovery** at `/.well-known/agent-card.json` using the spec’s AgentCard schema (including `protocolVersions`, `supportedInterfaces`, `capabilities`, `securitySchemes`, etc.).
 4. Implement **service parameter** handling (`A2A-Version`, `A2A-Extensions`) and **VersionNotSupportedError** behavior.
 5. Implement **error mapping** via RFC 9457 Problem Details for HTTP and the defined code mappings for JSON-RPC/gRPC (even if those bindings are phased in later).
 6. Add a **Task store** (in-memory default + interface for durable stores) to support `GetTask`, `ListTasks`, `SubscribeToTask`, and push notification configs.
@@ -60,7 +60,7 @@ To claim “A2A compatible” for a given binding, PenguiFlow must implement:
 
 The spec defines three “standard” bindings:
 
-- **HTTP+JSON/REST** (`/v1/message:send`, `/v1/tasks/{id}`, etc.) with SSE for streaming.
+- **HTTP+JSON/REST** (`/message:send`, `/tasks/{id}`, etc.) with SSE for streaming. (These routes may be mounted behind a deployment prefix; see AgentCard `supportedInterfaces[].url`.)
 - **JSON-RPC 2.0 over HTTP** with SSE for streaming.
 - **gRPC** based on the proto.
 
@@ -72,14 +72,14 @@ Some features are optional and gated by AgentCard capabilities:
 
 - Streaming: gated by `AgentCard.capabilities.streaming`
 - Push notifications: gated by `AgentCard.capabilities.pushNotifications`
-- Extended Agent Card: gated by `AgentCard.supportsExtendedAgentCard`
+- Extended Agent Card: gated by `AgentCard.capabilities.extendedAgentCard`
 
 **Compliance rule**: If we advertise a capability as unsupported, we must return the correct spec error when the corresponding operation is attempted.
 
 **Project goal**:
 - Streaming: **supported** (we already stream in PenguiFlow; we must change the wire format).
 - Push notifications: **supported** (required for “full-feature” A2A agents; can be phased but must be implemented before advertising `pushNotifications: true`).
-- Extended Agent Card: **optional** (we can advertise `supportsExtendedAgentCard: false` until implemented).
+- Extended Agent Card: **optional** (we can advertise `capabilities.extendedAgentCard: false` until implemented).
 
 ---
 
@@ -301,43 +301,48 @@ Webhook payload: JSON `StreamResponse` (exactly one of task/message/statusUpdate
 
 #### AgentCard (public discovery)
 
-AgentCard is the discovery manifest. Key required fields (per provided spec text):
+AgentCard is the discovery manifest. Key required fields (proto-first; see `docs/spec/a2a.proto`):
 
 | Field | Required | Notes |
 |---|---:|---|
+| `protocolVersions` | Yes | List of supported protocol versions as `Major.Minor` strings (e.g., `"0.3"`, `"1.0"`). |
 | `name` | Yes | Human readable |
 | `description` | Yes | Human readable |
+| `supportedInterfaces` | Yes | Ordered list; first entry is preferred |
 | `version` | Yes | Agent version (not protocol version) |
 | `capabilities` | Yes | AgentCapabilities |
 | `defaultInputModes` | Yes | Media types |
 | `defaultOutputModes` | Yes | Media types |
 | `skills` | Yes | AgentSkill list |
-| `protocolVersion` | Optional | Latest released is `0.3.0` (examples use `"0.3.0"`); some draft text mentions a `"1.0"` default—treat proto as normative and negotiate via `A2A-Version` (Major.Minor). |
-| `supportedInterfaces` | No | Preferred + additional; first is preferred |
-| `supportsExtendedAgentCard` | Optional | Gate for `/v1/extendedAgentCard` |
+| `provider` | No | AgentProvider |
+| `documentationUrl` | No | Documentation URL |
 | `securitySchemes` | No | Map of scheme name → SecurityScheme |
 | `security` | No | Security requirements |
+| `signatures` | No | JWS signatures (optional) |
+| `iconUrl` | No | Optional icon URL |
 
 AgentCapabilities includes:
 - `streaming` (optional bool)
 - `pushNotifications` (optional bool)
 - `extensions` (optional list)
 - `stateTransitionHistory` (optional bool)
+- `extendedAgentCard` (optional bool)
 
 AgentInterface includes:
 - `url` (required)
 - `protocolBinding` (required: `JSONRPC`, `GRPC`, `HTTP+JSON`, etc.)
 - `tenant` (optional)
 
-#### Backward compatibility fields (deprecated in spec)
+#### Legacy AgentCard fields (0.3.x compatibility)
 
-The spec allows agents to populate deprecated fields alongside `supportedInterfaces`:
+Some `0.3.x`-era docs/SDKs used legacy AgentCard fields such as `protocolVersion`, `url`, `preferredTransport`, `additionalInterfaces`, and `supportsExtendedAgentCard`.
 
-- `url` (deprecated): should match the URL of the first `supportedInterfaces` entry
-- `preferredTransport` (deprecated): should match the first entry’s `protocolBinding`
-- `additionalInterfaces` (deprecated): should contain all entries from `supportedInterfaces`
+These fields are not part of the proto-first AgentCard message in `docs/spec/a2a.proto`. For pragmatic ecosystem compatibility, we MAY choose to emit them as additional JSON fields, but they are **non-normative** and must mirror the canonical fields:
 
-We SHOULD populate these deprecated fields for broad ecosystem compatibility until we confirm all clients we care about are `supportedInterfaces`-aware.
+- `protocolVersion` MUST have the same `Major.Minor` as `protocolVersions[0]` (if emitted)
+- `url` / `preferredTransport` MUST match the first entry in `supportedInterfaces`
+- `additionalInterfaces` MUST mirror `supportedInterfaces`
+- `supportsExtendedAgentCard` MUST mirror `capabilities.extendedAgentCard`
 
 #### Security fields (high-level requirements)
 
@@ -381,31 +386,33 @@ When the Agent Card indicates a capability is not supported, the server MUST ret
 
 - Push notifications (`capabilities.pushNotifications` is false/absent) → `PushNotificationNotSupportedError` for push config operations
 - Streaming (`capabilities.streaming` is false/absent) → `UnsupportedOperationError` for stream/subscribe operations
-- Extended Agent Card (`supportsExtendedAgentCard` is false/absent) → `UnsupportedOperationError` for `GetExtendedAgentCard`
+- Extended Agent Card (`capabilities.extendedAgentCard` is false/absent) → `UnsupportedOperationError` for `GetExtendedAgentCard`
 
 ---
 
 ### Binding method mapping reference (spec Section 5.3)
 
-The spec text uses `/v1/...` endpoints, while the proto in `docs/spec/a2a.proto` uses unversioned HTTP annotations (e.g., `/message:send`, `/tasks`, `/extendedAgentCard`) with optional tenant-prefixed bindings.
+The normative proto in `docs/spec/a2a.proto` defines unversioned HTTP annotations (e.g., `/message:send`, `/tasks`, `/extendedAgentCard`) with optional tenant-prefixed bindings.
+
+Some older examples and ecosystem clients may use a `/v1/...` prefix. We treat `/v1/...` as an optional compatibility alias, not the canonical binding.
 
 **Implementation requirement (interop-first):**
-- Expose the **`/v1/...`** endpoints (matching published examples), AND
-- Provide **proto-annotation aliases** (unversioned paths) for compatibility with proto-generated REST clients.
+- Expose the canonical **unversioned** endpoints from the proto.
+- Optionally also expose `/v1/...` aliases (and tenant-prefixed variants) for compatibility with clients that hardcode `/v1`.
 
-| Operation | JSON-RPC method | gRPC method | HTTP+JSON (`/v1`) | HTTP+JSON (proto alias) |
+| Operation | JSON-RPC method | gRPC method | HTTP+JSON (canonical) | HTTP+JSON (compat alias) |
 |---|---|---|---|---|
-| Send message | `SendMessage` | `SendMessage` | `POST /v1/message:send` | `POST /message:send` |
-| Stream message | `SendStreamingMessage` | `SendStreamingMessage` | `POST /v1/message:stream` | `POST /message:stream` |
-| Get task | `GetTask` | `GetTask` | `GET /v1/tasks/{id}` | `GET /tasks/{id}` (resource `name=tasks/{id}`) |
-| List tasks | `ListTasks` | `ListTasks` | `GET /v1/tasks` | `GET /tasks` |
-| Cancel task | `CancelTask` | `CancelTask` | `POST /v1/tasks/{id}:cancel` | `POST /tasks/{id}:cancel` |
-| Subscribe to task | `SubscribeToTask` | `SubscribeToTask` | `POST /v1/tasks/{id}:subscribe` | `GET /tasks/{id}:subscribe` |
-| Set push config | `SetTaskPushNotificationConfig` | `SetTaskPushNotificationConfig` | `POST /v1/tasks/{id}/pushNotificationConfigs` | `POST /tasks/{id}/pushNotificationConfigs` |
-| Get push config | `GetTaskPushNotificationConfig` | `GetTaskPushNotificationConfig` | `GET /v1/tasks/{id}/pushNotificationConfigs/{configId}` | `GET /tasks/{id}/pushNotificationConfigs/{configId}` |
-| List push configs | `ListTaskPushNotificationConfig` | `ListTaskPushNotificationConfig` | `GET /v1/tasks/{id}/pushNotificationConfigs` | `GET /tasks/{id}/pushNotificationConfigs` |
-| Delete push config | `DeleteTaskPushNotificationConfig` | `DeleteTaskPushNotificationConfig` | `DELETE /v1/tasks/{id}/pushNotificationConfigs/{configId}` | `DELETE /tasks/{id}/pushNotificationConfigs/{configId}` |
-| Get extended Agent Card | `GetExtendedAgentCard` | `GetExtendedAgentCard` | `GET /v1/extendedAgentCard` | `GET /extendedAgentCard` |
+| Send message | `SendMessage` | `SendMessage` | `POST /message:send` | `POST /v1/message:send` |
+| Stream message | `SendStreamingMessage` | `SendStreamingMessage` | `POST /message:stream` | `POST /v1/message:stream` |
+| Get task | `GetTask` | `GetTask` | `GET /tasks/{id}` | `GET /v1/tasks/{id}` |
+| List tasks | `ListTasks` | `ListTasks` | `GET /tasks` | `GET /v1/tasks` |
+| Cancel task | `CancelTask` | `CancelTask` | `POST /tasks/{id}:cancel` | `POST /v1/tasks/{id}:cancel` |
+| Subscribe to task | `SubscribeToTask` | `SubscribeToTask` | `GET /tasks/{id}:subscribe` | `POST /v1/tasks/{id}:subscribe` (also accept `POST /tasks/{id}:subscribe`) |
+| Set push config | `SetTaskPushNotificationConfig` | `SetTaskPushNotificationConfig` | `POST /tasks/{id}/pushNotificationConfigs` | `POST /v1/tasks/{id}/pushNotificationConfigs` |
+| Get push config | `GetTaskPushNotificationConfig` | `GetTaskPushNotificationConfig` | `GET /tasks/{id}/pushNotificationConfigs/{configId}` | `GET /v1/tasks/{id}/pushNotificationConfigs/{configId}` |
+| List push configs | `ListTaskPushNotificationConfig` | `ListTaskPushNotificationConfig` | `GET /tasks/{id}/pushNotificationConfigs` | `GET /v1/tasks/{id}/pushNotificationConfigs` |
+| Delete push config | `DeleteTaskPushNotificationConfig` | `DeleteTaskPushNotificationConfig` | `DELETE /tasks/{id}/pushNotificationConfigs/{configId}` | `DELETE /v1/tasks/{id}/pushNotificationConfigs/{configId}` |
+| Get extended Agent Card | `GetExtendedAgentCard` | `GetExtendedAgentCard` | `GET /extendedAgentCard` | `GET /v1/extendedAgentCard` |
 
 ---
 
@@ -418,22 +425,21 @@ The spec text uses `/v1/...` endpoints, while the proto in `docs/spec/a2a.proto`
 - For errors, return `Content-Type: application/problem+json` (RFC 9457).
 - For streaming endpoints, return `Content-Type: text/event-stream`.
 
-#### Path aliases (proto-grounded)
+#### Path aliases (interop)
 
-The proto in `docs/spec/a2a.proto` defines HTTP annotations without a `/v1` prefix. To avoid breaking clients that generate REST calls from proto annotations, we serve both:
+The proto in `docs/spec/a2a.proto` defines canonical HTTP annotations without a `/v1` prefix. Some clients and older examples may hardcode a `/v1/...` prefix.
 
-- `/v1/...` paths (matching published spec examples), and
-- unversioned aliases (matching proto http annotations), including tenant-prefixed variants where applicable.
+To maximize interoperability, we serve the canonical unversioned paths and (optionally) `/v1/...` aliases.
 
 Examples:
-- `POST /v1/message:send` and `POST /message:send`
-- `GET /v1/tasks/{id}` and `GET /tasks/{id}`
-- `GET /v1/tasks` and `GET /tasks`
+- `POST /message:send` and `POST /v1/message:send`
+- `GET /tasks/{id}` and `GET /v1/tasks/{id}`
+- `GET /tasks` and `GET /v1/tasks`
 
 #### Query parameter naming (GET/DELETE)
 
 - Query parameters MUST use **camelCase** to match JSON field names:
-  - `contextId`, `pageSize`, `pageToken`, `historyLength`, `lastUpdatedAfter`, `includeArtifacts`
+  - `contextId`, `status`, `pageSize`, `pageToken`, `historyLength`, `statusTimestampAfter`, `includeArtifacts`
 
 #### ListTasks required pagination semantics
 
@@ -502,19 +508,15 @@ The provided spec text includes a few internal inconsistencies. Because this doc
 
 ### A2A protocol version string (“0.3” vs “1.0”)
 
-`docs/spec/a2a_specification.md` states:
-- **Latest released version:** `0.3.0`
-- `A2A-Version` header value MUST be `Major.Minor` (example: `0.3`)
-- AgentCard examples include `"protocolVersion": "0.3.0"`
-- There is also text asserting `protocolVersion` defaults to `"1.0"` and an appendix describing a breaking change “Version 1.0…”
+The proto-first spec uses `Major.Minor` protocol versions for negotiation and discovery.
 
-**Decision (for implementation planning):**
-- Primary compliance target is **A2A v0.3.0**.
-- Implement strict version negotiation:
-  - Accept `A2A-Version: 0.3` as supported.
-  - Return `VersionNotSupportedError` for other requested versions unless explicitly added to a supported list.
-- Publish `AgentCard.protocolVersion` as `"0.3.0"` (matching the latest released spec), and treat any patch component as non-semantic for negotiation (Major.Minor drives compatibility per spec).
-- Track “DRAFT v1.0” changes separately and do not advertise v1.0 support unless the vendored `docs/spec/a2a.proto` and the published “latest released” version guidance are aligned for the targeted major version.
+**Decision (proto-first):**
+- Maintain a configured ordered list of supported protocol versions (e.g., `["0.3"]`).
+- AgentCard MUST publish these in `protocolVersions`.
+- Requests MAY include `A2A-Version: <major.minor>`.
+  - If absent: treat as the first supported version (implementation default).
+  - If present and unsupported: return `VersionNotSupportedError` and include the supported versions.
+- Do not claim support for a protocol version unless it is listed in AgentCard `protocolVersions`.
 
 ### Service parameter prefix (“a2a-” vs “A2A-”)
 
@@ -530,8 +532,9 @@ The spec includes an optional `tenant` “provided as a path parameter”, but t
 
 **Decision**:
 - Implement tenant as **optional** and support both:
-  - Non-tenant routes exactly as spec (`/v1/...`)
-  - A tenant-prefixed form for deployments that need it: `/{tenant}/v1/...`
+  - Canonical non-tenant routes exactly as proto (`/...`)
+  - Canonical tenant-prefixed form: `/{tenant}/...`
+  - Optional `/v1/...` aliases for either form where needed for ecosystem compatibility
 - Reflect tenant presence in AgentCard `supportedInterfaces[].tenant` when used.
 
 ### Skill selection
@@ -558,9 +561,10 @@ This section is intentionally verbose and should be treated as the “definition
 - Should be stable and cacheable; avoid including secrets
 
 **Minimum correctness requirements**
-- `protocolVersion` is set to the latest supported released version (for this plan: `"0.3.0"`), and version negotiation uses `A2A-Version: 0.3` (Major.Minor) per spec.
+- `protocolVersions` is set to our supported `Major.Minor` protocol versions (e.g., `["0.3"]`).
 - `supportedInterfaces` includes at least one entry for our HTTP+JSON base URL with `protocolBinding: "HTTP+JSON"`.
 - `capabilities.streaming` and `capabilities.pushNotifications` match actual support.
+- `capabilities.extendedAgentCard` matches actual support.
 - `defaultInputModes` / `defaultOutputModes` contain media types (e.g., `text/plain`, `application/json`).
 - `skills[]` is populated (even if only a single default skill).
 
@@ -568,12 +572,12 @@ This section is intentionally verbose and should be treated as the “definition
 
 ```json
 {
-  "protocolVersion": "0.3.0",
+  "protocolVersions": ["0.3"],
   "name": "PenguiFlow Agent",
   "description": "Exposes a PenguiFlow graph via A2A.",
   "supportedInterfaces": [
     {
-      "url": "https://agent.example.com/a2a/v1",
+      "url": "https://agent.example.com/a2a",
       "protocolBinding": "HTTP+JSON"
     }
   ],
@@ -585,7 +589,8 @@ This section is intentionally verbose and should be treated as the “definition
   "capabilities": {
     "streaming": true,
     "pushNotifications": false,
-    "stateTransitionHistory": false
+    "stateTransitionHistory": false,
+    "extendedAgentCard": false
   },
   "defaultInputModes": ["application/a2a+json", "text/plain", "application/json"],
   "defaultOutputModes": ["application/a2a+json", "text/plain", "application/json"],
@@ -597,15 +602,14 @@ This section is intentionally verbose and should be treated as the “definition
       "tags": ["orchestration"],
       "examples": ["Summarize this text..."]
     }
-  ],
-  "supportsExtendedAgentCard": false
+  ]
 }
 ```
 
-### 2) `POST /v1/message:send` (SendMessage)
+### 2) `POST /message:send` (SendMessage)
 
 **Proto aliases**
-- `POST /message:send`
+- Optional compatibility alias: `POST /v1/message:send`
 - Optional tenant form: `POST /{tenant}/message:send` (proto additional binding)
 
 **Headers**
@@ -691,10 +695,10 @@ If `configuration.blocking=true` and the operation returns a Task, then the serv
 }
 ```
 
-### 3) `POST /v1/message:stream` (SendStreamingMessage)
+### 3) `POST /message:stream` (SendStreamingMessage)
 
 **Proto aliases**
-- `POST /message:stream`
+- Optional compatibility alias: `POST /v1/message:stream`
 - Optional tenant form: `POST /{tenant}/message:stream` (proto additional binding)
 
 **Headers**
@@ -702,7 +706,7 @@ If `configuration.blocking=true` and the operation returns a Task, then the serv
 - Response: `Content-Type: text/event-stream`
 
 **Request body**
-- Same `SendMessageRequest` as `/v1/message:send`
+- Same `SendMessageRequest` as `/message:send`
 
 **Response body (SSE)**
 - Sequence of SSE events; each event MUST contain:
@@ -734,10 +738,10 @@ data: {"statusUpdate":{"taskId":"task-uuid","contextId":"context-uuid","status":
 - Messages sent to terminal tasks → `UnsupportedOperationError`.
 - Event ordering MUST match generation ordering (no reordering).
 
-### 4) `GET /v1/tasks/{id}` (GetTask)
+### 4) `GET /tasks/{id}` (GetTask)
 
 **Proto aliases**
-- `GET /tasks/{id}` (proto uses resource `name=tasks/{id}`)
+- Optional compatibility alias: `GET /v1/tasks/{id}`
 - Optional tenant form: `GET /{tenant}/tasks/{id}`
 
 **Query parameters**
@@ -769,10 +773,10 @@ data: {"statusUpdate":{"taskId":"task-uuid","contextId":"context-uuid","status":
 **Errors**
 - `TaskNotFoundError` when task does not exist or is not accessible
 
-### 5) `GET /v1/tasks` (ListTasks)
+### 5) `GET /tasks` (ListTasks)
 
 **Proto aliases**
-- `GET /tasks`
+- Optional compatibility alias: `GET /v1/tasks`
 - Optional tenant form: `GET /{tenant}/tasks`
 
 **Query parameters (all optional)**
@@ -781,7 +785,7 @@ data: {"statusUpdate":{"taskId":"task-uuid","contextId":"context-uuid","status":
 - `pageSize` (1–100; default 50)
 - `pageToken` (cursor token)
 - `historyLength` (apply to each returned Task)
-- `lastUpdatedAfter` (milliseconds since epoch)
+- `statusTimestampAfter` (ISO 8601 UTC timestamp; filters tasks updated after this timestamp)
 - `includeArtifacts` (default false)
 
 **Response body: ListTasksResponse**
@@ -813,10 +817,10 @@ data: {"statusUpdate":{"taskId":"task-uuid","contextId":"context-uuid","status":
 - MUST use cursor-based pagination.
 - If `includeArtifacts=false`, `artifacts` MUST be omitted entirely from each Task object.
 
-### 6) `POST /v1/tasks/{id}:cancel` (CancelTask)
+### 6) `POST /tasks/{id}:cancel` (CancelTask)
 
 **Proto aliases**
-- `POST /tasks/{id}:cancel` (proto uses resource `name=tasks/{id}`)
+- Optional compatibility alias: `POST /v1/tasks/{id}:cancel`
 - Optional tenant form: `POST /{tenant}/tasks/{id}:cancel`
 
 **Response**
@@ -839,10 +843,14 @@ data: {"statusUpdate":{"taskId":"task-uuid","contextId":"context-uuid","status":
 **Required semantics**
 - Cancel is idempotent.
 
-### 7) `POST /v1/tasks/{id}:subscribe` (SubscribeToTask)
+### 7) `GET /tasks/{id}:subscribe` (SubscribeToTask)
 
 **Proto aliases**
 - `GET /tasks/{id}:subscribe` (proto uses GET)
+- Optional compatibility aliases (some clients use POST and/or /v1):
+  - `POST /tasks/{id}:subscribe`
+  - `GET /v1/tasks/{id}:subscribe`
+  - `POST /v1/tasks/{id}:subscribe`
 - Optional tenant form: `GET /{tenant}/tasks/{id}:subscribe`
 
 **Response**
@@ -862,12 +870,13 @@ data: {"statusUpdate":{"taskId":"task-uuid","contextId":"context-uuid","status":
 
 These endpoints are only valid if `capabilities.pushNotifications` is true; otherwise they MUST return `PushNotificationNotSupportedError`.
 
-#### `POST /v1/tasks/{id}/pushNotificationConfigs` (Set/Create)
+#### `POST /tasks/{id}/pushNotificationConfigs` (Set/Create)
 
 Creates or updates a push notification configuration for a task.
 
 **Proto aliases**
 - `POST /tasks/{id}/pushNotificationConfigs`
+- Optional compatibility alias: `POST /v1/tasks/{id}/pushNotificationConfigs`
 - Optional tenant form: `POST /{tenant}/tasks/{id}/pushNotificationConfigs`
 
 **Important naming detail:** In the canonical model and gRPC binding, the push config is a named sub-resource:
@@ -884,7 +893,7 @@ The proto’s HTTP annotation uses `body: "config"`, which means the HTTP reques
 
 **Request shape (recommended for REST):**
 - `configId` is required as a **query parameter**:
-  - `POST /v1/tasks/{id}/pushNotificationConfigs?configId=webhook-1`
+  - `POST /tasks/{id}/pushNotificationConfigs?configId=webhook-1`
 - Request body is a `TaskPushNotificationConfig` object.
 
 **Response**
@@ -895,7 +904,7 @@ The proto’s HTTP annotation uses `body: "config"`, which means the HTTP reques
 HTTP form:
 
 ```http
-POST /v1/tasks/task-uuid/pushNotificationConfigs?configId=webhook-1
+POST /tasks/task-uuid/pushNotificationConfigs?configId=webhook-1
 Content-Type: application/a2a+json
 ```
 
@@ -938,12 +947,13 @@ Content-Type: application/a2a+json
   - `name` present but inconsistent with `{id}`/`configId` (server rejects as validation error)
 - The server MUST store the push notification configuration associated with the task until completion or deletion.
 
-#### `GET /v1/tasks/{id}/pushNotificationConfigs/{configId}` (Get)
+#### `GET /tasks/{id}/pushNotificationConfigs/{configId}` (Get)
 
 - Returns config or error if missing
 
 **Proto aliases**
 - `GET /tasks/{id}/pushNotificationConfigs/{configId}`
+- Optional compatibility alias: `GET /v1/tasks/{id}/pushNotificationConfigs/{configId}`
 - Optional tenant form: `GET /{tenant}/tasks/{id}/pushNotificationConfigs/{configId}`
 
 **Example response (resource wrapper)**
@@ -960,12 +970,13 @@ Content-Type: application/a2a+json
 }
 ```
 
-#### `GET /v1/tasks/{id}/pushNotificationConfigs` (List)
+#### `GET /tasks/{id}/pushNotificationConfigs` (List)
 
 - Returns list (pagination is optional per spec; document if implemented)
 
 **Proto aliases**
 - `GET /tasks/{id}/pushNotificationConfigs`
+- Optional compatibility alias: `GET /v1/tasks/{id}/pushNotificationConfigs`
 - Optional tenant form: `GET /{tenant}/tasks/{id}/pushNotificationConfigs`
 
 **Example response**
@@ -982,12 +993,13 @@ Content-Type: application/a2a+json
 }
 ```
 
-#### `DELETE /v1/tasks/{id}/pushNotificationConfigs/{configId}` (Delete)
+#### `DELETE /tasks/{id}/pushNotificationConfigs/{configId}` (Delete)
 
 - Must be idempotent
 
 **Proto aliases**
 - `DELETE /tasks/{id}/pushNotificationConfigs/{configId}`
+- Optional compatibility alias: `DELETE /v1/tasks/{id}/pushNotificationConfigs/{configId}`
 - Optional tenant form: `DELETE /{tenant}/tasks/{id}/pushNotificationConfigs/{configId}`
 
 **Response**
@@ -1012,10 +1024,13 @@ For REST, the path parameters map directly to the gRPC-style resource fields:
 - Agent may retry with backoff; must set timeouts (10–30s recommended)
 - Must implement SSRF mitigations (reject private IP ranges, localhost, link-local)
 
-### 9) `GET /v1/extendedAgentCard` (GetExtendedAgentCard)
+### 9) `GET /extendedAgentCard` (GetExtendedAgentCard)
 
-- Only valid if `supportsExtendedAgentCard` is true.
+- Only valid if `capabilities.extendedAgentCard` is true.
 - Requires authentication per `securitySchemes` / `security`.
+
+**Compatibility alias**
+- Optionally also expose `GET /v1/extendedAgentCard`.
 
 **Errors**
 - `UnsupportedOperationError` if not supported
@@ -1030,13 +1045,13 @@ For REST, the path parameters map directly to the gRPC-style resource fields:
 **Spec requires**
 - Public discovery: `GET /.well-known/agent-card.json`
 - Schema: `AgentCard` with fields such as:
-  - `protocolVersion`
+  - `protocolVersions`
   - `supportedInterfaces` (preferred + additional)
   - `capabilities` (`streaming`, `pushNotifications`, `extensions`, `stateTransitionHistory`)
   - `securitySchemes` and `security`
   - `defaultInputModes`, `defaultOutputModes`
   - `skills` with `id`, `name`, `description`, `tags`, `examples`, etc.
-  - Optional deprecated fields (url/preferredTransport/additionalInterfaces) for backward compatibility
+  - Optional legacy fields (e.g., `protocolVersion`, `preferredTransport`) for backward compatibility with older clients
 
 **Current**
 - `GET /agent` returns a legacy object with mismatched schema (`penguiflow_a2a/server.py`)
@@ -1055,7 +1070,7 @@ For REST, the path parameters map directly to the gRPC-style resource fields:
 ### 2) Send Message (unary)
 
 **Spec requires**
-- HTTP endpoint: `POST /v1/message:send`
+- Canonical HTTP endpoint: `POST /message:send` (optionally also serve `POST /v1/message:send` as a compatibility alias)
 - Request body: `SendMessageRequest`:
   - `message` (A2A Message w/ `messageId`, `role`, `parts`)
   - optional `configuration`:
@@ -1087,7 +1102,7 @@ For REST, the path parameters map directly to the gRPC-style resource fields:
 ### 3) Send Streaming Message
 
 **Spec requires**
-- HTTP endpoint: `POST /v1/message:stream` returning `text/event-stream`
+- Canonical HTTP endpoint: `POST /message:stream` returning `text/event-stream` (optionally also serve `POST /v1/message:stream` as a compatibility alias)
 - Stream semantics:
   - **Message-only stream**: exactly one `Message`, then close
   - **Task lifecycle stream**: first event is `Task`, then zero or more `statusUpdate` / `artifactUpdate`, then close at terminal state
@@ -1117,7 +1132,7 @@ For REST, the path parameters map directly to the gRPC-style resource fields:
 ### 4) Get Task
 
 **Spec requires**
-- `GET /v1/tasks/{id}`
+- Canonical: `GET /tasks/{id}` (optionally also serve `GET /v1/tasks/{id}`)
 - Query parameter: `historyLength` (optional)
 - Returns `Task` or `TaskNotFoundError`
 
@@ -1136,8 +1151,8 @@ For REST, the path parameters map directly to the gRPC-style resource fields:
 ### 5) List Tasks
 
 **Spec requires**
-- `GET /v1/tasks` with query params:
-  - `contextId`, `status`, `pageSize`, `pageToken`, `historyLength`, `lastUpdatedAfter`, `includeArtifacts`
+- Canonical: `GET /tasks` with query params:
+  - `contextId`, `status`, `pageSize`, `pageToken`, `historyLength`, `statusTimestampAfter`, `includeArtifacts`
 - Must:
   - return tasks visible to caller (auth scoping)
   - sort by last update desc
@@ -1159,7 +1174,7 @@ For REST, the path parameters map directly to the gRPC-style resource fields:
 ### 6) Cancel Task
 
 **Spec requires**
-- `POST /v1/tasks/{id}:cancel`
+- Canonical: `POST /tasks/{id}:cancel` (optionally also serve `POST /v1/tasks/{id}:cancel`)
 - Returns updated `Task` or `TaskNotCancelableError`/`TaskNotFoundError`
 - Idempotent behavior
 
@@ -1170,7 +1185,7 @@ For REST, the path parameters map directly to the gRPC-style resource fields:
 - Endpoint mismatch, schema mismatch, error mapping mismatch.
 
 **Fix**
-- Implement `POST /v1/tasks/{id}:cancel`, map to PenguiFlow per-trace cancellation.
+- Implement `POST /tasks/{id}:cancel`, map to PenguiFlow per-trace cancellation.
 - Return updated `Task` with state `cancelled` when cancellation succeeds.
 
 ---
@@ -1178,7 +1193,7 @@ For REST, the path parameters map directly to the gRPC-style resource fields:
 ### 7) Subscribe to Task (stream existing task)
 
 **Spec requires**
-- `POST /v1/tasks/{id}:subscribe` returning SSE
+- Canonical: `GET /tasks/{id}:subscribe` returning SSE (accept `POST` and/or `/v1` as compatibility aliases if needed)
 - First event MUST be the current `Task`
 - Then emit `statusUpdate` / `artifactUpdate`
 - Must terminate on terminal state
@@ -1202,7 +1217,7 @@ For REST, the path parameters map directly to the gRPC-style resource fields:
 ### 8) Push Notification Config + Delivery
 
 **Spec requires**
-- CRUD endpoints under `/v1/tasks/{id}/pushNotificationConfigs`
+- CRUD endpoints under `/tasks/{id}/pushNotificationConfigs` (optionally also serve `/v1/tasks/{id}/pushNotificationConfigs` as compatibility aliases)
 - If capability not supported, must return `PushNotificationNotSupportedError`
 - On updates, server POSTs `StreamResponse` payloads to client webhook URL with configured auth
 - Must implement delivery semantics (at-least-once attempt; retry allowed; timeouts; SSRF mitigations)
@@ -1222,8 +1237,8 @@ For REST, the path parameters map directly to the gRPC-style resource fields:
 ### 9) Get Extended Agent Card
 
 **Spec requires**
-- `GET /v1/extendedAgentCard`
-- Only if `supportsExtendedAgentCard=true`
+- Canonical: `GET /extendedAgentCard` (optionally also serve `GET /v1/extendedAgentCard`)
+- Only if `capabilities.extendedAgentCard=true`
 - Requires auth per AgentCard `securitySchemes`/`security`
 - Must return `UnsupportedOperationError` or `ExtendedAgentCardNotConfiguredError` in appropriate cases
 
@@ -1267,7 +1282,8 @@ The A2A spec intentionally does not prescribe how an agent maps protocol objects
 PenguiFlow `Headers.tenant` is currently required (`penguiflow/types.py`). A2A’s HTTP binding does not require a tenant field, but does allow an optional tenant “path parameter” concept.
 
 **Decision:**
-- If the server is deployed in tenant-prefixed mode (`/{tenant}/v1/...`), set `Headers.tenant = <tenant>` from the path.
+- If the server is deployed in tenant-prefixed mode (`/{tenant}/...`), set `Headers.tenant = <tenant>` from the path.
+- If we also expose `/v1/...` aliases, treat `/{tenant}/v1/...` as a compatibility alias of `/{tenant}/...`.
 - Otherwise, derive `Headers.tenant` from authentication context if available (e.g., JWT claim / API key mapping) and document the mapping.
 - If neither is present, use a configurable default tenant (e.g., `"default"`). This default MUST be explicit in server config and tests.
 
@@ -1385,16 +1401,16 @@ Acceptance tests:
 
 Deliverables:
 - `/.well-known/agent-card.json`
-- `POST /v1/message:send`
-- `POST /v1/message:stream` (SSE)
-- `GET /v1/tasks/{id}`
-- `GET /v1/tasks`
-- `POST /v1/tasks/{id}:cancel`
-- `POST /v1/tasks/{id}:subscribe` (SSE)
-- Proto path aliases (HTTP annotation compatibility):
-  - `POST /message:send`, `POST /message:stream`
-  - `GET /tasks`, `GET /tasks/{id}`, `POST /tasks/{id}:cancel`
+- Canonical HTTP+JSON endpoints (proto-first):
+  - `POST /message:send`
+  - `POST /message:stream` (SSE)
+  - `GET /tasks/{id}`
+  - `GET /tasks`
+  - `POST /tasks/{id}:cancel`
   - `GET /tasks/{id}:subscribe` (SSE)
+- Compatibility aliases (optional):
+  - `/v1/...` versions of the above routes
+  - `POST /tasks/{id}:subscribe` (some clients use POST for subscribe)
 - Version negotiation middleware (`A2A-Version`)
 - Capability validation (streaming on/off)
 
@@ -1418,7 +1434,7 @@ Acceptance tests:
 ### Phase 2 — Push notifications (CRUD + delivery)
 
 Deliverables:
-- CRUD endpoints for push configs under `/v1/tasks/{id}/pushNotificationConfigs`
+- CRUD endpoints for push configs under `/tasks/{id}/pushNotificationConfigs` (and optional `/v1/...` aliases)
 - Webhook sender:
   - sends StreamResponse payloads
   - uses configured authentication
@@ -1436,7 +1452,7 @@ Acceptance tests:
 ### Phase 3 — Extended Agent Card (optional)
 
 Deliverables:
-- `GET /v1/extendedAgentCard`
+- `GET /extendedAgentCard` (and optional `/v1/extendedAgentCard` alias)
 - Auth integration per `securitySchemes` and `security`
 - Error behavior:
   - UnsupportedOperationError if not supported
@@ -1491,16 +1507,16 @@ This checklist should be used for release readiness.
 - [ ] If `blocking=false`, returns immediately with non-terminal Task
 
 ### Streaming (HTTP SSE)
-- [ ] `/v1/message:stream` uses `text/event-stream`
+- [ ] `/message:stream` uses `text/event-stream` (and `/v1/message:stream` works if we enable compat aliases)
 - [ ] First frame is Task or single Message; conforms to StreamResponse oneof
 - [ ] Event ordering preserved
 - [ ] Stream closes at terminal state
 
 ### Task APIs
-- [ ] `GET /v1/tasks/{id}` returns Task or TaskNotFoundError
-- [ ] `GET /v1/tasks` supports filters/pagination and omits artifacts unless requested
-- [ ] `POST /v1/tasks/{id}:cancel` is idempotent and returns updated Task or proper error
-- [ ] `POST /v1/tasks/{id}:subscribe` returns first Task snapshot and streams updates
+- [ ] `GET /tasks/{id}` returns Task or TaskNotFoundError
+- [ ] `GET /tasks` supports filters/pagination and omits artifacts unless requested
+- [ ] `POST /tasks/{id}:cancel` is idempotent and returns updated Task or proper error
+- [ ] `GET /tasks/{id}:subscribe` returns first Task snapshot and streams updates
 
 ### Push notifications
 - [ ] CRUD endpoints implemented and gated by `capabilities.pushNotifications`
@@ -1555,8 +1571,8 @@ The existing endpoints (`/agent`, `/message/send`, `/message/stream`, `/tasks/ca
 
 **Plan**
 - Keep legacy endpoints during a deprecation window.
-- Add new spec-compliant endpoints in parallel under `/v1/...` and `/.well-known/...`.
-- Document legacy endpoints as **non-A2A** (explicitly) once v1 endpoints land.
+- Add new spec-compliant endpoints in parallel on canonical proto-first paths (and optionally `/v1/...` aliases) and `/.well-known/...`.
+- Document legacy endpoints as **non-A2A** (explicitly) once the spec-compliant A2A endpoints land.
 
 ### Data model migration
 

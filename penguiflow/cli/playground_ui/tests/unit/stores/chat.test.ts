@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { chatStore } from '$lib/stores/chat.svelte';
+import { createChatStore } from '$lib/stores';
+
+const chatStore = createChatStore();
 
 describe('chatStore', () => {
   beforeEach(() => {
@@ -34,8 +36,9 @@ describe('chatStore', () => {
       chatStore.addUserMessage('Second');
       
       expect(chatStore.messages).toHaveLength(2);
-      expect(chatStore.messages[0].text).toBe('First');
-      expect(chatStore.messages[1].text).toBe('Second');
+      const [first, second] = chatStore.messages;
+      expect(first?.text).toBe('First');
+      expect(second?.text).toBe('Second');
     });
   });
 
@@ -79,7 +82,8 @@ describe('chatStore', () => {
       chatStore.addUserMessage('Test');
       chatStore.updateMessage('nonexistent', { text: 'Updated' });
       
-      expect(chatStore.messages[0].text).toBe('Test');
+      const [first] = chatStore.messages;
+      expect(first?.text).toBe('Test');
     });
   });
 

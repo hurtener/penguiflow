@@ -166,7 +166,7 @@ Response:
 Returns metadata used by the UI’s left column:
 - agent name/description/template/flags
 - planner settings summary
-- service flags (memory_iceberg/lighthouse/wayfinder)
+- service flags (memory_iceberg/rag_server/wayfinder)
 - tool catalog listing (name/description/tags)
 
 ### `POST /chat`
@@ -210,10 +210,51 @@ SSE event types:
 - `chunk` (planner stream chunks)
 - `llm_stream_chunk` (LLM token streaming)
 - `artifact_chunk` (structured artifacts emitted during execution)
+- `artifact_stored` (artifact stored with metadata)
+- `resource_updated` (MCP resource cache invalidation)
 - `step` (step_start / step_complete)
 - `event` (all other planner events)
 - `done` (final answer/pause envelope)
 - `error` (terminal errors)
+
+### `POST /agui/agent` (AG-UI)
+
+AG-UI streaming endpoint using the official `ag-ui-protocol` encoder. This runs the same agent
+wrapper as `/chat/stream` but emits AG-UI events instead of legacy SSE frames.
+
+Request body (AG-UI `RunAgentInput`):
+```json
+{
+  "threadId": "session-id",
+  "runId": "trace-id",
+  "messages": [ ... ],
+  "tools": [],
+  "state": {},
+  "forwardedProps": {
+    "penguiflow": {
+      "llm_context": { ... },
+      "tool_context": { ... }
+    }
+  }
+}
+```
+
+Notes:
+- `threadId` maps to PenguiFlow `session_id`.
+- `runId` maps to PenguiFlow `trace_id`.
+- `forwardedProps.penguiflow.llm_context/tool_context` preserves the context split.
+- The Python SDK accepts snake_case aliases (`thread_id`, `run_id`, `forwarded_props`) if needed.
+
+Standard AG-UI events:
+- `RUN_STARTED` / `RUN_FINISHED` / `RUN_ERROR`
+- `STEP_STARTED` / `STEP_FINISHED`
+- `TEXT_MESSAGE_START` / `TEXT_MESSAGE_CONTENT` / `TEXT_MESSAGE_END`
+- `TOOL_CALL_START` / `TOOL_CALL_ARGS` / `TOOL_CALL_END` / `TOOL_CALL_RESULT`
+
+Custom AG-UI events:
+- `name="artifact_stored"` with `{ artifact, download_url }`
+- `name="resource_updated"` with `{ namespace, uri, read_url }`
+- `name="pause"` with the pause payload (HITL / OAuth flow)
 
 ### `GET /events` (SSE replay + follow)
 

@@ -22,7 +22,7 @@ def _project_paths(base: Path, name: str) -> tuple[Path, Path]:
 
 @pytest.mark.parametrize(
     "template",
-    ["minimal", "react", "parallel", "flow", "controller", "lighthouse", "wayfinder", "analyst", "enterprise"],
+    ["minimal", "react", "parallel", "flow", "controller", "rag_server", "wayfinder", "analyst", "enterprise"],
 )
 def test_run_new_creates_expected_files(tmp_path: Path, template: str) -> None:
     name = f"{template}-agent"
@@ -65,7 +65,7 @@ def test_cli_new_command_creates_project(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "template",
-    ["minimal", "react", "parallel", "flow", "controller", "lighthouse", "wayfinder", "analyst", "enterprise"],
+    ["minimal", "react", "parallel", "flow", "controller", "rag_server", "wayfinder", "analyst", "enterprise"],
 )
 def test_generated_project_tests_pass(tmp_path: Path, template: str) -> None:
     name = f"{template}-proj"
@@ -95,11 +95,11 @@ def test_generated_project_tests_pass(tmp_path: Path, template: str) -> None:
     ("template", "flags"),
     [
         ("minimal", {"with_streaming": True, "with_hitl": True}),
-        ("react", {"with_streaming": True, "with_a2a": True}),
+        ("react", {"with_streaming": True, "with_a2a": True, "with_rich_output": True}),
         ("parallel", {"no_memory": True}),
         ("flow", {"with_streaming": True, "with_a2a": True}),
         ("controller", {"with_streaming": True, "no_memory": True}),
-        ("lighthouse", {"with_streaming": True}),
+        ("rag_server", {"with_streaming": True}),
         ("wayfinder", {"with_hitl": True}),
         ("analyst", {"with_a2a": True}),
         ("enterprise", {"with_streaming": True, "with_hitl": True}),

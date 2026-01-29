@@ -70,6 +70,19 @@ uv run mypy src/
 uv run ruff check src/
 ```
 
+{% if a2a_enabled %}
+## A2A HTTP+JSON Binding
+
+This project includes an `a2a.py` module that wires `A2AService` and
+`create_a2a_http_app`. Use it to expose the agent over A2A endpoints like
+`/.well-known/agent-card.json` and `POST /message:send`.
+
+```bash
+uv run python -m {{ package_name }}
+# In another terminal, mount {{ package_name }}.a2a.A2AServer.app with uvicorn.
+```
+{% endif %}
+
 ## Customization
 
 ### Adding New Tools

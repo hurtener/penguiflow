@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { render } from '@testing-library/svelte';
-import Pill from '$lib/components/ui/Pill.svelte';
+import Pill from '$lib/components/primitives/Pill.svelte';
 
 describe('Pill component', () => {
   it('renders with default variant', () => {

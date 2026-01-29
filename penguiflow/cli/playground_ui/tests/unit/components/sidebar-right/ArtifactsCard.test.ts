@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, fireEvent, waitFor } from '@testing-library/svelte';
-import ArtifactsCard from '$lib/components/sidebar-right/artifacts/ArtifactsCard.svelte';
-import { artifactsStore } from '$lib/stores/artifacts.svelte';
+import ArtifactsCardHost from './ArtifactsCardHost.svelte';
+import { createArtifactsStore, createSessionStore } from '$lib/stores';
 import type { ArtifactStoredEvent } from '$lib/types';
 import * as api from '$lib/services/api';
 
@@ -11,6 +11,8 @@ vi.mock('$lib/services/api', () => ({
 }));
 
 describe('ArtifactsCard component', () => {
+  const artifactsStore = createArtifactsStore();
+  const sessionStore = createSessionStore();
   const createMockEvent = (id: string, filename: string): ArtifactStoredEvent => ({
     artifact_id: id,
     mime_type: 'application/pdf',
@@ -29,14 +31,14 @@ describe('ArtifactsCard component', () => {
 
   describe('empty state', () => {
     it('renders card with Artifacts title', () => {
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const title = document.querySelector('.artifacts-title');
       expect(title?.textContent).toContain('Artifacts');
     });
 
     it('shows empty state message when no artifacts', () => {
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const emptyMessage = document.querySelector('.no-artifacts');
       expect(emptyMessage).toBeTruthy();
@@ -44,14 +46,14 @@ describe('ArtifactsCard component', () => {
     });
 
     it('does not show count badge when empty', () => {
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const badge = document.querySelector('.count-badge');
       expect(badge).toBeNull();
     });
 
     it('does not show Download All button when empty', () => {
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const downloadAllBtn = document.querySelector('.download-all-btn');
       expect(downloadAllBtn).toBeNull();
@@ -63,7 +65,7 @@ describe('ArtifactsCard component', () => {
       artifactsStore.addArtifact(createMockEvent('artifact-1', 'report1.pdf'));
       artifactsStore.addArtifact(createMockEvent('artifact-2', 'report2.pdf'));
 
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const badge = document.querySelector('.count-badge');
       expect(badge?.textContent).toBe('2');
@@ -73,7 +75,7 @@ describe('ArtifactsCard component', () => {
       artifactsStore.addArtifact(createMockEvent('artifact-1', 'report1.pdf'));
       artifactsStore.addArtifact(createMockEvent('artifact-2', 'report2.pdf'));
 
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const items = document.querySelectorAll('.artifact-item');
       expect(items.length).toBe(2);
@@ -82,7 +84,7 @@ describe('ArtifactsCard component', () => {
     it('does not show empty state message when artifacts exist', () => {
       artifactsStore.addArtifact(createMockEvent('artifact-1', 'report1.pdf'));
 
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const emptyMessage = document.querySelector('.no-artifacts');
       expect(emptyMessage).toBeNull();
@@ -92,7 +94,7 @@ describe('ArtifactsCard component', () => {
       artifactsStore.addArtifact(createMockEvent('artifact-1', 'report1.pdf'));
       artifactsStore.addArtifact(createMockEvent('artifact-2', 'report2.pdf'));
 
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const downloadAllBtn = document.querySelector('.download-all-btn');
       expect(downloadAllBtn).toBeTruthy();
@@ -104,7 +106,7 @@ describe('ArtifactsCard component', () => {
     it('shows count badge for single artifact', () => {
       artifactsStore.addArtifact(createMockEvent('artifact-1', 'single.pdf'));
 
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const badge = document.querySelector('.count-badge');
       expect(badge?.textContent).toBe('1');
@@ -113,7 +115,7 @@ describe('ArtifactsCard component', () => {
     it('does not show Download All button for single artifact', () => {
       artifactsStore.addArtifact(createMockEvent('artifact-1', 'single.pdf'));
 
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const downloadAllBtn = document.querySelector('.download-all-btn');
       expect(downloadAllBtn).toBeNull();
@@ -128,7 +130,7 @@ describe('ArtifactsCard component', () => {
 
       const mockDownload = vi.mocked(api.downloadArtifact).mockResolvedValue();
 
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const downloadAllBtn = document.querySelector('.download-all-btn') as HTMLButtonElement;
       expect(downloadAllBtn).toBeTruthy();
@@ -148,7 +150,7 @@ describe('ArtifactsCard component', () => {
         () => new Promise(resolve => setTimeout(resolve, 50))
       );
 
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const downloadAllBtn = document.querySelector('.download-all-btn') as HTMLButtonElement;
       await fireEvent.click(downloadAllBtn);
@@ -164,7 +166,7 @@ describe('ArtifactsCard component', () => {
         () => new Promise(resolve => setTimeout(resolve, 100))
       );
 
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const downloadAllBtn = document.querySelector('.download-all-btn') as HTMLButtonElement;
       await fireEvent.click(downloadAllBtn);
@@ -183,7 +185,7 @@ describe('ArtifactsCard component', () => {
         .mockRejectedValueOnce(new Error('Failed'))
         .mockResolvedValueOnce();
 
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const downloadAllBtn = document.querySelector('.download-all-btn') as HTMLButtonElement;
       await fireEvent.click(downloadAllBtn);
@@ -199,7 +201,7 @@ describe('ArtifactsCard component', () => {
 
       vi.mocked(api.downloadArtifact).mockResolvedValue();
 
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const downloadAllBtn = document.querySelector('.download-all-btn') as HTMLButtonElement;
       await fireEvent.click(downloadAllBtn);
@@ -216,7 +218,7 @@ describe('ArtifactsCard component', () => {
       artifactsStore.addArtifact(createMockEvent('artifact-1', 'report1.pdf'));
       artifactsStore.addArtifact(createMockEvent('artifact-2', 'report2.pdf'));
 
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const downloadAllBtn = document.querySelector('.download-all-btn');
       expect(downloadAllBtn).toBeTruthy();
@@ -232,7 +234,7 @@ describe('ArtifactsCard component', () => {
         () => new Promise(resolve => setTimeout(resolve, 100))
       );
 
-      render(ArtifactsCard);
+      render(ArtifactsCardHost, { props: { artifactsStore, sessionStore } });
 
       const downloadAllBtn = document.querySelector('.download-all-btn') as HTMLButtonElement;
       await fireEvent.click(downloadAllBtn);

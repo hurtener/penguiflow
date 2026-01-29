@@ -142,7 +142,7 @@ def dev(project_root: str, host: str, port: int, no_browser: bool) -> None:
     "-t",
     default="react",
     type=click.Choice(
-        ["minimal", "react", "parallel", "flow", "controller", "lighthouse", "wayfinder", "analyst", "enterprise"],
+        ["minimal", "react", "parallel", "flow", "controller", "rag_server", "wayfinder", "analyst", "enterprise"],
         case_sensitive=False,
     ),
     show_default=True,
@@ -183,12 +183,22 @@ def dev(project_root: str, host: str, port: int, no_browser: bool) -> None:
 @click.option(
     "--with-a2a",
     is_flag=True,
-    help="Include A2A server/client stubs.",
+    help="Include A2A HTTP+JSON binding.",
+)
+@click.option(
+    "--with-rich-output",
+    is_flag=True,
+    help="Include rich output component tooling (UI artifacts).",
 )
 @click.option(
     "--no-memory",
     is_flag=True,
     help="Skip memory integration stubs.",
+)
+@click.option(
+    "--with-background-tasks",
+    is_flag=True,
+    help="Include background task orchestration (subagent spawning, task management).",
 )
 def new(
     name: str,
@@ -200,7 +210,9 @@ def new(
     with_streaming: bool,
     with_hitl: bool,
     with_a2a: bool,
+    with_rich_output: bool,
     no_memory: bool,
+    with_background_tasks: bool,
 ) -> None:
     """Create a new PenguiFlow agent project."""
     from pathlib import Path
@@ -219,7 +231,9 @@ def new(
             with_streaming=with_streaming,
             with_hitl=with_hitl,
             with_a2a=with_a2a,
+            with_rich_output=with_rich_output,
             no_memory=no_memory,
+            with_background_tasks=with_background_tasks,
         )
         if not result.success:
             sys.exit(1)

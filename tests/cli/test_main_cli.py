@@ -92,6 +92,17 @@ class TestNewCommand:
                 result = runner.invoke(app, ["new", "test-agent"])
                 assert result.exit_code == 1
 
+    def test_accepts_with_rich_output_flag(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            with patch("penguiflow.cli.new.run_new") as mock_run:
+                mock_result = MagicMock()
+                mock_result.success = True
+                mock_run.return_value = mock_result
+                result = runner.invoke(app, ["new", "test-agent", "--with-rich-output"])
+                assert result.exit_code == 0
+                assert mock_run.call_args.kwargs["with_rich_output"] is True
+
 
 class TestGenerateCommand:
     def test_error_when_both_init_and_spec(self, tmp_path: Path) -> None:

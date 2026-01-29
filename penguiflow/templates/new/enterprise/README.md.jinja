@@ -51,11 +51,11 @@ Input and output validation with detailed reporting:
 See: `src/{{ package_name }}/tools/validate.py`
 
 ### Server Integration
-HTTP and gRPC handler stubs for production deployment:
+HTTP handler stubs for production deployment:
 - FastAPI-ready HTTP handlers
 - Health check and metrics endpoints{% if with_hitl %}
 - Resume endpoint for human-in-the-loop{% endif %}{% if with_a2a %}
-- gRPC handler stub for agent-to-agent communication{% endif %}
+- A2A HTTP+JSON binding for agent-to-agent communication{% endif %}
 
 See: `src/{{ package_name }}/server/`
 
@@ -82,6 +82,9 @@ LOG_LEVEL=INFO
 # Planner limits
 PLANNER_MAX_ITERS=12
 PLANNER_HOP_BUDGET=8
+PLANNER_MULTI_ACTION_SEQUENTIAL=false
+PLANNER_MULTI_ACTION_READ_ONLY_ONLY=true
+PLANNER_MULTI_ACTION_MAX_TOOLS=2
 
 # Resilience (see above for circuit breaker, rate limiting, retry)
 
@@ -192,8 +195,7 @@ async def resume(request: dict):
 - [ ] Configure logging level for production (`LOG_LEVEL=WARNING`)
 - [ ] Set up health check monitoring
 - [ ] Test circuit breaker behavior under load
-- [ ] Validate error rate tracking and alerting{% if with_a2a %}
-- [ ] Implement gRPC protobuf definitions for A2A{% endif %}
+- [ ] Validate error rate tracking and alerting
 
 ## Testing
 
@@ -227,7 +229,7 @@ Tests cover:
 │   └── validate.py     # Multi-stage validation
 └── server/
     ├── __init__.py
-    └── handlers.py     # HTTP/gRPC integration stubs
+    └── handlers.py     # HTTP/A2A integration stubs
 ```
 
 ## Learn More

@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from .migration import dump_action_legacy, normalize_action
 from .models import PlannerAction
 
 
@@ -42,7 +43,7 @@ class TrajectoryStep:
 
     def dump(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "action": self.action.model_dump(mode="json"),
+            "action": dump_action_legacy(self.action),
             "observation": self._serialise_observation(),
             "error": self.error,
             "failure": dict(self.failure) if self.failure else None,
@@ -78,6 +79,7 @@ class Trajectory:
     summary: TrajectorySummary | None = None
     hint_state: dict[str, Any] = field(default_factory=dict)
     resume_user_input: str | None = None
+    steering_inputs: list[str] = field(default_factory=list)
 
     def to_history(self) -> list[dict[str, Any]]:
         return [step.dump() for step in self.steps]
@@ -100,6 +102,7 @@ class Trajectory:
             "summary": self.summary.model_dump(mode="json") if self.summary else None,
             "hint_state": dict(self.hint_state),
             "resume_user_input": self.resume_user_input,
+            "steering_inputs": list(self.steering_inputs),
         }
 
     @classmethod
@@ -116,7 +119,7 @@ class Trajectory:
         if isinstance(payload.get("metadata"), Mapping):
             trajectory.metadata.update(dict(payload["metadata"]))
         for step_data in payload.get("steps", []):
-            action = PlannerAction.model_validate(step_data["action"])
+            action = normalize_action(step_data["action"])
             streams_payload = step_data.get("streams")
             normalised_streams: dict[str, tuple[Mapping[str, Any], ...]] | None = None
             if isinstance(streams_payload, Mapping):
@@ -144,6 +147,7 @@ class Trajectory:
             trajectory.summary = TrajectorySummary.model_validate(summary_data)
         trajectory.hint_state.update(payload.get("hint_state", {}))
         trajectory.resume_user_input = payload.get("resume_user_input")
+        trajectory.steering_inputs = list(payload.get("steering_inputs") or [])
         trajectory.artifacts.update(payload.get("artifacts") or {})
         for src in payload.get("sources") or []:
             if isinstance(src, Mapping):
@@ -163,7 +167,8 @@ class Trajectory:
                 facts["last_error"] = last_step.error
         for step in self.steps:
             if step.error:
-                pending.append(f"retry {step.action.next_node or 'finish'}")
+                pending_target = "finish" if step.action.next_node == "final_response" else step.action.next_node
+                pending.append(f"retry {pending_target}")
         digest = None
         if last_observation is not None:
             digest_raw = json.dumps(last_observation, ensure_ascii=False)

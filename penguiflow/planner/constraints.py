@@ -112,7 +112,7 @@ class _CostTracker:
 
     def snapshot(self) -> dict[str, Any]:
         return {
-            "total_cost_usd": round(self._total_cost_usd, 6),
+            "total_cost_usd": round(self._total_cost_usd, 4),
             "main_llm_calls": self._main_llm_calls,
             "reflection_llm_calls": self._reflection_llm_calls,
             "summarizer_llm_calls": self._summarizer_llm_calls,

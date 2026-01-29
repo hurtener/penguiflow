@@ -6,7 +6,12 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:analyze": "VITE_ANALYZE=1 vite build",
+    "bundle:report": "node scripts/bundle-report.mjs",
     "preview": "vite preview",
+    "lint": "eslint . && svelte-check --tsconfig ./tsconfig.json",
+    "format": "prettier --write .",
+    "precommit": "npm run lint && npm run test",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -18,13 +23,30 @@
     "@sveltejs/vite-plugin-svelte": "^6.2.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/svelte": "^5.3.0",
+    "@typescript-eslint/eslint-plugin": "^8.44.0",
+    "@typescript-eslint/parser": "^8.44.0",
     "@vitest/coverage-v8": "^4.0.16",
+    "eslint": "^9.31.0",
+    "eslint-plugin-svelte": "^3.7.0",
     "jsdom": "^27.3.0",
+    "prettier": "^3.5.1",
+    "rollup-plugin-visualizer": "^6.0.3",
     "svelte": "^5.43.8",
+    "svelte-check": "^4.3.1",
+    "svelte-eslint-parser": "^1.1.2",
+    "typescript": "^5.8.3",
     "vite": "^7.2.4",
     "vitest": "^4.0.16"
   },
   "dependencies": {
-    "marked": "^17.0.1"
+    "@ag-ui/client": "^0.0.42",
+    "@ag-ui/core": "^0.0.42",
+    "dompurify": "^3.1.7",
+    "echarts": "^5.5.1",
+    "fast-json-patch": "^3.1.1",
+    "katex": "^0.16.11",
+    "marked": "^17.0.1",
+    "mermaid": "^11.4.1",
+    "plotly.js-dist-min": "^2.33.0"
   }
 }

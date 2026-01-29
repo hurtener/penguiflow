@@ -1,35 +1,51 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    sessionStore,
-    chatStore,
-    timelineStore,
-    agentStore,
-    specStore,
-    setupStore,
+    initStores,
   } from "$lib/stores";
   import {
     loadMeta,
     loadSpec,
+    loadComponentRegistry,
     fetchTrajectory,
-    chatStreamManager,
-    eventStreamManager,
+    createChatStreamManager,
+    createEventStreamManager,
+    createSessionStreamManager,
   } from "$lib/services";
-  import { Page } from "$lib/components/layout";
-  import { LeftSidebar, ProjectCard, SpecCard } from "$lib/components/sidebar-left";
-  import { CenterColumn } from "$lib/components/center";
-  import { TrajectoryCard } from "$lib/components/center/trajectory";
-  import { RightSidebar } from "$lib/components/sidebar-right";
-  import { EventsCard } from "$lib/components/sidebar-right/events";
-  import { ConfigCard } from "$lib/components/sidebar-right/config";
-  import { ArtifactsCard } from "$lib/components/sidebar-right/artifacts";
-  import { MobileHeader, MobileBottomPanel } from "$lib/components/mobile";
-  import { ChatCard } from "$lib/components/center/chat";
+  import { Page } from "$lib/components/containers";
+  import { LeftSidebar, ProjectCard, SpecCard } from "$lib/components/features/sidebar-left";
+  // GeneratorCard intentionally disabled - validate/generate not active
+  import { CenterColumn } from "$lib/components/features/center";
+  import { TrajectoryCard } from "$lib/components/features/trajectory";
+  import { RightSidebar } from "$lib/components/features/sidebar-right";
+  import { EventsCard } from "$lib/components/features/sidebar-right/events";
+  import { ConfigCard } from "$lib/components/features/sidebar-right/config";
+  import { ArtifactsCard } from "$lib/components/features/sidebar-right/artifacts";
+  import { TasksCard } from "$lib/components/features/sidebar-right/tasks";
+  import { NotificationsCard } from "$lib/components/features/sidebar-right/notifications";
+  import { MobileHeader, MobileBottomPanel } from "$lib/components/features/mobile";
+  import { ChatCard } from "$lib/components/features/chat";
+  import type { ChatMessage, PendingInteraction } from '$lib/types';
+
+  const stores = initStores();
+  const {
+    sessionStore,
+    chatStore,
+    trajectoryStore,
+    agentStore,
+    specStore,
+    setupStore,
+    componentRegistryStore,
+    interactionsStore,
+  } = stores;
+  const chatStreamManager = createChatStreamManager(stores);
+  const eventStreamManager = createEventStreamManager(stores);
+  const sessionStreamManager = createSessionStreamManager(stores);
 
   // Reference to chat body for auto-scrolling
   let chatBodyEl = $state<HTMLDivElement | null>(null);
-  let centerColumnRef: CenterColumn;
-  let chatCardRef: ChatCard;
+  let centerColumnRef = $state<CenterColumn | undefined>(undefined);
+  let chatCardRef = $state<ChatCard | undefined>(undefined);
 
   // Responsive breakpoint detection
   let isMobile = $state(false);
@@ -41,7 +57,7 @@
   // Auto-scroll to bottom when new messages arrive
   $effect(() => {
     const _msgCount = chatStore.messages.length;
-    const streamingMsg = chatStore.messages.find((m) => m.isStreaming);
+    const streamingMsg = chatStore.messages.find((m: ChatMessage) => m.isStreaming);
     const _streamingText = streamingMsg ? `${streamingMsg.text}${streamingMsg.observations ?? ""}` : "";
 
     if (chatBodyEl) {
@@ -61,16 +77,31 @@
       window.removeEventListener('resize', checkMobile);
       chatStreamManager.close();
       eventStreamManager.close();
+      sessionStreamManager.close();
     };
   });
 
+  $effect(() => {
+    const sessionId = sessionStore.sessionId;
+    if (sessionId) {
+      sessionStreamManager.start(sessionId);
+    }
+  });
+
   const initializeApp = async () => {
-    const [metaData, specData] = await Promise.all([loadMeta(), loadSpec()]);
+    const [metaData, specData, componentData] = await Promise.all([
+      loadMeta(),
+      loadSpec(),
+      loadComponentRegistry()
+    ]);
     if (metaData) {
       agentStore.setFromResponse(metaData);
     }
     if (specData) {
       specStore.setFromSpecData(specData);
+    }
+    if (componentData) {
+      componentRegistryStore.setFromPayload(componentData);
     }
   };
 
@@ -92,7 +123,8 @@
     const { toolContext, llmContext } = contexts;
 
     sessionStore.isSending = true;
-    timelineStore.clearArtifacts();
+    trajectoryStore.clearArtifacts();
+    interactionsStore.clearPendingInteraction();
     chatStore.addUserMessage(query);
     chatStore.clearInput();
 
@@ -107,13 +139,67 @@
           if (traceId) {
             const payload = await fetchTrajectory(traceId, sessionStore.sessionId);
             if (payload && sessionStore.activeTraceId === traceId) {
-              timelineStore.setFromPayload(payload);
+              trajectoryStore.setFromPayload(payload);
             }
             eventStreamManager.start(traceId, sessionStore.sessionId);
           }
           sessionStore.isSending = false;
         },
         onError: () => {
+          sessionStore.isSending = false;
+        }
+      },
+      setupStore.useAgui ? 'agui' : 'sse'
+    );
+  };
+
+  const resumeInteraction = (interaction: PendingInteraction, result: unknown) => {
+    if (!setupStore.useAgui) {
+      setupStore.error = 'Interactive components require AG-UI streaming.';
+      return;
+    }
+
+    // Check resume_token BEFORE clearing state
+    if (!interaction.resume_token) {
+      setupStore.error = 'Cannot submit: session expired or interrupted. Please resend your message.';
+      interactionsStore.clearPendingInteraction();
+      return;
+    }
+
+    const contexts = setupStore.parseContexts();
+    if (!contexts) {
+      if (isMobile) {
+        chatCardRef?.switchToSetup();
+      } else {
+        centerColumnRef?.switchToSetup();
+      }
+      return;
+    }
+    const { toolContext } = contexts;
+
+    sessionStore.isSending = true;
+    trajectoryStore.clearArtifacts();
+    interactionsStore.clearPendingInteraction();
+
+    chatStreamManager.resumeAgui(
+      interaction,
+      result,
+      sessionStore.sessionId,
+      toolContext,
+      {
+        onDone: async (traceId) => {
+          sessionStore.activeTraceId = traceId;
+          if (traceId) {
+            const payload = await fetchTrajectory(traceId, sessionStore.sessionId);
+            if (payload && sessionStore.activeTraceId === traceId) {
+              trajectoryStore.setFromPayload(payload);
+            }
+            eventStreamManager.start(traceId, sessionStore.sessionId);
+          }
+          sessionStore.isSending = false;
+        },
+        onError: (error) => {
+          setupStore.error = error || 'Failed to submit response. Please try again.';
           sessionStore.isSending = false;
         }
       }
@@ -137,7 +223,12 @@
     </MobileHeader>
 
     <main class="mobile-main">
-      <ChatCard bind:this={chatCardRef} onSendChat={sendChat} bind:chatBodyEl />
+      <ChatCard
+        bind:this={chatCardRef}
+        onSendChat={sendChat}
+        onInteractionResult={resumeInteraction}
+        bind:chatBodyEl
+      />
     </main>
 
     <MobileBottomPanel>
@@ -150,6 +241,12 @@
       {#snippet artifactsContent()}
         <ArtifactsCard />
       {/snippet}
+      {#snippet tasksContent()}
+        <TasksCard />
+      {/snippet}
+      {#snippet notificationsContent()}
+        <NotificationsCard />
+      {/snippet}
     </MobileBottomPanel>
   </div>
 {:else}
@@ -158,12 +255,14 @@
     <LeftSidebar>
       <ProjectCard />
       <SpecCard />
+      <!-- GeneratorCard disabled -->
       <ConfigCard />
     </LeftSidebar>
 
     <CenterColumn
       bind:this={centerColumnRef}
       onSendChat={sendChat}
+      onInteractionResult={resumeInteraction}
       bind:chatBodyEl
     />
 

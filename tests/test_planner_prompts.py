@@ -84,6 +84,14 @@ def test_build_system_prompt_has_tagged_sections() -> None:
     assert "<available_tools>" in prompt
 
 
+def test_build_system_prompt_action_schema_snapshot_markers() -> None:
+    """Guardrails: keep core schema markers stable for repair behavior and UI tooling."""
+    prompt = prompts.build_system_prompt([])
+    assert 'Emit keys in this order for stability: next_node, args.' in prompt
+    assert "args.answer" in prompt
+    assert 'next_node is "final_response"' in prompt
+
+
 def test_build_system_prompt_extra_in_tagged_section() -> None:
     prompt = prompts.build_system_prompt([], extra="Custom instructions")
     assert "<additional_guidance>" in prompt
@@ -159,7 +167,7 @@ def test_render_empty_parallel_plan() -> None:
 def test_render_parallel_with_next_node() -> None:
     result = prompts.render_parallel_with_next_node("next_tool")
     assert "next_tool" in result
-    assert "cannot set next_node" in result
+    assert "must set next_node" in result
 
 
 def test_render_parallel_unknown_failure() -> None:

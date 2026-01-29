@@ -1,0 +1,398 @@
+"""Main orchestrator for {{ project_name }}."""
+
+from __future__ import annotations
+
+import logging
+import secrets
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from penguiflow.errors import FlowError
+from penguiflow.planner import PlannerFinish, PlannerPause
+{% if with_background_tasks %}
+from penguiflow.planner import BackgroundTasksConfig, ReactPlanner
+from penguiflow.sessions import SessionLimits, SessionManager
+from penguiflow.sessions.task_service import InProcessTaskService
+from penguiflow.sessions.task_tools import SUBAGENT_FLAG_KEY, TASK_SERVICE_KEY
+from penguiflow.sessions.telemetry import LoggingTaskTelemetrySink
+from penguiflow.sessions.tool_jobs import build_tool_job_pipeline
+{% endif %}
+
+{% if with_a2a %}
+from .a2a import A2AServer
+{% endif %}
+from .clients.rag_server import RagServerClient
+{% if memory_enabled %}
+from .clients.memory import MemoryClient
+{% endif %}
+from penguiflow.steering import SteeringInbox
+
+from .config import Config
+from .models import QueryResult
+from .planner import PlannerBundle, build_planner
+from .telemetry import AgentTelemetry
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class {{ class_name }}FlowError(RuntimeError):
+    """Raised when planner execution fails."""
+
+    def __init__(self, flow_error: FlowError | str) -> None:
+        message = flow_error.message if isinstance(flow_error, FlowError) else str(flow_error)
+        super().__init__(message)
+        self.flow_error = flow_error
+
+
+@dataclass
+class AgentResponse:
+    """Response envelope returned by the orchestrator."""
+
+    answer: str | None
+    trace_id: str
+    metadata: dict[str, Any] | None = None
+{% if with_streaming %}
+    streams: dict[str, list[dict[str, Any]]] | None = None
+{% endif %}
+{% if with_hitl %}
+    pause_token: str | None = None
+{% endif %}
+
+
+def _collect_streams(metadata: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Aggregate stream chunks from planner metadata."""
+    streams: dict[str, list[dict[str, Any]]] = {}
+    for step in metadata.get("steps", []):
+        for stream_id, chunks in (step.get("streams") or {}).items():
+            streams.setdefault(stream_id, []).extend(chunks)
+    return streams
+
+
+def _extract_answer(payload: Any) -> str | None:
+    """Normalise planner payloads to a displayable answer."""
+
+    if payload is None:
+        return None
+    if isinstance(payload, Mapping):
+        for key in ("raw_answer", "answer", "text", "content", "message", "greeting", "response", "result"):
+            if key in payload:
+                value = payload.get(key)
+                return None if value is None else str(value)
+        return str(payload)
+
+    for attr in ("raw_answer", "answer", "text", "content", "message", "greeting", "response", "result"):
+        if hasattr(payload, attr):
+            value = getattr(payload, attr)
+            return None if value is None else str(value)
+
+    return str(payload)
+
+
+class {{ class_name }}Orchestrator:
+    """Production-style orchestrator using ReactPlanner."""
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        telemetry: AgentTelemetry | None = None,
+{% if with_background_tasks %}
+        task_service: Any | None = None,
+        session_manager: SessionManager | None = None,
+{% endif %}
+    ) -> None:
+        self._config = config
+{% if memory_enabled %}
+        self._memory = MemoryClient(config.memory_base_url)
+{% else %}
+        self._memory = None
+{% endif %}
+        self._rag_server = RagServerClient(config.rag_server_base_url)
+        self._telemetry = telemetry or AgentTelemetry(
+            flow_name="{{ project_name }}",
+            logger=_LOGGER,
+        )
+
+        planner_bundle: PlannerBundle = build_planner(
+            config,
+            event_callback=self._telemetry.record_planner_event,
+        )
+        self._planner = planner_bundle.planner
+        self._tool_context_defaults: dict[str, Any] = {}
+{% if with_background_tasks %}
+        self._session_manager = session_manager
+        self._task_service = task_service
+        if self._task_service is not None:
+            self._tool_context_defaults[TASK_SERVICE_KEY] = self._task_service
+            self._tool_context_defaults[SUBAGENT_FLAG_KEY] = False
+        elif config.background_tasks_enabled:
+            self._setup_background_tasks_fallback()
+{% endif %}
+{% if with_a2a %}
+        self._a2a_server = A2AServer(self)
+{% endif %}
+        self._started = True
+
+{% if with_background_tasks %}
+    def _setup_background_tasks_fallback(self) -> None:
+        if self._task_service is not None:
+            return
+        if not isinstance(self._planner, ReactPlanner):
+            raise RuntimeError("background_tasks_fallback_requires_react_planner")
+
+        _LOGGER.warning(
+            "No task_service provided; using in-process fallback (SessionManager + InProcessTaskService)."
+        )
+
+        limits = SessionLimits(
+            max_tasks_per_session=self._config.background_tasks_max_tasks_per_session,
+            max_background_tasks=self._config.background_tasks_max_concurrent_tasks,
+            max_concurrent_tasks=self._config.background_tasks_max_concurrent_tasks,
+            max_task_runtime_s=float(self._config.background_tasks_task_timeout_s),
+        )
+        self._session_manager = self._session_manager or SessionManager(
+            limits=limits,
+            telemetry_sink=LoggingTaskTelemetrySink(logger=_LOGGER),
+        )
+
+        planner = self._planner
+        spec_by_name = getattr(planner, "_spec_by_name", {}) or {}
+        artifact_store = getattr(planner, "artifact_store", None)
+
+        tool_job_factory = None
+        if spec_by_name and artifact_store is not None:
+
+            def _tool_job_factory(tool_name: str, tool_args: Any):
+                spec = spec_by_name.get(tool_name)
+                if spec is None:
+                    raise RuntimeError(f"tool_not_found:{tool_name}")
+                return build_tool_job_pipeline(
+                    spec=spec,
+                    args_payload=dict(tool_args or {}),
+                    artifacts=artifact_store,
+                )
+
+            tool_job_factory = _tool_job_factory
+
+        subagent_background_cfg = BackgroundTasksConfig(enabled=False, include_prompt_guidance=False)
+
+        self._task_service = InProcessTaskService(
+            sessions=self._session_manager,
+            planner_factory=planner.fork,
+            subagent_planner_factory=lambda: planner.fork(
+                catalog_filter=lambda spec: not str(spec.name).startswith("tasks."),
+                background_tasks=subagent_background_cfg,
+            ),
+            tool_job_factory=tool_job_factory,
+        )
+        self._tool_context_defaults[TASK_SERVICE_KEY] = self._task_service
+        self._tool_context_defaults[SUBAGENT_FLAG_KEY] = False
+
+{% endif %}
+
+    async def execute(
+        self,
+        query: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        tool_context: Mapping[str, Any] | None = None,
+        steering: SteeringInbox | None = None,
+    ) -> AgentResponse:
+        """Execute the ReactPlanner with RAG server integration."""
+        trace_id = secrets.token_hex(8)
+        turn_id = secrets.token_hex(8)
+
+{% if memory_enabled %}
+        conscious = await self._memory.start_session(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        retrieval = await self._memory.auto_retrieve(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            prompt=query,
+        )
+{% else %}
+        conscious = {"conscious": []}
+        retrieval = {"snippets": []}
+{% endif %}
+
+        llm_context = {
+            "conscious_memories": conscious.get("conscious", []),
+            "retrieved_memories": retrieval.get("snippets", []),
+        }
+        base_tool_context = {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "turn_id": turn_id,
+            "task_id": trace_id,
+            "is_subagent": False,
+            "rag_server_base_url": self._config.rag_server_base_url,
+            "status_publisher": self._telemetry.publish_status,
+        }
+        merged_tool_context = {
+            **self._tool_context_defaults,
+            **(dict(tool_context or {})),
+            **base_tool_context,
+        }
+{% if with_background_tasks %}
+        if self._session_manager is not None:
+            session = await self._session_manager.get_or_create(session_id)
+            snapshot_tool_context = dict(merged_tool_context)
+            snapshot_tool_context.pop(TASK_SERVICE_KEY, None)
+            session.update_context(llm_context=dict(llm_context), tool_context=snapshot_tool_context)
+{% endif %}
+
+        result = await self._planner.run(
+            query=query,
+            llm_context=llm_context,
+            tool_context=merged_tool_context,
+            steering=steering,
+        )
+{% if with_streaming %}
+        streams = _collect_streams(getattr(result, "metadata", {}) or {})
+{% endif %}
+        if isinstance(result, PlannerPause):
+{% if with_hitl %}
+            return AgentResponse(
+                answer=None,
+                trace_id=trace_id,
+                metadata={"reason": result.reason, "payload": dict(result.payload)},
+{% if with_streaming %}
+                streams=streams or None,
+{% endif %}
+                pause_token=result.resume_token,
+            )
+{% else %}
+            raise {{ class_name }}FlowError("Planner paused unexpectedly")
+{% endif %}
+        if not isinstance(result, PlannerFinish):
+            raise {{ class_name }}FlowError("Planner did not finish successfully")
+
+        payload: Any = result.payload
+        answer_text = _extract_answer(payload)
+
+{% if memory_enabled %}
+        await self._memory.ingest_interaction(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            user_prompt=query,
+            agent_response=answer_text,
+        )
+{% endif %}
+
+        return AgentResponse(
+            answer=answer_text,
+            trace_id=trace_id,
+            metadata=dict(result.metadata),
+{% if with_streaming %}
+            streams=streams or None,
+{% endif %}
+        )
+
+{% if with_hitl %}
+    async def resume(
+        self,
+        resume_token: str,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        user_input: str | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+        steering: SteeringInbox | None = None,
+    ) -> AgentResponse:
+        """Resume a paused planner execution."""
+        trace_id = secrets.token_hex(8)
+        turn_id = secrets.token_hex(8)
+        base_tool_context = {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "turn_id": turn_id,
+            "task_id": trace_id,
+            "is_subagent": False,
+            "rag_server_base_url": self._config.rag_server_base_url,
+            "status_publisher": self._telemetry.publish_status,
+        }
+        merged_tool_context = {
+            **self._tool_context_defaults,
+            **(dict(tool_context or {})),
+            **base_tool_context,
+        }
+{% if with_background_tasks %}
+        if self._session_manager is not None:
+            session = await self._session_manager.get_or_create(session_id)
+            snapshot_tool_context = dict(merged_tool_context)
+            snapshot_tool_context.pop(TASK_SERVICE_KEY, None)
+            session.update_context(llm_context={}, tool_context=snapshot_tool_context)
+{% endif %}
+        result = await self._planner.resume(
+            token=resume_token,
+            user_input=user_input,
+            tool_context=merged_tool_context,
+            steering=steering,
+        )
+{% if with_streaming %}
+        streams = _collect_streams(getattr(result, "metadata", {}) or {})
+{% endif %}
+        if isinstance(result, PlannerPause):
+            return AgentResponse(
+                answer=None,
+                trace_id=trace_id,
+                metadata={"reason": result.reason, "payload": dict(result.payload)},
+{% if with_streaming %}
+                streams=streams or None,
+{% endif %}
+                pause_token=result.resume_token,
+            )
+        if not isinstance(result, PlannerFinish):
+            raise {{ class_name }}FlowError("Planner did not finish successfully")
+
+        payload: Any = result.payload
+        answer_text = _extract_answer(payload)
+
+{% if memory_enabled %}
+        await self._memory.ingest_interaction(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            user_prompt=f"[resume] {user_input or ''}",
+            agent_response=answer_text,
+        )
+{% endif %}
+
+        return AgentResponse(
+            answer=answer_text,
+            trace_id=trace_id,
+            metadata=dict(result.metadata),
+{% if with_streaming %}
+            streams=streams or None,
+{% endif %}
+        )
+{% endif %}
+
+    async def stop(self) -> None:
+        """Graceful shutdown hook."""
+        if self._started:
+{% if with_a2a %}
+            if getattr(self, "_a2a_server", None):
+                await self._a2a_server.stop()
+{% endif %}
+            self._started = False
+            _LOGGER.info("{{ project_name }} orchestrator stopped")
+
+{% if with_a2a %}
+    async def start_a2a(self) -> None:
+        """Start the A2A HTTP+JSON server."""
+        await self._a2a_server.start()
+{% endif %}

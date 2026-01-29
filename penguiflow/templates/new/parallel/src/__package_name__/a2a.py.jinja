@@ -1,31 +1,125 @@
 {% if with_a2a -%}
-"""A2A server stub for remote orchestration."""
+"""A2A HTTP+JSON server wiring."""
 
 from __future__ import annotations
 
+import json
 from typing import Any
+
+from fastapi import FastAPI
+
+from penguiflow import Message as FlowMessage
+from penguiflow import Node, NodePolicy, create
+from penguiflow_a2a import A2AConfig, A2AService, create_a2a_http_app
+from penguiflow_a2a.models import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+
+
+def _build_agent_card(agent_url: str) -> AgentCard:
+    return AgentCard(
+        protocol_versions=["0.3"],
+        name="{{ project_name }}",
+        description="A2A entrypoint for {{ project_name }}.",
+        supported_interfaces=[AgentInterface(url=agent_url, protocol_binding="HTTP+JSON")],
+        version="0.1.0",
+        capabilities=AgentCapabilities(
+            streaming=True,
+            push_notifications=False,
+            extended_agent_card=False,
+            state_transition_history=False,
+        ),
+        default_input_modes=["application/a2a+json", "application/json"],
+        default_output_modes=["application/a2a+json", "application/json"],
+        skills=[
+            AgentSkill(
+                id="orchestrate",
+                name="orchestrate",
+                description="Run the main agent workflow.",
+                tags=["orchestrate"],
+            )
+        ],
+    )
+
+
+def _resolve_query(payload: Any) -> str:
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("query", "text", "prompt"):
+            value = payload.get(key)
+            if value:
+                return str(value)
+        return json.dumps(payload)
+    return str(payload)
 
 
 class A2AServer:
-    """Placeholder A2A server for remote agent communication."""
+    """A2A HTTP+JSON server wrapper for this agent."""
 
-    def __init__(self, orchestrator: Any, *, host: str = "127.0.0.1", port: int = 9000) -> None:
+    def __init__(
+        self,
+        orchestrator: Any,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 9000,
+        agent_url: str | None = None,
+        include_docs: bool = True,
+    ) -> None:
         self.orchestrator = orchestrator
         self.host = host
         self.port = port
+        self.agent_url = agent_url or f"http://{host}:{port}"
         self.started = False
 
+        flow = getattr(orchestrator, "_flow", None)
+        registry = getattr(orchestrator, "_registry", None)
+        if flow is None:
+
+            async def _adapter(message: FlowMessage, _ctx: Any) -> dict[str, Any]:
+                tenant_id = message.headers.tenant
+                payload = message.payload
+                if isinstance(payload, dict):
+                    tenant_id = payload.get("tenant_id") or payload.get("tenantId") or tenant_id
+                    user_id = payload.get("user_id") or payload.get("userId") or "a2a-user"
+                    session_id = payload.get("session_id") or payload.get("sessionId") or "a2a-session"
+                else:
+                    user_id = "a2a-user"
+                    session_id = "a2a-session"
+                response = await orchestrator.execute(
+                    query=_resolve_query(payload),
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+                result: dict[str, Any] = {
+                    "answer": response.answer,
+                    "trace_id": response.trace_id,
+                    "metadata": response.metadata,
+                }
+                if getattr(response, "streams", None):
+                    result["streams"] = response.streams
+                if getattr(response, "pause_token", None):
+                    result["pause_token"] = response.pause_token
+                return result
+
+            node = Node(_adapter, name="a2a_entry", policy=NodePolicy(validate="none"))
+            flow = create(node.to(), emit_errors_to_rookery=True)
+            registry = None
+
+        self._service = A2AService(
+            flow,
+            agent_card=_build_agent_card(self.agent_url),
+            config=A2AConfig(agent_url=self.agent_url),
+            registry=registry,
+        )
+        self.app: FastAPI = create_a2a_http_app(self._service, include_docs=include_docs)
+
     async def start(self) -> None:
-        """Start the server (stub)."""
+        await self._service.start()
         self.started = True
 
     async def stop(self) -> None:
-        """Stop the server (stub)."""
+        await self._service.stop()
         self.started = False
-
-    async def handle_ping(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Example handler that echoes payload."""
-        return {"status": "ok", "payload": payload or {}}
 {% else -%}
-# A2A flag not enabled; add `--with-a2a` to scaffold server stubs.
+# A2A flag not enabled; add `--with-a2a` to scaffold server wiring.
 {% endif %}
