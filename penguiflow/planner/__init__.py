@@ -12,7 +12,10 @@ from .models import (
     SkillPackConfig,
     SkillsConfig,
     SkillsDirectoryConfig,
+    ToolDirectoryConfig,
     ToolExamplesConfig,
+    ToolGroupConfig,
+    ToolHintsConfig,
 )
 from .react import (
     JoinInjection,
@@ -59,6 +62,9 @@ __all__ = [
     "ToolContext",
     "ToolPolicy",
     "ToolExamplesConfig",
+    "ToolDirectoryConfig",
+    "ToolGroupConfig",
+    "ToolHintsConfig",
     "ToolSearchConfig",
     "ToolVisibilityPolicy",
     "Trajectory",

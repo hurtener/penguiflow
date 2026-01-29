@@ -226,6 +226,22 @@ Most tools can be hidden by default (deferred) to reduce prompt bloat.
 - `rebuild_cache_on_init`: force reindex on startup.
 - `max_search_results`: upper bound for returned results.
 
+Optional prompt aids (opt-in):
+
+- `hints.*`: inject a bounded per-turn shortlist of relevant tools into the prompt (powered by an internal `tool_search`).
+  - `hints.enabled`: turn on per-turn hints.
+  - `hints.top_k`: number of suggested tools to inject (default 5).
+  - `hints.search_type`: `fts` | `regex` | `exact`.
+  - `hints.include_always_loaded`: whether always-visible tools can appear in the hints.
+
+- `directory.*`: inject a bounded “tool groups” directory into the prompt so the model has a map of what exists.
+  - `directory.enabled`: turn on tool directory.
+  - `directory.max_groups`: cap groups in the prompt.
+  - `directory.max_tools_per_group`: include a small preview list per group.
+  - `directory.include_tool_counts`: show group tool counts.
+  - `directory.include_default_groups`: auto-group by namespace (e.g. MCP tool nodes).
+  - `directory.groups`: developer-defined group rules (namespace/tag/pattern/name matching).
+
 Note: `activation_scope: session` requires a stable `tool_context.session_id` and concurrency-safe session serialization.
 
 ### Skills (Local Skill Packs) (spec: `planner.skills`)
@@ -322,7 +338,7 @@ All of these can be overridden without regenerating:
 - `PLANNER_MAX_ITERS`, `PLANNER_HOP_BUDGET`, `PLANNER_ABSOLUTE_MAX_PARALLEL`
 - `PLANNER_STREAM_FINAL_RESPONSE`
 - `PLANNER_MULTI_ACTION_SEQUENTIAL`, `PLANNER_MULTI_ACTION_READ_ONLY_ONLY`, `PLANNER_MULTI_ACTION_MAX_TOOLS`
-- `TOOL_SEARCH_*` (enabled/cache_dir/default_loading_mode/activation_scope/always_loaded_patterns/etc.)
+- `TOOL_SEARCH_*` (enabled/cache_dir/default_loading_mode/activation_scope/always_loaded_patterns/hints/directory/etc.)
 - `SKILLS_*` (enabled/cache_dir/max_tokens/top_k/redaction/directory settings; packs are spec-defined)
 - `RICH_OUTPUT_ENABLED`, `RICH_OUTPUT_ALLOWLIST`, `RICH_OUTPUT_INCLUDE_PROMPT_CATALOG`, `RICH_OUTPUT_INCLUDE_PROMPT_EXAMPLES`, `RICH_OUTPUT_MAX_PAYLOAD_BYTES`, `RICH_OUTPUT_MAX_TOTAL_BYTES`
 - `ARTIFACT_STORE_ENABLED`, `ARTIFACT_STORE_TTL_SECONDS`, `ARTIFACT_STORE_MAX_*`, `ARTIFACT_STORE_CLEANUP_STRATEGY`
@@ -480,13 +496,27 @@ planner:
     enabled: true
     cache_dir: .penguiflow
     default_loading_mode: deferred
-    always_loaded_patterns: [tasks.*, tool_search, finish]
+    always_loaded_patterns: [tasks.*, tool_search, tool_get, finish]
     activation_scope: run
     preferred_namespaces: []
     fts_fallback_to_regex: true
     enable_incremental_index: true
     rebuild_cache_on_init: false
     max_search_results: 10
+
+    hints:
+      enabled: true
+      top_k: 5
+      include_always_loaded: false
+      search_type: fts
+
+    directory:
+      enabled: true
+      max_groups: 20
+      max_tools_per_group: 6
+      include_tool_counts: true
+      include_default_groups: true
+      groups: []
 
   skills:
     enabled: true
@@ -658,13 +688,25 @@ PLANNER_MULTI_ACTION_MAX_TOOLS=2
 TOOL_SEARCH_ENABLED=true
 TOOL_SEARCH_CACHE_DIR=.penguiflow
 TOOL_SEARCH_DEFAULT_LOADING_MODE=deferred
-TOOL_SEARCH_ALWAYS_LOADED_PATTERNS=tasks.*,tool_search,finish
+TOOL_SEARCH_ALWAYS_LOADED_PATTERNS=tasks.*,tool_search,tool_get,finish
 TOOL_SEARCH_ACTIVATION_SCOPE=run
 TOOL_SEARCH_PREFERRED_NAMESPACES=
 TOOL_SEARCH_FTS_FALLBACK_TO_REGEX=true
 TOOL_SEARCH_ENABLE_INCREMENTAL_INDEX=true
 TOOL_SEARCH_REBUILD_CACHE_ON_INIT=false
 TOOL_SEARCH_MAX_SEARCH_RESULTS=10
+
+# Optional prompt aids
+TOOL_SEARCH_HINTS_ENABLED=true
+TOOL_SEARCH_HINTS_TOP_K=5
+TOOL_SEARCH_HINTS_INCLUDE_ALWAYS_LOADED=false
+TOOL_SEARCH_HINTS_SEARCH_TYPE=fts
+
+TOOL_SEARCH_DIRECTORY_ENABLED=true
+TOOL_SEARCH_DIRECTORY_MAX_GROUPS=20
+TOOL_SEARCH_DIRECTORY_MAX_TOOLS_PER_GROUP=6
+TOOL_SEARCH_DIRECTORY_INCLUDE_TOOL_COUNTS=true
+TOOL_SEARCH_DIRECTORY_INCLUDE_DEFAULT_GROUPS=true
 
 # =============================================================================
 # Skills (Local Skill Packs)

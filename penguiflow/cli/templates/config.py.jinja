@@ -103,6 +103,19 @@ class Config:
     tool_search_rebuild_cache_on_init: bool = {{ tool_search_rebuild_cache_on_init }}
     tool_search_max_search_results: int = {{ tool_search_max_search_results }}
 
+    # Tool Search: Prompt Aids (optional)
+    tool_search_hints_enabled: bool = {{ tool_search_hints_enabled }}
+    tool_search_hints_top_k: int = {{ tool_search_hints_top_k }}
+    tool_search_hints_include_always_loaded: bool = {{ tool_search_hints_include_always_loaded }}
+    tool_search_hints_search_type: str = "{{ tool_search_hints_search_type }}"
+
+    tool_search_directory_enabled: bool = {{ tool_search_directory_enabled }}
+    tool_search_directory_max_groups: int = {{ tool_search_directory_max_groups }}
+    tool_search_directory_max_tools_per_group: int = {{ tool_search_directory_max_tools_per_group }}
+    tool_search_directory_include_tool_counts: bool = {{ tool_search_directory_include_tool_counts }}
+    tool_search_directory_include_default_groups: bool = {{ tool_search_directory_include_default_groups }}
+    tool_search_directory_groups: list[dict[str, Any]] = field(default_factory=lambda: {{ tool_search_directory_groups }})
+
     # Skills (Local Skill Packs)
     skills_enabled: bool = {{ skills_enabled }}
     skills_cache_dir: str = "{{ skills_cache_dir }}"
@@ -247,6 +260,44 @@ class Config:
             tool_search_max_search_results=_env_int(
                 "TOOL_SEARCH_MAX_SEARCH_RESULTS",
                 {{ tool_search_max_search_results }},
+            ),
+
+            tool_search_hints_enabled=_env_flag(
+                "TOOL_SEARCH_HINTS_ENABLED",
+                {{ tool_search_hints_enabled }},
+            ),
+            tool_search_hints_top_k=_env_int(
+                "TOOL_SEARCH_HINTS_TOP_K",
+                {{ tool_search_hints_top_k }},
+            ),
+            tool_search_hints_include_always_loaded=_env_flag(
+                "TOOL_SEARCH_HINTS_INCLUDE_ALWAYS_LOADED",
+                {{ tool_search_hints_include_always_loaded }},
+            ),
+            tool_search_hints_search_type=_env_str(
+                "TOOL_SEARCH_HINTS_SEARCH_TYPE",
+                "{{ tool_search_hints_search_type }}",
+            ),
+
+            tool_search_directory_enabled=_env_flag(
+                "TOOL_SEARCH_DIRECTORY_ENABLED",
+                {{ tool_search_directory_enabled }},
+            ),
+            tool_search_directory_max_groups=_env_int(
+                "TOOL_SEARCH_DIRECTORY_MAX_GROUPS",
+                {{ tool_search_directory_max_groups }},
+            ),
+            tool_search_directory_max_tools_per_group=_env_int(
+                "TOOL_SEARCH_DIRECTORY_MAX_TOOLS_PER_GROUP",
+                {{ tool_search_directory_max_tools_per_group }},
+            ),
+            tool_search_directory_include_tool_counts=_env_flag(
+                "TOOL_SEARCH_DIRECTORY_INCLUDE_TOOL_COUNTS",
+                {{ tool_search_directory_include_tool_counts }},
+            ),
+            tool_search_directory_include_default_groups=_env_flag(
+                "TOOL_SEARCH_DIRECTORY_INCLUDE_DEFAULT_GROUPS",
+                {{ tool_search_directory_include_default_groups }},
             ),
 
             # Skills

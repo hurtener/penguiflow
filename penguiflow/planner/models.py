@@ -423,6 +423,34 @@ class ToolPolicy(BaseModel):
         return True
 
 
+class ToolHintsConfig(BaseModel):
+    enabled: bool = False
+    top_k: int = Field(default=5, ge=1, le=20)
+    include_always_loaded: bool = False
+    search_type: Literal["fts", "regex", "exact"] = "fts"
+
+
+class ToolGroupConfig(BaseModel):
+    name: str
+    title: str | None = None
+    trigger: str | None = None
+    task_type: Literal["browser", "api", "code", "domain", "unknown"] | None = None
+
+    match_namespaces: list[str] = Field(default_factory=list)
+    match_tags: list[str] = Field(default_factory=list)
+    match_name_patterns: list[str] = Field(default_factory=list)
+    tool_names: list[str] = Field(default_factory=list)
+
+
+class ToolDirectoryConfig(BaseModel):
+    enabled: bool = False
+    max_groups: int = Field(default=20, ge=1, le=100)
+    max_tools_per_group: int = Field(default=6, ge=0, le=50)
+    include_tool_counts: bool = True
+    include_default_groups: bool = True
+    groups: list[ToolGroupConfig] = Field(default_factory=list)
+
+
 class ToolSearchConfig(BaseModel):
     enabled: bool = False
     cache_dir: str = ".penguiflow"
@@ -434,6 +462,10 @@ class ToolSearchConfig(BaseModel):
     enable_incremental_index: bool = True
     rebuild_cache_on_init: bool = False
     max_search_results: int = 10
+
+    # Optional prompt aids (opt-in)
+    hints: ToolHintsConfig = Field(default_factory=ToolHintsConfig)
+    directory: ToolDirectoryConfig = Field(default_factory=ToolDirectoryConfig)
 
 
 class ToolExamplesConfig(BaseModel):

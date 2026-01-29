@@ -590,6 +590,71 @@ def render_skill_directory(
     return "\n".join(lines)
 
 
+def render_tool_hints(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    query: str | None = None,
+) -> str | None:
+    if not entries:
+        return None
+    lines: list[str] = ["<tool_hints>"]
+    if isinstance(query, str) and query.strip():
+        lines.append(f"Suggested tools for: {query.strip()}")
+    else:
+        lines.append("Suggested tools:")
+    for entry in entries:
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        desc = entry.get("description")
+        label = None
+        if isinstance(desc, str) and desc.strip():
+            label = desc.strip()
+        if label:
+            lines.append(f"- {name} — {label}")
+        else:
+            lines.append(f"- {name}")
+    lines.append("</tool_hints>")
+    return "\n".join(lines)
+
+
+def render_tool_directory(
+    groups: Sequence[Mapping[str, Any]],
+) -> str | None:
+    if not groups:
+        return None
+    lines: list[str] = [
+        "<tool_directory>",
+        "Known tool groups (use tool_search for discovery; tool_get for schemas/examples):",
+    ]
+    for group in groups:
+        name = group.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        title = group.get("title")
+        trigger = group.get("trigger")
+        tool_count = group.get("tool_count")
+        tools = group.get("tools")
+        label_parts: list[str] = []
+        if isinstance(title, str) and title.strip() and title.strip() != name.strip():
+            label_parts.append(title.strip())
+        if isinstance(trigger, str) and trigger.strip():
+            label_parts.append(trigger.strip())
+        if isinstance(tool_count, int) and tool_count >= 0:
+            label_parts.append(f"{tool_count} tools")
+        label = " — ".join(label_parts) if label_parts else None
+        if label:
+            lines.append(f"- {name} — {label}")
+        else:
+            lines.append(f"- {name}")
+        if isinstance(tools, Sequence) and tools:
+            preview = ", ".join(str(item) for item in tools if item)
+            if preview:
+                lines.append(f"  e.g. {preview}")
+    lines.append("</tool_directory>")
+    return "\n".join(lines)
+
+
 def build_system_prompt(
     catalog: Sequence[Mapping[str, Any]],
     *,

@@ -117,6 +117,31 @@ def test_skill_search_fts_sanitizes_punctuation(tmp_path: Path) -> None:
     assert isinstance(results, list)
 
 
+def test_skill_search_fuzzy_text_matches_with_extra_terms(tmp_path: Path) -> None:
+    store = LocalSkillStore(db_path=tmp_path / "skills.db")
+    store.upsert_pack_skill(
+        SkillDefinition(
+            name="pack.ads.sov_comparison",
+            trigger="SOV comparison",
+            steps=["Step 1"],
+        ),
+        pack_name="ads",
+        scope_mode="project",
+        update_existing=True,
+    )
+
+    results, effective = store.search(
+        "sov_comparison overlap activity share audience",
+        search_type="fts",
+        limit=8,
+        task_type=None,
+        scope_clause="",
+        scope_params=(),
+    )
+    assert effective in {"fts", "regex", "exact"}
+    assert any(item["name"] == "pack.ads.sov_comparison" for item in results)
+
+
 def test_skill_search_fts_no_matches_does_not_force_fallback(tmp_path: Path) -> None:
     store = LocalSkillStore(db_path=tmp_path / "skills.db")
     store.upsert_pack_skill(

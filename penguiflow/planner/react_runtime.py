@@ -26,6 +26,9 @@ from .models import (
     PlannerFinish,
     PlannerPause,
     ReflectionCritique,
+    ToolDirectoryConfig,
+    ToolGroupConfig,
+    ToolHintsConfig,
     ToolSearchConfig,
     ToolVisibilityPolicy,
 )
@@ -43,6 +46,8 @@ _MULTI_ACTION_READONLY_SIDE_EFFECTS = frozenset({"pure", "read"})
 _ACTIVATED_TOOLS_METADATA_KEY = "activated_tools"
 _SKILLS_CONTEXT_METADATA_KEY = "skills_context"
 _SKILLS_DIRECTORY_METADATA_KEY = "skills_directory"
+_TOOLS_DIRECTORY_METADATA_KEY = "tools_directory"
+_TOOL_HINTS_METADATA_KEY = "tool_hints"
 
 
 def _tool_search_config(planner: Any) -> ToolSearchConfig | None:
@@ -112,6 +117,162 @@ async def _prepare_skills_context(
                             extra={"count": len(entries)},
                         )
                     )
+
+
+def _current_turn_text(trajectory: Trajectory) -> str:
+    value = getattr(trajectory, "resume_user_input", None)
+    if isinstance(value, str) and value.strip():
+        return value
+    return trajectory.query
+
+
+def _namespace_from_tool_name(name: str) -> str:
+    if "." in name:
+        return name.split(".", 1)[0]
+    return "core"
+
+
+def _match_group(spec: NodeSpec, group: ToolGroupConfig) -> bool:
+    if group.tool_names and spec.name in set(group.tool_names):
+        return True
+    if group.match_name_patterns and any(fnmatch(spec.name, pattern) for pattern in group.match_name_patterns):
+        return True
+    if group.match_namespaces:
+        namespace = _namespace_from_tool_name(spec.name)
+        if namespace in set(group.match_namespaces):
+            return True
+    if group.match_tags:
+        tags = set(spec.tags)
+        if set(group.match_tags) & tags:
+            return True
+    return False
+
+
+def _build_tool_directory(
+    specs: Sequence[NodeSpec],
+    *,
+    config: ToolDirectoryConfig,
+) -> list[dict[str, Any]]:
+    if not specs:
+        return []
+
+    remaining = {spec.name for spec in specs}
+    spec_by_name = {spec.name: spec for spec in specs}
+    groups: list[dict[str, Any]] = []
+
+    # Explicit groups first
+    for group in config.groups:
+        matched = [spec.name for spec in specs if spec.name in remaining and _match_group(spec, group)]
+        if not matched:
+            continue
+        for name in matched:
+            remaining.discard(name)
+        matched_sorted = sorted(matched, key=lambda item: (len(item), item))
+        preview = matched_sorted[: max(int(config.max_tools_per_group), 0)]
+        groups.append(
+            {
+                "name": group.name,
+                "title": group.title,
+                "trigger": group.trigger,
+                "task_type": group.task_type,
+                "tool_count": len(matched) if config.include_tool_counts else None,
+                "tools": preview,
+            }
+        )
+
+    if config.include_default_groups and remaining:
+        by_ns: dict[str, list[str]] = {}
+        for name in sorted(remaining):
+            ns = _namespace_from_tool_name(name)
+            by_ns.setdefault(ns, []).append(name)
+        for ns, names in sorted(by_ns.items(), key=lambda item: (item[0] != "core", item[0])):
+            preview = names[: max(int(config.max_tools_per_group), 0)]
+            trigger = None
+            if ns == "core":
+                trigger = "Built-in tools"
+            else:
+                # Best-effort hint; avoid expensive inference.
+                sample = spec_by_name.get(names[0])
+                if sample is not None and "mcp" in set(sample.tags):
+                    trigger = f"{ns} MCP tools"
+                else:
+                    trigger = f"{ns} tools"
+            groups.append(
+                {
+                    "name": ns,
+                    "title": None,
+                    "trigger": trigger,
+                    "task_type": None,
+                    "tool_count": len(names) if config.include_tool_counts else None,
+                    "tools": preview,
+                }
+            )
+
+    # Cap after assembly, keeping explicit groups first.
+    max_groups = max(int(config.max_groups), 1)
+    return groups[:max_groups]
+
+
+async def _prepare_tool_discovery_context(
+    planner: Any,
+    trajectory: Trajectory,
+    *,
+    allowed_names: set[str],
+) -> None:
+    config = _tool_search_config(planner)
+    if config is None:
+        return
+    cache = getattr(planner, "_tool_search_cache", None)
+    if cache is None:
+        return
+
+    turn_text = _current_turn_text(trajectory)
+
+    hints_cfg = getattr(config, "hints", None)
+    if isinstance(hints_cfg, ToolHintsConfig) and hints_cfg.enabled:
+        if _TOOL_HINTS_METADATA_KEY not in trajectory.metadata:
+            results, effective = cache.search(
+                turn_text,
+                search_type=hints_cfg.search_type,
+                limit=hints_cfg.top_k,
+                include_always_loaded=bool(hints_cfg.include_always_loaded),
+                allowed_names=set(allowed_names),
+            )
+            rendered = prompts.render_tool_hints(results, query=turn_text)
+            if rendered:
+                trajectory.metadata[_TOOL_HINTS_METADATA_KEY] = rendered
+            planner._emit_event(
+                PlannerEvent(
+                    event_type="tool_hints_generated",
+                    ts=planner._time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    extra={
+                        "query": turn_text,
+                        "requested_search_type": hints_cfg.search_type,
+                        "effective_search_type": effective,
+                        "count": len(results),
+                        "top_k": hints_cfg.top_k,
+                    },
+                )
+            )
+
+    directory_cfg = getattr(config, "directory", None)
+    if isinstance(directory_cfg, ToolDirectoryConfig) and directory_cfg.enabled:
+        if _TOOLS_DIRECTORY_METADATA_KEY not in trajectory.metadata:
+            base_specs: Sequence[NodeSpec] = list(getattr(planner, "_execution_specs", None) or [])
+            allowed_specs = [spec for spec in base_specs if spec.name in allowed_names]
+            groups = _build_tool_directory(allowed_specs, config=directory_cfg)
+            rendered = prompts.render_tool_directory(groups)
+            if rendered:
+                trajectory.metadata[_TOOLS_DIRECTORY_METADATA_KEY] = rendered
+                planner._emit_event(
+                    PlannerEvent(
+                        event_type="tool_directory_rendered",
+                        ts=planner._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        extra={"group_count": len(groups)},
+                    )
+                )
 
 
 def _allowed_names_from_policy(
@@ -558,6 +719,11 @@ async def run(
         )
         allowed_names = _allowed_names_from_policy(base_specs, tool_visibility, normalised_tool_context or {})
         all_tool_names = {spec.name for spec in base_specs}
+        await _prepare_tool_discovery_context(
+            planner,
+            trajectory,
+            allowed_names=allowed_names,
+        )
         await _prepare_skills_context(
             planner,
             trajectory,
@@ -639,6 +805,11 @@ async def resume(
         )
         allowed_names = _allowed_names_from_policy(base_specs, tool_visibility, trajectory.tool_context or {})
         all_tool_names = {spec.name for spec in base_specs}
+        await _prepare_tool_discovery_context(
+            planner,
+            trajectory,
+            allowed_names=allowed_names,
+        )
         await _prepare_skills_context(
             planner,
             trajectory,

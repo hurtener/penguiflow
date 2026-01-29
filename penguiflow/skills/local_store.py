@@ -585,10 +585,12 @@ def _search_fts(
     scope_clause: str,
     scope_params: Sequence[Any],
 ) -> tuple[list[dict[str, Any]], bool]:
-    fts_query = _coerce_fts_query(query)
-    if not fts_query:
+    tokens = _fts_tokens(query)
+    if not tokens:
         return [], False
-    params: list[Any] = [fts_query]
+    strict_query = " ".join(tokens)
+    relaxed_query = _fts_or_query(tokens)
+    params: list[Any] = [strict_query]
     clause = ""
     if scope_clause:
         clause += f" AND ({scope_clause})"
@@ -601,13 +603,24 @@ def _search_fts(
         "FROM skills_fts JOIN skills ON skills_fts.rowid = skills.rowid "
         "WHERE skills_fts MATCH ?" + clause
     )
-    try:
-        rows = conn.execute(sql, params).fetchall()
-    except sqlite3.OperationalError as exc:
-        message = str(exc).lower()
-        if "syntax error" in message or "fts5" in message:
+
+    def _run(match_query: str) -> list[tuple[Any, ...]] | None:
+        try:
+            return conn.execute(sql, [match_query, *params[1:]]).fetchall()
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "syntax error" in message or "fts5" in message:
+                return None
+            raise
+
+    rows = _run(strict_query)
+    if rows is None:
+        return [], False
+    if not rows:
+        # AND queries are often too strict for fuzzy user text. Retry with OR.
+        rows = _run(relaxed_query)
+        if rows is None:
             return [], False
-        raise
     if not rows:
         return [], True
     scored: list[dict[str, Any]] = []
@@ -647,8 +660,18 @@ def _coerce_fts_query(value: str) -> str:
     punctuation (e.g. '!') that triggers parser errors.
     """
 
-    tokens = re.findall(r"[A-Za-z0-9_]+", value or "")
-    return " ".join(tokens)
+    return " ".join(_fts_tokens(value))
+
+
+def _fts_tokens(value: str) -> list[str]:
+    # Treat underscores and punctuation as separators.
+    tokens = re.findall(r"[A-Za-z0-9]+", value or "")
+    return [token for token in tokens if token]
+
+
+def _fts_or_query(tokens: Sequence[str]) -> str:
+    # Quote each token so operators don't leak in.
+    return " OR ".join(f'"{token}"' for token in tokens)
 
 
 def _search_regex_exact(
@@ -716,10 +739,22 @@ def _score_exact(query: str, rows: list[tuple[str, str | None, str | None, str, 
 
 
 def _score_regex(query: str, rows: list[tuple[str, str | None, str | None, str, str]]) -> list[dict[str, Any]]:
+    regex: re.Pattern[str] | None = None
     try:
         regex = re.compile(query, re.IGNORECASE)
     except re.error:
-        return []
+        regex = None
+
+    # Natural language queries with whitespace are rarely intended as literal regex.
+    if regex is None or any(ch.isspace() for ch in query):
+        tokens = _fts_tokens(query)
+        if not tokens:
+            return []
+        safe = "|".join(re.escape(token) for token in tokens)
+        try:
+            regex = re.compile(safe, re.IGNORECASE)
+        except re.error:
+            return []
     results: list[dict[str, Any]] = []
     for name, title, trigger, tags_raw, task_type_value in rows:
         tags = _parse_json_list(tags_raw)
