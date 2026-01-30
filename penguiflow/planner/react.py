@@ -379,6 +379,9 @@ class ReactPlanner:
     _multi_action_sequential: bool
     _multi_action_read_only_only: bool
     _multi_action_max_tools: int
+    _auto_seq_enabled: bool
+    _auto_seq_execute: bool
+    _auto_seq_read_only_only: bool
     _use_native_reasoning: bool
     _reasoning_effort: str | None
     _guardrail_gateway: GuardrailGateway | None
@@ -434,6 +437,9 @@ class ReactPlanner:
         multi_action_sequential: bool = False,
         multi_action_read_only_only: bool = True,
         multi_action_max_tools: int = 2,
+        auto_seq_enabled: bool = False,
+        auto_seq_execute: bool = False,
+        auto_seq_read_only_only: bool = True,
         use_native_llm: bool = False,
         guardrail_gateway: Any | None = None,
         guardrail_conversation_history_turns: int = 1,
@@ -489,6 +495,9 @@ class ReactPlanner:
             "multi_action_sequential": multi_action_sequential,
             "multi_action_read_only_only": multi_action_read_only_only,
             "multi_action_max_tools": multi_action_max_tools,
+            "auto_seq_enabled": auto_seq_enabled,
+            "auto_seq_execute": auto_seq_execute,
+            "auto_seq_read_only_only": auto_seq_read_only_only,
             "use_native_llm": use_native_llm,
             "guardrail_gateway": guardrail_gateway,
             "guardrail_conversation_history_turns": guardrail_conversation_history_turns,
@@ -533,6 +542,9 @@ class ReactPlanner:
             multi_action_sequential=multi_action_sequential,
             multi_action_read_only_only=multi_action_read_only_only,
             multi_action_max_tools=multi_action_max_tools,
+            auto_seq_enabled=auto_seq_enabled,
+            auto_seq_execute=auto_seq_execute,
+            auto_seq_read_only_only=auto_seq_read_only_only,
             use_native_llm=use_native_llm,
             guardrail_gateway=guardrail_gateway,
             guardrail_conversation_history_turns=guardrail_conversation_history_turns,

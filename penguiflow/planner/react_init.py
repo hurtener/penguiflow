@@ -79,6 +79,9 @@ def init_react_planner(
     multi_action_sequential: bool = False,
     multi_action_read_only_only: bool = True,
     multi_action_max_tools: int = 2,
+    auto_seq_enabled: bool = False,
+    auto_seq_execute: bool = False,
+    auto_seq_read_only_only: bool = True,
     use_native_llm: bool = False,
     guardrail_gateway: Any | None = None,
     guardrail_conversation_history_turns: int = 1,
@@ -300,6 +303,9 @@ def init_react_planner(
     planner._multi_action_sequential = bool(multi_action_sequential)
     planner._multi_action_read_only_only = bool(multi_action_read_only_only)
     planner._multi_action_max_tools = int(multi_action_max_tools)
+    planner._auto_seq_enabled = bool(auto_seq_enabled)
+    planner._auto_seq_execute = bool(auto_seq_execute)
+    planner._auto_seq_read_only_only = bool(auto_seq_read_only_only)
 
     planner._memory_config = ShortTermMemoryConfig()
     planner._memory_singleton = None

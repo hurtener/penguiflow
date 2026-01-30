@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import warnings
 from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ..catalog import NodeSpec
 from ..steering import SteeringCancelled, SteeringEventType, SteeringInbox
@@ -30,6 +32,100 @@ logger = logging.getLogger("penguiflow.planner")
 _TASK_SERVICE_KEY = "task_service"
 _MULTI_ACTION_BLOCKED_NODES = frozenset({"final_response", "render_component", "tasks.spawn"})
 _MULTI_ACTION_READONLY_SIDE_EFFECTS = frozenset({"pure", "read"})
+
+
+@dataclass(frozen=True, slots=True)
+class DetectionResult:
+    status: Literal["unique", "ambiguous", "none", "skipped"]
+    selected_action: PlannerAction | None = None
+    candidates: list[str] | None = None
+    reason: str | None = None
+
+
+def _detect_deterministic_transition(planner: Any, trajectory: Trajectory) -> DetectionResult:
+    if not trajectory.steps:
+        return DetectionResult(status="skipped", reason="no_steps")
+
+    last_step = trajectory.steps[-1]
+    if last_step.action.next_node == "parallel":
+        return DetectionResult(status="skipped", reason="previous_step_parallel")
+
+    payload = last_step.serialise_for_llm()
+    if not isinstance(payload, Mapping):
+        return DetectionResult(status="skipped", reason="non_structured_observation")
+
+    specs = list(getattr(planner, "_specs", []) or [])
+    read_only_only = bool(getattr(planner, "_auto_seq_read_only_only", True))
+    matches: list[tuple[NodeSpec, BaseModel]] = []
+    for spec in specs:
+        if spec.name in _MULTI_ACTION_BLOCKED_NODES:
+            continue
+        if spec.extra.get("auto_seq") is not True:
+            continue
+        if read_only_only and spec.side_effects not in _MULTI_ACTION_READONLY_SIDE_EFFECTS:
+            continue
+        try:
+            validated = spec.args_model.model_validate(payload)
+        except ValidationError:
+            continue
+        matches.append((spec, validated))
+
+    if not matches:
+        return DetectionResult(status="none")
+
+    if len(matches) > 1:
+        return DetectionResult(status="ambiguous", candidates=[spec.name for spec, _ in matches])
+
+    spec, validated = matches[0]
+    action = PlannerAction(
+        next_node=spec.name,
+        args=validated.model_dump(mode="json"),
+    )
+    return DetectionResult(status="unique", selected_action=action)
+
+
+def _payload_fingerprint(payload: Mapping[str, Any]) -> str:
+    type_name = type(payload).__name__
+    keys = sorted(str(key) for key in payload.keys())
+    raw = json.dumps({"type": type_name, "keys": keys}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _emit_auto_seq_detection_event(planner: Any, trajectory: Trajectory, result: DetectionResult) -> None:
+    event_type_map = {
+        "unique": "auto_seq_detected_unique",
+        "ambiguous": "auto_seq_detected_ambiguous",
+        "none": "auto_seq_detected_none",
+        "skipped": "auto_seq_skipped",
+    }
+    event_type = event_type_map.get(result.status, "auto_seq_detected_none")
+    extra: dict[str, Any] = {}
+    payload: Any | None = None
+    if trajectory.steps:
+        payload = trajectory.steps[-1].serialise_for_llm()
+    if isinstance(payload, Mapping):
+        extra["payload_fingerprint"] = _payload_fingerprint(payload)
+        extra["payload_keys_count"] = len(payload)
+        extra["payload_type"] = type(payload).__name__
+    else:
+        extra["payload_type"] = type(payload).__name__ if payload is not None else "none"
+
+    if result.status == "unique" and result.selected_action is not None:
+        extra["tool_name"] = result.selected_action.next_node
+    elif result.status == "ambiguous" and result.candidates:
+        extra["candidate_count"] = len(result.candidates)
+        extra["candidates"] = list(result.candidates)
+    elif result.status == "skipped" and result.reason:
+        extra["reason"] = result.reason
+
+    planner._emit_event(
+        PlannerEvent(
+            event_type=event_type,
+            ts=planner._time_source(),
+            trajectory_step=len(trajectory.steps),
+            extra=extra,
+        )
+    )
 
 
 @contextmanager
@@ -845,11 +941,40 @@ async def run_loop(
                                 next_node=next_node,
                                 args=dict(args) if isinstance(args, dict) else {},
                             )
+                            trajectory.metadata["auto_seq_skip_next"] = True
 
             if queued_action is not None:
                 action = queued_action
             else:
-                action = await step_with_recovery(planner, trajectory, config=error_recovery_config)
+                detection: DetectionResult | None = None
+                if getattr(planner, "_auto_seq_enabled", False) and trajectory.steps:
+                    skip_next = False
+                    if isinstance(trajectory.metadata, MutableMapping):
+                        skip_next = bool(trajectory.metadata.pop("auto_seq_skip_next", False))
+                    if skip_next:
+                        detection = DetectionResult(status="skipped", reason="pending_actions_present")
+                    else:
+                        detection = _detect_deterministic_transition(planner, trajectory)
+                    _emit_auto_seq_detection_event(planner, trajectory, detection)
+
+                action = None
+                if detection is not None and detection.status == "unique":
+                    selected = detection.selected_action
+                    if selected is not None and getattr(planner, "_auto_seq_execute", False):
+                        spec = planner._spec_by_name.get(selected.next_node)
+                        if spec is not None and spec.extra.get("auto_seq_execute") is True:
+                            action = selected
+                            planner._emit_event(
+                                PlannerEvent(
+                                    event_type="auto_seq_executed",
+                                    ts=planner._time_source(),
+                                    trajectory_step=len(trajectory.steps),
+                                    extra={"tool_name": selected.next_node},
+                                )
+                            )
+
+                if action is None:
+                    action = await step_with_recovery(planner, trajectory, config=error_recovery_config)
                 # If this action came from a mixed-output response, enqueue eligible
                 # follow-up tool calls for sequential execution without another LLM call.
                 if getattr(planner, "_multi_action_sequential", False) and action.alternate_actions:

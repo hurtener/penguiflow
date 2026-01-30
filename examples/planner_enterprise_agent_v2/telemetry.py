@@ -43,9 +43,7 @@ class AgentTelemetry:
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
         self.logger = logging.getLogger(f"penguiflow.{config.agent_name}")
-        self.planner_logger = logging.getLogger(
-            f"penguiflow.{config.agent_name}.planner"
-        )
+        self.planner_logger = logging.getLogger(f"penguiflow.{config.agent_name}.planner")
 
         # Event collection for batch emission
         self._events: list[dict[str, Any]] = []
@@ -57,6 +55,11 @@ class AgentTelemetry:
             "planner_cost_usd": 0.0,
             "flow_node_errors": 0,
             "flow_node_successes": 0,
+            "auto_seq_detected_unique": 0,
+            "auto_seq_detected_ambiguous": 0,
+            "auto_seq_detected_none": 0,
+            "auto_seq_skipped": 0,
+            "auto_seq_executed": 0,
         }
 
     async def record_flow_event(self, event: FlowEvent) -> FlowEvent:
@@ -158,6 +161,11 @@ class AgentTelemetry:
             self._metrics["planner_llm_calls"] += 1
             self.planner_logger.debug("llm_call", extra=extra)
 
+        elif event_type.startswith("auto_seq_"):
+            if event_type in self._metrics:
+                self._metrics[event_type] += 1
+            self.planner_logger.info(event_type, extra=extra)
+
         elif event_type == "pause":
             self.planner_logger.info("pause", extra=extra)
 
@@ -242,4 +250,9 @@ class AgentTelemetry:
             "planner_cost_usd": 0.0,
             "flow_node_errors": 0,
             "flow_node_successes": 0,
+            "auto_seq_detected_unique": 0,
+            "auto_seq_detected_ambiguous": 0,
+            "auto_seq_detected_none": 0,
+            "auto_seq_skipped": 0,
+            "auto_seq_executed": 0,
         }
