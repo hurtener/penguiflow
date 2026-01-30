@@ -55,7 +55,7 @@ async def test_inmemory_statestore_planner_and_memory_state_roundtrip() -> None:
     store = InMemoryStateStore()
     await store.save_planner_state("token", {"a": 1})
     assert await store.load_planner_state("token") == {"a": 1}
-    assert await store.load_planner_state("token") == {}
+    assert await store.load_planner_state("token") is None
 
     await store.save_memory_state("mem-key", {"k": "v"})
     assert await store.load_memory_state("mem-key") == {"k": "v"}

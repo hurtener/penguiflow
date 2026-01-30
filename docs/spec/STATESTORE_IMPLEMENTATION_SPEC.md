@@ -1,12 +1,12 @@
 # StateStore Implementation Specification
 
-> **Version:** 2.8
+> **Version:** 2.11.x (current: 2.11.5)
 > **Audience:** Downstream teams implementing custom StateStore backends
 > **Last Updated:** January 2026
 
 This document provides a complete specification for implementing a StateStore backend compatible with PenguiFlow. It covers the protocol definition, data types, method contracts, integration points, distributed deployment patterns, and production best practices.
 
-> **Forward-looking backlog:** For known gaps and the roadmap to make this surface even more robust, see `docs/RFC/ToDo/RFC_STATESTORE_GOLD_STANDARD_FOLLOWUPS.md`.
+> **Forward-looking backlog:** For known gaps and the roadmap to make this surface even more robust, see `docs/RFC/ToDo/RFC_STATESTORE_STANDARD_FOLLOWUPS.md`.
 
 ---
 
@@ -192,7 +192,9 @@ class StoredEvent:
 
 #### Event Types (`kind` field)
 
-`StoredEvent.kind` is a **string discriminator**. In v2.8, PenguiFlow persists three *families* of events:
+`StoredEvent.kind` is a **string discriminator**. In v2.11.x, PenguiFlow persists multiple *families* of events.
+
+Important: `kind` values are an **open set**. StateStore backends MUST accept novel/unknown kinds and persist them as opaque strings.
 
 1) **Core runtime events** (`FlowEvent.event_type`): emitted by the `PenguiFlow` runtime around node execution and trace lifecycle.
 
@@ -211,7 +213,18 @@ class StoredEvent:
 | `trace_cancel_finish` | Trace cancellation finished |
 | `trace_cancel_drop` | Cancellation requested for unknown/finished trace |
 
-2) **Session/task pseudo-events**: when a session store is adapted onto a core `StateStore`, it persists session state as audit-log entries under `trace_id="session:{session_id}"`.
+2) **Remote transport events** (`FlowEvent.event_type`): emitted by the runtime when a `RemoteNode` performs remote calls/streams.
+
+| Event Kind | Description |
+|------------|-------------|
+| `remote_call_start` | Remote call initiated |
+| `remote_call_success` | Remote call completed successfully |
+| `remote_call_error` | Remote call failed |
+| `remote_call_cancelled` | Remote call cancelled due to trace cancellation |
+| `remote_cancel_error` | Failed to cancel a remote task |
+| `remote_stream_event` | Remote streaming event observed |
+
+3) **Session/task pseudo-events**: when a session store is adapted onto a core `StateStore`, it persists session state as audit-log entries under `trace_id="session:{session_id}"`.
 
 | Event Kind | Description |
 |------------|-------------|
@@ -219,7 +232,7 @@ class StoredEvent:
 | `session.update` | Task streaming/progress update persisted |
 | `session.steering` | Steering event persisted |
 
-3) **Planner/tool streaming events are *not* `StoredEvent`s.** They are `PlannerEvent`s (see `SupportsPlannerEvents`) and have their own `event_type` values such as `stream_chunk`, `llm_stream_chunk`, and `artifact_chunk`.
+4) **Planner/tool streaming events are *not* `StoredEvent`s.** They are `PlannerEvent`s (see `SupportsPlannerEvents`) and have their own `event_type` values such as `stream_chunk`, `llm_stream_chunk`, and `artifact_chunk`.
 
 > **Callout (important):** If you want to persist tool/LLM streaming events for the Playground UI or trace replay, implement `SupportsPlannerEvents` (`save_planner_event` / `list_planner_events`). Do **not** attempt to cram these into `save_event` as `StoredEvent.kind="stream_chunk"`; PenguiFlow treats those as different channels.
 
@@ -440,7 +453,7 @@ class FlowEvent:
 **Contract:**
 - MUST be idempotent (duplicate calls for same event should not fail)
 - MUST NOT block indefinitely (use timeouts)
-- SHOULD handle `trace_id=None` for global events
+- SHOULD handle `trace_id=None` for global events (recommended: normalise to a sentinel like `"__global__"`)
 - MAY store events asynchronously (eventual consistency acceptable)
 
 **Parameters:**
@@ -451,17 +464,33 @@ class FlowEvent:
 **Example Implementation:**
 ```python
 async def save_event(self, event: StoredEvent) -> None:
+    trace_id = event.trace_id or "__global__"
+    raw = json.dumps(
+        {
+            "trace_id": trace_id,
+            "ts": event.ts,
+            "kind": event.kind,
+            "node_name": event.node_name,
+            "node_id": event.node_id,
+            "payload": dict(event.payload),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    event_fp = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     await self._pool.execute(
         """
-        INSERT INTO flow_events (trace_id, ts, kind, node_name, node_id, payload)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT DO NOTHING  -- Idempotent
+        INSERT INTO flow_events (trace_id, ts, kind, node_name, node_id, event_fp, payload)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (trace_id, event_fp) DO NOTHING  -- Idempotent
         """,
-        event.trace_id,
+        trace_id,
         event.ts,
         event.kind,
         event.node_name,
         event.node_id,
+        event_fp,
         json.dumps(dict(event.payload)),
     )
 ```
@@ -611,9 +640,9 @@ async def save_planner_state(self, token: str, payload: dict) -> None:
 
 **Returns:** `dict | None` - The stored payload, or `None` if not found
 
-> **Callout (type mismatch):** `SupportsPlannerState.load_planner_state()` is typed as returning `dict[str, Any]` in
-> `penguiflow/state/protocol.py`, but the runtime treats `None` as the clean "not found" signal. Returning `{}` tends to
-> produce confusing downstream errors (`KeyError: 'trajectory'`) instead of a proper missing-token path. Prefer `None`.
+> **Callout (missing token semantics):** `ReactPlanner` treats `None` as the clean "not found/expired" signal.
+> Returning `{}` for missing tokens tends to produce confusing downstream errors (`KeyError: 'trajectory'`) instead of a
+> clear missing-token path. Prefer returning `None`.
 
 **Example Implementation:**
 ```python
@@ -1444,8 +1473,8 @@ class InMemoryStateStore(StateStore):
     async def save_planner_state(self, token: str, payload: dict) -> None:
         self._planner_state[token] = payload
 
-    async def load_planner_state(self, token: str) -> dict:
-        return self._planner_state.pop(token, {})
+    async def load_planner_state(self, token: str) -> dict | None:
+        return self._planner_state.pop(token, None)
 
     async def save_memory_state(self, key: str, state: dict) -> None:
         self._memory_state[key] = state
@@ -1485,9 +1514,9 @@ class HybridStateStore:
     async def save_planner_state(self, token: str, payload: dict) -> None:
         await self._redis.setex(f"pause:{token}", 3600, json.dumps(payload))
 
-    async def load_planner_state(self, token: str) -> dict:
+    async def load_planner_state(self, token: str) -> dict | None:
         data = await self._redis.getdel(f"pause:{token}")
-        return json.loads(data) if data else {}
+        return json.loads(data) if data else None
 
     # Memory can use either (preference: Redis for speed)
     async def save_memory_state(self, key: str, state: dict) -> None:
@@ -1642,17 +1671,22 @@ session = StreamingSession(
 -- Events table (required)
 CREATE TABLE flow_events (
     id BIGSERIAL PRIMARY KEY,
-    trace_id VARCHAR(64),
+    -- Recommended: normalise trace_id=None ("global events") to a sentinel like '__global__'
+    -- so this column can be NOT NULL and participate in uniqueness constraints.
+    trace_id VARCHAR(128) NOT NULL,
     ts DOUBLE PRECISION NOT NULL,
-    kind VARCHAR(32) NOT NULL,
+    kind VARCHAR(64) NOT NULL,
     node_name VARCHAR(128),
     node_id VARCHAR(128),
+    -- sha256 of canonical JSON of {trace_id, ts, kind, node_name, node_id, payload}
+    -- Used to make save_event() idempotent without requiring a first-class event_id.
+    event_fp VARCHAR(64) NOT NULL,
     payload JSONB,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (trace_id, event_fp)
 );
 
-CREATE INDEX idx_events_trace_id ON flow_events(trace_id);
-CREATE INDEX idx_events_trace_ts ON flow_events(trace_id, ts);
+CREATE INDEX idx_events_trace_ts ON flow_events(trace_id, ts, id);
 CREATE INDEX idx_events_kind ON flow_events(kind);
 
 -- Remote bindings
@@ -2059,7 +2093,7 @@ async def test_statestore_integration():
 
 ### What Is Best-Effort vs. What Can Propagate
 
-PenguiFlow does **not** treat every StateStore call uniformly. In v2.8:
+PenguiFlow does **not** treat every StateStore call uniformly. In v2.11.x:
 
 - **Core runtime audit-log calls** are best-effort:
   - `PenguiFlow` wraps `save_event()` and `save_remote_binding()` in `try/except` and logs failures.
@@ -2276,7 +2310,8 @@ Use this checklist to verify your implementation is complete:
 
 ## See Also
 
-- [StateStore Production Guide](../tools/statestore-guide.md) - PostgreSQL/Redis examples
-- [ReactPlanner Integration](../REACT_PLANNER_INTEGRATION_GUIDE.md) - Pause/resume flows
-- [A2A Protocol](../A2A_PROTOCOL.md) - Remote binding details
-- [Observability](../OBSERVABILITY.md) - Event types and metrics
+- [StateStore Production Guide](../tools/statestore-guide.md) - PostgreSQL/Redis patterns and pause/resume
+- [StateStore Standard Follow-Ups RFC](../RFC/ToDo/RFC_STATESTORE_STANDARD_FOLLOWUPS.md) - Known gaps + roadmap
+- [A2A Compliance Gap Analysis](../A2A_COMPLIANCE_GAP_ANALYSIS.md) - A2A status and gaps
+- [Observability & Monitoring](../architecture/infrastructure/observability_monitoring.md) - Logging/metrics patterns
+- `penguiflow/planner/pause_management.py` - Canonical pause/resume wire format and loader semantics

@@ -1,6 +1,6 @@
 # StateStore Implementation Guide for Production
 
-This guide explains how to implement a production-ready `StateStore` for ToolNode v2, enabling distributed pause/resume flows and OAuth token persistence.
+This guide explains how to implement a production-ready `StateStore` for PenguiFlow, enabling distributed pause/resume flows (OAuth/HITL) and durable audit/replay.
 
 ## Overview
 
@@ -29,15 +29,15 @@ class StateStore(Protocol):
         ...
 ```
 
-For pause/resume support (required for OAuth flows), add these **duck-typed** methods:
+For pause/resume support (required for OAuth/HITL flows), add these **duck-typed** methods:
 
 ```python
 async def save_planner_state(self, token: str, payload: dict) -> None:
     """Save pause record for distributed resume."""
     ...
 
-async def load_planner_state(self, token: str) -> dict:
-    """Load pause record for resume."""
+async def load_planner_state(self, token: str) -> dict | None:
+    """Load pause record for resume (return None if missing/expired)."""
     ...
 ```
 
@@ -51,15 +51,23 @@ The `ReactPlanner` checks for these methods via `hasattr()` at runtime.
 
 ```sql
 -- Events table (required)
+--
+-- NOTE: Core runtime may emit trace_id=None. Normalise that to '__global__'
+-- so trace_id can be NOT NULL and participate in uniqueness constraints.
 CREATE TABLE flow_events (
-    id SERIAL PRIMARY KEY,
-    trace_id VARCHAR(64) NOT NULL,
-    event_type VARCHAR(32) NOT NULL,
+    id BIGSERIAL PRIMARY KEY,
+    trace_id VARCHAR(128) NOT NULL,
+    ts DOUBLE PRECISION NOT NULL,
+    kind VARCHAR(64) NOT NULL,
     node_name VARCHAR(128),
+    node_id VARCHAR(128),
+    event_fp VARCHAR(64) NOT NULL,
     payload JSONB,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    INDEX idx_trace_id (trace_id)
+    UNIQUE (trace_id, event_fp)
 );
+
+CREATE INDEX idx_events_trace_ts ON flow_events(trace_id, ts, id);
 
 -- Planner pauses (for OAuth flows)
 CREATE TABLE planner_pauses (
@@ -79,12 +87,14 @@ CREATE TABLE oauth_tokens (
     PRIMARY KEY (user_id, provider)
 );
 
--- Remote bindings (for A2A)
+-- Remote bindings (for A2A / RemoteNode)
 CREATE TABLE remote_bindings (
-    node_name VARCHAR(128) PRIMARY KEY,
-    remote_url TEXT NOT NULL,
-    transport VARCHAR(32) NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    trace_id VARCHAR(128) NOT NULL,
+    context_id VARCHAR(128),
+    task_id VARCHAR(128) NOT NULL,
+    agent_url TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (trace_id, task_id)
 );
 
 -- Cleanup expired pauses
@@ -94,6 +104,7 @@ CREATE INDEX idx_pauses_expires ON planner_pauses(expires_at);
 ### Python Implementation
 
 ```python
+import hashlib
 import json
 from typing import Any, Sequence
 from datetime import datetime, timezone
@@ -113,34 +124,57 @@ class PostgresStateStore:
 
     async def save_event(self, event: StoredEvent) -> None:
         """Persist a flow event."""
+        trace_id = event.trace_id or "__global__"
+        event_fp = hashlib.sha256(
+            json.dumps(
+                {
+                    "trace_id": trace_id,
+                    "ts": event.ts,
+                    "kind": event.kind,
+                    "node_name": event.node_name,
+                    "node_id": event.node_id,
+                    "payload": dict(event.payload),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
         await self._pool.execute(
             """
-            INSERT INTO flow_events (trace_id, event_type, node_name, payload)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO flow_events (trace_id, ts, kind, node_name, node_id, event_fp, payload)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (trace_id, event_fp) DO NOTHING
             """,
-            event.trace_id,
-            event.event_type,
+            trace_id,
+            event.ts,
+            event.kind,
             event.node_name,
-            json.dumps(event.payload) if event.payload else None,
+            event.node_id,
+            event_fp,
+            json.dumps(dict(event.payload)) if event.payload else None,
         )
 
     async def load_history(self, trace_id: str) -> Sequence[StoredEvent]:
         """Load all events for a trace."""
+        trace_key = trace_id
         rows = await self._pool.fetch(
             """
-            SELECT trace_id, event_type, node_name, payload, created_at
+            SELECT trace_id, ts, kind, node_name, node_id, payload
             FROM flow_events
             WHERE trace_id = $1
-            ORDER BY created_at ASC
+            ORDER BY ts ASC, id ASC
             """,
-            trace_id,
+            trace_key,
         )
         return [
             StoredEvent(
                 trace_id=row["trace_id"],
-                event_type=row["event_type"],
+                ts=float(row["ts"]),
+                kind=row["kind"],
                 node_name=row["node_name"],
-                payload=json.loads(row["payload"]) if row["payload"] else None,
+                node_id=row["node_id"],
+                payload=json.loads(row["payload"]) if row["payload"] else {},
             )
             for row in rows
         ]
@@ -149,15 +183,16 @@ class PostgresStateStore:
         """Save A2A remote binding."""
         await self._pool.execute(
             """
-            INSERT INTO remote_bindings (node_name, remote_url, transport)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (node_name) DO UPDATE
-            SET remote_url = EXCLUDED.remote_url,
-                transport = EXCLUDED.transport
+            INSERT INTO remote_bindings (trace_id, context_id, task_id, agent_url)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (trace_id, task_id) DO UPDATE
+            SET agent_url = EXCLUDED.agent_url,
+                context_id = EXCLUDED.context_id
             """,
-            binding.node_name,
-            binding.remote_url,
-            binding.transport,
+            binding.trace_id,
+            binding.context_id,
+            binding.task_id,
+            binding.agent_url,
         )
 
     # ─── Pause/Resume Support (duck-typed) ───────────────────────────────────────
@@ -177,20 +212,21 @@ class PostgresStateStore:
             json.dumps(payload),
         )
 
-    async def load_planner_state(self, token: str) -> dict:
+    async def load_planner_state(self, token: str) -> dict | None:
         """Load pause record for resume.
 
         Called when resuming planner after OAuth callback.
         """
         row = await self._pool.fetchrow(
             """
-            SELECT payload FROM planner_pauses
+            DELETE FROM planner_pauses
             WHERE token = $1 AND expires_at > NOW()
+            RETURNING payload
             """,
             token,
         )
         if not row:
-            return {}
+            return None
         return json.loads(row["payload"])
 
     # ─── Cleanup ─────────────────────────────────────────────────────────────────
@@ -327,10 +363,11 @@ class RedisStateStore:
             json.dumps(payload),
         )
 
-    async def load_planner_state(self, token: str) -> dict:
-        data = await self._redis.get(f"planner:pause:{token}")
+    async def load_planner_state(self, token: str) -> dict | None:
+        # One-time use: consume/delete the pause record when loading.
+        data = await self._redis.getdel(f"planner:pause:{token}")
         if not data:
-            return {}
+            return None
         return json.loads(data)
 
 

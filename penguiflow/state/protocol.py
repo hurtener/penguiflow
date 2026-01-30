@@ -28,18 +28,27 @@ class StateStore(Protocol):
         The method must be idempotent since retries can emit duplicate events.
         """
 
+        raise NotImplementedError()
+        return None
+
     async def load_history(self, trace_id: str) -> Sequence[StoredEvent]:
         """Return the ordered history for a trace id."""
 
+        raise NotImplementedError()
+        return []
+
     async def save_remote_binding(self, binding: RemoteBinding) -> None:
         """Persist the mapping between a trace and an external worker."""
+
+        raise NotImplementedError()
+        return None
 
 
 @runtime_checkable
 class SupportsPlannerState(Protocol):
     async def save_planner_state(self, token: str, payload: dict[str, Any]) -> None: ...
 
-    async def load_planner_state(self, token: str) -> dict[str, Any]: ...
+    async def load_planner_state(self, token: str) -> dict[str, Any] | None: ...
 
 
 @runtime_checkable
