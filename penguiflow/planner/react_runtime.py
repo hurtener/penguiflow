@@ -5,20 +5,33 @@ from __future__ import annotations
 import json
 import logging
 import warnings
-from collections.abc import Iterator, Mapping, MutableMapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
+from fnmatch import fnmatch
 from typing import Any
 
 from pydantic import ValidationError
 
-from ..catalog import NodeSpec
+from ..catalog import NodeSpec, ToolLoadingMode
+from ..skills.models import SkillQuery
 from ..steering import SteeringCancelled, SteeringEventType, SteeringInbox
 from . import prompts
 from .artifact_handling import _ArtifactCollector, _SourceCollector
 from .artifact_registry import ArtifactRegistry
 from .constraints import _ConstraintTracker, _CostTracker
 from .error_recovery import ErrorRecoveryConfig, step_with_recovery
-from .models import PlannerAction, PlannerEvent, PlannerFinish, PlannerPause, ReflectionCritique, ToolVisibilityPolicy
+from .models import (
+    PlannerAction,
+    PlannerEvent,
+    PlannerFinish,
+    PlannerPause,
+    ReflectionCritique,
+    ToolDirectoryConfig,
+    ToolGroupConfig,
+    ToolHintsConfig,
+    ToolSearchConfig,
+    ToolVisibilityPolicy,
+)
 from .streaming import _StreamingArgsExtractor
 from .tool_aliasing import build_aliased_tool_catalog, rewrite_action_node
 from .tool_calls import execute_tool_call
@@ -30,20 +43,246 @@ logger = logging.getLogger("penguiflow.planner")
 _TASK_SERVICE_KEY = "task_service"
 _MULTI_ACTION_BLOCKED_NODES = frozenset({"final_response", "render_component", "tasks.spawn"})
 _MULTI_ACTION_READONLY_SIDE_EFFECTS = frozenset({"pure", "read"})
+_ACTIVATED_TOOLS_METADATA_KEY = "activated_tools"
+_SKILLS_CONTEXT_METADATA_KEY = "skills_context"
+_SKILLS_DIRECTORY_METADATA_KEY = "skills_directory"
+_TOOLS_DIRECTORY_METADATA_KEY = "tools_directory"
+_TOOL_HINTS_METADATA_KEY = "tool_hints"
 
 
-@contextmanager
-def _tool_visibility_scope(
+def _tool_search_config(planner: Any) -> ToolSearchConfig | None:
+    config = getattr(planner, "_tool_search_config", None)
+    if isinstance(config, ToolSearchConfig) and config.enabled:
+        return config
+    return None
+
+
+async def _prepare_skills_context(
     planner: Any,
+    trajectory: Trajectory,
     *,
-    tool_visibility: ToolVisibilityPolicy | None,
-    tool_context: Mapping[str, Any],
-) -> Iterator[None]:
-    if tool_visibility is None:
-        yield
+    allowed_names: set[str],
+    all_tool_names: Iterable[str],
+) -> None:
+    config = getattr(planner, "_skills_config", None)
+    provider = getattr(planner, "_skills_provider", None)
+    if config is None or not getattr(config, "enabled", False) or provider is None:
+        return
+    tool_context = trajectory.tool_context or {}
+    if _SKILLS_CONTEXT_METADATA_KEY not in trajectory.metadata:
+        query = SkillQuery(task=trajectory.query, top_k=config.top_k)
+        response = await provider.get_relevant(
+            query,
+            tool_context=tool_context,
+            all_tool_names=all_tool_names,
+            allowed_tool_names=allowed_names,
+        )
+        if response.formatted_context:
+            trajectory.metadata[_SKILLS_CONTEXT_METADATA_KEY] = response.formatted_context
+        planner._emit_event(
+            PlannerEvent(
+                event_type="skills_retrieved",
+                ts=planner._time_source(),
+                trajectory_step=len(trajectory.steps),
+                extra={
+                    "skill_count": len(response.skills),
+                    "top_k_used": response.top_k,
+                    "raw_tokens_est": response.raw_tokens_est,
+                    "final_tokens_est": response.final_tokens_est,
+                    "was_summarized": response.was_summarized,
+                },
+            )
+        )
+    directory_cfg = getattr(config, "directory", None)
+    if directory_cfg is not None and getattr(directory_cfg, "enabled", False):
+        if _SKILLS_DIRECTORY_METADATA_KEY not in trajectory.metadata:
+            entries = await provider.directory(
+                directory_cfg,
+                tool_context=tool_context,
+                all_tool_names=all_tool_names,
+                allowed_tool_names=allowed_names,
+            )
+            if entries:
+                rendered = prompts.render_skill_directory(
+                    [entry.model_dump(mode="json") for entry in entries],
+                    include_fields=directory_cfg.include_fields,
+                )
+                if rendered:
+                    trajectory.metadata[_SKILLS_DIRECTORY_METADATA_KEY] = rendered
+                    planner._emit_event(
+                        PlannerEvent(
+                            event_type="skill_directory_rendered",
+                            ts=planner._time_source(),
+                            trajectory_step=len(trajectory.steps),
+                            extra={"count": len(entries)},
+                        )
+                    )
+
+
+def _current_turn_text(trajectory: Trajectory) -> str:
+    value = getattr(trajectory, "resume_user_input", None)
+    if isinstance(value, str) and value.strip():
+        return value
+    return trajectory.query
+
+
+def _namespace_from_tool_name(name: str) -> str:
+    if "." in name:
+        return name.split(".", 1)[0]
+    return "core"
+
+
+def _match_group(spec: NodeSpec, group: ToolGroupConfig) -> bool:
+    if group.tool_names and spec.name in set(group.tool_names):
+        return True
+    if group.match_name_patterns and any(fnmatch(spec.name, pattern) for pattern in group.match_name_patterns):
+        return True
+    if group.match_namespaces:
+        namespace = _namespace_from_tool_name(spec.name)
+        if namespace in set(group.match_namespaces):
+            return True
+    if group.match_tags:
+        tags = set(spec.tags)
+        if set(group.match_tags) & tags:
+            return True
+    return False
+
+
+def _build_tool_directory(
+    specs: Sequence[NodeSpec],
+    *,
+    config: ToolDirectoryConfig,
+) -> list[dict[str, Any]]:
+    if not specs:
+        return []
+
+    remaining = {spec.name for spec in specs}
+    spec_by_name = {spec.name: spec for spec in specs}
+    groups: list[dict[str, Any]] = []
+
+    # Explicit groups first
+    for group in config.groups:
+        matched = [spec.name for spec in specs if spec.name in remaining and _match_group(spec, group)]
+        if not matched:
+            continue
+        for name in matched:
+            remaining.discard(name)
+        matched_sorted = sorted(matched, key=lambda item: (len(item), item))
+        preview = matched_sorted[: max(int(config.max_tools_per_group), 0)]
+        groups.append(
+            {
+                "name": group.name,
+                "title": group.title,
+                "trigger": group.trigger,
+                "task_type": group.task_type,
+                "tool_count": len(matched) if config.include_tool_counts else None,
+                "tools": preview,
+            }
+        )
+
+    if config.include_default_groups and remaining:
+        by_ns: dict[str, list[str]] = {}
+        for name in sorted(remaining):
+            ns = _namespace_from_tool_name(name)
+            by_ns.setdefault(ns, []).append(name)
+        for ns, names in sorted(by_ns.items(), key=lambda item: (item[0] != "core", item[0])):
+            preview = names[: max(int(config.max_tools_per_group), 0)]
+            trigger = None
+            if ns == "core":
+                trigger = "Built-in tools"
+            else:
+                # Best-effort hint; avoid expensive inference.
+                sample = spec_by_name.get(names[0])
+                if sample is not None and "mcp" in set(sample.tags):
+                    trigger = f"{ns} MCP tools"
+                else:
+                    trigger = f"{ns} tools"
+            groups.append(
+                {
+                    "name": ns,
+                    "title": None,
+                    "trigger": trigger,
+                    "task_type": None,
+                    "tool_count": len(names) if config.include_tool_counts else None,
+                    "tools": preview,
+                }
+            )
+
+    # Cap after assembly, keeping explicit groups first.
+    max_groups = max(int(config.max_groups), 1)
+    return groups[:max_groups]
+
+
+async def _prepare_tool_discovery_context(
+    planner: Any,
+    trajectory: Trajectory,
+    *,
+    allowed_names: set[str],
+) -> None:
+    config = _tool_search_config(planner)
+    if config is None:
+        return
+    cache = getattr(planner, "_tool_search_cache", None)
+    if cache is None:
         return
 
-    base_specs: Sequence[NodeSpec] = list(getattr(planner, "_specs", []) or [])
+    turn_text = _current_turn_text(trajectory)
+
+    hints_cfg = getattr(config, "hints", None)
+    if isinstance(hints_cfg, ToolHintsConfig) and hints_cfg.enabled:
+        if _TOOL_HINTS_METADATA_KEY not in trajectory.metadata:
+            results, effective = cache.search(
+                turn_text,
+                search_type=hints_cfg.search_type,
+                limit=hints_cfg.top_k,
+                include_always_loaded=bool(hints_cfg.include_always_loaded),
+                allowed_names=set(allowed_names),
+            )
+            rendered = prompts.render_tool_hints(results, query=turn_text)
+            if rendered:
+                trajectory.metadata[_TOOL_HINTS_METADATA_KEY] = rendered
+            planner._emit_event(
+                PlannerEvent(
+                    event_type="tool_hints_generated",
+                    ts=planner._time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    extra={
+                        "query": turn_text,
+                        "requested_search_type": hints_cfg.search_type,
+                        "effective_search_type": effective,
+                        "count": len(results),
+                        "top_k": hints_cfg.top_k,
+                    },
+                )
+            )
+
+    directory_cfg = getattr(config, "directory", None)
+    if isinstance(directory_cfg, ToolDirectoryConfig) and directory_cfg.enabled:
+        if _TOOLS_DIRECTORY_METADATA_KEY not in trajectory.metadata:
+            base_specs: Sequence[NodeSpec] = list(getattr(planner, "_execution_specs", None) or [])
+            allowed_specs = [spec for spec in base_specs if spec.name in allowed_names]
+            groups = _build_tool_directory(allowed_specs, config=directory_cfg)
+            rendered = prompts.render_tool_directory(groups)
+            if rendered:
+                trajectory.metadata[_TOOLS_DIRECTORY_METADATA_KEY] = rendered
+                planner._emit_event(
+                    PlannerEvent(
+                        event_type="tool_directory_rendered",
+                        ts=planner._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        extra={"group_count": len(groups)},
+                    )
+                )
+
+
+def _allowed_names_from_policy(
+    base_specs: Sequence[NodeSpec],
+    tool_visibility: ToolVisibilityPolicy | None,
+    tool_context: Mapping[str, Any],
+) -> set[str]:
+    if tool_visibility is None:
+        return {spec.name for spec in base_specs}
+
     base_by_name = {spec.name: spec for spec in base_specs}
     visible = tool_visibility.visible_tools(base_specs, tool_context)
     visible_names: set[str] = set()
@@ -55,13 +294,104 @@ def _tool_visibility_scope(
             if isinstance(name, str):
                 visible_names.add(name)
     visible_names &= set(base_by_name)
-    visible_specs = [spec for spec in base_specs if spec.name in visible_names]
+    return visible_names
+
+
+def _is_always_loaded(spec: NodeSpec, config: ToolSearchConfig | None) -> bool:
+    if spec.loading_mode == ToolLoadingMode.ALWAYS:
+        return True
+    if not config:
+        return True
+    return any(fnmatch(spec.name, pattern) for pattern in config.always_loaded_patterns)
+
+
+def _compute_visible_specs(
+    base_specs: Sequence[NodeSpec],
+    *,
+    allowed_names: set[str],
+    activated_names: set[str],
+    config: ToolSearchConfig | None,
+) -> list[NodeSpec]:
+    if config is None:
+        return [spec for spec in base_specs if spec.name in allowed_names]
+    visible_specs: list[NodeSpec] = []
+    for spec in base_specs:
+        if spec.name not in allowed_names:
+            continue
+        if _is_always_loaded(spec, config) or spec.name in activated_names:
+            visible_specs.append(spec)
+    return visible_specs
+
+
+def _apply_visible_catalog(planner: Any, visible_specs: Sequence[NodeSpec]) -> None:
+    planner._specs = list(visible_specs)
+    spec_by_name, catalog_records, alias_to_real = build_aliased_tool_catalog(planner._specs)
+    planner._spec_by_name = spec_by_name
+    planner._catalog_records = catalog_records
+    planner._tool_aliases = alias_to_real
+
+    planning_hints = getattr(planner, "_planning_hints", None)
+    hints_payload = None
+    if planning_hints is not None and not getattr(planning_hints, "empty", True):
+        hints_payload = planning_hints.to_prompt_payload()
+    planner._system_prompt = prompts.build_system_prompt(
+        planner._catalog_records,
+        extra=getattr(planner, "_system_prompt_extra", None),
+        planning_hints=hints_payload,
+        tool_examples=getattr(planner, "_tool_examples_config", None),
+    )
+
+    guardrail_context = getattr(planner, "_guardrail_context", None)
+    if guardrail_context is not None:
+        tool_ctx = getattr(guardrail_context, "tool_context", None)
+        if isinstance(tool_ctx, dict):
+            tool_ctx["available_tools"] = [spec.name for spec in planner._specs]
+
+    register_cb = getattr(planner, "_register_resource_callbacks", None)
+    if callable(register_cb):
+        register_cb()
+
+
+def _refresh_visible_catalog(
+    planner: Any,
+    *,
+    allowed_names: set[str],
+) -> None:
+    base_specs: Sequence[NodeSpec] = list(
+        getattr(planner, "_execution_specs", None) or getattr(planner, "_specs", None) or []
+    )
+    activated = getattr(planner, "_active_tool_names", None)
+    if activated is None:
+        activated = set()
+        planner._active_tool_names = activated
+    config = _tool_search_config(planner)
+    visible_specs = _compute_visible_specs(
+        base_specs,
+        allowed_names=allowed_names,
+        activated_names=activated,
+        config=config,
+    )
+    _apply_visible_catalog(planner, visible_specs)
+
+
+@contextmanager
+def _tool_visibility_scope(
+    planner: Any,
+    *,
+    tool_visibility: ToolVisibilityPolicy | None,
+    tool_context: Mapping[str, Any],
+) -> Iterator[None]:
+    base_specs: Sequence[NodeSpec] = list(
+        getattr(planner, "_execution_specs", None) or getattr(planner, "_specs", None) or []
+    )
+    allowed_names = _allowed_names_from_policy(base_specs, tool_visibility, tool_context)
 
     original_specs = getattr(planner, "_specs", None)
     original_spec_by_name = getattr(planner, "_spec_by_name", None)
     original_catalog_records = getattr(planner, "_catalog_records", None)
     original_tool_aliases = getattr(planner, "_tool_aliases", None)
     original_system_prompt = getattr(planner, "_system_prompt", None)
+    original_allowed_names = getattr(planner, "_tool_visibility_allowed_names", None)
     original_guardrail_available: list[str] | None = None
     guardrail_context = getattr(planner, "_guardrail_context", None)
     if guardrail_context is not None:
@@ -72,26 +402,8 @@ def _tool_visibility_scope(
                 original_guardrail_available = list(value)
 
     try:
-        planner._specs = visible_specs
-        spec_by_name, catalog_records, alias_to_real = build_aliased_tool_catalog(visible_specs)
-        planner._spec_by_name = spec_by_name
-        planner._catalog_records = catalog_records
-        planner._tool_aliases = alias_to_real
-
-        planning_hints = getattr(planner, "_planning_hints", None)
-        hints_payload = None
-        if planning_hints is not None and not getattr(planning_hints, "empty", True):
-            hints_payload = planning_hints.to_prompt_payload()
-        planner._system_prompt = prompts.build_system_prompt(
-            planner._catalog_records,
-            extra=getattr(planner, "_system_prompt_extra", None),
-            planning_hints=hints_payload,
-        )
-
-        if guardrail_context is not None:
-            tool_ctx = getattr(guardrail_context, "tool_context", None)
-            if isinstance(tool_ctx, dict):
-                tool_ctx["available_tools"] = [spec.name for spec in visible_specs]
+        planner._tool_visibility_allowed_names = allowed_names
+        _refresh_visible_catalog(planner, allowed_names=allowed_names)
 
         yield
     finally:
@@ -105,6 +417,7 @@ def _tool_visibility_scope(
             planner._tool_aliases = original_tool_aliases
         if original_system_prompt is not None:
             planner._system_prompt = original_system_prompt
+        planner._tool_visibility_allowed_names = original_allowed_names
         if guardrail_context is not None and original_guardrail_available is not None:
             tool_ctx = getattr(guardrail_context, "tool_context", None)
             if isinstance(tool_ctx, dict):
@@ -265,6 +578,102 @@ def _apply_steering(planner: Any, trajectory: Trajectory) -> None:
                 del history[: len(history) - 50]
 
 
+def _init_tool_activation_state(
+    planner: Any,
+    trajectory: Trajectory,
+    tool_context: Mapping[str, Any],
+    *,
+    resume: bool,
+) -> set[str] | None:
+    config = _tool_search_config(planner)
+    if config is None:
+        planner._active_tool_names = None
+        return None
+
+    if config.activation_scope == "session":
+        session_id = tool_context.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("activation_scope='session' requires tool_context['session_id']")
+        session_map = getattr(planner, "_session_tool_activations", None)
+        if session_map is None:
+            session_map = {}
+            planner._session_tool_activations = session_map
+        session_activated = session_map.setdefault(session_id, set())
+        planner._active_tool_names = session_activated
+        return session_activated
+
+    activated: set[str]
+    if resume:
+        raw = trajectory.metadata.get(_ACTIVATED_TOOLS_METADATA_KEY, [])
+        if isinstance(raw, list):
+            activated = {str(item) for item in raw if isinstance(item, str)}
+        else:
+            activated = set()
+    else:
+        activated = set()
+    trajectory.metadata[_ACTIVATED_TOOLS_METADATA_KEY] = sorted(activated)
+    planner._active_tool_names = activated
+    return activated
+
+
+def _maybe_activate_tool(
+    planner: Any,
+    tool_name: str,
+    trajectory: Trajectory,
+) -> bool:
+    config = _tool_search_config(planner)
+    if config is None:
+        return False
+
+    execution_specs: dict[str, NodeSpec] = getattr(planner, "_execution_spec_by_name", {})
+    spec = execution_specs.get(tool_name)
+    if spec is None:
+        return False
+
+    allowed_names = getattr(planner, "_tool_visibility_allowed_names", None)
+    if allowed_names is not None and tool_name not in allowed_names:
+        planner._emit_event(
+            PlannerEvent(
+                event_type="tool_activation_denied",
+                ts=planner._time_source(),
+                trajectory_step=len(trajectory.steps),
+                extra={"reason": "visibility_policy"},
+            )
+        )
+        return False
+
+    if _is_always_loaded(spec, config):
+        return False
+    if spec.loading_mode != ToolLoadingMode.DEFERRED:
+        return False
+
+    activated = getattr(planner, "_active_tool_names", None)
+    if activated is None:
+        activated = set()
+        planner._active_tool_names = activated
+
+    if tool_name not in activated:
+        activated.add(tool_name)
+        if config.activation_scope == "run":
+            trajectory.metadata[_ACTIVATED_TOOLS_METADATA_KEY] = sorted(activated)
+        _refresh_visible_catalog(planner, allowed_names=allowed_names or set(execution_specs))
+        planner._emit_event(
+            PlannerEvent(
+                event_type="tool_activated",
+                ts=planner._time_source(),
+                trajectory_step=len(trajectory.steps),
+                extra={
+                    "tool_name": tool_name,
+                    "activation_scope": config.activation_scope,
+                    "source": "tool_call",
+                    "reason": "first_use",
+                },
+            )
+        )
+
+    return True
+
+
 async def run(
     planner: Any,
     query: str,
@@ -302,8 +711,31 @@ async def run(
     planner._artifact_registry = ArtifactRegistry.from_snapshot(trajectory.metadata.get("artifact_registry"))
     planner._artifact_registry.write_snapshot(trajectory.metadata)
     error_recovery_cfg = getattr(planner, "_error_recovery_config", None)
-    with _tool_visibility_scope(planner, tool_visibility=tool_visibility, tool_context=normalised_tool_context or {}):
-        result = await run_loop(planner, trajectory, tracker=None, error_recovery_config=error_recovery_cfg)
+    previous_active = getattr(planner, "_active_tool_names", None)
+    _init_tool_activation_state(planner, trajectory, normalised_tool_context or {}, resume=False)
+    try:
+        base_specs: Sequence[NodeSpec] = list(
+            getattr(planner, "_execution_specs", None) or getattr(planner, "_specs", None) or []
+        )
+        allowed_names = _allowed_names_from_policy(base_specs, tool_visibility, normalised_tool_context or {})
+        all_tool_names = {spec.name for spec in base_specs}
+        await _prepare_tool_discovery_context(
+            planner,
+            trajectory,
+            allowed_names=allowed_names,
+        )
+        await _prepare_skills_context(
+            planner,
+            trajectory,
+            allowed_names=allowed_names,
+            all_tool_names=all_tool_names,
+        )
+        with _tool_visibility_scope(
+            planner, tool_visibility=tool_visibility, tool_context=normalised_tool_context or {}
+        ):
+            result = await run_loop(planner, trajectory, tracker=None, error_recovery_config=error_recovery_cfg)
+    finally:
+        planner._active_tool_names = previous_active
     await planner._maybe_record_memory_turn(query, result, trajectory, resolved_key)
     return result
 
@@ -365,8 +797,31 @@ async def resume(
     )
 
     error_recovery_cfg = getattr(planner, "_error_recovery_config", None)
-    with _tool_visibility_scope(planner, tool_visibility=tool_visibility, tool_context=trajectory.tool_context or {}):
-        result = await run_loop(planner, trajectory, tracker=tracker, error_recovery_config=error_recovery_cfg)
+    previous_active = getattr(planner, "_active_tool_names", None)
+    _init_tool_activation_state(planner, trajectory, trajectory.tool_context or {}, resume=True)
+    try:
+        base_specs: Sequence[NodeSpec] = list(
+            getattr(planner, "_execution_specs", None) or getattr(planner, "_specs", None) or []
+        )
+        allowed_names = _allowed_names_from_policy(base_specs, tool_visibility, trajectory.tool_context or {})
+        all_tool_names = {spec.name for spec in base_specs}
+        await _prepare_tool_discovery_context(
+            planner,
+            trajectory,
+            allowed_names=allowed_names,
+        )
+        await _prepare_skills_context(
+            planner,
+            trajectory,
+            allowed_names=allowed_names,
+            all_tool_names=all_tool_names,
+        )
+        with _tool_visibility_scope(
+            planner, tool_visibility=tool_visibility, tool_context=trajectory.tool_context or {}
+        ):
+            result = await run_loop(planner, trajectory, tracker=tracker, error_recovery_config=error_recovery_cfg)
+    finally:
+        planner._active_tool_names = previous_active
     await planner._maybe_record_memory_turn(trajectory.query, result, trajectory, resolved_key)
     return result
 
@@ -529,6 +984,7 @@ async def _handle_finish_action(
         },
     )
     metadata_reflection: dict[str, Any] | None = None
+    revision_idx = 0
 
     if candidate_answer is not None and planner._reflection_config and planner._reflection_config.enabled:
         critique: ReflectionCritique | None = None
@@ -964,46 +1420,49 @@ async def run_loop(
 
             spec = planner._spec_by_name.get(action.next_node)
             if spec is None:
-                # Try alternate candidates (multi-action outputs) before requiring another LLM step.
-                alt, _ = _maybe_select_alternate_action(
-                    planner,
-                    action,
-                    prefer_same_tool=False,
-                    require_read_only=False,
-                )
-                if alt is not None:
-                    previous = action.next_node
-                    action.next_node = alt.next_node
-                    action.args = dict(alt.args or {})
-                    # Remove used candidate from alternates to avoid reuse.
-                    if isinstance(action.alternate_actions, list):
-                        action.alternate_actions = [
-                            item
-                            for item in action.alternate_actions
-                            if not (
-                                isinstance(item, dict)
-                                and item.get("next_node") == alt.next_node
-                                and isinstance(item.get("args"), dict)
-                                and dict(item.get("args") or {}) == dict(alt.args or {})
-                            )
-                        ]
-                    planner._emit_event(
-                        PlannerEvent(
-                            event_type="multi_action_fallback_used",
-                            ts=planner._time_source(),
-                            trajectory_step=len(trajectory.steps),
-                            extra={"from": previous, "to": action.next_node, "reason": "unknown_tool"},
-                        )
-                    )
+                if _maybe_activate_tool(planner, action.next_node, trajectory):
                     spec = planner._spec_by_name.get(action.next_node)
-                error = prompts.render_invalid_node(
-                    action.next_node,
-                    list(planner._spec_by_name.keys()),
-                )
                 if spec is None:
-                    trajectory.steps.append(TrajectoryStep(action=action, error=error))
-                    trajectory.summary = None
-                    continue
+                    # Try alternate candidates (multi-action outputs) before requiring another LLM step.
+                    alt, _ = _maybe_select_alternate_action(
+                        planner,
+                        action,
+                        prefer_same_tool=False,
+                        require_read_only=False,
+                    )
+                    if alt is not None:
+                        previous = action.next_node
+                        action.next_node = alt.next_node
+                        action.args = dict(alt.args or {})
+                        # Remove used candidate from alternates to avoid reuse.
+                        if isinstance(action.alternate_actions, list):
+                            action.alternate_actions = [
+                                item
+                                for item in action.alternate_actions
+                                if not (
+                                    isinstance(item, dict)
+                                    and item.get("next_node") == alt.next_node
+                                    and isinstance(item.get("args"), dict)
+                                    and dict(item.get("args") or {}) == dict(alt.args or {})
+                                )
+                            ]
+                        planner._emit_event(
+                            PlannerEvent(
+                                event_type="multi_action_fallback_used",
+                                ts=planner._time_source(),
+                                trajectory_step=len(trajectory.steps),
+                                extra={"from": previous, "to": action.next_node, "reason": "unknown_tool"},
+                            )
+                        )
+                        spec = planner._spec_by_name.get(action.next_node)
+                    error = prompts.render_invalid_node(
+                        action.next_node,
+                        list(planner._spec_by_name.keys()),
+                    )
+                    if spec is None:
+                        trajectory.steps.append(TrajectoryStep(action=action, error=error))
+                        trajectory.summary = None
+                        continue
 
             autofilled_fields: tuple[str, ...] = ()
             try:

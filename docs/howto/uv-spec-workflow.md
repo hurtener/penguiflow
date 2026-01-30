@@ -206,6 +206,69 @@ This section lists the knobs you can enable either in the **spec** (source of tr
 - `sequential_only`: tools that must run alone.
 - `disallow`: tools the model must never call.
 
+### Tool Search + Deferred Tool Activation (spec: `planner.tool_search`)
+
+When enabled, these built-ins are added:
+
+- `tool_search` (discover tools by capability)
+- `tool_get` (fetch schema/examples for a discovered tool)
+
+Most tools can be hidden by default (deferred) to reduce prompt bloat.
+
+- `enabled`: turn on tool discovery.
+- `cache_dir`: where the SQLite tool index lives (default `.penguiflow`).
+- `default_loading_mode`: `always` | `deferred` (use `deferred` to hide tools by default).
+- `always_loaded_patterns`: glob patterns for tools that must remain visible (e.g. `tool_search`, `finish`, critical tools).
+- `activation_scope`: `run` | `session`.
+- `preferred_namespaces`: rank namespaces higher in `tool_search` ordering.
+- `fts_fallback_to_regex`: if FTS5 is unavailable, fall back to regex when `search_type=fts`.
+- `enable_incremental_index`: avoid full reindex when catalog fingerprint matches.
+- `rebuild_cache_on_init`: force reindex on startup.
+- `max_search_results`: upper bound for returned results.
+
+Optional prompt aids (opt-in):
+
+- `hints.*`: inject a bounded per-turn shortlist of relevant tools into the prompt (powered by an internal `tool_search`).
+  - `hints.enabled`: turn on per-turn hints.
+  - `hints.top_k`: number of suggested tools to inject (default 5).
+  - `hints.search_type`: `fts` | `regex` | `exact`.
+  - `hints.include_always_loaded`: whether always-visible tools can appear in the hints.
+
+- `directory.*`: inject a bounded “tool groups” directory into the prompt so the model has a map of what exists.
+  - `directory.enabled`: turn on tool directory.
+  - `directory.max_groups`: cap groups in the prompt.
+  - `directory.max_tools_per_group`: include a small preview list per group.
+  - `directory.include_tool_counts`: show group tool counts.
+  - `directory.include_default_groups`: auto-group by namespace (e.g. MCP tool nodes).
+  - `directory.groups`: developer-defined group rules (namespace/tag/pattern/name matching).
+
+Note: `activation_scope: session` requires a stable `tool_context.session_id` and concurrency-safe session serialization.
+
+### Skills (Local Skill Packs) (spec: `planner.skills`)
+
+When enabled, skills are loaded from local Skill Packs into a local SQLite store and can be retrieved pre-flight and/or discovered in-flight.
+
+- `enabled`: turn on skills subsystem.
+- `cache_dir`: where `skills.db` lives (default `.penguiflow`).
+- `max_tokens`: pre-flight injection budget.
+- `summarize`: MVP default is deterministic structured compression.
+- `redact_pii`: redact emails/phones/tokens in injected/returned skill text.
+- `scope_mode`: `project` | `tenant` | `global` (project is default).
+- `top_k`: number of skills to retrieve for pre-flight injection.
+- `fts_fallback_to_regex`: same semantics as tool_search.
+
+Skill packs (spec: `planner.skills.skill_packs[]`):
+- `name`, `path`, `format` (`md`|`yaml`|`json`|`jsonl` or auto-detect)
+- `scope_mode`, `enabled`, `update_existing_pack_skills`, `pinned_skill_names`
+
+Optional directory exposure (spec: `planner.skills.directory`):
+- `enabled`, `max_entries`, `include_fields`, `selection_strategy`
+
+When `planner.skills.enabled: true`, these built-in tools are added:
+- `skill_search` (find skill names)
+- `skill_get` (fetch full content)
+- `skill_list` (paged listing)
+
 ### Built-in short-term memory (spec: `planner.short_term_memory`)
 
 - `enabled`: turn on session memory inside ReactPlanner.
@@ -275,6 +338,8 @@ All of these can be overridden without regenerating:
 - `PLANNER_MAX_ITERS`, `PLANNER_HOP_BUDGET`, `PLANNER_ABSOLUTE_MAX_PARALLEL`
 - `PLANNER_STREAM_FINAL_RESPONSE`
 - `PLANNER_MULTI_ACTION_SEQUENTIAL`, `PLANNER_MULTI_ACTION_READ_ONLY_ONLY`, `PLANNER_MULTI_ACTION_MAX_TOOLS`
+- `TOOL_SEARCH_*` (enabled/cache_dir/default_loading_mode/activation_scope/always_loaded_patterns/hints/directory/etc.)
+- `SKILLS_*` (enabled/cache_dir/max_tokens/top_k/redaction/directory settings; packs are spec-defined)
 - `RICH_OUTPUT_ENABLED`, `RICH_OUTPUT_ALLOWLIST`, `RICH_OUTPUT_INCLUDE_PROMPT_CATALOG`, `RICH_OUTPUT_INCLUDE_PROMPT_EXAMPLES`, `RICH_OUTPUT_MAX_PAYLOAD_BYTES`, `RICH_OUTPUT_MAX_TOTAL_BYTES`
 - `ARTIFACT_STORE_ENABLED`, `ARTIFACT_STORE_TTL_SECONDS`, `ARTIFACT_STORE_MAX_*`, `ARTIFACT_STORE_CLEANUP_STRATEGY`
 - `SHORT_TERM_MEMORY_*` (enabled/strategy/budget/isolation/retry)
@@ -427,6 +492,55 @@ planner:
     sequential_only: [echo]
     disallow: []
 
+  tool_search:
+    enabled: true
+    cache_dir: .penguiflow
+    default_loading_mode: deferred
+    always_loaded_patterns: [tasks.*, tool_search, tool_get, finish]
+    activation_scope: run
+    preferred_namespaces: []
+    fts_fallback_to_regex: true
+    enable_incremental_index: true
+    rebuild_cache_on_init: false
+    max_search_results: 10
+
+    hints:
+      enabled: true
+      top_k: 5
+      include_always_loaded: false
+      search_type: fts
+
+    directory:
+      enabled: true
+      max_groups: 20
+      max_tools_per_group: 6
+      include_tool_counts: true
+      include_default_groups: true
+      groups: []
+
+  skills:
+    enabled: true
+    cache_dir: .penguiflow
+    max_tokens: 2000
+    summarize: false
+    redact_pii: true
+    scope_mode: project
+    top_k: 6
+    fts_fallback_to_regex: true
+    skill_packs:
+      - name: core
+        path: skills/packs/core
+        format: md
+        scope_mode: project
+        enabled: true
+        update_existing_pack_skills: true
+        pinned_skill_names: []
+    directory:
+      enabled: true
+      max_entries: 30
+      include_fields: [name, title, trigger]
+      selection_strategy: pinned_then_recent
+
   short_term_memory:
     enabled: true
     strategy: rolling_summary
@@ -567,6 +681,48 @@ PLANNER_STREAM_FINAL_RESPONSE=true
 PLANNER_MULTI_ACTION_SEQUENTIAL=true
 PLANNER_MULTI_ACTION_READ_ONLY_ONLY=true
 PLANNER_MULTI_ACTION_MAX_TOOLS=2
+
+# =============================================================================
+# Tool Search + Deferred Activation
+# =============================================================================
+TOOL_SEARCH_ENABLED=true
+TOOL_SEARCH_CACHE_DIR=.penguiflow
+TOOL_SEARCH_DEFAULT_LOADING_MODE=deferred
+TOOL_SEARCH_ALWAYS_LOADED_PATTERNS=tasks.*,tool_search,tool_get,finish
+TOOL_SEARCH_ACTIVATION_SCOPE=run
+TOOL_SEARCH_PREFERRED_NAMESPACES=
+TOOL_SEARCH_FTS_FALLBACK_TO_REGEX=true
+TOOL_SEARCH_ENABLE_INCREMENTAL_INDEX=true
+TOOL_SEARCH_REBUILD_CACHE_ON_INIT=false
+TOOL_SEARCH_MAX_SEARCH_RESULTS=10
+
+# Optional prompt aids
+TOOL_SEARCH_HINTS_ENABLED=true
+TOOL_SEARCH_HINTS_TOP_K=5
+TOOL_SEARCH_HINTS_INCLUDE_ALWAYS_LOADED=false
+TOOL_SEARCH_HINTS_SEARCH_TYPE=fts
+
+TOOL_SEARCH_DIRECTORY_ENABLED=true
+TOOL_SEARCH_DIRECTORY_MAX_GROUPS=20
+TOOL_SEARCH_DIRECTORY_MAX_TOOLS_PER_GROUP=6
+TOOL_SEARCH_DIRECTORY_INCLUDE_TOOL_COUNTS=true
+TOOL_SEARCH_DIRECTORY_INCLUDE_DEFAULT_GROUPS=true
+
+# =============================================================================
+# Skills (Local Skill Packs)
+# =============================================================================
+SKILLS_ENABLED=true
+SKILLS_CACHE_DIR=.penguiflow
+SKILLS_MAX_TOKENS=2000
+SKILLS_SUMMARIZE=false
+SKILLS_REDACT_PII=true
+SKILLS_SCOPE_MODE=project
+SKILLS_TOP_K=6
+SKILLS_FTS_FALLBACK_TO_REGEX=true
+SKILLS_DIRECTORY_ENABLED=true
+SKILLS_DIRECTORY_MAX_ENTRIES=30
+SKILLS_DIRECTORY_INCLUDE_FIELDS=name,title,trigger
+SKILLS_DIRECTORY_SELECTION_STRATEGY=pinned_then_recent
 
 # =============================================================================
 # Artifact Store (binary/large text)

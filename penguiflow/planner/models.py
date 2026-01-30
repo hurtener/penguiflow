@@ -9,7 +9,8 @@ from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast
 from pydantic import BaseModel, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from ..catalog import NodeSpec
+from ..catalog import NodeSpec, ToolLoadingMode
+from ..skills.models import SkillPackConfig, SkillsConfig, SkillsDirectoryConfig  # noqa: F401
 from .context import PlannerPauseReason
 
 # ---------------------------------------------------------------------------
@@ -422,6 +423,57 @@ class ToolPolicy(BaseModel):
         return True
 
 
+class ToolHintsConfig(BaseModel):
+    enabled: bool = False
+    top_k: int = Field(default=5, ge=1, le=20)
+    include_always_loaded: bool = False
+    search_type: Literal["fts", "regex", "exact"] = "fts"
+
+
+class ToolGroupConfig(BaseModel):
+    name: str
+    title: str | None = None
+    trigger: str | None = None
+    task_type: Literal["browser", "api", "code", "domain", "unknown"] | None = None
+
+    match_namespaces: list[str] = Field(default_factory=list)
+    match_tags: list[str] = Field(default_factory=list)
+    match_name_patterns: list[str] = Field(default_factory=list)
+    tool_names: list[str] = Field(default_factory=list)
+
+
+class ToolDirectoryConfig(BaseModel):
+    enabled: bool = False
+    max_groups: int = Field(default=20, ge=1, le=100)
+    max_tools_per_group: int = Field(default=6, ge=0, le=50)
+    include_tool_counts: bool = True
+    include_default_groups: bool = True
+    groups: list[ToolGroupConfig] = Field(default_factory=list)
+
+
+class ToolSearchConfig(BaseModel):
+    enabled: bool = False
+    cache_dir: str = ".penguiflow"
+    default_loading_mode: ToolLoadingMode = ToolLoadingMode.ALWAYS
+    always_loaded_patterns: list[str] = ["tasks.*", "tool_search", "tool_get", "finish"]
+    activation_scope: Literal["run", "session"] = "run"
+    preferred_namespaces: list[str] = []
+    fts_fallback_to_regex: bool = True
+    enable_incremental_index: bool = True
+    rebuild_cache_on_init: bool = False
+    max_search_results: int = 10
+
+    # Optional prompt aids (opt-in)
+    hints: ToolHintsConfig = Field(default_factory=ToolHintsConfig)
+    directory: ToolDirectoryConfig = Field(default_factory=ToolDirectoryConfig)
+
+
+class ToolExamplesConfig(BaseModel):
+    enabled: bool = True
+    max_examples_per_tool: int = Field(default=3, ge=1, le=10)
+    include_descriptions: bool = True
+
+
 class ToolVisibilityPolicy(Protocol):
     """Dynamic, per-run filtering for which tools are shown to the LLM.
 
@@ -660,7 +712,12 @@ __all__ = [
     "ReflectionCritique",
     "ReflectionCriteria",
     "FinalPayload",
+    "SkillPackConfig",
+    "SkillsConfig",
+    "SkillsDirectoryConfig",
     "Source",
     "SuggestedAction",
     "ToolPolicy",
+    "ToolExamplesConfig",
+    "ToolSearchConfig",
 ]

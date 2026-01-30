@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+from .models import ToolExamplesConfig
 
 
 def render_summary(summary: Mapping[str, Any]) -> str:
@@ -72,8 +75,7 @@ def render_empty_parallel_plan() -> str:
 
 def render_parallel_with_next_node(next_node: str) -> str:
     return (
-        f"Parallel action must set next_node='parallel'. Received next_node='{next_node}'. "
-        "Revise the action and retry."
+        f"Parallel action must set next_node='parallel'. Received next_node='{next_node}'. Revise the action and retry."
     )
 
 
@@ -225,6 +227,51 @@ def _compact_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, sort_keys=True)
 
 
+_EXAMPLE_TAG_PRIORITY = {
+    "minimal": 0,
+    "common": 1,
+    "edge-case": 2,
+}
+
+
+def _sorted_tool_examples(examples: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    ranked: list[tuple[tuple[int, int], Mapping[str, Any]]] = []
+    for idx, example in enumerate(examples):
+        tags = example.get("tags")
+        rank = len(_EXAMPLE_TAG_PRIORITY)
+        if isinstance(tags, Sequence) and not isinstance(tags, (str, bytes)):
+            for tag in tags:
+                tag_value = str(tag)
+                if tag_value in _EXAMPLE_TAG_PRIORITY:
+                    rank = min(rank, _EXAMPLE_TAG_PRIORITY[tag_value])
+        ranked.append(((rank, idx), example))
+    ranked.sort(key=lambda item: item[0])
+    return [example for _, example in ranked]
+
+
+def _render_tool_examples(
+    examples: Sequence[Mapping[str, Any]],
+    *,
+    config: ToolExamplesConfig,
+) -> list[str]:
+    if not config.enabled or not examples:
+        return []
+    limit = max(1, config.max_examples_per_tool)
+    lines = ["  examples:"]
+    for example in _sorted_tool_examples(examples)[:limit]:
+        args = example.get("args") if isinstance(example.get("args"), Mapping) else {}
+        lines.append(f"    - args: {_compact_json(args)}")
+        description = example.get("description")
+        if config.include_descriptions and isinstance(description, str) and description.strip():
+            lines.append(f"      description: {description.strip()}")
+        tags = example.get("tags")
+        if isinstance(tags, Sequence) and not isinstance(tags, (str, bytes)):
+            tag_list = [str(tag) for tag in tags if str(tag)]
+            if tag_list:
+                lines.append(f"      tags: {_compact_json(tag_list)}")
+    return lines
+
+
 def merge_prompt_extras(*parts: str | None) -> str | None:
     """Join optional system prompt fragments with spacing."""
     cleaned = [part.strip() for part in parts if part and part.strip()]
@@ -233,7 +280,7 @@ def merge_prompt_extras(*parts: str | None) -> str | None:
     return "\n\n".join(cleaned)
 
 
-STEERING_INTERPRETATION_PROMPT = '''
+STEERING_INTERPRETATION_PROMPT = """
 ## Real-Time User Steering
 
 During execution, the user may send steering messages. When you receive a
@@ -264,7 +311,7 @@ steering input in your context:
 4. **Status Query**: If the user asks about progress, provide a brief summary of current and background work.
 
 Always acknowledge steering messages naturally to confirm you received and understood them.
-'''
+"""
 
 
 def render_background_task_guidance(*, include_steering: bool = True) -> str:
@@ -294,7 +341,8 @@ def render_background_task_guidance(*, include_steering: bool = True) -> str:
 </user_steering>
 """
 
-    return """<background_tasks>
+    return (
+        """<background_tasks>
 You have access to background task orchestration. Background tasks are independent
 subagents that run asynchronously, allowing you to parallelize long-running work
 while continuing to respond to the user.
@@ -429,11 +477,14 @@ For HUMAN_GATED groups:
 Use retain_turn=True if you want to wait for results and continue reasoning
 without yielding to the user (requires APPEND or REPLACE merge strategy).
 </task_groups>
-""" + steering_section + """
+"""
+        + steering_section
+        + """
 </background_tasks>"""
+    )
 
 
-def render_tool(record: Mapping[str, Any]) -> str:
+def render_tool(record: Mapping[str, Any], *, tool_examples: ToolExamplesConfig | None = None) -> str:
     args_schema = _compact_json(record["args_schema"])
     out_schema = _compact_json(record["out_schema"])
     tags = ", ".join(record.get("tags", ()))
@@ -466,6 +517,9 @@ def render_tool(record: Mapping[str, Any]) -> str:
         f"  args_schema: {args_schema}",
         f"  out_schema: {out_schema}",
     ]
+    examples_config = tool_examples or ToolExamplesConfig()
+    if isinstance(record.get("examples"), Sequence):
+        parts.extend(_render_tool_examples(record.get("examples", ()), config=examples_config))
     if tags:
         parts.append(f"  tags: {tags}")
     if scopes:
@@ -481,12 +535,133 @@ def render_tool(record: Mapping[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def render_tool_discovery_guidance() -> str:
+    return """<tool_discovery>
+You can discover additional tools using `tool_search`.
+- Describe the capability you need.
+- Use `tool_get` to fetch the tool schema/examples if needed.
+- Use the tool name to call it.
+Only tools permitted for this request will appear.
+</tool_discovery>"""
+
+
+def render_skill_discovery_guidance() -> str:
+    return """<skill_discovery>
+You can discover and fetch skills:
+- Use `skill_search` to find skills by capability (returns skill names).
+- Use `skill_get` with a skill name for the full playbook.
+</skill_discovery>"""
+
+
+def render_skill_directory(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    include_fields: Sequence[str],
+) -> str | None:
+    if not entries:
+        return None
+    fields = {field for field in include_fields if isinstance(field, str)}
+    lines = [
+        "<skill_directory>",
+        "Known skills (use skill_get by name; use skill_search for discovery):",
+    ]
+    for entry in entries:
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        label = None
+        if "title" in fields:
+            title = entry.get("title")
+            if isinstance(title, str) and title.strip():
+                label = title.strip()
+        if label is None and "trigger" in fields:
+            trigger = entry.get("trigger")
+            if isinstance(trigger, str) and trigger.strip():
+                label = trigger.strip()
+        if label is None and "task_type" in fields:
+            task_type = entry.get("task_type")
+            if isinstance(task_type, str) and task_type.strip():
+                label = task_type.strip()
+        if label:
+            lines.append(f"- {name} — {label}")
+        else:
+            lines.append(f"- {name}")
+    lines.append("</skill_directory>")
+    return "\n".join(lines)
+
+
+def render_tool_hints(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    query: str | None = None,
+) -> str | None:
+    if not entries:
+        return None
+    lines: list[str] = ["<tool_hints>"]
+    if isinstance(query, str) and query.strip():
+        lines.append(f"Suggested tools for: {query.strip()}")
+    else:
+        lines.append("Suggested tools:")
+    for entry in entries:
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        desc = entry.get("description")
+        label = None
+        if isinstance(desc, str) and desc.strip():
+            label = desc.strip()
+        if label:
+            lines.append(f"- {name} — {label}")
+        else:
+            lines.append(f"- {name}")
+    lines.append("</tool_hints>")
+    return "\n".join(lines)
+
+
+def render_tool_directory(
+    groups: Sequence[Mapping[str, Any]],
+) -> str | None:
+    if not groups:
+        return None
+    lines: list[str] = [
+        "<tool_directory>",
+        "Known tool groups (use tool_search for discovery; tool_get for schemas/examples):",
+    ]
+    for group in groups:
+        name = group.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        title = group.get("title")
+        trigger = group.get("trigger")
+        tool_count = group.get("tool_count")
+        tools = group.get("tools")
+        label_parts: list[str] = []
+        if isinstance(title, str) and title.strip() and title.strip() != name.strip():
+            label_parts.append(title.strip())
+        if isinstance(trigger, str) and trigger.strip():
+            label_parts.append(trigger.strip())
+        if isinstance(tool_count, int) and tool_count >= 0:
+            label_parts.append(f"{tool_count} tools")
+        label = " — ".join(label_parts) if label_parts else None
+        if label:
+            lines.append(f"- {name} — {label}")
+        else:
+            lines.append(f"- {name}")
+        if isinstance(tools, Sequence) and tools:
+            preview = ", ".join(str(item) for item in tools if item)
+            if preview:
+                lines.append(f"  e.g. {preview}")
+    lines.append("</tool_directory>")
+    return "\n".join(lines)
+
+
 def build_system_prompt(
     catalog: Sequence[Mapping[str, Any]],
     *,
     extra: str | None = None,
     planning_hints: Mapping[str, Any] | None = None,
     current_date: str | None = None,
+    tool_examples: ToolExamplesConfig | None = None,
 ) -> str:
     """Build comprehensive system prompt for the planner.
 
@@ -517,7 +692,7 @@ def build_system_prompt(
     Returns:
         Complete system prompt string combining baseline rules + tools + extra + hints
     """
-    rendered_tools = "\n".join(render_tool(item) for item in catalog)
+    rendered_tools = "\n".join(render_tool(item, tool_examples=tool_examples) for item in catalog)
 
     # Default to current date if not provided (date-only for better cache hits)
     if current_date is None:
@@ -1002,8 +1177,6 @@ def render_arg_fill_prompt(
 
         # Check for "Valid options: ['opt1', 'opt2']" pattern
         if "Valid options:" in desc:
-            import re
-
             match = re.search(r"Valid options:\s*\[([^\]]+)\]", desc)
             if match:
                 # Parse the options and use the first one
@@ -1035,13 +1208,9 @@ def render_arg_fill_prompt(
     user_context = f'\nUser\'s request: "{user_query}"\n' if user_query else ""
 
     # Check if any field has valid options - add emphasis
-    has_constrained_fields = any(
-        "Valid options:" in field_descriptions.get(f, "") for f in missing_fields
-    )
+    has_constrained_fields = any("Valid options:" in field_descriptions.get(f, "") for f in missing_fields)
     constraint_note = (
-        "- For fields with 'Valid options', you MUST use one of the listed values\n"
-        if has_constrained_fields
-        else ""
+        "- For fields with 'Valid options', you MUST use one of the listed values\n" if has_constrained_fields else ""
     )
 
     return (
@@ -1245,7 +1414,7 @@ def render_multi_action_guidance(multi_count: int) -> str | None:
         return (
             "<multi_action_reminder>\n"
             "REMINDER: Output exactly ONE JSON object per assistant message.\n"
-            "If you need multiple tool calls, use next_node=\"parallel\" with args.steps.\n"
+            'If you need multiple tool calls, use next_node="parallel" with args.steps.\n'
             "Do not output multiple JSON objects sequentially.\n"
             "</multi_action_reminder>"
         )
@@ -1256,7 +1425,7 @@ def render_multi_action_guidance(multi_count: int) -> str | None:
             "IMPORTANT: You have emitted multiple JSON objects in a single response.\n"
             "You MUST output exactly ONE JSON object.\n"
             "If you need multiple tool calls, use:\n"
-            "{\"next_node\": \"parallel\", \"args\": {\"steps\": [{\"node\": \"tool_a\", \"args\": {...}}]}}\n"
+            '{"next_node": "parallel", "args": {"steps": [{"node": "tool_a", "args": {...}}]}}\n'
             "Do NOT emit multiple JSON objects one after another.\n"
             "</multi_action_warning>"
         )
@@ -1267,7 +1436,7 @@ def render_multi_action_guidance(multi_count: int) -> str | None:
         "This breaks tool execution reliability.\n\n"
         "RULES:\n"
         "- Output exactly ONE JSON object per message.\n"
-        "- For multiple tool calls, use next_node=\"parallel\" (args.steps + optional join).\n"
+        '- For multiple tool calls, use next_node="parallel" (args.steps + optional join).\n'
         "- Do NOT include extra commentary, code fences, or additional JSON objects.\n"
         "</multi_action_critical>"
     )
@@ -1349,10 +1518,7 @@ def render_arg_fill_clarification(
             field_list.append(f"- {field}")
 
     fields_str = "\n".join(field_list)
-    return (
-        f"To use {tool_name}, I need you to provide the following information:\n"
-        f"{fields_str}"
-    )
+    return f"To use {tool_name}, I need you to provide the following information:\n{fields_str}"
 
 
 def render_proactive_report_guidance() -> str:

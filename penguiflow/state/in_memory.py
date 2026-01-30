@@ -276,9 +276,10 @@ class InMemoryStateStore:
         async with self._lock:
             self._planner_state[token] = dict(payload)
 
-    async def load_planner_state(self, token: str) -> dict[str, Any]:
+    async def load_planner_state(self, token: str) -> dict[str, Any] | None:
         async with self._lock:
-            return dict(self._planner_state.pop(token, {}))
+            payload = self._planner_state.pop(token, None)
+        return dict(payload) if payload is not None else None
 
     # ---------------------------------------------------------------------
     # Optional - Short-term memory persistence
