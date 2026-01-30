@@ -24,6 +24,7 @@ It provides:
 * **Streaming chunks** (LLM-style token emission with `Context.emit_chunk`)
 * **Dynamic loops** (controller nodes)
 * **LLM-driven orchestration** (`ReactPlanner` for autonomous multi-step workflows with tool selection, parallel execution, and pause/resume)
+  * **Auto-seq (opt-in, v1)** — deterministic post-node transitions with `auto_seq_*` events and optional auto-exec per tool.
 * **Short-term memory (opt-in)** — per-session conversation continuity for `ReactPlanner` with truncation/rolling-summary strategies, fail-closed isolation by `MemoryKey`, and optional persistence via `state_store` (see `docs/MEMORY_GUIDE.md`).
 * **Runtime playbooks** (callable subflows with shared metadata)
 * **Per-trace cancellation** (`PenguiFlow.cancel` with `TraceCancelled` surfacing in nodes)

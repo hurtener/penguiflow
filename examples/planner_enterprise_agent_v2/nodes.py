@@ -57,6 +57,12 @@ class RouteDecision(BaseModel):
     reason: str
 
 
+class DocumentRouteDecision(RouteDecision):
+    """RouteDecision narrowed to document workflow."""
+
+    route: Literal["documents"]
+
+
 class RoadmapStep(BaseModel):
     """UI progress indicator for multi-step workflows."""
 
@@ -282,9 +288,7 @@ async def triage_query(args: UserQuery, ctx: ToolContext) -> RouteDecision:
     tags=["planner", "documents"],
     side_effects="stateful",
 )
-async def initialize_document_workflow(
-    args: RouteDecision, ctx: ToolContext
-) -> DocumentState:
+async def initialize_document_workflow(args: RouteDecision, ctx: ToolContext) -> DocumentState:
     """Set up document analysis pipeline."""
     if args.route != "documents":
         raise FlowError(
@@ -295,9 +299,7 @@ async def initialize_document_workflow(
         )
 
     roadmap = _clone_roadmap(DOCUMENT_ROADMAP)
-    current = _mark_step_status(
-        roadmap, step_id=DOCUMENT_ROADMAP[0].id, status="running"
-    )
+    current = _mark_step_status(roadmap, step_id=DOCUMENT_ROADMAP[0].id, status="running")
     _publish_status(
         ctx,
         status="thinking",
@@ -318,9 +320,7 @@ async def initialize_document_workflow(
 async def parse_documents(args: DocumentState, ctx: ToolContext) -> DocumentState:
     """Extract document references from query."""
     roadmap = list(args.roadmap)
-    current = _mark_step_status(
-        roadmap, step_id=DOCUMENT_ROADMAP[0].id, status="running"
-    )
+    current = _mark_step_status(roadmap, step_id=DOCUMENT_ROADMAP[0].id, status="running")
     _publish_status(
         ctx,
         status="thinking",
@@ -371,9 +371,7 @@ async def extract_metadata(args: DocumentState, ctx: ToolContext) -> DocumentSta
         }
 
     roadmap = list(args.roadmap)
-    current = _mark_step_status(
-        roadmap, step_id=DOCUMENT_ROADMAP[1].id, status="running"
-    )
+    current = _mark_step_status(roadmap, step_id=DOCUMENT_ROADMAP[1].id, status="running")
     _publish_status(
         ctx,
         status="thinking",
@@ -406,14 +404,10 @@ async def extract_metadata(args: DocumentState, ctx: ToolContext) -> DocumentSta
     tags=["planner", "documents"],
     side_effects="pure",
 )
-async def generate_document_summary(
-    args: DocumentState, ctx: ToolContext
-) -> DocumentState:
+async def generate_document_summary(args: DocumentState, ctx: ToolContext) -> DocumentState:
     """Synthesize findings into natural language summary."""
     roadmap = list(args.roadmap)
-    current = _mark_step_status(
-        roadmap, step_id=DOCUMENT_ROADMAP[2].id, status="running"
-    )
+    current = _mark_step_status(roadmap, step_id=DOCUMENT_ROADMAP[2].id, status="running")
     _publish_status(
         ctx,
         status="thinking",
@@ -450,9 +444,7 @@ async def generate_document_summary(
 async def render_document_report(args: DocumentState, ctx: ToolContext) -> FinalAnswer:
     """Package results into structured final answer."""
     roadmap = list(args.roadmap)
-    current = _mark_step_status(
-        roadmap, step_id=DOCUMENT_ROADMAP[3].id, status="running"
-    )
+    current = _mark_step_status(roadmap, step_id=DOCUMENT_ROADMAP[3].id, status="running")
     _publish_status(
         ctx,
         status="thinking",
@@ -617,9 +609,7 @@ async def recommend_bug_fix(args: BugState, ctx: ToolContext) -> FinalAnswer:
         roadmap=roadmap,
     )
 
-    failed_checks = [
-        k for k, v in args.diagnostics.items() if v in ("failed", "degraded")
-    ]
+    failed_checks = [k for k, v in args.diagnostics.items() if v in ("failed", "degraded")]
 
     recommendation = (
         f"Root cause: Configuration validation failure. "
@@ -699,11 +689,7 @@ async def answer_general_query(args: RouteDecision, ctx: ToolContext) -> FinalAn
 async def _init_documents_flow(message: Message, ctx: Any) -> Message:
     base = _ensure_message(message)
     payload = base.payload
-    decision = (
-        payload
-        if isinstance(payload, RouteDecision)
-        else RouteDecision.model_validate(payload)
-    )
+    decision = payload if isinstance(payload, RouteDecision) else RouteDecision.model_validate(payload)
     proxy_ctx = _flow_ctx(base.meta)
     state = await initialize_document_workflow(decision, proxy_ctx)
     return base.model_copy(update={"payload": state})
@@ -712,11 +698,7 @@ async def _init_documents_flow(message: Message, ctx: Any) -> Message:
 async def _parse_documents_flow(message: Message, ctx: Any) -> Message:
     base = _ensure_message(message)
     payload = base.payload
-    state = (
-        payload
-        if isinstance(payload, DocumentState)
-        else DocumentState.model_validate(payload)
-    )
+    state = payload if isinstance(payload, DocumentState) else DocumentState.model_validate(payload)
     proxy_ctx = _flow_ctx(base.meta)
     updated = await parse_documents(state, proxy_ctx)
     return base.model_copy(update={"payload": updated})
@@ -725,11 +707,7 @@ async def _parse_documents_flow(message: Message, ctx: Any) -> Message:
 async def _extract_metadata_flow(message: Message, ctx: Any) -> Message:
     base = _ensure_message(message)
     payload = base.payload
-    state = (
-        payload
-        if isinstance(payload, DocumentState)
-        else DocumentState.model_validate(payload)
-    )
+    state = payload if isinstance(payload, DocumentState) else DocumentState.model_validate(payload)
     proxy_ctx = _flow_ctx(base.meta)
     updated = await extract_metadata(state, proxy_ctx)
     return base.model_copy(update={"payload": updated})
@@ -738,11 +716,7 @@ async def _extract_metadata_flow(message: Message, ctx: Any) -> Message:
 async def _generate_summary_flow(message: Message, ctx: Any) -> Message:
     base = _ensure_message(message)
     payload = base.payload
-    state = (
-        payload
-        if isinstance(payload, DocumentState)
-        else DocumentState.model_validate(payload)
-    )
+    state = payload if isinstance(payload, DocumentState) else DocumentState.model_validate(payload)
     proxy_ctx = _flow_ctx(base.meta)
     updated = await generate_document_summary(state, proxy_ctx)
     return base.model_copy(update={"payload": updated})
@@ -751,11 +725,7 @@ async def _generate_summary_flow(message: Message, ctx: Any) -> Message:
 async def _render_report_flow(message: Message, ctx: Any) -> Message:
     base = _ensure_message(message)
     payload = base.payload
-    state = (
-        payload
-        if isinstance(payload, DocumentState)
-        else DocumentState.model_validate(payload)
-    )
+    state = payload if isinstance(payload, DocumentState) else DocumentState.model_validate(payload)
     proxy_ctx = _flow_ctx(base.meta)
     final = await render_document_report(state, proxy_ctx)
     return base.model_copy(update={"payload": final})
@@ -796,16 +766,14 @@ def build_document_analysis_subflow(
 
 
 @tool(
-    desc=(
-        "Complete document analysis pipeline "
-        "(parse, extract metadata, summarize, render report)"
-    ),
+    desc=("Complete document analysis pipeline (parse, extract metadata, summarize, render report)"),
     tags=["planner", "documents", "subflow"],
     side_effects="read",
     latency_hint_ms=2000,  # Entire pipeline latency
     cost_hint="medium",  # Multiple internal operations
+    extra={"auto_seq": True, "auto_seq_execute": True},
 )
-async def analyze_documents_pipeline(args: RouteDecision, ctx: ToolContext) -> FinalAnswer:
+async def analyze_documents_pipeline(args: DocumentRouteDecision, ctx: ToolContext) -> FinalAnswer:
     """Execute complete document analysis workflow as a single operation."""
     if args.route != "documents":
         raise FlowError(
@@ -869,6 +837,7 @@ async def analyze_documents_pipeline(args: RouteDecision, ctx: ToolContext) -> F
 __all__ = [
     "UserQuery",
     "RouteDecision",
+    "DocumentRouteDecision",
     "DocumentState",
     "BugState",
     "FinalAnswer",
