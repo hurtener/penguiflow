@@ -13,7 +13,7 @@ It is intentionally a backlog RFC: it lists *what we should fix/standardize next
 
 ## Background
 
-PenguiFlow v2.8 uses a duck-typed `StateStore` Protocol plus optional capability protocols (planner pause, memory, sessions, trajectories, planner events, artifacts). The system is intentionally flexible, but over time several mismatches emerged between:
+PenguiFlow v2.11.x uses a duck-typed `StateStore` Protocol plus optional capability protocols (planner pause, memory, sessions, trajectories, planner events, artifacts). The system is intentionally flexible, but over time several mismatches emerged between:
 
 - The *documented contracts* (`docs/spec/STATESTORE_IMPLEMENTATION_SPEC.md`)
 - The *typed surface* (`penguiflow/state/protocol.py`)
@@ -188,4 +188,3 @@ This RFC tracks StateStore follow-ups that are independent of the A2A redesign, 
 - Do we want `StoredEvent` to become a Pydantic model (easier migration + schema evolution) instead of a dataclass?
 - Is it worth introducing a “StateStore version handshake” to let stores advertise supported capabilities/features?
 - How do we best bound storage for high-volume streaming events (`PlannerEvent` stream chunks) without losing usability for the Playground UI?
-

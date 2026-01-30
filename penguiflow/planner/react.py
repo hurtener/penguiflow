@@ -72,7 +72,10 @@ from .models import (
     ReflectionConfig,
     ReflectionCriteria,
     ReflectionCritique,
+    SkillsConfig,
+    ToolExamplesConfig,
     ToolPolicy,
+    ToolSearchConfig,
     ToolVisibilityPolicy,
 )
 from .parallel import execute_parallel_plan
@@ -375,6 +378,17 @@ class ReactPlanner:
     _time_source: Callable[[], float]
     _token_budget: int | None
     _tool_policy: ToolPolicy | None
+    _tool_search_cache: Any | None
+    _tool_search_config: Any | None
+    _tool_search_max_results: int
+    _tool_visibility_allowed_names: set[str] | None
+    _active_tool_names: set[str] | None
+    _session_tool_activations: dict[str, set[str]]
+    _execution_specs: list[NodeSpec]
+    _execution_spec_by_name: dict[str, NodeSpec]
+    _tool_examples_config: ToolExamplesConfig | None
+    _skills_config: SkillsConfig | None
+    _skills_provider: Any | None
     _background_tasks: BackgroundTasksConfig
     _multi_action_sequential: bool
     _multi_action_read_only_only: bool
@@ -443,6 +457,9 @@ class ReactPlanner:
         use_native_llm: bool = False,
         guardrail_gateway: Any | None = None,
         guardrail_conversation_history_turns: int = 1,
+        tool_search: ToolSearchConfig | None = None,
+        tool_examples: ToolExamplesConfig | None = None,
+        skills: SkillsConfig | None = None,
     ) -> None:
         # NOTE: ReactPlanner has mutable per-run state and is not safe to call concurrently on a single
         # instance. We provide an internal hotfix path that serializes calls per session_id while
@@ -501,6 +518,9 @@ class ReactPlanner:
             "use_native_llm": use_native_llm,
             "guardrail_gateway": guardrail_gateway,
             "guardrail_conversation_history_turns": guardrail_conversation_history_turns,
+            "tool_search": tool_search,
+            "tool_examples": tool_examples,
+            "skills": skills,
         }
         _init_react_planner(
             self,
@@ -548,6 +568,9 @@ class ReactPlanner:
             use_native_llm=use_native_llm,
             guardrail_gateway=guardrail_gateway,
             guardrail_conversation_history_turns=guardrail_conversation_history_turns,
+            tool_search_config=tool_search,
+            tool_examples_config=tool_examples,
+            skills_config=skills,
         )
         self._guardrail_stream_handler = None
         self._guardrail_stream_decision = None

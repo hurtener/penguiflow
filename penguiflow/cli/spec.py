@@ -689,6 +689,108 @@ class PlannerBackgroundTasksSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PlannerToolHintsSpec(BaseModel):
+    enabled: bool = False
+    top_k: int = Field(default=5, ge=1, le=20)
+    include_always_loaded: bool = False
+    search_type: Literal["fts", "regex", "exact"] = "fts"
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PlannerToolDirectoryGroupSpec(BaseModel):
+    name: str
+    title: str | None = None
+    trigger: str | None = None
+    task_type: Literal["browser", "api", "code", "domain", "unknown"] | None = None
+    match_namespaces: list[str] = Field(default_factory=list)
+    match_tags: list[str] = Field(default_factory=list)
+    match_name_patterns: list[str] = Field(default_factory=list)
+    tool_names: list[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PlannerToolDirectorySpec(BaseModel):
+    enabled: bool = False
+    max_groups: int = Field(default=20, ge=1, le=100)
+    max_tools_per_group: int = Field(default=6, ge=0, le=50)
+    include_tool_counts: bool = True
+    include_default_groups: bool = True
+    groups: list[PlannerToolDirectoryGroupSpec] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PlannerToolSearchSpec(BaseModel):
+    """Tool search + deferred activation configuration for ReactPlanner."""
+
+    enabled: bool = False
+    cache_dir: str = ".penguiflow"
+    default_loading_mode: Literal["always", "deferred"] = "always"
+    always_loaded_patterns: list[str] = Field(default_factory=lambda: ["tasks.*", "tool_search", "tool_get", "finish"])
+    activation_scope: Literal["run", "session"] = "run"
+    preferred_namespaces: list[str] = Field(default_factory=list)
+    fts_fallback_to_regex: bool = True
+    enable_incremental_index: bool = True
+    rebuild_cache_on_init: bool = False
+    max_search_results: int = Field(default=10, ge=1, le=50)
+
+    hints: PlannerToolHintsSpec = Field(default_factory=PlannerToolHintsSpec)
+    directory: PlannerToolDirectorySpec = Field(default_factory=PlannerToolDirectorySpec)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PlannerSkillsDirectorySpec(BaseModel):
+    """Skills directory exposure configuration."""
+
+    enabled: bool = True
+    max_entries: int = Field(default=30, ge=1, le=200)
+    include_fields: list[Literal["name", "title", "trigger", "task_type"]] = Field(
+        default_factory=lambda: cast(
+            list[Literal["name", "title", "trigger", "task_type"]],
+            ["name", "title", "trigger"],
+        )
+    )
+    selection_strategy: Literal["pinned_then_recent", "pinned_then_top"] = "pinned_then_recent"
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PlannerSkillPackSpec(BaseModel):
+    """Developer-registered skill pack."""
+
+    name: str
+    path: str
+    format: Literal["md", "yaml", "json", "jsonl"] | None = None
+    scope_mode: Literal["project", "tenant", "global"] = "project"
+    enabled: bool = True
+    update_existing_pack_skills: bool = True
+    prune_missing_pack_skills: bool = True
+    pinned_skill_names: list[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PlannerSkillsSpec(BaseModel):
+    """Local-first skills configuration for ReactPlanner."""
+
+    enabled: bool = False
+    cache_dir: str = ".penguiflow"
+    max_tokens: int = Field(default=2000, ge=200, le=10000)
+    summarize: bool = False
+    redact_pii: bool = True
+    scope_mode: Literal["project", "tenant", "global"] = "project"
+    top_k: int = Field(default=6, ge=1, le=20)
+    fts_fallback_to_regex: bool = True
+    prune_packs_not_in_config: bool = True
+    skill_packs: list[PlannerSkillPackSpec] = Field(default_factory=list)
+    directory: PlannerSkillsDirectorySpec = Field(default_factory=PlannerSkillsDirectorySpec)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class PlannerSpec(BaseModel):
     max_iters: int = 12
     hop_budget: int = 8
@@ -699,6 +801,8 @@ class PlannerSpec(BaseModel):
     artifact_store: PlannerArtifactStoreSpec = Field(default_factory=PlannerArtifactStoreSpec)
     rich_output: PlannerRichOutputSpec = Field(default_factory=PlannerRichOutputSpec)
     background_tasks: PlannerBackgroundTasksSpec = Field(default_factory=PlannerBackgroundTasksSpec)
+    tool_search: PlannerToolSearchSpec = Field(default_factory=PlannerToolSearchSpec)
+    skills: PlannerSkillsSpec = Field(default_factory=PlannerSkillsSpec)
     hints: PlannerHintsSpec | None = None
     stream_final_response: bool = False
     # When models emit multiple JSON objects in a single response, optionally
@@ -989,8 +1093,7 @@ def _validate_cross_fields(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail
                     path=path,
                     line=lines.line_for(path),
                     suggestion=(
-                        "Enable agent.flags.hitl or remove interactive components "
-                        "from planner.rich_output.allowlist."
+                        "Enable agent.flags.hitl or remove interactive components from planner.rich_output.allowlist."
                     ),
                 )
             )
@@ -1025,8 +1128,7 @@ def _validate_cross_fields(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail
                 errors.append(
                     SpecErrorDetail(
                         message=(
-                            f"Tool '{tool.name}' has background enabled "
-                            "but agent.flags.background_tasks is false."
+                            f"Tool '{tool.name}' has background enabled but agent.flags.background_tasks is false."
                         ),
                         path=tool_path,
                         line=lines.line_for(tool_path),
@@ -1050,10 +1152,7 @@ def _validate_cross_fields(spec: Spec, lines: LineIndex) -> list[SpecErrorDetail
                 tool_path = ("tools", idx, "background", "default_merge_strategy")
                 errors.append(
                     SpecErrorDetail(
-                        message=(
-                            f"Tool '{tool.name}' uses HUMAN_GATED merge "
-                            "but agent.flags.hitl is false."
-                        ),
+                        message=(f"Tool '{tool.name}' uses HUMAN_GATED merge but agent.flags.hitl is false."),
                         path=tool_path,
                         line=lines.line_for(tool_path),
                         suggestion="Enable agent.flags.hitl or use APPEND/REPLACE strategy.",

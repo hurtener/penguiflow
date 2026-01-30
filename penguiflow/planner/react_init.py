@@ -5,14 +5,21 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
+from fnmatch import fnmatch
 from typing import Any
 from uuid import uuid4
 
+from pydantic import BaseModel
+
 from ..artifacts import ArtifactStore, NoOpArtifactStore, discover_artifact_store
-from ..catalog import NodeSpec, build_catalog
+from ..catalog import NodeSpec, ToolLoadingMode, build_catalog
 from ..llm import create_native_adapter
 from ..node import Node
 from ..registry import ModelRegistry
+from ..skills.provider import LocalSkillProvider
+from ..skills.tools.skill_get_tool import SkillGetArgs, SkillGetResponse, skill_get
+from ..skills.tools.skill_list_tool import SkillListArgs, SkillListResponse, skill_list
+from ..skills.tools.skill_search_tool import SkillSearchArgs, SkillSearchResponse, skill_search
 from . import prompts
 from .artifact_registry import ArtifactRegistry
 from .constraints import _CostTracker
@@ -27,11 +34,20 @@ from .models import (
     ClarificationResponse,
     JSONLLMClient,
     ObservationGuardrailConfig,
+    PlannerEvent,
     ReflectionConfig,
     ReflectionCritique,
+    SkillsConfig,
+    ToolExamplesConfig,
     ToolPolicy,
+    ToolSearchConfig,
 )
 from .tool_aliasing import build_aliased_tool_catalog
+from .tool_get_tool import ToolGetArgs, ToolGetResponse
+from .tool_get_tool import tool_get as tool_get_tool
+from .tool_search_cache import ToolSearchCache
+from .tool_search_tool import ToolSearchArgs, ToolSearchResponse
+from .tool_search_tool import tool_search as tool_search_tool
 from .trajectory import TrajectorySummary
 
 logger = logging.getLogger("penguiflow.planner")
@@ -85,6 +101,9 @@ def init_react_planner(
     use_native_llm: bool = False,
     guardrail_gateway: Any | None = None,
     guardrail_conversation_history_turns: int = 1,
+    tool_search_config: ToolSearchConfig | None = None,
+    tool_examples_config: ToolExamplesConfig | None = None,
+    skills_config: SkillsConfig | None = None,
 ) -> None:
     """Initialize a ReactPlanner instance with the specified configuration.
 
@@ -135,14 +154,111 @@ def init_react_planner(
             Defaults to False for backward compatibility.
         guardrail_gateway: Optional guardrail gateway for safety checks.
     """
+    tool_search_config = tool_search_config or ToolSearchConfig()
+    tool_examples_config = tool_examples_config or ToolExamplesConfig()
+    skills_config = skills_config or SkillsConfig()
+    planner._tool_search_config = tool_search_config
+    planner._tool_examples_config = tool_examples_config
+    planner._skills_config = skills_config
+    planner._skills_provider = None
+    planner._tool_search_cache = None
+    planner._tool_search_max_results = tool_search_config.max_search_results
+    planner._execution_specs = []
+    planner._execution_spec_by_name = {}
+    planner._tool_visibility_allowed_names = None
+    planner._active_tool_names = None
+    planner._session_tool_activations = {}
+
     if catalog is None:
         if nodes is None or registry is None:
             raise ValueError("Either catalog or (nodes and registry) must be provided")
-        catalog = build_catalog(nodes, registry)
+        default_loading = (
+            tool_search_config.default_loading_mode if tool_search_config.enabled else ToolLoadingMode.ALWAYS
+        )
+        catalog = build_catalog(nodes, registry, default_loading_mode=default_loading)
+
+    specs = list(catalog)
+    if tool_search_config.enabled:
+        tool_search_spec = NodeSpec(
+            node=Node(tool_search_tool, name="tool_search"),
+            name="tool_search",
+            desc="Discover tools by capability and keywords.",
+            args_model=ToolSearchArgs,
+            out_model=ToolSearchResponse,
+            side_effects="pure",
+            tags=(),
+            auth_scopes=(),
+            cost_hint=None,
+            latency_hint_ms=None,
+            safety_notes=None,
+            extra={},
+            loading_mode=ToolLoadingMode.ALWAYS,
+        )
+        if not any(spec.name == "tool_search" for spec in specs):
+            specs.append(tool_search_spec)
+
+        tool_get_spec = NodeSpec(
+            node=Node(tool_get_tool, name="tool_get"),
+            name="tool_get",
+            desc="Fetch a tool's schema/examples by name.",
+            args_model=ToolGetArgs,
+            out_model=ToolGetResponse,
+            side_effects="pure",
+            tags=(),
+            auth_scopes=(),
+            cost_hint=None,
+            latency_hint_ms=None,
+            safety_notes=None,
+            extra={},
+            loading_mode=ToolLoadingMode.ALWAYS,
+        )
+        if not any(spec.name == "tool_get" for spec in specs):
+            specs.append(tool_get_spec)
+
+    if skills_config.enabled:
+        skill_tools: dict[str, tuple[Callable[..., Any], type[BaseModel], type[BaseModel], str]] = {
+            "skill_search": (
+                skill_search,
+                SkillSearchArgs,
+                SkillSearchResponse,
+                "Discover skills by capability.",
+            ),
+            "skill_get": (
+                skill_get,
+                SkillGetArgs,
+                SkillGetResponse,
+                "Fetch skill content by name.",
+            ),
+            "skill_list": (
+                skill_list,
+                SkillListArgs,
+                SkillListResponse,
+                "List available skills.",
+            ),
+        }
+        for name, (func, args_model, out_model, desc) in skill_tools.items():
+            if any(spec.name == name for spec in specs):
+                continue
+            specs.append(
+                NodeSpec(
+                    node=Node(func, name=name),
+                    name=name,
+                    desc=desc,
+                    args_model=args_model,
+                    out_model=out_model,
+                    side_effects="pure",
+                    tags=(),
+                    auth_scopes=(),
+                    cost_hint=None,
+                    latency_hint_ms=None,
+                    safety_notes=None,
+                    extra={},
+                    loading_mode=ToolLoadingMode.ALWAYS,
+                )
+            )
 
     planner._stream_final_response = stream_final_response
     planner._tool_policy = tool_policy
-    specs = list(catalog)
     if tool_policy is not None:
         filtered_specs: list[NodeSpec] = []
         removed: list[str] = []
@@ -168,11 +284,48 @@ def init_react_planner(
             )
         specs = filtered_specs
 
-    planner._specs = specs
+    planner._execution_specs = specs
+    planner._execution_spec_by_name = {spec.name: spec for spec in specs}
+
+    if tool_search_config.enabled:
+        visible_specs = [
+            spec
+            for spec in specs
+            if spec.loading_mode == ToolLoadingMode.ALWAYS
+            or any(fnmatch(spec.name, pattern) for pattern in tool_search_config.always_loaded_patterns)
+        ]
+    else:
+        visible_specs = specs
+
+    planner._specs = visible_specs
     spec_by_name, catalog_records, alias_to_real = build_aliased_tool_catalog(planner._specs)
     planner._spec_by_name = spec_by_name
     planner._catalog_records = catalog_records
     planner._tool_aliases = alias_to_real
+    planner._tool_visibility_allowed_names = {spec.name for spec in specs}
+
+    if tool_search_config.enabled:
+        cache = ToolSearchCache(
+            cache_dir=tool_search_config.cache_dir,
+            preferred_namespaces=tool_search_config.preferred_namespaces,
+            always_loaded_patterns=tool_search_config.always_loaded_patterns,
+            fts_fallback_to_regex=tool_search_config.fts_fallback_to_regex,
+            enable_incremental_index=tool_search_config.enable_incremental_index,
+            rebuild_cache_on_init=tool_search_config.rebuild_cache_on_init,
+            max_search_results=tool_search_config.max_search_results,
+        )
+        cache.sync_tools(specs)
+        logger.info(
+            "tool_search_cache_ready",
+            extra={
+                "db_path": str(cache.db_path),
+                "tool_count": cache.tool_count(),
+                "fts_available": cache.fts_available,
+                "execution_tool_count": len(specs),
+                "visible_tool_count": len(planner._specs),
+            },
+        )
+        planner._tool_search_cache = cache
     planner._register_resource_callbacks()
     planner._guardrail_gateway = guardrail_gateway
     planner._guardrail_context = None
@@ -194,6 +347,20 @@ def init_react_planner(
     hints_payload = planner._planning_hints.to_prompt_payload() if not planner._planning_hints.empty() else None
     planner._background_tasks = background_tasks or BackgroundTasksConfig()
     planner._error_recovery_config = error_recovery
+    tool_search_available = tool_search_config.enabled and any(spec.name == "tool_search" for spec in planner._specs)
+    if tool_search_available:
+        system_prompt_extra = prompts.merge_prompt_extras(
+            system_prompt_extra,
+            prompts.render_tool_discovery_guidance(),
+        )
+
+    skills_available = skills_config.enabled and any(spec.name == "skill_search" for spec in planner._specs)
+    if skills_available:
+        system_prompt_extra = prompts.merge_prompt_extras(
+            system_prompt_extra,
+            prompts.render_skill_discovery_guidance(),
+        )
+
     if planner._background_tasks.enabled and planner._background_tasks.include_prompt_guidance:
         system_prompt_extra = prompts.merge_prompt_extras(
             system_prompt_extra,
@@ -231,6 +398,7 @@ def init_react_planner(
         planner._catalog_records,
         extra=system_prompt_extra,
         planning_hints=hints_payload,
+        tool_examples=tool_examples_config,
     )
     # Store extra for use in repair prompts (voice/personality context)
     planner._system_prompt_extra = system_prompt_extra
@@ -283,6 +451,23 @@ def init_react_planner(
     planner._absolute_max_parallel = absolute_max_parallel
     planner._use_native_reasoning = use_native_reasoning
     planner._reasoning_effort = reasoning_effort
+    if skills_config.enabled:
+        provider = LocalSkillProvider(skills_config)
+        planner._skills_provider = provider
+        pack_results = provider.load_packs()
+        for result in pack_results:
+            planner._emit_event(
+                PlannerEvent(
+                    event_type="skill_pack_loaded",
+                    ts=planner._time_source(),
+                    trajectory_step=0,
+                    extra={
+                        "pack_name": result.pack_name,
+                        "skill_count": result.skill_count,
+                        "updated_count": result.updated_count,
+                    },
+                )
+            )
     from .llm import _build_planner_action_schema_conditional_finish
 
     action_schema = {

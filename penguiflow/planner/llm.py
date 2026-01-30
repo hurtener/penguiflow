@@ -994,6 +994,30 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
             or system_prompt
         )
 
+    skills_directory = trajectory.metadata.get("skills_directory") if isinstance(trajectory.metadata, Mapping) else None
+    skills_context = trajectory.metadata.get("skills_context") if isinstance(trajectory.metadata, Mapping) else None
+    tools_directory = trajectory.metadata.get("tools_directory") if isinstance(trajectory.metadata, Mapping) else None
+    tool_hints = trajectory.metadata.get("tool_hints") if isinstance(trajectory.metadata, Mapping) else None
+
+    if tools_directory or tool_hints:
+        system_prompt = (
+            prompts.merge_prompt_extras(
+                system_prompt,
+                tools_directory if isinstance(tools_directory, str) else None,
+                tool_hints if isinstance(tool_hints, str) else None,
+            )
+            or system_prompt
+        )
+    if skills_directory or skills_context:
+        system_prompt = (
+            prompts.merge_prompt_extras(
+                system_prompt,
+                skills_directory if isinstance(skills_directory, str) else None,
+                skills_context if isinstance(skills_context, str) else None,
+            )
+            or system_prompt
+        )
+
     messages: list[dict[str, str]] = [
         {"role": "system", "content": system_prompt},
     ]

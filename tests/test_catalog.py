@@ -31,6 +31,17 @@ async def describe(args: EchoArgs, ctx: object) -> EchoOut:
     return EchoOut(echoed=f"desc:{args.message}")
 
 
+@tool(
+    desc="Echo with examples",
+    examples=[
+        {"args": {"message": "hello"}, "description": "Basic echo", "tags": ["minimal"]},
+        {"args": {"message": "hi"}, "description": "Short input", "tags": ["common"]},
+    ],
+)
+async def echo_with_examples(args: EchoArgs, ctx: object) -> EchoOut:
+    return EchoOut(echoed=args.message)
+
+
 @pytest.fixture()
 def registry() -> ModelRegistry:
     reg = ModelRegistry()
@@ -59,3 +70,14 @@ def test_build_catalog_falls_back_to_docstring(registry: ModelRegistry) -> None:
     spec = specs[0]
     assert spec.desc == "Describe the payload."
     assert spec.side_effects == "pure"
+
+
+def test_build_catalog_includes_tool_examples() -> None:
+    registry = ModelRegistry()
+    registry.register("echo_with_examples", EchoArgs, EchoOut)
+    node = Node(echo_with_examples, name="echo_with_examples")
+    specs = build_catalog([node], registry)
+    spec = specs[0]
+    record = spec.to_tool_record()
+    assert record["examples"][0]["args"] == {"message": "hello"}
+    assert record["examples"][0]["tags"] == ["minimal"]

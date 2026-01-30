@@ -7,9 +7,27 @@ from typing import Any
 
 import asyncio
 
-from penguiflow.catalog import build_catalog
+from penguiflow.catalog import ToolLoadingMode, build_catalog
 from penguiflow.artifacts import ArtifactRetentionConfig, InMemoryArtifactStore
-from penguiflow.planner import ReactPlanner{% if with_background_tasks %}, BackgroundTasksConfig{% endif %}{% if reflection_enabled %}, ReflectionConfig{% if reflection_criteria %}, ReflectionCriteria{% endif %}{% endif %}
+from penguiflow.planner import (
+    ReactPlanner,
+    SkillPackConfig,
+    SkillsConfig,
+    SkillsDirectoryConfig,
+    ToolDirectoryConfig,
+    ToolGroupConfig,
+    ToolHintsConfig,
+    ToolSearchConfig,
+{% if with_background_tasks %}
+    BackgroundTasksConfig,
+{% endif %}
+{% if reflection_enabled %}
+    ReflectionConfig,
+{% if reflection_criteria %}
+    ReflectionCriteria,
+{% endif %}
+{% endif %}
+)
 
 from penguiflow.planner.memory import MemoryBudget, MemoryIsolation, ShortTermMemoryConfig
 from penguiflow.rich_output import DEFAULT_ALLOWLIST, RichOutputConfig, attach_rich_output_nodes, get_runtime
@@ -143,7 +161,12 @@ def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
     nodes, registry = build_catalog_bundle()
     rich_output_config = _build_rich_output_config(config)
     nodes.extend(attach_rich_output_nodes(registry, config=rich_output_config))
-    catalog = build_catalog(nodes, registry)
+    default_loading_mode = (
+        ToolLoadingMode(config.tool_search_default_loading_mode)
+        if config.tool_search_enabled
+        else ToolLoadingMode.ALWAYS
+    )
+    catalog = build_catalog(nodes, registry, default_loading_mode=default_loading_mode)
 {% if has_external_tools %}
     # Connect external tool sources and merge their specs using the current event loop
     loop = asyncio.get_event_loop()
@@ -194,10 +217,63 @@ def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
 
     rich_output_prompt = get_runtime().prompt_section()
 
+    tool_search_cfg = None
+    if config.tool_search_enabled:
+        directory_groups = [ToolGroupConfig(**dict(item)) for item in config.tool_search_directory_groups]
+        tool_search_cfg = ToolSearchConfig(
+            enabled=True,
+            cache_dir=config.tool_search_cache_dir,
+            default_loading_mode=ToolLoadingMode(config.tool_search_default_loading_mode),
+            always_loaded_patterns=list(config.tool_search_always_loaded_patterns),
+            activation_scope=config.tool_search_activation_scope,
+            preferred_namespaces=list(config.tool_search_preferred_namespaces),
+            fts_fallback_to_regex=config.tool_search_fts_fallback_to_regex,
+            enable_incremental_index=config.tool_search_enable_incremental_index,
+            rebuild_cache_on_init=config.tool_search_rebuild_cache_on_init,
+            max_search_results=config.tool_search_max_search_results,
+            hints=ToolHintsConfig(
+                enabled=config.tool_search_hints_enabled,
+                top_k=config.tool_search_hints_top_k,
+                include_always_loaded=config.tool_search_hints_include_always_loaded,
+                search_type=config.tool_search_hints_search_type,
+            ),
+            directory=ToolDirectoryConfig(
+                enabled=config.tool_search_directory_enabled,
+                max_groups=config.tool_search_directory_max_groups,
+                max_tools_per_group=config.tool_search_directory_max_tools_per_group,
+                include_tool_counts=config.tool_search_directory_include_tool_counts,
+                include_default_groups=config.tool_search_directory_include_default_groups,
+                groups=directory_groups,
+            ),
+        )
+
+    skills_cfg = None
+    if config.skills_enabled:
+        packs = [SkillPackConfig(**dict(item)) for item in config.skills_skill_packs]
+        skills_cfg = SkillsConfig(
+            enabled=True,
+            cache_dir=config.skills_cache_dir,
+            max_tokens=config.skills_max_tokens,
+            summarize=config.skills_summarize,
+            redact_pii=config.skills_redact_pii,
+            scope_mode=config.skills_scope_mode,
+            top_k=config.skills_top_k,
+            fts_fallback_to_regex=config.skills_fts_fallback_to_regex,
+            skill_packs=packs,
+            directory=SkillsDirectoryConfig(
+                enabled=config.skills_directory_enabled,
+                max_entries=config.skills_directory_max_entries,
+                include_fields=list(config.skills_directory_include_fields),
+                selection_strategy=config.skills_directory_selection_strategy,
+            ),
+        )
+
     planner = ReactPlanner(
         llm=config.llm_model,
         catalog=catalog,
         system_prompt_extra=_build_system_prompt(config, rich_output_prompt),
+        tool_search=tool_search_cfg,
+        skills=skills_cfg,
         max_iters=config.planner_max_iters,
         hop_budget=config.planner_hop_budget,
         absolute_max_parallel=config.planner_absolute_max_parallel,
