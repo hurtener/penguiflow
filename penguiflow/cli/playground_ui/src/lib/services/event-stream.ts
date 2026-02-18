@@ -95,17 +95,30 @@ function toArtifactChunkPayload(data: Record<string, unknown>): ArtifactChunkPay
   };
 }
 
+function toNumberLike(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 function toArtifactStoredEvent(data: Record<string, unknown>): ArtifactStoredEvent | null {
   const artifact_id = typeof data.artifact_id === 'string' ? data.artifact_id : null;
-  const mime_type = typeof data.mime_type === 'string' ? data.mime_type : null;
-  const size_bytes = typeof data.size_bytes === 'number' ? data.size_bytes : null;
-  const filename = typeof data.filename === 'string' ? data.filename : null;
-  const trace_id = typeof data.trace_id === 'string' ? data.trace_id : null;
-  const session_id = typeof data.session_id === 'string' ? data.session_id : null;
-  const ts = typeof data.ts === 'number' ? data.ts : null;
-  if (!artifact_id || !mime_type || size_bytes === null || !filename || !trace_id || !session_id || ts === null) {
+  if (!artifact_id) {
     return null;
   }
+  const mime_type = typeof data.mime_type === 'string' ? data.mime_type : 'application/octet-stream';
+  const size_bytes = toNumberLike(data.size_bytes) ?? 0;
+  const filename = typeof data.filename === 'string' && data.filename.trim().length > 0
+    ? data.filename
+    : artifact_id;
+  const trace_id = typeof data.trace_id === 'string' ? data.trace_id : 'unknown';
+  const session_id = typeof data.session_id === 'string' ? data.session_id : 'unknown';
+  const ts = toNumberLike(data.ts) ?? Date.now();
   const source = data.source;
   return {
     artifact_id,

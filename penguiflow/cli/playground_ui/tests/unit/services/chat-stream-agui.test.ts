@@ -124,4 +124,33 @@ describe('chatStreamManager (AG-UI)', () => {
     expect(artifactsStore.count).toBe(1);
     expect(artifactsStore.has('artifact-1')).toBe(true);
   });
+
+  it('stores artifacts from custom events when metadata is partial', () => {
+    runAgentMock.mockReturnValueOnce({
+      subscribe: ({ next, complete }: { next: (e: BaseEvent) => void; complete: () => void }) => {
+        next({
+          type: 'CUSTOM',
+          name: 'artifact_stored',
+          value: {
+            artifact: {
+              id: 'artifact-partial',
+              source: { namespace: 'tools' }
+            },
+            download_url: '/artifacts/artifact-partial'
+          }
+        } as BaseEvent);
+        complete();
+        return { unsubscribe: vi.fn() };
+      }
+    });
+
+    chatStore.addUserMessage('Hi');
+    chatStreamManager.start('Hi', 'session-1', {}, {}, { onDone: () => {}, onError: () => {} }, 'agui');
+
+    expect(artifactsStore.count).toBe(1);
+    const artifact = artifactsStore.get('artifact-partial');
+    expect(artifact?.filename).toBe('artifact-partial');
+    expect(artifact?.mime_type).toBe('application/octet-stream');
+    expect(artifact?.size_bytes).toBe(0);
+  });
 });

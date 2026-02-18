@@ -999,6 +999,17 @@ function getNumber(value: unknown): number | undefined {
   return typeof value === 'number' ? value : undefined;
 }
 
+function getNumberLike(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
 function getBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
@@ -1025,15 +1036,15 @@ function toArtifactChunkPayload(data: Record<string, unknown>): ArtifactChunkPay
 
 function toArtifactStoredEvent(data: Record<string, unknown>): ArtifactStoredEvent | null {
   const artifact_id = getString(data.artifact_id);
-  const mime_type = getString(data.mime_type);
-  const size_bytes = getNumber(data.size_bytes);
-  const filename = getString(data.filename);
-  const trace_id = getString(data.trace_id);
-  const session_id = getString(data.session_id);
-  const ts = getNumber(data.ts);
-  if (!artifact_id || !mime_type || size_bytes === undefined || !filename || !trace_id || !session_id || ts === undefined) {
+  if (!artifact_id) {
     return null;
   }
+  const mime_type = getString(data.mime_type) ?? 'application/octet-stream';
+  const size_bytes = getNumberLike(data.size_bytes) ?? 0;
+  const filename = getString(data.filename) ?? artifact_id;
+  const trace_id = getString(data.trace_id) ?? 'unknown';
+  const session_id = getString(data.session_id) ?? 'unknown';
+  const ts = getNumberLike(data.ts) ?? Date.now();
   return {
     artifact_id,
     mime_type,
@@ -1051,22 +1062,21 @@ function toArtifactStoredEventFromCustom(
   traceId: string | null,
   sessionId: string | null
 ): ArtifactStoredEvent | null {
-  if (!traceId || !sessionId) return null;
   const artifact_id = getString(artifact.id);
-  const mime_type = getString(artifact.mime_type);
-  const size_bytes = getNumber(artifact.size_bytes);
-  const filename = getString(artifact.filename);
-  if (!artifact_id || !mime_type || size_bytes === undefined || !filename) {
+  if (!artifact_id) {
     return null;
   }
+  const mime_type = getString(artifact.mime_type) ?? 'application/octet-stream';
+  const size_bytes = getNumberLike(artifact.size_bytes) ?? 0;
+  const filename = getString(artifact.filename) ?? artifact_id;
   return {
     artifact_id,
     mime_type,
     size_bytes,
     filename,
     source: asRecord(artifact.source) ?? {},
-    trace_id: traceId,
-    session_id: sessionId,
+    trace_id: traceId ?? 'unknown',
+    session_id: sessionId ?? 'unknown',
     ts: Date.now()
   };
 }
