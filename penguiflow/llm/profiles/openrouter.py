@@ -36,6 +36,7 @@ PROVIDER_PROFILE_MAPPING = {
     "cohere": "cohere",
     "perplexity": "perplexity",
     "qwen": "qwen",
+    "stepfun": "stepfun",
 }
 
 # Profiles for OpenRouter-specific models
@@ -509,6 +510,19 @@ PROFILES: dict[str, ModelProfile] = {
         max_context_tokens=16384,
         max_output_tokens=4096,
     ),
+    # StepFun via OpenRouter
+    "stepfun/step-3.5-flash": ModelProfile(
+        supports_schema_guided_output=False,
+        supports_json_only_output=False,
+        supports_tools=True,
+        supports_reasoning=False,
+        supports_streaming=True,
+        default_output_mode="tools",
+        native_structured_kind="openai_compatible_tools",
+        strict_mode_default=False,
+        max_context_tokens=131072,
+        max_output_tokens=8192,
+    ),
 }
 
 
@@ -572,6 +586,16 @@ def get_openrouter_profile(model: str) -> ModelProfile:
                 model_name = parts[-1] if len(parts) > 1 else model
                 for key, profile in google.PROFILES.items():
                     if model_name.startswith(key) or key in model_name:
+                        return profile
+
+            elif profile_type == "stepfun":
+                # Prefer explicit StepFun profile entries when available.
+                model_name = parts[-1] if len(parts) > 1 else model
+                for key, profile in PROFILES.items():
+                    if not key.startswith("stepfun/"):
+                        continue
+                    key_model = key.split("/", 1)[-1]
+                    if model_name.startswith(key_model) or key_model in model_name:
                         return profile
 
     # Default OpenRouter profile

@@ -373,6 +373,14 @@ class TestOpenRouterProviderBuildParams:
             assert params["response_format"]["type"] == "json_object"
 
 
+def test_openrouter_stepfun_profile_disables_json_output_modes() -> None:
+    from penguiflow.llm.profiles.openrouter import get_openrouter_profile
+
+    profile = get_openrouter_profile("openrouter/stepfun/step-3.5-flash")
+    assert profile.supports_schema_guided_output is False
+    assert profile.supports_json_only_output is False
+
+
 class TestOpenRouterProviderComplete:
     """Test OpenRouter provider complete method."""
 

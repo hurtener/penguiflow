@@ -254,6 +254,33 @@ class TestNativeLLMAdapter:
             assert request.structured_output.name == "planner_action"
             assert request.structured_output.strict is True
 
+    def test_build_request_openrouter_stepfun_route_uses_text_mode(self) -> None:
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.model = "stepfun/step-3.5-flash"
+            mock_provider.provider_name = "openrouter"
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter("openrouter/stepfun/step-3.5-flash", json_schema_mode=True)
+            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
+
+            request = adapter._build_request(
+                messages,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "planner_action",
+                        "schema": {
+                            "type": "object",
+                            "properties": {"next_node": {"type": "string"}},
+                            "required": ["next_node"],
+                        },
+                    },
+                },
+            )
+
+            assert request.structured_output is None
+
     def test_convert_messages(self) -> None:
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
@@ -356,6 +383,34 @@ class TestNativeLLMAdapter:
             assert retry_request.structured_output.name == "json_response"
             assert retry_request.structured_output.json_schema == {"type": "object"}
             assert retry_request.structured_output.strict is False
+
+    @pytest.mark.asyncio
+    async def test_complete_downgrades_json_object_to_text_mode(self, mock_provider: MagicMock) -> None:
+        mock_provider.provider_name = "openrouter"
+        mock_provider.model = "meta-llama/llama-3.3-70b-instruct"
+        mock_provider.complete = AsyncMock(
+            side_effect=[
+                RuntimeError("response_format json_object is not supported for this model"),
+                CompletionResponse(
+                    message=LLMMessage(role="assistant", parts=[TextPart(text='{"result": "ok"}')]),
+                    usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
+                ),
+            ]
+        )
+
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter("openrouter/meta-llama/llama-3.3-70b-instruct", json_schema_mode=True)
+            content, _ = await adapter.complete(
+                messages=[{"role": "user", "content": "test"}],
+                response_format={"type": "json_object"},
+            )
+
+            assert content == '{"result": "ok"}'
+            assert mock_provider.complete.call_count == 2
+            retry_request = mock_provider.complete.call_args_list[1].args[0]
+            assert retry_request.structured_output is None
 
 
 class TestCreateNativeAdapter:

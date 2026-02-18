@@ -54,14 +54,17 @@ def _is_invalid_json_schema_error(exc: Exception) -> bool:
         or "output_format.schema" in text
         or "additionalproperties" in text
         or "must be text or json_object" in text
+        or "response_format json_object is not supported" in text
     )
 
 
-def _openrouter_allows_json_schema(model: str) -> bool:
-    """Whether OpenRouter route should attempt json_schema mode.
+def _openrouter_response_format_mode(model: str) -> str:
+    """Preferred response_format mode for OpenRouter routes.
 
-    Conservative policy: only OpenAI/Google routes are allowed to start with
-    json_schema. All other OpenRouter providers default to json_object.
+    Conservative policy:
+    - openai/google routes -> json_schema
+    - stepfun routes -> text (no response_format)
+    - all other routes -> json_object
     """
 
     route = model.lower().strip()
@@ -69,7 +72,19 @@ def _openrouter_allows_json_schema(model: str) -> bool:
         route = route.removeprefix("openrouter/")
 
     provider = route.split("/", 1)[0] if route else ""
-    return provider in {"openai", "google"}
+    if provider in {"openai", "google"}:
+        return "json_schema"
+    if provider in {"stepfun"}:
+        return "text"
+    return "json_object"
+
+
+def _next_response_format_mode(mode: str) -> str | None:
+    if mode == "json_schema":
+        return "json_object"
+    if mode == "json_object":
+        return "text"
+    return None
 
 
 class NativeLLMAdapter:
@@ -129,7 +144,7 @@ class NativeLLMAdapter:
         self._streaming_enabled = streaming_enabled
         self._use_native_reasoning = use_native_reasoning
         self._reasoning_effort = reasoning_effort
-        self._force_json_object_response_format = False
+        self._response_format_override: str | None = None
 
         # Create the underlying provider
         self._provider = create_provider(
@@ -274,22 +289,23 @@ class NativeLLMAdapter:
                 last_error = e
                 error_type = e.__class__.__name__
 
-                if (
-                    response_format is not None
-                    and response_format.get("type") == "json_schema"
-                    and not self._force_json_object_response_format
-                    and _is_invalid_json_schema_error(e)
-                ):
-                    self._force_json_object_response_format = True
-                    request = self._build_request(llm_messages, response_format)
-                    logger.warning(
-                        "native_schema_downgraded_to_json_object",
-                        extra={
-                            "provider": self._provider.provider_name,
-                            "model": self._provider.model,
-                        },
-                    )
-                    continue
+                if response_format is not None and _is_invalid_json_schema_error(e):
+                    requested_type = str(response_format.get("type") or "text")
+                    current_mode = self._response_format_override or requested_type
+                    next_mode = _next_response_format_mode(current_mode)
+                    if next_mode is not None:
+                        self._response_format_override = next_mode
+                        request = self._build_request(llm_messages, response_format)
+                        logger.warning(
+                            "native_response_format_downgraded",
+                            extra={
+                                "provider": self._provider.provider_name,
+                                "model": self._provider.model,
+                                "from_mode": current_mode,
+                                "to_mode": next_mode,
+                            },
+                        )
+                        continue
 
                 # Check if error is retryable (timeout, rate limit, server errors)
                 if is_retryable(e) and attempt < self._max_retries - 1:
@@ -402,32 +418,37 @@ class NativeLLMAdapter:
         structured_output: StructuredOutputSpec | None = None
 
         if response_format and self._json_schema_mode:
-            format_type = response_format.get("type")
-            force_json_object_mode = self._force_json_object_response_format
+            requested_type = str(response_format.get("type") or "text")
+            effective_mode = self._response_format_override or requested_type
 
             if (
-                format_type == "json_schema"
-                and not force_json_object_mode
+                requested_type in {"json_schema", "json_object"}
+                and self._response_format_override is None
                 and self._provider.provider_name == "openrouter"
-                and not _openrouter_allows_json_schema(self._provider.model)
             ):
-                force_json_object_mode = True
-                self._force_json_object_response_format = True
-                logger.info(
-                    "openrouter_schema_preemptive_downgrade",
-                    extra={
-                        "model": self._provider.model,
-                        "provider": self._provider.provider_name,
-                    },
-                )
+                preferred_mode = _openrouter_response_format_mode(self._provider.model)
+                if preferred_mode != requested_type:
+                    effective_mode = preferred_mode
+                    self._response_format_override = preferred_mode
+                    logger.info(
+                        "openrouter_response_format_preemptive_override",
+                        extra={
+                            "model": self._provider.model,
+                            "provider": self._provider.provider_name,
+                            "from_mode": requested_type,
+                            "to_mode": preferred_mode,
+                        },
+                    )
 
-            if format_type == "json_schema" and force_json_object_mode:
+            if effective_mode == "text":
+                structured_output = None
+            elif effective_mode == "json_object":
                 structured_output = StructuredOutputSpec(
                     name="json_response",
                     json_schema={"type": "object"},
                     strict=False,
                 )
-            elif format_type == "json_schema":
+            elif effective_mode == "json_schema":
                 # Extract schema from response_format
                 json_schema_spec_raw = response_format.get("json_schema", {})
                 json_schema_spec = json_schema_spec_raw if isinstance(json_schema_spec_raw, Mapping) else {}
@@ -441,13 +462,26 @@ class NativeLLMAdapter:
                     strict=strict,
                 )
 
-            elif format_type == "json_object":
+            elif requested_type == "json_object":
                 # JSON object mode - no strict schema, just ensure JSON output
                 # Use a generic JSON output schema
                 structured_output = StructuredOutputSpec(
                     name="json_response",
                     json_schema={"type": "object"},
                     strict=False,
+                )
+            elif requested_type == "json_schema":
+                # Unknown override mode fallback: still honor schema request.
+                json_schema_spec_raw = response_format.get("json_schema", {})
+                json_schema_spec = json_schema_spec_raw if isinstance(json_schema_spec_raw, Mapping) else {}
+                schema_name = json_schema_spec.get("name", "response")
+                schema = _normalize_json_schema(json_schema_spec.get("schema", {}))
+                strict = json_schema_spec.get("strict", True)
+
+                structured_output = StructuredOutputSpec(
+                    name=schema_name,
+                    json_schema=schema,
+                    strict=strict,
                 )
 
         # Build extra parameters for reasoning support
