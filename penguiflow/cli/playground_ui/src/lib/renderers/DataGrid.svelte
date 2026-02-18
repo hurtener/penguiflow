@@ -221,16 +221,19 @@
   .datagrid-search {
     flex: 1;
     padding: 0.4rem 0.6rem;
-    border: 1px solid #e5e7eb;
-    border-radius: 0.375rem;
+    border: 1px solid var(--color-border, #f0ebe4);
+    border-radius: var(--radius-lg, 12px);
+    background: var(--color-card-bg, #fcfaf7);
+    color: var(--color-text, #1f1f1f);
     font-size: 0.875rem;
   }
 
   .export-btn {
     padding: 0.35rem 0.75rem;
-    border-radius: 0.375rem;
-    border: 1px solid #d1d5db;
-    background: #f9fafb;
+    border-radius: var(--radius-lg, 12px);
+    border: 1px solid var(--color-border, #f0ebe4);
+    background: var(--color-pill-ghost-bg, #f4f0ea);
+    color: var(--color-text, #1f1f1f);
     font-size: 0.75rem;
     cursor: pointer;
   }
@@ -247,12 +250,13 @@
 
   th, td {
     padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid #e5e7eb;
+    border-bottom: 1px solid var(--color-border, #f0ebe4);
   }
 
   th.sortable {
     cursor: pointer;
     user-select: none;
+    color: var(--color-text, #1f1f1f);
   }
 
   .sort-indicator {
@@ -261,7 +265,7 @@
   }
 
   .striped {
-    background: #f9fafb;
+    background: var(--color-code-bg, #fbf8f3);
   }
 
   .align-left {
@@ -290,8 +294,9 @@
   }
 
   .pagination button {
-    border: 1px solid #d1d5db;
-    background: #ffffff;
+    border: 1px solid var(--color-border, #f0ebe4);
+    background: var(--color-card-bg, #fcfaf7);
+    color: var(--color-text, #1f1f1f);
     padding: 0.25rem 0.5rem;
     border-radius: 0.25rem;
     cursor: pointer;

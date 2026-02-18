@@ -1,0 +1,4 @@
+interface:
+  display_name: "Interface Design (Design Soul)"
+  short_description: "Cozy interface design with calm premium warmth"
+  default_prompt: "Use $interface-design to design a calm, cozy-premium UI for this product or feature."

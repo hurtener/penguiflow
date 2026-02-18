@@ -73,7 +73,7 @@ _PROFILES: dict[str, ModelProfile] | None = None
 
 def _load_profiles() -> dict[str, ModelProfile]:
     """Load all profiles from submodules."""
-    from . import anthropic, bedrock, databricks, google, openai, openrouter
+    from . import anthropic, bedrock, databricks, google, nim, openai, openrouter
 
     profiles: dict[str, ModelProfile] = {}
     profiles.update(openai.PROFILES)
@@ -82,6 +82,7 @@ def _load_profiles() -> dict[str, ModelProfile]:
     profiles.update(bedrock.PROFILES)
     profiles.update(databricks.PROFILES)
     profiles.update(openrouter.PROFILES)
+    profiles.update(nim.PROFILES)
     return profiles
 
 

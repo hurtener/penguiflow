@@ -131,6 +131,47 @@ class TestDatabricksProviderInit:
                 assert call_kwargs["api_key"] == "env-token"
                 assert "env-workspace.databricks.com" in call_kwargs["base_url"]
 
+    def test_init_uses_api_base_api_key_aliases(self, mock_openai_sdk: MagicMock) -> None:
+        """Test API_BASE/API_KEY aliases are accepted for host/token."""
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.databricks import DatabricksProvider
+
+            with patch.dict(
+                os.environ,
+                {
+                    "DATABRICKS_API_BASE": "https://env-workspace.databricks.com/serving-endpoints",
+                    "DATABRICKS_API_KEY": "env-api-key",
+                },
+                clear=True,
+            ):
+                DatabricksProvider("databricks-claude-sonnet-4-5")
+
+                call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
+                assert call_kwargs["api_key"] == "env-api-key"
+                assert call_kwargs["base_url"] == (
+                    "https://env-workspace.databricks.com/serving-endpoints/databricks-claude-sonnet-4-5/"
+                )
+
+    def test_init_api_base_with_endpoint_suffix_is_normalized(self, mock_openai_sdk: MagicMock) -> None:
+        """Test API_BASE including endpoint path still resolves correctly."""
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.databricks import DatabricksProvider
+
+            with patch.dict(
+                os.environ,
+                {
+                    "DATABRICKS_API_BASE": "https://env-workspace.databricks.com/serving-endpoints/old-endpoint/",
+                    "DATABRICKS_API_KEY": "env-api-key",
+                },
+                clear=True,
+            ):
+                DatabricksProvider("new-endpoint")
+
+                call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
+                assert call_kwargs["base_url"] == (
+                    "https://env-workspace.databricks.com/serving-endpoints/new-endpoint/"
+                )
+
     def test_init_raises_without_credentials(self, mock_openai_sdk: MagicMock) -> None:
         """Test initialization raises without host or token."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
@@ -195,10 +236,7 @@ class TestDatabricksProviderValidation:
             )
 
             # Create 33 tools (max is 32)
-            tools = tuple(
-                ToolSpec(name=f"tool_{i}", description=f"Tool {i}", json_schema={})
-                for i in range(33)
-            )
+            tools = tuple(ToolSpec(name=f"tool_{i}", description=f"Tool {i}", json_schema={}) for i in range(33))
 
             request = LLMRequest(
                 model="databricks-claude-sonnet-4-5",
@@ -220,10 +258,7 @@ class TestDatabricksProviderValidation:
                 token="token",
             )
 
-            tools = tuple(
-                ToolSpec(name=f"tool_{i}", description=f"Tool {i}", json_schema={})
-                for i in range(5)
-            )
+            tools = tuple(ToolSpec(name=f"tool_{i}", description=f"Tool {i}", json_schema={}) for i in range(5))
 
             request = LLMRequest(
                 model="databricks-claude-sonnet-4-5",
@@ -875,9 +910,7 @@ class TestDatabricksProviderCompleteLegacy:
 
             mock_response = self._create_mock_response(
                 content="",
-                tool_calls=[
-                    {"id": "call_123", "name": "get_weather", "arguments": '{"city": "NYC"}'}
-                ],
+                tool_calls=[{"id": "call_123", "name": "get_weather", "arguments": '{"city": "NYC"}'}],
             )
             mock_client = MagicMock()
             mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
@@ -1245,9 +1278,7 @@ class TestDatabricksProviderErrorMappingFallback:
 
             # Test via the mocked path
             with patch.object(provider, "_map_error") as mock_map:
-                mock_map.return_value = LLMError(
-                    message="Unknown error", provider="databricks"
-                )
+                mock_map.return_value = LLMError(message="Unknown error", provider="databricks")
                 result = mock_map(ValueError("Unknown error"))
 
                 assert isinstance(result, LLMError)

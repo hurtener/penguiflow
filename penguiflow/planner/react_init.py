@@ -465,13 +465,37 @@ def init_react_planner(
                     },
                 )
             )
-    from .llm import _build_planner_action_schema_conditional_finish
+    from .llm import (
+        _build_minimal_planner_schema,
+        _build_planner_action_schema_conditional_finish,
+        _supports_conditional_finish_schema,
+    )
+
+    schema_model_name = ""
+    if isinstance(llm, str):
+        schema_model_name = llm
+    elif isinstance(llm, Mapping):
+        schema_model_name = str(llm.get("model", ""))
+    elif llm_client is not None:
+        client_model = getattr(llm_client, "_model", None)
+        if client_model is None:
+            client_model = getattr(llm_client, "model", None)
+        if isinstance(client_model, str):
+            schema_model_name = client_model
+        elif isinstance(client_model, Mapping):
+            schema_model_name = str(client_model.get("model", ""))
+
+    action_schema_payload = (
+        _build_planner_action_schema_conditional_finish()
+        if _supports_conditional_finish_schema(schema_model_name)
+        else _build_minimal_planner_schema()
+    )
 
     action_schema = {
         "type": "json_schema",
         "json_schema": {
             "name": "planner_action",
-            "schema": _build_planner_action_schema_conditional_finish(),
+            "schema": action_schema_payload,
         },
     }
     planner._action_schema = action_schema

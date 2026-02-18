@@ -48,7 +48,7 @@
     {#if activeTab?.component}
       <ComponentRenderer component={activeTab.component} props={activeTab.props ?? {}} />
     {:else if activeTab?.content}
-      <Markdown content={activeTab.content} />
+      <Markdown content={activeTab.content} padded={false} />
     {:else}
       <div class="empty">No content.</div>
     {/if}
@@ -68,17 +68,18 @@
 
   .tab {
     padding: 0.4rem 0.75rem;
-    border-radius: 0.5rem;
-    border: 1px solid #e5e7eb;
-    background: #ffffff;
+    border-radius: var(--radius-xl, 16px);
+    border: 1px solid var(--color-border, #f0ebe4);
+    background: var(--color-tab-bg, #f2eee8);
+    color: var(--color-tab-text, #5a534a);
     cursor: pointer;
     font-size: 0.8rem;
   }
 
   .tab.active {
-    background: #2563eb;
-    color: #ffffff;
-    border-color: #2563eb;
+    background: var(--color-tab-active-bg, #e8f6f2);
+    color: var(--color-tab-active-text, #106c67);
+    border-color: var(--color-primary, #31a6a0);
   }
 
   .tab-panel {
@@ -90,7 +91,8 @@
   }
 
   .tabs.enclosed {
-    border: 1px solid #e5e7eb;
-    border-radius: 0.75rem;
+    border: 1px solid var(--color-border, #f0ebe4);
+    border-radius: var(--radius-2xl, 18px);
+    background: var(--color-card-bg, #fcfaf7);
   }
 </style>

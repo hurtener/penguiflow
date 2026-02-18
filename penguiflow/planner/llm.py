@@ -384,7 +384,23 @@ def _build_planner_action_schema_conditional_finish() -> dict[str, Any]:
         },
     }
 
-    return {"allOf": [base, conditional]}
+    # Keep a top-level object type for stricter OpenAI-compatible validators
+    # (e.g., some OpenRouter upstream providers) that reject schemas without
+    # an explicit root "type".
+    return {"type": "object", "allOf": [base, conditional]}
+
+
+def _supports_conditional_finish_schema(model_name: str) -> bool:
+    """Whether a model should use the conditional finish schema.
+
+    The conditional ``allOf`` schema was introduced to improve finish-action
+    quality for Gemini-family models. Some OpenAI-compatible providers reject
+    ``allOf`` in response-format schemas, so we limit this shape to models that
+    benefit from it.
+    """
+
+    lower = model_name.lower()
+    return "gemini" in lower or lower.startswith("google/") or "/google/" in lower
 
 
 def _inline_defs(schema: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:

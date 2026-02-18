@@ -56,6 +56,11 @@ llm:
   primary:
     model: gpt-4o
     provider: openai
+    # NIM example:
+    # model: nim/qwen/qwen3.5-397b-a17b
+    # provider: nim
+    # Also accepted alias:
+    # model: nvidia/qwen/qwen3.5-397b-a17b
   summarizer:
     enabled: false
   reflection:

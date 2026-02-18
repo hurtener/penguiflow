@@ -74,6 +74,16 @@ AWS_REGION_NAME=us-east-1
 LLM_MODEL={{ primary_model }}
 ```
 
+{% elif primary_provider == "nim" or primary_provider == "nvidia" %}
+### NVIDIA NIM Setup (Your Configured Provider)
+
+```bash
+NIM_API_KEY=nvapi-...
+# Alternative env var also supported:
+# NVIDIA_API_KEY=nvapi-...
+LLM_MODEL={{ primary_model }}
+```
+
 {% else %}
 ### OpenAI Setup (Your Configured Provider)
 
@@ -116,6 +126,17 @@ LLM_MODEL=anthropic/claude-sonnet-4-20250514
 ```bash
 OPENROUTER_API_KEY=sk-or-v1-...
 LLM_MODEL=openrouter/anthropic/claude-sonnet-4-20250514
+```
+</details>
+
+<details>
+<summary>NVIDIA NIM</summary>
+
+```bash
+NIM_API_KEY=nvapi-...
+# Alternative env var also supported:
+# NVIDIA_API_KEY=nvapi-...
+LLM_MODEL=nim/qwen/qwen3.5-397b-a17b
 ```
 </details>
 

@@ -40,6 +40,15 @@ OPENROUTER_API_KEY=sk-or-...
 LLM_MODEL=openrouter/anthropic/claude-sonnet-4-20250514
 ```
 
+### NVIDIA NIM
+```bash
+NIM_API_KEY=nvapi-...
+# Also supported as fallback: NVIDIA_API_KEY
+LLM_MODEL=nim/qwen/qwen3.5-397b-a17b
+# Also accepted model prefix alias:
+# LLM_MODEL=nvidia/qwen/qwen3.5-397b-a17b
+```
+
 ### Azure OpenAI
 ```bash
 AZURE_API_KEY=...
