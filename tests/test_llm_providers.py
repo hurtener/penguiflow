@@ -299,6 +299,34 @@ class TestProviderFactory:
             assert provider.model == "gemini-2.0-flash"
             assert provider.provider_name == "google"
 
+    def test_create_nim_provider_from_nim_prefix(self) -> None:
+        """Test creating NIM provider with nim/ prefix."""
+        mock_openai = MagicMock()
+        mock_client = MagicMock()
+        mock_openai.AsyncOpenAI.return_value = mock_client
+
+        with patch.dict(sys.modules, {"openai": mock_openai}):
+            from penguiflow.llm.providers import create_provider
+
+            provider = create_provider("nim/qwen/qwen3.5-397b-a17b", api_key="test-key")
+
+            assert provider.model == "qwen/qwen3.5-397b-a17b"
+            assert provider.provider_name == "nim"
+
+    def test_create_nim_provider_from_nvidia_prefix(self) -> None:
+        """Test creating NIM provider with nvidia/ alias prefix."""
+        mock_openai = MagicMock()
+        mock_client = MagicMock()
+        mock_openai.AsyncOpenAI.return_value = mock_client
+
+        with patch.dict(sys.modules, {"openai": mock_openai}):
+            from penguiflow.llm.providers import create_provider
+
+            provider = create_provider("nvidia/qwen/qwen3.5-397b-a17b", api_key="test-key")
+
+            assert provider.model == "qwen/qwen3.5-397b-a17b"
+            assert provider.provider_name == "nim"
+
     def test_create_openrouter_provider(self) -> None:
         """Test creating OpenRouter provider."""
         mock_openai = MagicMock()
@@ -377,6 +405,12 @@ class TestProviderRouting:
         assert get_provider_for_model("bedrock/anthropic.claude-3-sonnet") == "bedrock"
         assert get_provider_for_model("bedrock/amazon.titan-text") == "bedrock"
 
+    def test_routing_nim_models(self) -> None:
+        from penguiflow.llm.routing import get_provider_for_model
+
+        assert get_provider_for_model("nim/qwen/qwen3.5-397b-a17b") == "nim"
+        assert get_provider_for_model("nvidia/qwen/qwen3.5-397b-a17b") == "nim"
+
 
 class TestProviderProfiles:
     """Test that providers use correct model profiles."""
@@ -400,6 +434,13 @@ class TestProviderProfiles:
 
         profile = get_profile("gemini-2.0-flash")
         assert profile is not None
+
+    def test_nim_profile(self) -> None:
+        from penguiflow.llm.profiles import get_profile
+
+        profile = get_profile("nim/qwen/qwen3.5-397b-a17b")
+        assert profile is not None
+        assert profile.default_output_mode == "tools"
 
     def test_default_profile_for_unknown(self) -> None:
         from penguiflow.llm.profiles import get_profile

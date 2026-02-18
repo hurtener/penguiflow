@@ -48,16 +48,18 @@
   }
 
   .grid-item {
-    background: #ffffff;
-    border: 1px solid #e5e7eb;
-    border-radius: 0.75rem;
-    padding: 0.75rem;
+    background: var(--color-card-bg, #fcfaf7);
+    border: 1px solid var(--color-border, #f0ebe4);
+    border-radius: var(--radius-2xl, 18px);
+    padding: 1rem;
+    box-shadow: var(--shadow-subtle, 0 4px 12px rgba(0, 0, 0, 0.04));
   }
 
   .grid-title {
     font-size: 0.875rem;
     font-weight: 600;
     margin-bottom: 0.5rem;
+    color: var(--color-text, #1f1f1f);
   }
 
   .grid-item.equal {

@@ -9,9 +9,16 @@
     allowHtml?: boolean;
     syntaxHighlight?: boolean;
     mathEnabled?: boolean;
+    padded?: boolean;
   }
 
-  let { content = '', allowHtml = false, syntaxHighlight = true, mathEnabled = true }: Props = $props();
+  let {
+    content = '',
+    allowHtml = false,
+    syntaxHighlight = true,
+    mathEnabled = true,
+    padded = true
+  }: Props = $props();
 
   const escapeHtml = (html: string) =>
     html.replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -101,110 +108,19 @@
   const html = $derived(DOMPurify.sanitize(applyMath(rawHtml), { USE_PROFILES: { html: true, svg: false } }));
 </script>
 
-<div class="markdown" class:math={mathEnabled}>
+<div class="markdown markdown-content" class:math={mathEnabled} class:padded={padded}>
   {@html html}
 </div>
 
 <style>
   .markdown {
-    padding: 1rem;
     font-size: 0.95rem;
-    line-height: 1.6;
+    line-height: 1.7;
+    color: var(--color-text-secondary, #3c3a36);
+    overflow-wrap: anywhere;
   }
 
-  /* Headings */
-  .markdown :global(h1),
-  .markdown :global(h2),
-  .markdown :global(h3),
-  .markdown :global(h4),
-  .markdown :global(h5),
-  .markdown :global(h6) {
-    margin-top: 1.5em;
-    margin-bottom: 0.5em;
-    font-weight: 600;
-  }
-
-  .markdown :global(h1:first-child),
-  .markdown :global(h2:first-child),
-  .markdown :global(h3:first-child) {
-    margin-top: 0;
-  }
-
-  /* Paragraphs */
-  .markdown :global(p) {
-    margin: 0.75em 0;
-  }
-
-  /* Lists - ensure numbers/bullets have room */
-  .markdown :global(ul),
-  .markdown :global(ol) {
-    margin: 0.75em 0;
-    padding-left: 1.75em;
-  }
-
-  .markdown :global(li) {
-    margin: 0.35em 0;
-  }
-
-  .markdown :global(li > ul),
-  .markdown :global(li > ol) {
-    margin: 0.25em 0;
-  }
-
-  /* Code */
-  .markdown :global(code) {
-    font-family: var(--font-mono, ui-monospace);
-    background: #f1f5f9;
-    padding: 0.1rem 0.25rem;
-    border-radius: 0.25rem;
-  }
-
-  .markdown :global(pre) {
-    background: #0f172a;
-    color: #e2e8f0;
-    padding: 0.75rem;
-    border-radius: 0.5rem;
-    overflow-x: auto;
-    margin: 1em 0;
-  }
-
-  .markdown :global(pre code) {
-    background: transparent;
-    padding: 0;
-  }
-
-  /* Blockquotes */
-  .markdown :global(blockquote) {
-    margin: 1em 0;
-    padding: 0.5em 1em;
-    border-left: 3px solid #cbd5e1;
-    background: #f8fafc;
-    color: #475569;
-  }
-
-  /* Tables */
-  .markdown :global(table) {
-    border-collapse: collapse;
-    margin: 1em 0;
-    width: 100%;
-  }
-
-  .markdown :global(th),
-  .markdown :global(td) {
-    border: 1px solid #e2e8f0;
-    padding: 0.5em 0.75em;
-    text-align: left;
-  }
-
-  .markdown :global(th) {
-    background: #f8fafc;
-    font-weight: 600;
-  }
-
-  /* Horizontal rule */
-  .markdown :global(hr) {
-    border: none;
-    border-top: 1px solid #e2e8f0;
-    margin: 1.5em 0;
+  .markdown.padded {
+    padding: 1rem;
   }
 </style>

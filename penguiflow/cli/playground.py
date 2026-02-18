@@ -694,6 +694,7 @@ def _instantiate_orchestrator(
     config: Any | None,
     *,
     session_manager: Any | None = None,
+    state_store: Any | None = None,
 ) -> Any:
     signature = inspect.signature(cls)
     params = [param for name, param in signature.parameters.items() if name != "self"]
@@ -707,6 +708,8 @@ def _instantiate_orchestrator(
     kwargs: dict[str, Any] = {}
     if session_manager is not None and "session_manager" in signature.parameters:
         kwargs["session_manager"] = session_manager
+    if state_store is not None and "state_store" in signature.parameters:
+        kwargs["state_store"] = state_store
 
     try:
         if config is not None:
@@ -765,7 +768,12 @@ def load_agent(
     state_store = state_store or InMemoryStateStore()
 
     if result.kind == "orchestrator":
-        orchestrator = _instantiate_orchestrator(result.target, config, session_manager=session_manager)
+        orchestrator = _instantiate_orchestrator(
+            result.target,
+            config,
+            session_manager=session_manager,
+            state_store=state_store,
+        )
         wrapper: AgentWrapper = OrchestratorAgentWrapper(
             orchestrator,
             state_store=state_store,

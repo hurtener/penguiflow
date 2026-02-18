@@ -147,6 +147,19 @@ async def test_llm_client_generate_native_mode_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_llm_client_generate_with_nim_model_and_injected_provider() -> None:
+    provider = FakeProvider(_model="qwen/qwen3.5-397b-a17b", _provider_name="nim")
+    client = LLMClient("nim/qwen/qwen3.5-397b-a17b", provider=provider, profile=provider.profile)
+    result = await client.generate(
+        [LLMMessage(role="user", parts=[TextPart(text="hello")])],
+        Answer,
+        force_mode=OutputMode.NATIVE,
+    )
+    assert isinstance(result.data, Answer)
+    assert result.data.text == "ok"
+
+
+@pytest.mark.asyncio
 async def test_generate_structured_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = FakeProvider(_model="gpt-4o", _provider_name="openai")
 

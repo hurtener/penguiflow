@@ -56,6 +56,34 @@ class TestGetProfileForModel:
         profile = get_profile("gemini-2.0-flash")
         assert profile is not None
 
+    def test_nim_model_with_provider_prefix(self) -> None:
+        """Test NIM model profile lookup with provider prefixes."""
+        profile_nim = get_profile("nim/qwen/qwen3.5-397b-a17b")
+        profile_nvidia = get_profile("nvidia/qwen/qwen3.5-397b-a17b")
+        assert profile_nim is not None
+        assert profile_nvidia is not None
+        assert profile_nim.default_output_mode == "tools"
+        assert profile_nvidia.default_output_mode == "tools"
+
+    def test_nim_reasoning_profiles(self) -> None:
+        """Test NIM reasoning profile capabilities for known models."""
+        model_ids = (
+            "qwen/qwen3.5-397b-a17b",
+            "minimaxai/minimax-m2.1",
+            "z-ai/glm5",
+            "moonshotai/kimi-k2.5",
+            "deepseek-ai/deepseek-v3.1-terminus",
+            "stepfun-ai/step-3.5-flash",
+        )
+
+        for model_id in model_ids:
+            profile = get_profile(f"nim/{model_id}")
+            assert profile.supports_reasoning is True
+            assert profile.supports_tools is True
+            assert profile.supports_streaming is True
+            assert profile.supports_json_only_output is True
+            assert profile.thinking_tags == ("<think>", "</think>")
+
 
 class TestRegisterProfile:
     """Test register_profile function."""

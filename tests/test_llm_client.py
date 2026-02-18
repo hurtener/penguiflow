@@ -701,6 +701,12 @@ class TestResponseFormatPolicyExtended:
     def test_o3_model_returns_json_object(self) -> None:
         assert _response_format_policy("openrouter/o3-mini") == "json_object"
 
+    def test_nim_model_returns_json_object(self) -> None:
+        assert _response_format_policy("nim/qwen/qwen3.5-397b-a17b") == "json_object"
+
+    def test_nvidia_model_returns_json_object(self) -> None:
+        assert _response_format_policy("nvidia/qwen/qwen3.5-397b-a17b") == "json_object"
+
 
 # ─── RFC_UNIFIED_ACTION_SCHEMA: Native reasoning support tests ────────────────
 

@@ -92,7 +92,7 @@
         {/if}
 
         {#if section.content}
-          <Markdown content={section.content} />
+          <Markdown content={section.content} padded={false} />
         {/if}
 
         {#if section.components}
@@ -113,7 +113,7 @@
                 <h3>{subsection.title}</h3>
               {/if}
               {#if subsection.content}
-                <Markdown content={subsection.content} />
+                <Markdown content={subsection.content} padded={false} />
               {/if}
               {#if subsection.components}
                 {#each subsection.components as comp}
@@ -134,7 +134,7 @@
 
   {#if footer}
     <footer class="report-footer">
-      <Markdown content={footer} />
+      <Markdown content={footer} padded={false} />
     </footer>
   {/if}
 </article>
@@ -143,44 +143,48 @@
   .artifact-report {
     max-width: 900px;
     margin: 0 auto;
-    padding: 2rem;
-    line-height: 1.6;
+    padding: clamp(1.25rem, 4vw, 2.5rem);
+    line-height: 1.7;
+    color: var(--color-text-secondary, #3c3a36);
   }
 
   .report-header {
     margin-bottom: 2rem;
     padding-bottom: 1rem;
-    border-bottom: 2px solid #e5e7eb;
+    border-bottom: 1px solid var(--color-border, #f0ebe4);
   }
 
   .report-header h1 {
     margin: 0 0 0.5rem;
     font-size: 2rem;
+    color: var(--color-text, #1f1f1f);
   }
 
   .subtitle {
     margin: 0 0 0.5rem;
     font-size: 1.25rem;
-    color: #6b7280;
+    color: var(--color-muted, #6b665f);
   }
 
   .meta {
     display: flex;
     gap: 1rem;
     font-size: 0.875rem;
-    color: #9ca3af;
+    color: var(--color-muted-light, #8a847c);
   }
 
   .toc {
     margin-bottom: 2rem;
-    padding: 1rem;
-    background: #f9fafb;
-    border-radius: 0.5rem;
+    padding: 1rem 1.25rem;
+    background: var(--color-pill-ghost-bg, #f4f0ea);
+    border: 1px solid var(--color-border, #f0ebe4);
+    border-radius: var(--radius-xl, 16px);
   }
 
   .toc h2 {
     margin: 0 0 0.5rem;
     font-size: 1rem;
+    color: var(--color-text, #1f1f1f);
   }
 
   .toc ul {
@@ -194,12 +198,14 @@
   }
 
   .toc a {
-    color: #2563eb;
-    text-decoration: none;
+    color: var(--color-primary-text, #1f6c68);
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
 
   .toc a:hover {
-    text-decoration: underline;
+    color: var(--color-primary-light, #106c67);
+    text-decoration-thickness: 2px;
   }
 
   .report-body section {
@@ -209,17 +215,18 @@
   .report-body h2 {
     margin: 0 0 1rem;
     padding-bottom: 0.5rem;
-    border-bottom: 1px solid #e5e7eb;
+    border-bottom: 1px solid var(--color-border, #f0ebe4);
+    color: var(--color-text, #1f1f1f);
   }
 
   .report-body h3 {
     margin: 1.5rem 0 0.75rem;
+    color: var(--color-text, #1f1f1f);
   }
 
   .subsection {
-    margin-left: 1rem;
-    padding-left: 1rem;
-    border-left: 2px solid #e5e7eb;
+    margin-top: 1.5rem;
+    padding-top: 0.25rem;
   }
 
   .component-figure {
@@ -229,7 +236,7 @@
   figcaption {
     margin-top: 0.5rem;
     font-size: 0.875rem;
-    color: #6b7280;
+    color: var(--color-muted, #6b665f);
     text-align: center;
     font-style: italic;
   }
@@ -237,8 +244,8 @@
   .report-footer {
     margin-top: 2rem;
     padding-top: 1rem;
-    border-top: 1px solid #e5e7eb;
+    border-top: 1px solid var(--color-border, #f0ebe4);
     font-size: 0.875rem;
-    color: #6b7280;
+    color: var(--color-muted, #6b665f);
   }
 </style>

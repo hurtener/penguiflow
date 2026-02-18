@@ -250,6 +250,29 @@ class TestCreateNativeAdapter:
                 reasoning_effort=None,
             )
 
+    def test_create_with_nim_dict_config(self) -> None:
+        with patch("penguiflow.llm.protocol.NativeLLMAdapter") as mock_adapter:
+            create_native_adapter(
+                {
+                    "model": "nim/qwen/qwen3.5-397b-a17b",
+                    "api_key": "nim-key",
+                    "base_url": "https://integrate.api.nvidia.com/v1",
+                }
+            )
+
+            mock_adapter.assert_called_once_with(
+                "nim/qwen/qwen3.5-397b-a17b",
+                api_key="nim-key",
+                base_url="https://integrate.api.nvidia.com/v1",
+                temperature=0.0,
+                json_schema_mode=True,
+                max_retries=3,
+                timeout_s=360.0,
+                streaming_enabled=True,
+                use_native_reasoning=True,
+                reasoning_effort=None,
+            )
+
     def test_create_with_api_base_alias(self) -> None:
         with patch("penguiflow.llm.protocol.NativeLLMAdapter") as mock_adapter:
             create_native_adapter(
@@ -484,6 +507,25 @@ class TestNativeLLMAdapterBuildRequest:
 
             assert request.extra is not None
             assert request.extra["reasoning_effort"] == "medium"
+
+    def test_build_request_with_reasoning_effort_for_nim_model(self) -> None:
+        """NIM models should use the same canonical reasoning_effort request knob."""
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.model = "qwen/qwen3.5-397b-a17b"
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter(
+                "nim/qwen/qwen3.5-397b-a17b",
+                use_native_reasoning=True,
+                reasoning_effort="high",
+            )
+            messages = [LLMMessage(role="user", parts=[TextPart(text="Think")])]
+
+            request = adapter._build_request(messages, None)
+
+            assert request.extra is not None
+            assert request.extra["reasoning_effort"] == "high"
 
     def test_build_request_no_reasoning_when_disabled(self) -> None:
         """Test request building omits reasoning when disabled."""
