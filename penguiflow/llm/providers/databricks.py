@@ -20,6 +20,7 @@ import json
 import os
 import re
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from ..errors import (
     LLMAuthError,
@@ -83,6 +84,32 @@ class DatabricksProvider(OpenAICompatibleProvider):
     MAX_TOOL_SCHEMA_KEYS = 16
     DEFAULT_VISIBLE_OUTPUT_TOKENS_WITH_THINKING = 4096
 
+    @staticmethod
+    def _normalize_host_from_host_or_api_base(value: str) -> str:
+        """Normalize Databricks host from host or API base alias."""
+        raw = value.strip()
+        if not raw:
+            return ""
+
+        # Accept host-only values and full URLs transparently.
+        if not re.match(r"^https?://", raw, flags=re.IGNORECASE):
+            raw = f"https://{raw}"
+
+        parsed = urlparse(raw)
+        host = parsed.netloc.strip()
+        path = (parsed.path or "").rstrip("/")
+
+        # DATABRICKS_API_BASE aliases are often configured as:
+        # https://<workspace>/serving-endpoints
+        # or https://<workspace>/serving-endpoints/<endpoint>
+        if "/serving-endpoints" in path:
+            path = path.split("/serving-endpoints", 1)[0]
+
+        if path and path != "/":
+            host = f"{host}{path}".strip("/")
+
+        return host.rstrip("/")
+
     def __init__(
         self,
         model: str,
@@ -97,8 +124,8 @@ class DatabricksProvider(OpenAICompatibleProvider):
         Args:
             model: Model identifier (e.g., "databricks/databricks-claude-sonnet-4-5").
                    The "databricks/" prefix will be stripped to get the endpoint name.
-            host: Databricks workspace host (uses DATABRICKS_HOST env var if not provided).
-            token: Databricks access token (uses DATABRICKS_TOKEN env var if not provided).
+            host: Databricks workspace host (uses DATABRICKS_HOST or DATABRICKS_API_BASE if not provided).
+            token: Databricks access token (uses DATABRICKS_TOKEN or DATABRICKS_API_KEY if not provided).
                    OAuth tokens are recommended for production use.
             profile: Model profile override.
             timeout: Default timeout in seconds.
@@ -119,21 +146,18 @@ class DatabricksProvider(OpenAICompatibleProvider):
         self._profile = profile or get_profile(model)
         self._timeout = timeout
 
-        host = host or os.environ.get("DATABRICKS_HOST")
-        token = token or os.environ.get("DATABRICKS_TOKEN")
+        host = host or os.environ.get("DATABRICKS_HOST") or os.environ.get("DATABRICKS_API_BASE")
+        token = token or os.environ.get("DATABRICKS_TOKEN") or os.environ.get("DATABRICKS_API_KEY")
 
         if not host or not token:
             raise ValueError(
-                "Databricks host and token required. Set DATABRICKS_HOST and "
-                "DATABRICKS_TOKEN environment variables or pass explicitly."
+                "Databricks host and token required. Set DATABRICKS_HOST/DATABRICKS_TOKEN "
+                "or DATABRICKS_API_BASE/DATABRICKS_API_KEY environment variables, "
+                "or pass host/token explicitly."
             )
 
-        # Normalize host
-        if host.startswith("https://"):
-            host = host[8:]
-        if host.startswith("http://"):
-            host = host[7:]
-        host = host.rstrip("/")
+        # Normalize host from either direct host or API base alias.
+        host = self._normalize_host_from_host_or_api_base(host)
 
         # Databricks native API endpoint.
         #
