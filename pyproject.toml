@@ -149,6 +149,7 @@ extend-exclude = [
     "ooflow.py",
     "penguiflow_a2a/grpc/a2a_pb2.py",
     "penguiflow_a2a/grpc/a2a_pb2_grpc.py",
+    "tmp/codex-skills",
 ]
 
 [tool.ruff.lint]
