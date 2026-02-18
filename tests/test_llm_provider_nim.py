@@ -113,9 +113,7 @@ class TestNIMProviderBuildParams:
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
             messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
-            tools=(
-                ToolSpec(name="get_weather", description="Get weather", json_schema={"type": "object"}),
-            ),
+            tools=(ToolSpec(name="get_weather", description="Get weather", json_schema={"type": "object"}),),
             tool_choice="get_weather",
             structured_output=StructuredOutputSpec(name="Out", json_schema={"type": "object"}, strict=False),
             extra={"custom_flag": True},
@@ -141,7 +139,7 @@ class TestNIMProviderBuildParams:
         )
 
         params = provider._build_params(request)
-        assert params["extra_body"]["chat_template_kwargs"]["thinking"] is True
+        assert params["extra_body"]["chat_template_kwargs"]["thinking_mode"] == "thinking"
         assert "reasoning_effort" not in params
 
     def test_build_params_maps_reasoning_effort_to_thinking_false(self) -> None:
@@ -158,7 +156,7 @@ class TestNIMProviderBuildParams:
         )
 
         params = provider._build_params(request)
-        assert params["extra_body"]["chat_template_kwargs"]["thinking"] is False
+        assert params["extra_body"]["chat_template_kwargs"]["thinking_mode"] == "non-thinking"
 
     def test_build_params_explicit_extra_body_thinking_overrides_effort(self) -> None:
         from penguiflow.llm.providers.nim import NIMProvider
@@ -172,12 +170,12 @@ class TestNIMProviderBuildParams:
             messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
             extra={
                 "reasoning_effort": "high",
-                "extra_body": {"chat_template_kwargs": {"thinking": False}},
+                "extra_body": {"chat_template_kwargs": {"thinking_mode": "non-thinking"}},
             },
         )
 
         params = provider._build_params(request)
-        assert params["extra_body"]["chat_template_kwargs"]["thinking"] is False
+        assert params["extra_body"]["chat_template_kwargs"]["thinking_mode"] == "non-thinking"
 
     def test_build_params_normalizes_chat_template_kwargs_alias(self, caplog: pytest.LogCaptureFixture) -> None:
         from penguiflow.llm.providers.nim import NIMProvider
@@ -189,15 +187,97 @@ class TestNIMProviderBuildParams:
         request = LLMRequest(
             model="qwen/qwen3.5-397b-a17b",
             messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
-            extra={"chat_template_kwargs": {"thinking": True, "foo": "bar"}},
+            extra={"chat_template_kwargs": {"thinking_mode": "thinking", "foo": "bar"}},
         )
 
         with caplog.at_level(logging.WARNING, logger="penguiflow.llm.providers.nim"):
             params = provider._build_params(request)
 
-        assert params["extra_body"]["chat_template_kwargs"]["thinking"] is True
+        assert params["extra_body"]["chat_template_kwargs"]["thinking_mode"] == "thinking"
         assert params["extra_body"]["chat_template_kwargs"]["foo"] == "bar"
         assert any("nim_chat_template_kwargs_alias_normalized" in r.message for r in caplog.records)
+
+    def test_build_params_reorders_system_messages(self, caplog: pytest.LogCaptureFixture) -> None:
+        from penguiflow.llm.providers.nim import NIMProvider
+
+        provider = NIMProvider.__new__(NIMProvider)
+        provider._model = "qwen/qwen3.5-397b-a17b"
+        provider._profile = MagicMock(supports_reasoning=True, reasoning_effort_param=None)
+
+        request = LLMRequest(
+            model="qwen/qwen3.5-397b-a17b",
+            messages=(
+                LLMMessage(role="user", parts=[TextPart(text="User first")]),
+                LLMMessage(role="system", parts=[TextPart(text="System later")]),
+            ),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="penguiflow.llm.providers.nim"):
+            params = provider._build_params(request)
+
+        assert [msg["role"] for msg in params["messages"]] == ["system", "user"]
+        assert any("nim_reordered_system_messages" in r.message for r in caplog.records)
+
+    def test_build_params_collapses_multiple_system_messages(self, caplog: pytest.LogCaptureFixture) -> None:
+        from penguiflow.llm.providers.nim import NIMProvider
+
+        provider = NIMProvider.__new__(NIMProvider)
+        provider._model = "qwen/qwen3.5-397b-a17b"
+        provider._profile = MagicMock(supports_reasoning=True, reasoning_effort_param=None)
+
+        request = LLMRequest(
+            model="qwen/qwen3.5-397b-a17b",
+            messages=(
+                LLMMessage(role="system", parts=[TextPart(text="System A")]),
+                LLMMessage(role="system", parts=[TextPart(text="System B")]),
+                LLMMessage(role="user", parts=[TextPart(text="Hello")]),
+            ),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="penguiflow.llm.providers.nim"):
+            params = provider._build_params(request)
+
+        assert [msg["role"] for msg in params["messages"]] == ["system", "user"]
+        assert "System A" in str(params["messages"][0]["content"])
+        assert "System B" in str(params["messages"][0]["content"])
+        assert any("nim_collapsed_system_messages" in r.message for r in caplog.records)
+
+    @pytest.mark.parametrize(
+        ("model", "effort", "expected_key", "expected_value"),
+        [
+            ("qwen/qwen3.5-397b-a17b", "high", "thinking_mode", "thinking"),
+            ("qwen/qwen3.5-397b-a17b", "off", "thinking_mode", "non-thinking"),
+            ("stepfun-ai/step-3.5-flash", "high", "reasoning_mode", "thinking"),
+            ("stepfun-ai/step-3.5-flash", "off", "reasoning_mode", "none"),
+            ("z-ai/glm5", "high", "reasoning_mode", "thinking"),
+            ("moonshotai/kimi-k2.5", "off", "reasoning_mode", "none"),
+            ("deepseek-ai/deepseek-v3.1-terminus", "high", "reasoning_mode", "thinking"),
+            ("minimaxai/minimax-m2.1", "high", "enable_thinking", True),
+            ("minimaxai/minimax-m2.1", "off", "enable_thinking", False),
+        ],
+    )
+    def test_build_params_model_specific_reasoning_controls(
+        self,
+        model: str,
+        effort: str,
+        expected_key: str,
+        expected_value: object,
+    ) -> None:
+        from penguiflow.llm.providers.nim import NIMProvider
+
+        provider = NIMProvider.__new__(NIMProvider)
+        provider._model = model
+        provider._profile = MagicMock(supports_reasoning=True, reasoning_effort_param=None)
+
+        request = LLMRequest(
+            model=model,
+            messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+            extra={"reasoning_effort": effort},
+        )
+
+        params = provider._build_params(request)
+        chat_kwargs = params["extra_body"]["chat_template_kwargs"]
+        assert chat_kwargs[expected_key] == expected_value
 
     def test_build_params_ignores_unsupported_budget_controls(self, caplog: pytest.LogCaptureFixture) -> None:
         from penguiflow.llm.providers.nim import NIMProvider

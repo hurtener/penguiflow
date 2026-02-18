@@ -56,6 +56,14 @@ class NIMProvider(OpenAICompatibleProvider):
         "thinking_budget",
         "thinking_budget_tokens",
     }
+    _MODEL_REASONING_CONTROL_MAP: tuple[tuple[str, str, Any, Any], ...] = (
+        ("qwen/qwen3.5-397b-a17b", "thinking_mode", "thinking", "non-thinking"),
+        ("stepfun-ai/step-3.5-flash", "reasoning_mode", "thinking", "none"),
+        ("z-ai/glm5", "reasoning_mode", "thinking", "none"),
+        ("moonshotai/kimi-k2.5", "reasoning_mode", "thinking", "none"),
+        ("deepseek-ai/deepseek-v3.1-terminus", "reasoning_mode", "thinking", "none"),
+        ("minimaxai/minimax-m2.1", "enable_thinking", True, False),
+    )
 
     def __init__(
         self,
@@ -262,9 +270,11 @@ class NIMProvider(OpenAICompatibleProvider):
 
     def _build_params(self, request: LLMRequest) -> dict[str, Any]:
         """Build NIM OpenAI-compatible parameters from request."""
+        messages = self._to_openai_messages(request.messages)
+        messages = self._reorder_system_messages(messages)
         params: dict[str, Any] = {
             "model": self._model,
-            "messages": self._to_openai_messages(request.messages),
+            "messages": messages,
         }
 
         if not self._profile.supports_reasoning or request.temperature > 0:
@@ -294,9 +304,68 @@ class NIMProvider(OpenAICompatibleProvider):
 
         return params
 
+    def _reorder_system_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Ensure all system/developer messages appear first, collapsed to one."""
+        system_like_roles = {"system", "developer"}
+        seen_non_system = False
+        needs_reorder = False
+        for msg in messages:
+            role = str(msg.get("role", "")).lower()
+            if role in system_like_roles:
+                if seen_non_system:
+                    needs_reorder = True
+                    break
+            else:
+                seen_non_system = True
+
+        systems = [msg for msg in messages if str(msg.get("role", "")).lower() in system_like_roles]
+        others = [msg for msg in messages if str(msg.get("role", "")).lower() not in system_like_roles]
+
+        normalized = messages
+        if needs_reorder:
+            logger.warning(
+                "nim_reordered_system_messages",
+                extra={
+                    "provider": "nim",
+                    "model": self._model,
+                    "system_count": len(systems),
+                    "non_system_count": len(others),
+                },
+            )
+            normalized = [*systems, *others]
+
+        leading_system_count = 0
+        merged_parts: list[str] = []
+        for msg in normalized:
+            if str(msg.get("role", "")).lower() not in system_like_roles:
+                break
+            leading_system_count += 1
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                merged_parts.append(content.strip())
+
+        if leading_system_count > 1:
+            merged_content = "\n\n".join(merged_parts)
+            collapsed = [
+                {"role": "system", "content": merged_content},
+                *normalized[leading_system_count:],
+            ]
+            logger.warning(
+                "nim_collapsed_system_messages",
+                extra={
+                    "provider": "nim",
+                    "model": self._model,
+                    "collapsed_count": leading_system_count,
+                },
+            )
+            return collapsed
+
+        return normalized
+
     def _normalize_nim_reasoning_controls(self, extra: dict[str, Any]) -> None:
         """Normalize generic reasoning controls into NIM's extra_body shape."""
         reasoning_effort = extra.pop("reasoning_effort", None)
+        control_key, on_value, off_value = self._resolve_reasoning_control_spec()
 
         # Databricks-style thinking budgets are not supported by NIM; ignore with warning.
         for key in self._UNSUPPORTED_BUDGET_KEYS:
@@ -337,7 +406,9 @@ class NIMProvider(OpenAICompatibleProvider):
                 )
 
         raw_chat_kwargs = extra_body.get("chat_template_kwargs")
-        explicit_extra_body_thinking = isinstance(raw_chat_kwargs, dict) and "thinking" in raw_chat_kwargs
+        explicit_extra_body_control = isinstance(raw_chat_kwargs, dict) and (
+            control_key in raw_chat_kwargs or "thinking" in raw_chat_kwargs
+        )
         chat_kwargs: dict[str, Any] = dict(raw_chat_kwargs) if isinstance(raw_chat_kwargs, dict) else {}
 
         if raw_chat_kwargs is not None and not isinstance(raw_chat_kwargs, dict):
@@ -364,9 +435,22 @@ class NIMProvider(OpenAICompatibleProvider):
                     extra={"provider": "nim", "model": self._model, "control": f"chat_template_kwargs.{key}"},
                 )
 
-        derived_thinking = self._map_reasoning_effort_to_thinking(reasoning_effort)
-        if derived_thinking is not None and not explicit_extra_body_thinking:
-            chat_kwargs["thinking"] = derived_thinking
+        # Backward compatibility for legacy key: map explicit "thinking" to model key.
+        if "thinking" in chat_kwargs and control_key != "thinking" and control_key not in chat_kwargs:
+            thinking_value = bool(chat_kwargs.pop("thinking"))
+            chat_kwargs[control_key] = on_value if thinking_value else off_value
+
+        derived_control = self._map_reasoning_effort_to_control_value(
+            reasoning_effort,
+            on_value=on_value,
+            off_value=off_value,
+        )
+        if derived_control is not None and not explicit_extra_body_control:
+            chat_kwargs[control_key] = derived_control
+
+        if control_key != "thinking" and "thinking" in chat_kwargs:
+            # Avoid sending both legacy and model-native keys in the same request.
+            chat_kwargs.pop("thinking", None)
 
         if chat_kwargs:
             extra_body["chat_template_kwargs"] = chat_kwargs
@@ -378,15 +462,28 @@ class NIMProvider(OpenAICompatibleProvider):
         else:
             extra.pop("extra_body", None)
 
-    def _map_reasoning_effort_to_thinking(self, reasoning_effort: Any) -> bool | None:
+    def _resolve_reasoning_control_spec(self) -> tuple[str, Any, Any]:
+        model = self._model.lower()
+        for prefix, key, on_value, off_value in self._MODEL_REASONING_CONTROL_MAP:
+            if model.startswith(prefix):
+                return key, on_value, off_value
+        return "thinking", True, False
+
+    def _map_reasoning_effort_to_control_value(
+        self,
+        reasoning_effort: Any,
+        *,
+        on_value: Any,
+        off_value: Any,
+    ) -> Any | None:
         if reasoning_effort is None:
             return None
 
         effort = str(reasoning_effort).strip().lower()
         if effort in self._REASONING_OFF_VALUES:
-            return False
+            return off_value
         if effort in self._REASONING_ON_VALUES:
-            return True
+            return on_value
 
         logger.warning(
             "nim_unknown_reasoning_effort_defaulting_to_thinking",
@@ -396,7 +493,7 @@ class NIMProvider(OpenAICompatibleProvider):
                 "reasoning_effort": str(reasoning_effort),
             },
         )
-        return True
+        return on_value
 
     def _normalize_thinking_tags(
         self,

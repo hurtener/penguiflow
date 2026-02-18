@@ -281,6 +281,41 @@ class TestNativeLLMAdapter:
 
             assert request.structured_output is None
 
+    def test_build_request_nim_structured_keeps_reasoning_effort_by_default(self) -> None:
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.model = "qwen/qwen3.5-397b-a17b"
+            mock_provider.provider_name = "nim"
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter(
+                "nim/qwen/qwen3.5-397b-a17b",
+                json_schema_mode=True,
+                use_native_reasoning=True,
+                reasoning_effort="high",
+            )
+            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
+
+            request = adapter._build_request(
+                messages,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "planner_action",
+                        "schema": {
+                            "type": "object",
+                            "properties": {"next_node": {"type": "string"}},
+                            "required": ["next_node"],
+                        },
+                    },
+                },
+            )
+
+            assert request.structured_output is not None
+            assert request.structured_output.name == "json_response"
+            assert request.extra is not None
+            assert request.extra["reasoning_effort"] == "high"
+
     def test_convert_messages(self) -> None:
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
@@ -342,6 +377,57 @@ class TestNativeLLMAdapter:
             assert len(reasoning_chunks) == 2
             assert reasoning_chunks[0] == ("I thought about it...", False)
             assert reasoning_chunks[1] == ("", True)
+
+    @pytest.mark.asyncio
+    async def test_complete_reorders_nim_system_messages_before_request(self, mock_provider: MagicMock) -> None:
+        mock_provider.provider_name = "nim"
+        mock_provider.model = "qwen/qwen3.5-397b-a17b"
+        mock_provider.complete = AsyncMock(
+            return_value=CompletionResponse(
+                message=LLMMessage(role="assistant", parts=[TextPart(text='{"ok": true}')]),
+                usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
+            )
+        )
+
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_create.return_value = mock_provider
+            adapter = NativeLLMAdapter("nim/qwen/qwen3.5-397b-a17b")
+            await adapter.complete(
+                messages=[
+                    {"role": "user", "content": "Hello"},
+                    {"role": "system", "content": "System guidance"},
+                ]
+            )
+
+            request = mock_provider.complete.call_args.args[0]
+            assert [msg.role for msg in request.messages] == ["system", "user"]
+
+    @pytest.mark.asyncio
+    async def test_complete_collapses_multiple_nim_system_messages(self, mock_provider: MagicMock) -> None:
+        mock_provider.provider_name = "nim"
+        mock_provider.model = "qwen/qwen3.5-397b-a17b"
+        mock_provider.complete = AsyncMock(
+            return_value=CompletionResponse(
+                message=LLMMessage(role="assistant", parts=[TextPart(text='{"ok": true}')]),
+                usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
+            )
+        )
+
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_create.return_value = mock_provider
+            adapter = NativeLLMAdapter("nim/qwen/qwen3.5-397b-a17b")
+            await adapter.complete(
+                messages=[
+                    {"role": "system", "content": "System A"},
+                    {"role": "user", "content": "Hello"},
+                    {"role": "system", "content": "System B"},
+                ]
+            )
+
+            request = mock_provider.complete.call_args.args[0]
+            assert [msg.role for msg in request.messages] == ["system", "user"]
+            assert "System A" in request.messages[0].text
+            assert "System B" in request.messages[0].text
 
     @pytest.mark.asyncio
     async def test_complete_downgrades_schema_after_invalid_json_schema_error(self, mock_provider: MagicMock) -> None:
@@ -411,6 +497,60 @@ class TestNativeLLMAdapter:
             assert mock_provider.complete.call_count == 2
             retry_request = mock_provider.complete.call_args_list[1].args[0]
             assert retry_request.structured_output is None
+
+    @pytest.mark.asyncio
+    async def test_complete_nim_structured_disables_reasoning_after_error(self, mock_provider: MagicMock) -> None:
+        mock_provider.provider_name = "nim"
+        mock_provider.model = "qwen/qwen3.5-397b-a17b"
+        mock_provider.complete = AsyncMock(
+            side_effect=[
+                RuntimeError("provider rejected first structured request"),
+                CompletionResponse(
+                    message=LLMMessage(role="assistant", parts=[TextPart(text='{"result": "ok"}')]),
+                    usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
+                    reasoning_content="hidden reasoning",
+                ),
+            ]
+        )
+
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_create.return_value = mock_provider
+
+            reasoning_chunks: list[tuple[str, bool]] = []
+
+            def on_reasoning(text: str, done: bool) -> None:
+                reasoning_chunks.append((text, done))
+
+            adapter = NativeLLMAdapter(
+                "nim/qwen/qwen3.5-397b-a17b",
+                json_schema_mode=True,
+                use_native_reasoning=True,
+                reasoning_effort="high",
+            )
+            content, _ = await adapter.complete(
+                messages=[{"role": "user", "content": "test"}],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "planner_action",
+                        "schema": {
+                            "type": "object",
+                            "properties": {"next_node": {"type": "string"}},
+                            "required": ["next_node"],
+                        },
+                    },
+                },
+                on_reasoning_chunk=on_reasoning,
+            )
+
+            assert content == '{"result": "ok"}'
+            assert mock_provider.complete.call_count == 2
+            first_request = mock_provider.complete.call_args_list[0].args[0]
+            second_request = mock_provider.complete.call_args_list[1].args[0]
+            assert first_request.extra is not None
+            assert first_request.extra["reasoning_effort"] == "high"
+            assert second_request.extra is None
+            assert reasoning_chunks == []
 
 
 class TestCreateNativeAdapter:
