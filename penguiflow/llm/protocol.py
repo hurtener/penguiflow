@@ -27,6 +27,51 @@ from .types import (
 logger = logging.getLogger("penguiflow.llm.protocol")
 
 
+def _normalize_json_schema(schema: Any) -> dict[str, Any]:
+    """Normalize schema shape for stricter OpenAI-compatible validators.
+
+    Some providers reject valid composition-only schemas like ``{"allOf": [...]}``
+    unless the root also declares ``{"type": "object"}``.
+    """
+
+    if not isinstance(schema, Mapping):
+        return {"type": "object"}
+
+    normalized = dict(schema)
+    if normalized.get("type") is None and any(
+        key in normalized for key in ("properties", "required", "allOf", "anyOf", "oneOf", "if", "then", "else")
+    ):
+        normalized["type"] = "object"
+    return normalized
+
+
+def _is_invalid_json_schema_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "invalid_json_schema" in text
+        or "invalid schema for response_format" in text
+        or "response_format is invalid" in text
+        or "output_format.schema" in text
+        or "additionalproperties" in text
+        or "must be text or json_object" in text
+    )
+
+
+def _openrouter_allows_json_schema(model: str) -> bool:
+    """Whether OpenRouter route should attempt json_schema mode.
+
+    Conservative policy: only OpenAI/Google routes are allowed to start with
+    json_schema. All other OpenRouter providers default to json_object.
+    """
+
+    route = model.lower().strip()
+    if route.startswith("openrouter/"):
+        route = route.removeprefix("openrouter/")
+
+    provider = route.split("/", 1)[0] if route else ""
+    return provider in {"openai", "google"}
+
+
 class NativeLLMAdapter:
     """Adapter that implements JSONLLMClient protocol using the native LLM layer.
 
@@ -84,6 +129,7 @@ class NativeLLMAdapter:
         self._streaming_enabled = streaming_enabled
         self._use_native_reasoning = use_native_reasoning
         self._reasoning_effort = reasoning_effort
+        self._force_json_object_response_format = False
 
         # Create the underlying provider
         self._provider = create_provider(
@@ -228,6 +274,23 @@ class NativeLLMAdapter:
                 last_error = e
                 error_type = e.__class__.__name__
 
+                if (
+                    response_format is not None
+                    and response_format.get("type") == "json_schema"
+                    and not self._force_json_object_response_format
+                    and _is_invalid_json_schema_error(e)
+                ):
+                    self._force_json_object_response_format = True
+                    request = self._build_request(llm_messages, response_format)
+                    logger.warning(
+                        "native_schema_downgraded_to_json_object",
+                        extra={
+                            "provider": self._provider.provider_name,
+                            "model": self._provider.model,
+                        },
+                    )
+                    continue
+
                 # Check if error is retryable (timeout, rate limit, server errors)
                 if is_retryable(e) and attempt < self._max_retries - 1:
                     backoff_s = 2**attempt  # Exponential backoff: 1s, 2s, 4s, ...
@@ -340,12 +403,36 @@ class NativeLLMAdapter:
 
         if response_format and self._json_schema_mode:
             format_type = response_format.get("type")
+            force_json_object_mode = self._force_json_object_response_format
 
-            if format_type == "json_schema":
+            if (
+                format_type == "json_schema"
+                and not force_json_object_mode
+                and self._provider.provider_name == "openrouter"
+                and not _openrouter_allows_json_schema(self._provider.model)
+            ):
+                force_json_object_mode = True
+                self._force_json_object_response_format = True
+                logger.info(
+                    "openrouter_schema_preemptive_downgrade",
+                    extra={
+                        "model": self._provider.model,
+                        "provider": self._provider.provider_name,
+                    },
+                )
+
+            if format_type == "json_schema" and force_json_object_mode:
+                structured_output = StructuredOutputSpec(
+                    name="json_response",
+                    json_schema={"type": "object"},
+                    strict=False,
+                )
+            elif format_type == "json_schema":
                 # Extract schema from response_format
-                json_schema_spec = response_format.get("json_schema", {})
+                json_schema_spec_raw = response_format.get("json_schema", {})
+                json_schema_spec = json_schema_spec_raw if isinstance(json_schema_spec_raw, Mapping) else {}
                 schema_name = json_schema_spec.get("name", "response")
-                schema = json_schema_spec.get("schema", {})
+                schema = _normalize_json_schema(json_schema_spec.get("schema", {}))
                 strict = json_schema_spec.get("strict", True)
 
                 structured_output = StructuredOutputSpec(

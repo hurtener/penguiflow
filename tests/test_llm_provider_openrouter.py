@@ -347,6 +347,31 @@ class TestOpenRouterProviderBuildParams:
             assert "response_format" in params
             assert params["response_format"]["type"] == "json_schema"
 
+    def test_build_params_with_json_object_mode(self, mock_openai_sdk: MagicMock) -> None:
+        """Test generic non-strict structured output maps to json_object."""
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.openrouter import OpenRouterProvider
+
+            provider = OpenRouterProvider(
+                "anthropic/claude-sonnet-4.5",
+                api_key="key",
+            )
+
+            request = LLMRequest(
+                model="anthropic/claude-sonnet-4.5",
+                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                structured_output=StructuredOutputSpec(
+                    name="json_response",
+                    json_schema={"type": "object"},
+                    strict=False,
+                ),
+            )
+
+            params = provider._build_params(request)
+
+            assert "response_format" in params
+            assert params["response_format"]["type"] == "json_object"
+
 
 class TestOpenRouterProviderComplete:
     """Test OpenRouter provider complete method."""
@@ -424,9 +449,7 @@ class TestOpenRouterProviderComplete:
 
             mock_response = self._create_mock_response(
                 content="",
-                tool_calls=[
-                    {"id": "call_123", "name": "get_weather", "arguments": '{"city": "NYC"}'}
-                ],
+                tool_calls=[{"id": "call_123", "name": "get_weather", "arguments": '{"city": "NYC"}'}],
             )
             mock_client = MagicMock()
             mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
@@ -607,9 +630,7 @@ class TestOpenRouterProviderErrorMapping:
 
             # Test via the mocked path
             with patch.object(provider, "_map_error") as mock_map:
-                mock_map.return_value = LLMError(
-                    message="Unknown error", provider="openrouter"
-                )
+                mock_map.return_value = LLMError(message="Unknown error", provider="openrouter")
                 result = mock_map(ValueError("Unknown error"))
 
                 assert isinstance(result, LLMError)

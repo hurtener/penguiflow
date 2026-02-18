@@ -149,6 +149,111 @@ class TestNativeLLMAdapter:
             assert call_args.structured_output.json_schema == {"type": "object"}
             assert call_args.structured_output.strict is False
 
+    def test_build_request_normalizes_composed_schema_root_type(self) -> None:
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.model = "test-model"
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter("test-model", json_schema_mode=True)
+            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
+
+            request = adapter._build_request(
+                messages,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "planner_action",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {"next_node": {"type": "string"}},
+                                    "required": ["next_node"],
+                                },
+                                {
+                                    "if": {
+                                        "properties": {"next_node": {"const": "final_response"}},
+                                    },
+                                    "then": {
+                                        "properties": {
+                                            "args": {
+                                                "type": "object",
+                                                "properties": {"answer": {"type": "string"}},
+                                                "required": ["answer"],
+                                            }
+                                        }
+                                    },
+                                },
+                            ]
+                        },
+                    },
+                },
+            )
+
+            assert request.structured_output is not None
+            assert request.structured_output.json_schema["type"] == "object"
+            assert "allOf" in request.structured_output.json_schema
+
+    def test_build_request_openrouter_non_allowlisted_route_uses_json_object(self) -> None:
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.model = "anthropic/claude-sonnet-4.5"
+            mock_provider.provider_name = "openrouter"
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter("openrouter/anthropic/claude-sonnet-4.5", json_schema_mode=True)
+            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
+
+            request = adapter._build_request(
+                messages,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "planner_action",
+                        "schema": {
+                            "type": "object",
+                            "properties": {"next_node": {"type": "string"}},
+                            "required": ["next_node"],
+                        },
+                    },
+                },
+            )
+
+            assert request.structured_output is not None
+            assert request.structured_output.name == "json_response"
+            assert request.structured_output.json_schema == {"type": "object"}
+            assert request.structured_output.strict is False
+
+    def test_build_request_openrouter_openai_route_keeps_json_schema(self) -> None:
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.model = "openai/gpt-5"
+            mock_provider.provider_name = "openrouter"
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter("openrouter/openai/gpt-5", json_schema_mode=True)
+            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
+
+            request = adapter._build_request(
+                messages,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "planner_action",
+                        "schema": {
+                            "type": "object",
+                            "properties": {"next_node": {"type": "string"}},
+                            "required": ["next_node"],
+                        },
+                    },
+                },
+            )
+
+            assert request.structured_output is not None
+            assert request.structured_output.name == "planner_action"
+            assert request.structured_output.strict is True
+
     def test_convert_messages(self) -> None:
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_provider = MagicMock()
@@ -210,6 +315,47 @@ class TestNativeLLMAdapter:
             assert len(reasoning_chunks) == 2
             assert reasoning_chunks[0] == ("I thought about it...", False)
             assert reasoning_chunks[1] == ("", True)
+
+    @pytest.mark.asyncio
+    async def test_complete_downgrades_schema_after_invalid_json_schema_error(self, mock_provider: MagicMock) -> None:
+        mock_provider.complete = AsyncMock(
+            side_effect=[
+                RuntimeError("invalid_json_schema: strict provider rejected schema"),
+                CompletionResponse(
+                    message=LLMMessage(role="assistant", parts=[TextPart(text='{"result": "ok"}')]),
+                    usage=Usage(input_tokens=10, output_tokens=5, total_tokens=15),
+                ),
+            ]
+        )
+
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter("test-model", json_schema_mode=True)
+            content, _ = await adapter.complete(
+                messages=[{"role": "user", "content": "test"}],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "planner_action",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "args": {"type": "object"},
+                            },
+                            "required": ["args"],
+                        },
+                    },
+                },
+            )
+
+            assert content == '{"result": "ok"}'
+            assert mock_provider.complete.call_count == 2
+            retry_request = mock_provider.complete.call_args_list[1].args[0]
+            assert retry_request.structured_output is not None
+            assert retry_request.structured_output.name == "json_response"
+            assert retry_request.structured_output.json_schema == {"type": "object"}
+            assert retry_request.structured_output.strict is False
 
 
 class TestCreateNativeAdapter:
