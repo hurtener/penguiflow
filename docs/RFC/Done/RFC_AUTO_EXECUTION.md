@@ -1,6 +1,6 @@
 # RFC: Deterministic Transition Detection (Auto-Seq) with Optional Auto-Execution
 
-## Status: **Proposed**
+## Status: **Implemented (v1)**
 **Date:** 2026-01-28  
 **Reviewers:** Core Engineering Team  
 
@@ -69,13 +69,13 @@ Still passes through the same alias rewrite, constraint checks, visibility scopi
 
 ```python
 auto_seq_detected_unique
-extra: { "tool_name": "...", "candidate_count": 1, "prev_step_next_node": "...", "payload_fingerprint": "..." }
+extra: { "tool_name": "...", "payload_fingerprint": "...", "payload_keys_count": N, "payload_type": "..." }
 
 auto_seq_detected_ambiguous
-extra: { "tool_names": [...], "candidate_count": N, "prev_step_next_node": "...", "payload_fingerprint": "..." }
+extra: { "candidates": [...], "candidate_count": N, "payload_fingerprint": "...", "payload_keys_count": N, "payload_type": "..." }
 
 auto_seq_detected_none or auto_seq_skipped
-extra: include reason and fingerprint if available
+extra: include fingerprint metadata when available; `auto_seq_skipped` also includes reason
 ```
 
 **Skipped reasons (non-exhaustive):**
@@ -86,10 +86,12 @@ extra: include reason and fingerprint if available
 
 ```python
 auto_seq_executed
-extra: { "tool_name": "...", "prev_step_next_node": "..."}
+extra: { "tool_name": "..."}
 ```
 
-**Event taxonomy:** The system emits exactly one detection event per iteration when enabled (`auto_seq_detected_*` or `auto_seq_skipped`). If the tool runs without LLM planning, emit `auto_seq_executed`. Note: `prev_step_next_node` is the destination of the previous action.
+**Event taxonomy:** The system emits exactly one detection event per iteration when enabled (`auto_seq_detected_*` or `auto_seq_skipped`). If the tool runs without LLM planning, emit `auto_seq_executed`.
+
+**Implementation note:** the shipped ambiguous payload key is `candidates` (not `tool_names`). Detection events also include `payload_type` and `payload_keys_count` for lightweight telemetry bucketing.
 
 **Payload fingerprint directive:**
 fingerprint should avoid raw data; use type name + stable key set (privacy-safe) to support emergent playbook analytics.

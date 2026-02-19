@@ -1428,6 +1428,7 @@ async def run_loop(
                             )
                             trajectory.metadata["auto_seq_skip_next"] = True
 
+            action: PlannerAction
             if queued_action is not None:
                 action = queued_action
             else:
@@ -1442,13 +1443,13 @@ async def run_loop(
                         detection = _detect_deterministic_transition(planner, trajectory)
                     _emit_auto_seq_detection_event(planner, trajectory, detection)
 
-                action = None
+                selected_action: PlannerAction | None = None
                 if detection is not None and detection.status == "unique":
                     selected = detection.selected_action
                     if selected is not None and getattr(planner, "_auto_seq_execute", False):
                         spec = planner._spec_by_name.get(selected.next_node)
                         if spec is not None and spec.extra.get("auto_seq_execute") is True:
-                            action = selected
+                            selected_action = selected
                             planner._emit_event(
                                 PlannerEvent(
                                     event_type="auto_seq_executed",
@@ -1458,8 +1459,10 @@ async def run_loop(
                                 )
                             )
 
-                if action is None:
+                if selected_action is None:
                     action = await step_with_recovery(planner, trajectory, config=error_recovery_config)
+                else:
+                    action = selected_action
                 # If this action came from a mixed-output response, enqueue eligible
                 # follow-up tool calls for sequential execution without another LLM call.
                 if getattr(planner, "_multi_action_sequential", False) and action.alternate_actions:
