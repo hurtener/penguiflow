@@ -179,7 +179,7 @@ def test_run_generate_creates_planner_and_tools(tmp_path: Path) -> None:
 
     init_content = tools_init.read_text()
     assert "build_catalog_bundle" in init_content
-    assert "registry.register(\"fetch_data\"" in init_content
+    assert 'registry.register("fetch_data"' in init_content
 
     planner_content = planner.read_text()
     assert "ReactPlanner" in planner_content
@@ -224,6 +224,7 @@ def test_run_generate_creates_planner_and_tools(tmp_path: Path) -> None:
     env_setup_content = env_setup_md.read_text()
     assert "OPENAI_API_KEY" in env_setup_content
     assert "ANTHROPIC_API_KEY" in env_setup_content
+    assert "NIM_API_KEY" in env_setup_content
     assert "demo-gen" in env_setup_content or "demo_gen" in env_setup_content
 
 

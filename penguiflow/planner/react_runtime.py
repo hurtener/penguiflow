@@ -1070,6 +1070,35 @@ async def _handle_finish_action(
             )
 
     candidate_answer = action.args if action.args else last_observation
+    if isinstance(candidate_answer, MutableMapping):
+        invalid_answer_fields: dict[str, str] = {}
+        for answer_key in ("answer", "raw_answer"):
+            if answer_key in candidate_answer and not isinstance(candidate_answer.get(answer_key), str):
+                value = candidate_answer.get(answer_key)
+                invalid_answer_fields[answer_key] = type(value).__name__
+                candidate_answer.pop(answer_key, None)
+        if invalid_answer_fields:
+            if "answer" not in candidate_answer and "raw_answer" not in candidate_answer:
+                candidate_answer["raw_answer"] = "No answer produced."
+            planner._emit_event(
+                PlannerEvent(
+                    event_type="finish_invalid_answer_type_discarded",
+                    ts=planner._time_source(),
+                    trajectory_step=len(trajectory.steps),
+                    thought=action.thought,
+                    extra={
+                        "fields": invalid_answer_fields,
+                        "action_seq": action_seq,
+                    },
+                )
+            )
+            logger.warning(
+                "finish_invalid_answer_type_discarded",
+                extra={
+                    "fields": invalid_answer_fields,
+                    "action_seq": action_seq,
+                },
+            )
     # Trace: Log candidate_answer state (helps debug answer loss issues)
     _ca_raw = candidate_answer.get("raw_answer") if isinstance(candidate_answer, dict) else None
     logger.debug(

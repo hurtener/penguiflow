@@ -14,6 +14,7 @@ __all__ = [
     "OpenAICompatibleProvider",
     "create_provider",
     "OpenAIProvider",
+    "NIMProvider",
     "AnthropicProvider",
     "GoogleProvider",
     "BedrockProvider",
@@ -33,6 +34,7 @@ def create_provider(
 
     Model string formats:
     - "openai/gpt-4o" or "gpt-4o" -> OpenAI
+    - "nim/qwen/qwen3.5-397b-a17b" or "nvidia/qwen/qwen3.5-397b-a17b" -> NIM
     - "anthropic/claude-3-5-sonnet" or "claude-*" -> Anthropic
     - "google/gemini-2.0-flash" or "gemini-*" -> Google
     - "bedrock/anthropic.claude-3-5-sonnet" or "anthropic.*" -> Bedrock
@@ -53,6 +55,7 @@ def create_provider(
     from .bedrock import BedrockProvider
     from .databricks import DatabricksProvider
     from .google import GoogleProvider
+    from .nim import NIMProvider
     from .openai import OpenAIProvider
     from .openrouter import OpenRouterProvider
 
@@ -94,6 +97,12 @@ def create_provider(
     if model.startswith("gemini"):
         return GoogleProvider(model, api_key=api_key, **kwargs)
 
+    # NVIDIA NIM
+    if model.startswith("nim/"):
+        return NIMProvider(model.removeprefix("nim/"), api_key=api_key, base_url=base_url, **kwargs)
+    if model.startswith("nvidia/"):
+        return NIMProvider(model.removeprefix("nvidia/"), api_key=api_key, base_url=base_url, **kwargs)
+
     # Default: OpenAI-compatible (requires base_url for non-OpenAI servers)
     return OpenAIProvider(model, api_key=api_key, base_url=base_url, **kwargs)
 
@@ -109,6 +118,9 @@ def __getattr__(name: str) -> type:
     elif name == "GoogleProvider":
         from .google import GoogleProvider
         return GoogleProvider
+    elif name == "NIMProvider":
+        from .nim import NIMProvider
+        return NIMProvider
     elif name == "BedrockProvider":
         from .bedrock import BedrockProvider
         return BedrockProvider

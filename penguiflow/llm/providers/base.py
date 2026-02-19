@@ -203,6 +203,15 @@ class OpenAICompatibleProvider(Provider, ABC):
         if not structured_output:
             return None
 
+        # Represent permissive generic-object mode as json_object so
+        # OpenAI-compatible providers can avoid strict schema validation.
+        if (
+            getattr(structured_output, "strict", None) is False
+            and getattr(structured_output, "name", None) == "json_response"
+            and getattr(structured_output, "json_schema", None) == {"type": "object"}
+        ):
+            return {"type": "json_object"}
+
         return {
             "type": "json_schema",
             "json_schema": {

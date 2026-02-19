@@ -11,6 +11,7 @@ from typing import Literal
 # Provider type literals
 ProviderType = Literal[
     "openai",
+    "nim",
     "anthropic",
     "google",
     "bedrock",
@@ -36,6 +37,8 @@ def parse_model_string(model: str) -> ParsedModel:
     Supported formats:
     - "gpt-4o" -> (openai, gpt-4o)
     - "openai/gpt-4o" -> (openai, gpt-4o)
+    - "nim/qwen/qwen3.5-397b-a17b" -> (nim, qwen/qwen3.5-397b-a17b)
+    - "nvidia/qwen/qwen3.5-397b-a17b" -> (nim, qwen/qwen3.5-397b-a17b)
     - "claude-3-5-sonnet" -> (anthropic, claude-3-5-sonnet)
     - "anthropic/claude-3-5-sonnet" -> (anthropic, claude-3-5-sonnet)
     - "gemini-2.0-flash" -> (google, gemini-2.0-flash)
@@ -79,6 +82,10 @@ def parse_model_string(model: str) -> ParsedModel:
 
         if provider_prefix == "openai":
             return ParsedModel(provider="openai", model_id=model_id, original=original)
+        elif provider_prefix == "nim":
+            return ParsedModel(provider="nim", model_id=model_id, original=original)
+        elif provider_prefix == "nvidia":
+            return ParsedModel(provider="nim", model_id=model_id, original=original)
         elif provider_prefix == "anthropic":
             return ParsedModel(provider="anthropic", model_id=model_id, original=original)
         elif provider_prefix == "google":

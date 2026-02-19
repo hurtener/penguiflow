@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
 from penguiflow.planner import PlannerEvent, PlannerPause, ReactPlanner
+from penguiflow.planner.guardrails import GuardrailAction, GuardrailDecision, RetrySpec
 from penguiflow.planner.memory import MemoryBudget, MemoryKey, ShortTermMemoryConfig
 from penguiflow.planner.react import (
     PlannerAction,
@@ -464,9 +465,7 @@ async def test_finish_repair_fills_missing_answer() -> None:
     assert result.payload["raw_answer"] == "Fixed"
     assert any(evt.event_type == "finish_repair_attempt" for evt in events)
     assert any(evt.event_type == "finish_repair_success" for evt in events)
-    assert any(
-        evt.event_type == "llm_stream_chunk" and evt.extra.get("channel") == "answer" for evt in events
-    )
+    assert any(evt.event_type == "llm_stream_chunk" and evt.extra.get("channel") == "answer" for evt in events)
 
 
 @pytest.mark.asyncio
@@ -536,9 +535,7 @@ async def test_step_records_llm_parse_extras_in_trajectory_metadata() -> None:
     planner = make_planner(
         MixedClient(
             [
-                "PREFACE\n"
-                '{"next_node":"retrieve","args":{"intent":"docs"}}\n'
-                '{"foo":"bar"}\n',
+                'PREFACE\n{"next_node":"retrieve","args":{"intent":"docs"}}\n{"foo":"bar"}\n',
                 '{"next_node":"final_response","args":{"answer":"ok"}}',
             ]
         ),
@@ -552,6 +549,7 @@ async def test_step_records_llm_parse_extras_in_trajectory_metadata() -> None:
     assert isinstance(extras, list)
     assert extras, "Expected at least one llm_parse_extras entry"
     assert extras[0].get("selected_next_node") == "retrieve"
+
 
 @pytest.mark.asyncio
 async def test_multi_action_fallback_uses_alternate_when_first_tool_invalid() -> None:
@@ -580,8 +578,7 @@ async def test_multi_action_fallback_uses_alternate_when_first_tool_invalid() ->
     client = MixedClient(
         [
             # First candidate is an unknown tool; second candidate is a real tool.
-            '{"next_node":"not_a_real_tool","args":{"x":1}}\\n'
-            '{"next_node":"triage","args":{"question":"hi"}}',
+            '{"next_node":"not_a_real_tool","args":{"x":1}}\\n{"next_node":"triage","args":{"question":"hi"}}',
             '{"next_node":"final_response","args":{"answer":"ok"}}',
         ]
     )
@@ -796,9 +793,7 @@ async def test_per_tool_arg_failures_force_finish() -> None:
             "args": {"query": "<auto>"},
         },
         # Graceful failure response - model provides user-friendly message
-        {
-            "raw_answer": "I apologize, but I'm having trouble completing that action. Let me help you in another way."
-        },
+        {"raw_answer": "I apologize, but I'm having trouble completing that action. Let me help you in another way."},
     ]
 
     planner = ReactPlanner(
@@ -1484,8 +1479,72 @@ async def test_react_planner_step_repairs_invalid_action() -> None:
     action = await planner.step(trajectory)
     assert action.next_node == "triage"
     assert len(client.calls) == 2
-    repair_message = client.calls[1][-1]["content"]
+    repair_idx = next(i for i, msg in enumerate(client.calls[1]) if "invalid JSON" in (msg.get("content") or ""))
+    first_non_system_idx = next(i for i, msg in enumerate(client.calls[1]) if msg.get("role") != "system")
+    repair_message = client.calls[1][repair_idx]["content"]
+    assert repair_idx < first_non_system_idx
     assert "invalid JSON" in repair_message
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_guardrail_retry_corrective_message_is_system_prefixed() -> None:
+    class _RetryGateway:
+        class _Config:
+            mode = "enforce"
+
+        config = _Config()
+
+        async def evaluate(self, context: object, event: object) -> GuardrailDecision | None:
+            del context, event
+            return GuardrailDecision(
+                action=GuardrailAction.RETRY,
+                rule_id="retry-rule",
+                reason="retry",
+                retry=RetrySpec(max_attempts=2, corrective_message="Use strict JSON output."),
+            )
+
+    client = StubClient(
+        [
+            {
+                "thought": "recover",
+                "next_node": "triage",
+                "args": {"question": "fixed"},
+            },
+        ]
+    )
+    planner = make_planner(client)
+    planner._guardrail_gateway = _RetryGateway()
+    planner._guardrail_context = object()
+    trajectory = Trajectory(query="recover")
+
+    action = await planner.step(trajectory)
+    assert action.next_node == "triage"
+
+    first_call = client.calls[0]
+    corrective_idx = next(
+        i for i, msg in enumerate(first_call) if "Use strict JSON output." in (msg.get("content") or "")
+    )
+    first_non_system_idx = next(i for i, msg in enumerate(first_call) if msg.get("role") != "system")
+    assert corrective_idx < first_non_system_idx
+
+
+@pytest.mark.asyncio()
+async def test_finish_invalid_numeric_answer_falls_back_to_default_message() -> None:
+    client = StubClient(
+        [
+            {"thought": "finish", "next_node": None, "args": {"answer": -0.0}},
+            {"note": "still missing answer"},
+        ]
+    )
+    events: list[PlannerEvent] = []
+    planner = make_planner(client, event_callback=events.append)
+
+    result = await planner.run("numeric finish edge case")
+
+    assert result.reason == "answer_complete"
+    assert result.payload["raw_answer"] == "No answer produced."
+    assert result.payload["raw_answer"] != "-0.0"
+    assert any(evt.event_type == "finish_invalid_answer_type_discarded" for evt in events)
 
 
 @pytest.mark.asyncio()
@@ -2424,9 +2483,7 @@ def test_react_planner_registers_resource_callbacks() -> None:
     )
 
     ReactPlanner(
-        llm_client=StubClient(
-            [{"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}}]
-        ),
+        llm_client=StubClient([{"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}}]),
         catalog=[spec],
         event_callback=callback,
     )

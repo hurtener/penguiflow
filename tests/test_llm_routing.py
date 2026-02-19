@@ -20,6 +20,16 @@ class TestParseModelString:
         assert result.model_id == "gpt-4o"
         assert result.original == "openai/gpt-4o"
 
+    def test_nim_prefix(self) -> None:
+        result = parse_model_string("nim/qwen/qwen3.5-397b-a17b")
+        assert result.provider == "nim"
+        assert result.model_id == "qwen/qwen3.5-397b-a17b"
+
+    def test_nvidia_prefix_maps_to_nim(self) -> None:
+        result = parse_model_string("nvidia/qwen/qwen3.5-397b-a17b")
+        assert result.provider == "nim"
+        assert result.model_id == "qwen/qwen3.5-397b-a17b"
+
     def test_openai_implied(self) -> None:
         result = parse_model_string("gpt-4o")
         assert result.provider == "openai"
@@ -107,6 +117,8 @@ class TestGetProviderForModel:
         assert get_provider_for_model("gpt-4o") == "openai"
         assert get_provider_for_model("claude-3-5-sonnet") == "anthropic"
         assert get_provider_for_model("gemini-2.0-flash") == "google"
+        assert get_provider_for_model("nim/qwen/qwen3.5-397b-a17b") == "nim"
+        assert get_provider_for_model("nvidia/qwen/qwen3.5-397b-a17b") == "nim"
 
 
 class TestIsReasoningModel:
@@ -164,6 +176,10 @@ class TestBuildModelString:
     def test_build_openai(self) -> None:
         result = build_model_string("openai", "gpt-4o")
         assert result == "openai/gpt-4o"
+
+    def test_build_nim(self) -> None:
+        result = build_model_string("nim", "qwen/qwen3.5-397b-a17b")
+        assert result == "nim/qwen/qwen3.5-397b-a17b"
 
     def test_build_openrouter(self) -> None:
         result = build_model_string("openrouter", "claude-3-5-sonnet", sub_provider="anthropic")

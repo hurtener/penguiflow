@@ -247,7 +247,8 @@
           "content": {"type": "string", "description": "Markdown text"},
           "allowHtml": {"type": "boolean", "default": false},
           "syntaxHighlight": {"type": "boolean", "default": true},
-          "mathEnabled": {"type": "boolean", "default": true}
+          "mathEnabled": {"type": "boolean", "default": true},
+          "padded": {"type": "boolean", "default": true, "description": "Apply default padding around the markdown block"}
         }
       }
     },

@@ -26,16 +26,17 @@
   {/if}
   {#if open}
     <div class="callout-body">
-      <Markdown content={content} allowHtml={false} />
+      <Markdown content={content} allowHtml={false} padded={false} />
     </div>
   {/if}
 </div>
 
 <style>
   .callout {
-    border-radius: 0.5rem;
+    border-radius: var(--radius-xl, 16px);
     padding: 0.75rem 1rem;
     border: 1px solid transparent;
+    color: var(--color-text-secondary, #3c3a36);
   }
 
   .callout-header {
@@ -62,32 +63,33 @@
   }
 
   .callout.info {
-    background: #eff6ff;
-    border-color: #bfdbfe;
+    background: var(--color-pill-subtle-bg, #eef5f3);
+    border-color: var(--color-border, #f0ebe4);
   }
 
   .callout.warning {
-    background: #fef9c3;
-    border-color: #fde047;
+    background: var(--color-pill-ghost-bg, #f4f0ea);
+    border-color: var(--color-border, #f0ebe4);
   }
 
   .callout.error {
-    background: #fee2e2;
-    border-color: #fecaca;
+    background: var(--color-error-bg, #fdf3f3);
+    border-color: var(--color-error-border, #f5dddd);
+    color: var(--color-error-text, #9b2d2d);
   }
 
   .callout.success {
-    background: #dcfce7;
-    border-color: #86efac;
+    background: var(--color-pill-subtle-bg, #eef5f3);
+    border-color: var(--color-border, #f0ebe4);
   }
 
   .callout.tip {
-    background: #ecfccb;
-    border-color: #bef264;
+    background: var(--color-tab-active-bg, #e8f6f2);
+    border-color: var(--color-border, #f0ebe4);
   }
 
   .callout.note {
-    background: #f8fafc;
-    border-color: #cbd5f5;
+    background: var(--color-code-bg, #fbf8f3);
+    border-color: var(--color-border, #f0ebe4);
   }
 </style>

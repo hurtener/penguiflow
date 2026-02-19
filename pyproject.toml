@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "penguiflow"
-version = "2.11.5"
+version = "2.11.6"
 description = "Async-first orchestration library for multi-agent and data pipelines"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -149,6 +149,7 @@ extend-exclude = [
     "ooflow.py",
     "penguiflow_a2a/grpc/a2a_pb2.py",
     "penguiflow_a2a/grpc/a2a_pb2_grpc.py",
+    "tmp/codex-skills",
 ]
 
 [tool.ruff.lint]

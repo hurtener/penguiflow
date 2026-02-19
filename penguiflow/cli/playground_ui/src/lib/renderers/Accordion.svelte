@@ -63,7 +63,7 @@
         {#if item.component}
           <ComponentRenderer component={item.component} props={item.props ?? {}} />
         {:else if item.content}
-          <Markdown content={item.content} />
+          <Markdown content={item.content} padded={false} />
         {/if}
       </div>
     </details>
@@ -72,20 +72,22 @@
 
 <style>
   .accordion {
-    padding: 0.75rem 1rem;
+    padding: 1rem;
   }
 
   details {
-    border: 1px solid #e5e7eb;
-    border-radius: 0.5rem;
-    padding: 0.5rem;
+    border: 1px solid var(--color-border, #f0ebe4);
+    border-radius: var(--radius-xl, 16px);
+    padding: 0.75rem 1rem;
     margin-bottom: 0.5rem;
-    background: #ffffff;
+    background: var(--color-card-bg, #fcfaf7);
+    box-shadow: var(--shadow-subtle, 0 4px 12px rgba(0, 0, 0, 0.04));
   }
 
   summary {
     cursor: pointer;
     font-weight: 600;
+    color: var(--color-text, #1f1f1f);
   }
 
   .panel {

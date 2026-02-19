@@ -71,9 +71,10 @@
 <style>
   .metric {
     padding: 1rem;
-    border-radius: 0.75rem;
-    border: 1px solid #e5e7eb;
-    background: #ffffff;
+    border-radius: var(--radius-2xl, 18px);
+    border: 1px solid var(--color-border, #f0ebe4);
+    background: var(--color-card-bg, #fcfaf7);
+    box-shadow: var(--shadow-subtle, 0 4px 12px rgba(0, 0, 0, 0.04));
   }
 
   .metric-header {
@@ -81,15 +82,14 @@
     justify-content: space-between;
     align-items: center;
     font-size: 0.75rem;
-    color: #64748b;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    color: var(--color-muted-light, #8a847c);
   }
 
   .metric-value {
     font-size: 1.75rem;
     font-weight: 600;
     margin-top: 0.5rem;
+    color: var(--color-text, #1f1f1f);
   }
 
   .metric-change {
@@ -98,11 +98,11 @@
   }
 
   .metric-change.positive {
-    color: #16a34a;
+    color: var(--color-primary, #31a6a0);
   }
 
   .metric-change.negative {
-    color: #dc2626;
+    color: var(--color-error-accent, #b24c4c);
   }
 
   .metric-sparkline {
@@ -114,7 +114,7 @@
 
   .spark {
     width: 6px;
-    background: #cbd5f5;
+    background: var(--color-tab-active-bg, #e8f6f2);
     border-radius: 2px;
   }
 </style>

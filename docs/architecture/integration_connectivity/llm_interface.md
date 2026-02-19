@@ -144,6 +144,12 @@ The LLM Interface subsystem provides a standardized abstraction layer for intera
 - **Response Format Policies**: Adaptive response format selection based on model capabilities
 - **Cost Tracking**: Accurate cost calculation for billing and monitoring
 
+#### NIM Native Reasoning Ergonomics
+- Canonical caller surface remains unchanged: use `use_native_reasoning=True` and `reasoning_effort` via `NativeLLMAdapter`.
+- For NIM models (`nim/...` and `nvidia/...`), the provider maps `reasoning_effort` to `extra_body.chat_template_kwargs.thinking` automatically.
+- Downstream teams do not need to pass NIM-specific payloads such as `chat_template_kwargs` manually.
+- Budget-like reasoning controls are currently unsupported by NIM in native mode; they are ignored with warnings instead of failing requests.
+
 ### 7. Native Provider Integration
 - **Direct API Integration**: Native integrations without LiteLLM overhead
 - **Provider-Specific Features**: Access to provider-specific capabilities
@@ -397,6 +403,8 @@ LLM Request
 - `base_url`: Override base URL for provider
 - `api_key`: Provider API key
 - `model_profile`: Provider-specific capabilities and quirks
+- NIM model prefixes: `nim/...` (preferred) and `nvidia/...` (alias)
+- NIM API key env vars: `NIM_API_KEY` (preferred), `NVIDIA_API_KEY` (fallback)
 
 ## Error Handling
 

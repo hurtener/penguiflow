@@ -20,6 +20,20 @@ from .validation_repair import _salvage_action_payload
 logger = logging.getLogger("penguiflow.planner")
 
 
+def _prepend_system_message(messages: list[dict[str, str]], content: str) -> list[dict[str, str]]:
+    """Insert a system message before the first non-system message."""
+    patched: list[dict[str, str]] = []
+    inserted = False
+    for msg in messages:
+        if not inserted and msg.get("role") != "system":
+            patched.append({"role": "system", "content": content})
+            inserted = True
+        patched.append(msg)
+    if not inserted:
+        patched.append({"role": "system", "content": content})
+    return patched
+
+
 async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
     had_pending_steering = bool(trajectory.steering_inputs)
 
@@ -32,16 +46,7 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
     if isinstance(trajectory.metadata, MutableMapping):
         arg_repair_message = trajectory.metadata.pop("arg_repair_message", None)
     if arg_repair_message:
-        patched: list[dict[str, str]] = []
-        inserted = False
-        for msg in base_messages:
-            if not inserted and msg.get("role") != "system":
-                patched.append({"role": "system", "content": arg_repair_message})
-                inserted = True
-            patched.append(msg)
-        if not inserted:
-            patched.append({"role": "system", "content": arg_repair_message})
-        base_messages = patched
+        base_messages = _prepend_system_message(list(base_messages), arg_repair_message)
     messages: list[dict[str, str]] = list(base_messages)
     last_error: str | None = None
     last_raw: str | None = None
@@ -57,16 +62,13 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
         },
     )
 
-
     for attempt in range(1, planner._repair_attempts + 1):
         planner._guardrail_stream_decision = None
         if last_error is not None:
-            messages = list(base_messages) + [
-                {
-                    "role": "system",
-                    "content": prompts.render_repair_message(last_error),
-                }
-            ]
+            messages = _prepend_system_message(
+                list(base_messages),
+                prompts.render_repair_message(last_error),
+            )
 
         response_format: Mapping[str, Any] | None = planner._response_format
         if response_format is None and getattr(planner._client, "expects_json_schema", False):
@@ -240,9 +242,10 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                         if retry_meta is not None:
                             retry_meta["guardrail_retry_count"] = attempts + 1
                         if decision.retry.corrective_message:
-                            messages = list(base_messages) + [
-                                {"role": "system", "content": decision.retry.corrective_message}
-                            ]
+                            messages = _prepend_system_message(
+                                list(base_messages),
+                                decision.retry.corrective_message,
+                            )
                         if planner._event_callback is not None:
                             planner._emit_event(
                                 PlannerEvent(
@@ -256,9 +259,8 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                                 )
                             )
         try:
-            if (
-                isinstance(planner._client, (_LiteLLMJSONClient, NativeLLMAdapter))
-                and getattr(planner, "_use_native_reasoning", True)
+            if isinstance(planner._client, (_LiteLLMJSONClient, NativeLLMAdapter)) and getattr(
+                planner, "_use_native_reasoning", True
             ):
                 llm_result = await planner._client.complete(
                     messages=messages,
@@ -366,12 +368,8 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
             # Emit a structured event for UIs/logs (only when there is something to report).
             ignored_len = parse_debug.get("ignored_text_len")
             other_count = parse_debug.get("other_json_count")
-            if (
-                planner._event_callback is not None
-                and (
-                    (isinstance(ignored_len, int) and ignored_len > 0)
-                    or (isinstance(other_count, int) and other_count > 0)
-                )
+            if planner._event_callback is not None and (
+                (isinstance(ignored_len, int) and ignored_len > 0) or (isinstance(other_count, int) and other_count > 0)
             ):
                 # Keep SSE payload small: exclude raw candidate args.
                 event_debug = {k: v for k, v in parse_debug.items() if k != "other_actions"}
