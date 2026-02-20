@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from examples.planner_enterprise_agent_v2.config import AgentConfig
 from examples.planner_enterprise_agent_v2.nodes import (
+    DocumentRouteDecision,
     FinalAnswer,
     StatusUpdate,
     UserQuery,
@@ -177,7 +178,7 @@ class EnterpriseAgentOrchestrator:
         # PATTERN A: Document workflow as wrapped subflow
         # Single registration: RouteDecision → FinalAnswer
         # (Internal subflow nodes are NOT registered in planner catalog)
-        registry.register("analyze_documents", RouteDecision, FinalAnswer)
+        registry.register("analyze_documents", DocumentRouteDecision, FinalAnswer)
 
         # PATTERN B: Bug workflow as individual nodes
         # Each step registered separately for granular control
@@ -327,6 +328,8 @@ When context is provided, use it appropriately to enhance your responses.
             llm_max_retries=self.config.llm_max_retries,
             absolute_max_parallel=self.config.planner_absolute_max_parallel,
             repair_attempts=self.config.planner_repair_attempts,
+            auto_seq_enabled=True,
+            auto_seq_execute=True,
             # V2: New features
             reflection_config=reflection_config,
             reflection_llm=reflection_llm,

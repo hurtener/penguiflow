@@ -60,6 +60,13 @@ source .env  # or: export $(cat .env | xargs)
 python -m examples.planner_enterprise_agent.main
 ```
 
+### Auto-seq (v1, opt-in)
+
+This example opts into auto-seq for the documents pipeline so you can observe
+`auto_seq_detected_*` and `auto_seq_executed` events in telemetry. Auto-seq is
+opt-in at both the planner level (`auto_seq_enabled`, `auto_seq_execute`) and
+per-tool metadata (`extra={"auto_seq": True, "auto_seq_execute": True}`).
+
 Expected output:
 ```
 ===============================================================================

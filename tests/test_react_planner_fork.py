@@ -64,6 +64,24 @@ def test_react_planner_fork_default_is_equivalent() -> None:
     assert set(cloned._spec_by_name) == set(planner._spec_by_name)
 
 
+def test_react_planner_fork_inherits_auto_seq_flags() -> None:
+    registry = ModelRegistry()
+    registry.register("echo", EchoArgs, EchoOut)
+    catalog = build_catalog([Node(echo, name="echo")], registry)
+    planner = ReactPlanner(
+        llm="stub-llm",
+        catalog=catalog,
+        auto_seq_enabled=True,
+        auto_seq_execute=True,
+        auto_seq_read_only_only=False,
+    )
+
+    cloned = planner.fork()
+    assert cloned._auto_seq_enabled is True
+    assert cloned._auto_seq_execute is True
+    assert cloned._auto_seq_read_only_only is False
+
+
 def test_react_planner_fork_tool_policy_override_filters_tools() -> None:
     registry = ModelRegistry()
     registry.register("echo", EchoArgs, EchoOut)
