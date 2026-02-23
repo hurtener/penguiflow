@@ -2,6 +2,11 @@
 
 This guide covers how PenguiFlow handles binary content, large text, and UI components through its multi-layer artifact system.
 
+!!! note
+    Canonical pages:
+    - **[Artifacts & resources](artifacts-and-resources.md)**
+    - **[MCP resources](mcp-resources.md)**
+
 ## Overview
 
 Artifact storage solves a critical problem: LLM context windows are limited and expensive. When tools return binary content (PDFs, images) or large text, sending raw bytes or base64 data to the LLM wastes tokens and degrades performance.

@@ -2,6 +2,13 @@
 
 This guide covers environment variable handling, tool namespacing, collision detection, and configuration best practices for ToolNode v2.
 
+!!! note
+    Canonical pages:
+    - **[Tools configuration](configuration.md)**
+    - **[OAuth & HITL](oauth-hitl.md)**
+    - **[Artifacts & resources](artifacts-and-resources.md)**
+    - **[MCP resources](mcp-resources.md)**
+
 ## Environment Variable Substitution
 
 ToolNode supports `${VAR}` syntax for environment variable substitution in configuration values.

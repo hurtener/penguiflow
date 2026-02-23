@@ -35,17 +35,17 @@ Located in `/architecture/session_management/`, this domain covers:
 
 ### Integration & Connectivity Domain
 Located in `/architecture/integration_connectivity/`, this domain covers:
-- [LLM Interface](./architecture/integration_connectivity/llm_interface.md) - LLM provider abstraction and JSON schema enforcement
-- [Tool Execution](./architecture/integration_connectivity/tool_execution.md) - Tool execution framework and catalog management
+- [LLM Interface](./integration_connectivity/llm_interface.md) - LLM provider abstraction and JSON schema enforcement
+- [Tool Execution](./integration_connectivity/tool_execution.md) - Tool execution framework and catalog management
 
 ### Infrastructure Domain
 Located in `/architecture/infrastructure/`, this domain covers:
-- [Distributed Execution](./architecture/infrastructure/distributed_execution.md) - Remote nodes, A2A protocols, and message bus integration
-- [Observability & Monitoring](./architecture/infrastructure/observability_monitoring.md) - Structured logging, metrics, and MLflow integration
-- [Security & Compliance](./architecture/infrastructure/security_compliance.md) - Authentication, authorization, and audit trails
-- [Performance & Scalability](./architecture/infrastructure/performance_scalability.md) - Resource management and scaling patterns
-- [State Management & Persistence](./architecture/infrastructure/state_management_persistence.md) - State store protocols and persistence strategies
-- [Streaming & Real-Time](./architecture/infrastructure/streaming_realtime.md) - Streaming protocols and real-time communication
+- [Distributed Execution](./infrastructure/distributed_execution.md) - Remote nodes, A2A protocols, and message bus integration
+- [Observability & Monitoring](./infrastructure/observability_monitoring.md) - Structured logging, metrics, and MLflow integration
+- [Security & Compliance](./infrastructure/security_compliance.md) - Authentication, authorization, and audit trails
+- [Performance & Scalability](./infrastructure/performance_scalability.md) - Resource management and scaling patterns
+- [State Management & Persistence](./infrastructure/state_management_persistence.md) - State store protocols and persistence strategies
+- [Streaming & Real-Time](./infrastructure/streaming_realtime.md) - Streaming protocols and real-time communication
 
 ## Core Architecture Layers
 

@@ -1,0 +1,130 @@
+site_name: PenguiFlow
+site_description: Async-first orchestration library for multi-agent and data pipelines
+site_url: https://hurtener.github.io/penguiflow/
+
+repo_name: hurtener/penguiflow
+repo_url: https://github.com/hurtener/penguiflow
+
+docs_dir: docs
+exclude_docs: |
+  RFC/**
+  proposals/**
+  spec/**
+  specification/**
+  architecture/**
+  agui/**
+  patterns/**
+  guardrails/**
+  investigations/**
+  implementation/**
+  howto/**
+  api/**
+  tools/*-guide.md
+  tools/a2a-agent-tools.md
+  tools/mcp-resources-guide.md
+  tools/artifacts-guide.md
+  tools/concurrency-guide.md
+  tools/configuration-guide.md
+  tools/statestore-guide.md
+  A2A_COMPLIANCE_GAP_ANALYSIS.md
+  LLM_LOGGING.md
+  PLAYGROUND_BACKEND_CONTRACTS.md
+  PROPOSED_PLANNER_PROMPT.md
+  RFC_SCHEDULED_TASKS.md
+  core_behavior_spec.md
+theme:
+  name: material
+  logo: assets/Penguiflow.png
+  favicon: assets/Penguiflow.png
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.tracking
+    - content.code.copy
+    - toc.follow
+  palette:
+    - scheme: default
+      primary: teal
+      accent: teal
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - fenced_code
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: false
+            docstring_style: google
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+      - Concepts: getting-started/concepts.md
+  - Core runtime:
+      - Flows & nodes: core/flows-and-nodes.md
+      - Messages & envelopes: core/messages-and-envelopes.md
+      - Routers & policies: core/routers-and-policies.md
+      - Concurrency: core/concurrency.md
+      - Streaming: core/streaming.md
+      - Cancellation: core/cancellation.md
+      - Errors, retries, timeouts: core/errors-retries-timeouts.md
+      - Playbooks (subflows): core/playbooks.md
+  - Planner (ReactPlanner):
+      - Overview: planner/overview.md
+      - Actions & schema: planner/actions-and-schema.md
+      - Tool design: planner/tool-design.md
+      - Parallel & joins: planner/parallel-and-joins.md
+      - Tooling: planner/tooling.md
+      - Pause/resume (HITL): planner/pause-resume-hitl.md
+      - Memory: planner/memory.md
+      - LLM clients: planner/llm-clients.md
+      - Observability: planner/observability.md
+      - Troubleshooting: planner/troubleshooting.md
+  - Tools & integrations:
+      - Configuration: tools/configuration.md
+      - OAuth & HITL: tools/oauth-hitl.md
+      - MCP resources: tools/mcp-resources.md
+      - Artifacts & resources: tools/artifacts-and-resources.md
+      - State store: tools/statestore.md
+  - Deployment:
+      - Overview: deployment/overview.md
+      - Worker integration: deployment/worker-integration.md
+      - Production deployment: deployment/production-deployment.md
+      - Distributed execution: deployment/distributed-execution.md
+  - Observability:
+      - Logging: observability/logging.md
+      - Metrics & alerts: observability/metrics-and-alerts.md
+      - Telemetry patterns: observability/telemetry-patterns.md
+  - CLI:
+      - Overview: cli/overview.md
+      - "penguiflow new": cli/new-command.md
+      - "penguiflow dev": cli/dev-command.md
+      - "penguiflow init": cli/init-command.md
+      - "penguiflow generate": cli/generate-command.md
+      - "penguiflow tools": cli/tools-command.md
+  - Reference:
+      - Public API surface: reference/public-api.md
+      - Short-term memory API: reference/short-term-memory-api.md
+      - Testing (FlowTestKit): reference/testing.md
+      - Visualization: reference/visualization.md
+  - Contributing:
+      - Dev setup: contributing/dev-setup.md
+      - Docs style: contributing/docs-style.md
+      - Docs backlog: contributing/docs-backlog.md
+      - Docs uplift plan: contributing/docs-uplift-plan.md
+      - Testing: contributing/testing.md
+      - Releasing: contributing/releasing.md

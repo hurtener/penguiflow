@@ -1,3 +1,24 @@
+# PenguiFlow Usage Manual (legacy long-form)
+
+> **Status (Phase 6): legacy / being decomposed**
+>
+> This file is a long-form “everything in one place” manual and is **not the canonical documentation**.
+> It is being decomposed into the curated docs site, where pages are kept accurate and runbook-grade.
+>
+> Canonical entrypoints:
+>
+> - Getting started: `docs/getting-started/quickstart.md`
+> - Core runtime: `docs/core/flows-and-nodes.md`, `docs/core/messages-and-envelopes.md`
+> - Core routing & subflows: `docs/core/routers-and-policies.md`, `docs/core/playbooks.md`
+> - Planner (ReactPlanner): `docs/planner/overview.md`
+> - Tool integrations (ToolNode): `docs/tools/configuration.md`
+> - Deployment + ops: `docs/deployment/production-deployment.md`
+> - Distributed + remote: `docs/deployment/distributed-execution.md`
+> - Observability: `docs/observability/telemetry-patterns.md`, `docs/observability/metrics-and-alerts.md`
+> - Testing + diagrams: `docs/reference/testing.md`, `docs/reference/visualization.md`
+>
+> If this manual conflicts with the curated docs or the code, treat the curated docs/code as the source of truth.
+
 # PenguiFlow Usage Manual
 
 ## 1. Core Concepts
