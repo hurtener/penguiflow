@@ -722,12 +722,19 @@ def _instantiate_orchestrator(
 def _call_builder(
     builder: Callable[..., Any],
     config: Any | None,
+    *,
+    state_store: Any | None = None,
 ) -> Any:
     kwargs: dict[str, Any] = {}
     try:
         signature = inspect.signature(builder)
         if "event_callback" in signature.parameters:
             kwargs["event_callback"] = None
+        if state_store is not None and (
+            "state_store" in signature.parameters
+            or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values())
+        ):
+            kwargs["state_store"] = state_store
         params = list(signature.parameters.values())
         if not params:
             return builder(**kwargs)
@@ -779,7 +786,7 @@ def load_agent(
             state_store=state_store,
         )
     else:
-        builder_output = _call_builder(result.target, config)
+        builder_output = _call_builder(result.target, config, state_store=state_store)
         planner = _unwrap_planner(builder_output)
         wrapper = PlannerAgentWrapper(
             planner,
@@ -789,13 +796,17 @@ def load_agent(
     return wrapper, result
 
 
-def _build_planner_factory(result: DiscoveryResult | None) -> Callable[[], Any] | None:
+def _build_planner_factory(
+    result: DiscoveryResult | None,
+    *,
+    state_store: Any | None = None,
+) -> Callable[[], Any] | None:
     if result is None or result.kind != "planner":
         return None
 
     def _factory() -> Any:
         config = result.config_factory() if result.config_factory else None
-        builder_output = _call_builder(result.target, config)
+        builder_output = _call_builder(result.target, config, state_store=state_store)
         return _unwrap_planner(builder_output)
 
     return _factory
@@ -839,7 +850,7 @@ def create_playground_app(
     # Now load the agent, passing the shared SessionManager
     if agent_wrapper is None:
         agent_wrapper, discovery = load_agent(project_root, state_store=store, session_manager=session_manager)
-        planner_factory = _build_planner_factory(discovery)
+        planner_factory = _build_planner_factory(discovery, state_store=store)
     else:
         planner_factory = None
     try:

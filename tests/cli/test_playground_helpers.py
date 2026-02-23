@@ -991,6 +991,22 @@ class TestCallBuilder:
         _call_builder(builder_with_callback, None)
         assert received_callback == [None]
 
+    def test_call_builder_with_state_store(self) -> None:
+        """Test calling builder that accepts state_store passes it through."""
+        from penguiflow.cli.playground import _call_builder
+
+        sentinel = object()
+        received_state_store: list[object] = []
+
+        def builder_with_state_store(config=None, *, state_store=None):
+            del config
+            received_state_store.append(state_store)
+            return "built"
+
+        result = _call_builder(builder_with_state_store, None, state_store=sentinel)
+        assert result == "built"
+        assert received_state_store == [sentinel]
+
     def test_call_builder_requires_config_raises_error(self) -> None:
         """Test calling builder that requires config raises error (lines 506-507)."""
         from penguiflow.cli.playground import PlaygroundError, _call_builder

@@ -132,6 +132,7 @@ def build_planner(
     *,
     event_callback: PlannerEventCallback | None = None,
     llm_context_hooks: Sequence[LLMContextHook] | None = None,
+    state_store: Any | None = None,
 ) -> PlannerBundle:
     """Create a ReactPlanner wired with scripted responses.
 
@@ -156,6 +157,7 @@ def build_planner(
     planner = ReactPlanner(
         llm_client=llm_client,
         catalog=catalog,
+        state_store=state_store,
         system_prompt_extra=_build_system_prompt(rich_output_prompt),
         event_callback=event_callback,
         llm_context_hooks=llm_context_hooks,

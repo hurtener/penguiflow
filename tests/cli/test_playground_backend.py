@@ -206,3 +206,39 @@ def test_discovery_prefers_orchestrator(tmp_path: Path) -> None:
     discovery = discover_agent(tmp_path)
     assert discovery.kind == "orchestrator"
     assert discovery.target.__name__ == "StubOrchestrator"
+
+
+def test_load_agent_injects_state_store_into_planner_builder(tmp_path: Path) -> None:
+    from penguiflow.cli.playground import load_agent
+
+    package_name = "stub_agent_state_store"
+    src_dir = tmp_path / "src" / package_name
+    src_dir.mkdir(parents=True)
+    (src_dir / "__init__.py").write_text("", encoding="utf-8")
+    (src_dir / "config.py").write_text(
+        "class Config:\n"
+        "    @classmethod\n"
+        "    def from_env(cls):\n"
+        "        return cls()\n",
+        encoding="utf-8",
+    )
+    (src_dir / "planner.py").write_text(
+        "received_state_store = None\n"
+        "def build_planner(config=None, *, state_store=None):\n"
+        "    del config\n"
+        "    global received_state_store\n"
+        "    received_state_store = state_store\n"
+        "    return type('Bundle', (), {'planner': object()})()\n",
+        encoding="utf-8",
+    )
+
+    sentinel = object()
+    wrapper, discovery = load_agent(tmp_path, state_store=sentinel)
+    assert wrapper is not None
+    assert discovery.kind == "planner"
+
+    import sys
+
+    planner_module = sys.modules.get(f"{package_name}.planner")
+    assert planner_module is not None
+    assert getattr(planner_module, "received_state_store") is sentinel
