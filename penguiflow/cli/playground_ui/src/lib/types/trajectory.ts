@@ -68,6 +68,7 @@ export interface BackgroundTaskResultPayload {
  */
 export interface LLMContext {
   conversation_memory?: ConversationMemory;
+  external_memory?: unknown;
   [key: string]: unknown;
 }
 

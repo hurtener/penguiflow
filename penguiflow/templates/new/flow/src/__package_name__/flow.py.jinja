@@ -28,8 +28,7 @@ class QueryPayload(BaseModel):
     user_id: str
     session_id: str
 {% if memory_enabled %}
-    conscious_memories: list[dict[str, Any]] | None = None
-    retrieved_memories: list[dict[str, Any]] | None = None
+    external_memory: dict[str, Any] | None = None
 {% endif %}
 
 
@@ -92,10 +91,14 @@ async def _prepare_node(message: Message, _ctx: Any) -> Message:
         "query_length": len(payload.query),
     }
 {% if memory_enabled %}
-    if payload.conscious_memories:
-        metadata["conscious_count"] = len(payload.conscious_memories)
-    if payload.retrieved_memories:
-        metadata["retrieved_count"] = len(payload.retrieved_memories)
+    external_memory = payload.external_memory or {}
+    if isinstance(external_memory, dict):
+        conscious = external_memory.get("conscious_memories")
+        if isinstance(conscious, list):
+            metadata["conscious_count"] = len(conscious)
+        retrieved = external_memory.get("retrieved_memories")
+        if isinstance(retrieved, list):
+            metadata["retrieved_count"] = len(retrieved)
 {% endif %}
 
     # Return updated message with same payload (validation complete)

@@ -142,7 +142,7 @@ This is valid if you want:
 
 In this mode:
 
-- External retrieval snippets can remain in `llm_context` under a retrieval key (e.g., `retrieved_memories`)
+- External retrieval snippets can remain in `llm_context` under `external_memory` (developer-owned shape)
 - STM injects its own `conversation_memory` block
 
 The two can coexist as long as you keep identifiers in `tool_context`.
@@ -197,4 +197,3 @@ Before enabling STM broadly:
 - Verify isolation: two different sessions do not influence each other.
 - Verify failure behavior: summarizer failure does not block responses.
 - Verify persistence: restart the process and confirm STM resumes if you added a store.
-

@@ -28,6 +28,7 @@ from .artifact_handling import (  # noqa: F401
 from .constraints import _ConstraintTracker
 from .context import PlannerPauseReason
 from .error_recovery import ErrorRecoveryConfig
+from .llm_context_hooks import LLMContextHook
 from .llm import (
     _estimate_size,
     _sanitize_json_schema,
@@ -347,6 +348,7 @@ class ReactPlanner:
     _deadline_s: float | None
     _event_callback: PlannerEventCallback | None
     _hop_budget: int | None
+    _llm_context_hooks: list[LLMContextHook]
     _json_schema_mode: bool
     _max_consecutive_arg_failures: int
     _max_iters: int
@@ -460,6 +462,7 @@ class ReactPlanner:
         tool_search: ToolSearchConfig | None = None,
         tool_examples: ToolExamplesConfig | None = None,
         skills: SkillsConfig | None = None,
+        llm_context_hooks: Sequence[LLMContextHook] | None = None,
     ) -> None:
         # NOTE: ReactPlanner has mutable per-run state and is not safe to call concurrently on a single
         # instance. We provide an internal hotfix path that serializes calls per session_id while
@@ -521,6 +524,7 @@ class ReactPlanner:
             "tool_search": tool_search,
             "tool_examples": tool_examples,
             "skills": skills,
+            "llm_context_hooks": list(llm_context_hooks or []),
         }
         _init_react_planner(
             self,
@@ -574,6 +578,7 @@ class ReactPlanner:
         )
         self._guardrail_stream_handler = None
         self._guardrail_stream_decision = None
+        self._llm_context_hooks = list(llm_context_hooks or [])
 
     def fork(
         self,

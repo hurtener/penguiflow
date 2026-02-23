@@ -25,6 +25,8 @@ export interface TrajectoryStore {
   readonly hasBackgroundResults: boolean;
   readonly conversationMemory: ConversationMemory | null;
   readonly hasMemory: boolean;
+  readonly externalMemory: unknown | null;
+  readonly hasExternalMemory: boolean;
   readonly traceId: string | null;
   readonly sessionId: string | null;
   setFromPayload(payload: TrajectoryPayload): void;
@@ -64,6 +66,8 @@ export function createTrajectoryStore(): TrajectoryStore {
     },
     get conversationMemory() { return llmContext?.conversation_memory ?? null; },
     get hasMemory() { return llmContext?.conversation_memory != null; },
+    get externalMemory() { return llmContext?.external_memory ?? null; },
+    get hasExternalMemory() { return llmContext?.external_memory != null; },
 
     setFromPayload(payload: TrajectoryPayload) {
       const rawSteps = payload?.steps ?? [];

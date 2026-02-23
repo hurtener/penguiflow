@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +11,7 @@ import asyncio
 from penguiflow.catalog import ToolLoadingMode, build_catalog
 from penguiflow.artifacts import ArtifactRetentionConfig, InMemoryArtifactStore
 from penguiflow.planner import (
+    LLMContextHook,
     ReactPlanner,
     SkillPackConfig,
     SkillsConfig,
@@ -155,7 +157,12 @@ def _build_artifact_store(config: Config) -> InMemoryArtifactStore | None:
     )
 
 
-def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
+def build_planner(
+    config: Config,
+    *,
+    event_callback=None,
+    llm_context_hooks: Sequence[LLMContextHook] | None = None,
+) -> PlannerBundle:
     """Build ReactPlanner with generated tool catalog."""
 
     nodes, registry = build_catalog_bundle()
@@ -274,6 +281,7 @@ def build_planner(config: Config, *, event_callback=None) -> PlannerBundle:
         system_prompt_extra=_build_system_prompt(config, rich_output_prompt),
         tool_search=tool_search_cfg,
         skills=skills_cfg,
+        llm_context_hooks=llm_context_hooks,
         max_iters=config.planner_max_iters,
         hop_budget=config.planner_hop_budget,
         absolute_max_parallel=config.planner_absolute_max_parallel,

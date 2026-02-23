@@ -17,6 +17,7 @@
   const trajectoryStore = getTrajectoryStore();
 
   let memoryExpanded = $state(true);
+  let externalMemoryExpanded = $state(true);
   let llmContextExpanded = $state(true);
   let backgroundExpanded = $state(true);
   let toolContextExpanded = $state(false);
@@ -24,7 +25,8 @@
   // Extract conversation_memory from llmContext for separate display
   const llmContextWithoutMemory = $derived.by(() => {
     if (!trajectoryStore.llmContext) return null;
-    const { conversation_memory, background_result, background_results, ...rest } = trajectoryStore.llmContext;
+    const { conversation_memory, external_memory, background_result, background_results, ...rest } =
+      trajectoryStore.llmContext;
     return Object.keys(rest).length > 0 ? rest : null;
   });
 
@@ -170,6 +172,41 @@
           {:else}
             <div class="empty-section">
               Short-term memory is not enabled or no conversation history exists.
+            </div>
+          {/if}
+        </div>
+      {/if}
+    </section>
+
+    <!-- External Memory Section -->
+    <section class="context-section">
+      <button
+        class="section-header"
+        onclick={() => externalMemoryExpanded = !externalMemoryExpanded}
+        aria-expanded={externalMemoryExpanded}
+      >
+        <span class="section-title">
+          External Memory
+          {#if trajectoryStore.hasExternalMemory}
+            <span class="badge active">Active</span>
+          {:else}
+            <span class="badge">Disabled</span>
+          {/if}
+        </span>
+        <span class="chevron" class:expanded={externalMemoryExpanded}>
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+            <path d="M4 5L6 7L8 5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+          </svg>
+        </span>
+      </button>
+
+      {#if externalMemoryExpanded}
+        <div class="section-content">
+          {#if trajectoryStore.externalMemory}
+            <pre class="json-block">{formatJson(trajectoryStore.externalMemory)}</pre>
+          {:else}
+            <div class="empty-section">
+              No external memory was injected for this run.
             </div>
           {/if}
         </div>

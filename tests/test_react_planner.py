@@ -40,6 +40,21 @@ def _extract_read_only_conversation_memory(messages: list[Mapping[str, str]]) ->
     return None
 
 
+def _extract_read_only_external_memory(messages: list[Mapping[str, str]]) -> dict[str, Any] | None:
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content") or ""
+        if "<read_only_external_memory_json>" not in content:
+            continue
+        if "</read_only_external_memory_json>" not in content:
+            continue
+        start = content.index("<read_only_external_memory_json>") + len("<read_only_external_memory_json>")
+        end = content.index("</read_only_external_memory_json>", start)
+        return json.loads(content[start:end])
+    return None
+
+
 class Query(BaseModel):
     question: str
 
@@ -1027,6 +1042,75 @@ async def test_react_planner_injects_short_term_memory_across_runs() -> None:
     recent = memory2["recent_turns"]
     assert recent[0]["user"] == "q1"
     assert recent[0]["assistant"] == "a1"
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_injects_external_memory_hook_as_system_message() -> None:
+    class Hook:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def before_run(self, inp: Any) -> Mapping[str, Any]:
+            self.calls += 1
+            assert inp.query == "q1"
+            return {"external_memory": {"foo": "bar"}}
+
+    hook = Hook()
+    client = StubClient([{"thought": "finish", "next_node": None, "args": {"raw_answer": "ok"}}])
+    planner = make_planner(client, llm_context_hooks=[hook])
+
+    await planner.run("q1")
+
+    assert hook.calls == 1
+    first_call = client.calls[0]
+    external = _extract_read_only_external_memory(first_call)
+    assert external == {"foo": "bar"}
+
+    # Ensure external_memory is NOT embedded in the user JSON context.
+    first_user = next(msg for msg in first_call if msg.get("role") == "user")
+    payload = json.loads(first_user["content"])
+    ctx = payload.get("context") or {}
+    assert "external_memory" not in ctx
+
+
+@pytest.mark.asyncio()
+async def test_react_planner_external_memory_hook_not_called_on_resume() -> None:
+    class Hook:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def before_run(self, inp: Any) -> Mapping[str, Any]:
+            self.calls += 1
+            return {"external_memory": {"foo": "bar"}}
+
+    @tool(desc="Pause tool")
+    async def pause_tool(args: Query, ctx: Any) -> Intent:
+        await ctx.pause("await_input", {"need": "user"})
+        return Intent(intent="paused")
+
+    hook = Hook()
+    registry = ModelRegistry()
+    registry.register("pause_tool", Query, Intent)
+    registry.register("respond", Answer, Answer)
+    catalog = build_catalog([Node(pause_tool, name="pause_tool"), Node(respond, name="respond")], registry)
+    client = StubClient(
+        [
+            {"thought": "pause", "next_node": "pause_tool", "args": {"question": "x"}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
+        ]
+    )
+    planner = ReactPlanner(llm_client=client, catalog=catalog, llm_context_hooks=[hook])
+
+    paused = await planner.run("q1")
+    assert isinstance(paused, PlannerPause)
+    resumed = await planner.resume(paused.resume_token, user_input="ok")
+    assert resumed.reason == "answer_complete"
+    assert hook.calls == 1
+
+    # The resume LLM call should still include the original external memory system message.
+    resumed_messages = client.calls[1]
+    external = _extract_read_only_external_memory(resumed_messages)
+    assert external == {"foo": "bar"}
 
 
 @pytest.mark.asyncio()

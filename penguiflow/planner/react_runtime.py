@@ -22,6 +22,8 @@ from .artifact_handling import _ArtifactCollector, _SourceCollector
 from .artifact_registry import ArtifactRegistry
 from .constraints import _ConstraintTracker, _CostTracker
 from .error_recovery import ErrorRecoveryConfig, step_with_recovery
+from .llm_context_hooks import LLMContextHookInput
+from .memory import MemoryKey
 from .models import (
     PlannerAction,
     PlannerEvent,
@@ -50,6 +52,107 @@ _SKILLS_CONTEXT_METADATA_KEY = "skills_context"
 _SKILLS_DIRECTORY_METADATA_KEY = "skills_directory"
 _TOOLS_DIRECTORY_METADATA_KEY = "tools_directory"
 _TOOL_HINTS_METADATA_KEY = "tool_hints"
+
+
+async def _apply_llm_context_hooks(
+    planner: Any,
+    *,
+    query: str,
+    llm_context: dict[str, Any] | None,
+    tool_context: Mapping[str, Any],
+    memory_key: MemoryKey | None,
+) -> dict[str, Any] | None:
+    hooks = getattr(planner, "_llm_context_hooks", None)
+    if not hooks:
+        return llm_context
+
+    merged: dict[str, Any] = dict(llm_context or {})
+    for hook in hooks:
+        hook_name = getattr(hook, "name", None)
+        if not isinstance(hook_name, str) or not hook_name.strip():
+            hook_name = hook.__class__.__name__
+        overwrite = bool(getattr(hook, "overwrite", False))
+
+        try:
+            patch = await hook.before_run(
+                LLMContextHookInput(
+                    query=query,
+                    llm_context=merged,
+                    tool_context=tool_context,
+                    memory_key=memory_key,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "llm_context_hook_failed",
+                extra={"hook_name": hook_name, "error": str(exc), "error_type": exc.__class__.__name__},
+            )
+            planner._emit_event(
+                PlannerEvent(
+                    event_type="llm_context_hook_failed",
+                    ts=planner._time_source(),
+                    trajectory_step=0,
+                    extra={"hook_name": hook_name, "error_type": exc.__class__.__name__},
+                )
+            )
+            continue
+
+        if patch is None:
+            continue
+        if not isinstance(patch, Mapping):
+            logger.warning(
+                "llm_context_hook_invalid_patch",
+                extra={"hook_name": hook_name, "patch_type": type(patch).__name__},
+            )
+            planner._emit_event(
+                PlannerEvent(
+                    event_type="llm_context_hook_failed",
+                    ts=planner._time_source(),
+                    trajectory_step=0,
+                    extra={"hook_name": hook_name, "error_type": "InvalidPatchType"},
+                )
+            )
+            continue
+
+        candidate = dict(merged)
+        keys_added: list[str] = []
+        for key, value in patch.items():
+            if key in candidate and not overwrite:
+                continue
+            if key not in candidate:
+                keys_added.append(str(key))
+            candidate[key] = value
+        if candidate == merged:
+            continue
+
+        try:
+            payload = json.dumps(candidate, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "llm_context_hook_patch_not_json_serialisable",
+                extra={"hook_name": hook_name, "error": str(exc), "error_type": exc.__class__.__name__},
+            )
+            planner._emit_event(
+                PlannerEvent(
+                    event_type="llm_context_hook_failed",
+                    ts=planner._time_source(),
+                    trajectory_step=0,
+                    extra={"hook_name": hook_name, "error_type": "NotJSONSerialisable"},
+                )
+            )
+            continue
+
+        merged = candidate
+        planner._emit_event(
+            PlannerEvent(
+                event_type="llm_context_hook_applied",
+                ts=planner._time_source(),
+                trajectory_step=0,
+                extra={"hook_name": hook_name, "keys_added": keys_added, "bytes_est": len(payload)},
+            )
+        )
+
+    return merged
 
 
 @dataclass(frozen=True, slots=True)
@@ -795,6 +898,13 @@ async def run(
     normalised_llm_context = _validate_llm_context(llm_context)
     resolved_key = planner._resolve_memory_key(memory_key, normalised_tool_context)
     normalised_llm_context = await planner._apply_memory_context(normalised_llm_context, resolved_key)
+    normalised_llm_context = await _apply_llm_context_hooks(
+        planner,
+        query=query,
+        llm_context=normalised_llm_context,
+        tool_context=normalised_tool_context or {},
+        memory_key=resolved_key,
+    )
     cleaned_llm_context, extracted_results = extract_background_results(normalised_llm_context)
     planner._cost_tracker = _CostTracker()
     trajectory = Trajectory(

@@ -1,0 +1,55 @@
+"""Pre-run hooks for injecting external memory into llm_context."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping
+from typing import Any
+
+from penguiflow.planner import LLMContextHookInput
+
+from .clients.memory import MemoryClient
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class ExternalMemoryHook:
+    """Fetch external memory before the run starts (best-effort)."""
+
+    name = "external_memory"
+    overwrite = False
+
+    async def before_run(self, inp: LLMContextHookInput) -> Mapping[str, Any] | None:
+        memory = inp.tool_context.get("memory_client")
+        if not isinstance(memory, MemoryClient):
+            return {}
+
+        tool_ctx = inp.tool_context
+        tenant_id = str(tool_ctx.get("tenant_id") or "").strip()
+        user_id = str(tool_ctx.get("user_id") or "").strip()
+        session_id = str(tool_ctx.get("session_id") or "").strip()
+        if not tenant_id or not user_id or not session_id:
+            return {}
+
+        try:
+            conscious = await memory.start_session(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            retrieval = await memory.auto_retrieve(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+                prompt=inp.query,
+            )
+        except Exception:
+            _LOGGER.exception("external_memory_hook_failed")
+            return {}
+
+        return {
+            "external_memory": {
+                "conscious_memories": conscious.get("conscious", []),
+                "retrieved_memories": retrieval.get("snippets", []),
+            }
+        }

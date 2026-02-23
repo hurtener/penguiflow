@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from penguiflow.catalog import build_catalog
-from penguiflow.planner import PlannerEventCallback, ReactPlanner
+from penguiflow.planner import LLMContextHook, PlannerEventCallback, ReactPlanner
 {% if with_background_tasks %}
 from penguiflow.planner import BackgroundTasksConfig
 from penguiflow.sessions.task_tools import build_task_tool_specs
@@ -131,6 +131,7 @@ def build_planner(
     config: Config,
     *,
     event_callback: PlannerEventCallback | None = None,
+    llm_context_hooks: Sequence[LLMContextHook] | None = None,
 ) -> PlannerBundle:
     """Create a ReactPlanner wired with scripted responses.
 
@@ -157,6 +158,7 @@ def build_planner(
         catalog=catalog,
         system_prompt_extra=_build_system_prompt(rich_output_prompt),
         event_callback=event_callback,
+        llm_context_hooks=llm_context_hooks,
         multi_action_sequential=config.multi_action_sequential,
         multi_action_read_only_only=config.multi_action_read_only_only,
         multi_action_max_tools=config.multi_action_max_tools,

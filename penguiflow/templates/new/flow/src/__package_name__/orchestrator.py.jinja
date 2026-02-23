@@ -114,8 +114,10 @@ class {{ class_name }}Orchestrator:
             tenant_id=tenant_id,
             user_id=user_id,
             session_id=session_id,
-            conscious_memories=conscious.get("conscious", []),
-            retrieved_memories=retrieval.get("snippets", []),
+            external_memory={
+                "conscious_memories": conscious.get("conscious", []),
+                "retrieved_memories": retrieval.get("snippets", []),
+            },
         )
 {% else %}
         payload = QueryPayload(

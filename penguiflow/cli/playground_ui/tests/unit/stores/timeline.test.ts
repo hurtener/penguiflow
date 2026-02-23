@@ -87,6 +87,19 @@ describe('trajectoryStore', () => {
       const [first] = trajectoryStore.steps;
       expect(first?.reflectionScore).toBe(0.85);
     });
+
+    it('exposes external memory from llm_context', () => {
+      const payload: TrajectoryPayload = {
+        llm_context: {
+          external_memory: { foo: 'bar' }
+        }
+      };
+
+      trajectoryStore.setFromPayload(payload);
+
+      expect(trajectoryStore.hasExternalMemory).toBe(true);
+      expect(trajectoryStore.externalMemory).toEqual({ foo: 'bar' });
+    });
   });
 
   describe('artifact streams', () => {

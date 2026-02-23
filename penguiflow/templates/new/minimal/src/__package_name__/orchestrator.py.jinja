@@ -29,6 +29,7 @@ from .a2a import A2AServer
 {% if memory_enabled %}
 from .clients.memory import MemoryClient
 {% endif %}
+from .memory_hooks import ExternalMemoryHook
 from penguiflow.steering import SteeringInbox
 
 from .config import Config
@@ -217,11 +218,13 @@ class {{ class_name }}Orchestrator:
             catalog.extend(build_task_tool_specs())
 {% endif %}
         self._llm = ScriptedLLM()
+        llm_context_hooks = [ExternalMemoryHook()] if self._memory is not None else None
         self._planner = ReactPlanner(
             llm_client=self._llm,
             catalog=catalog,
             system_prompt_extra=_build_system_prompt(rich_output_prompt),
             event_callback=self._telemetry.record_planner_event,
+            llm_context_hooks=llm_context_hooks,
             multi_action_sequential=config.multi_action_sequential,
             multi_action_read_only_only=config.multi_action_read_only_only,
             multi_action_max_tools=config.multi_action_max_tools,
@@ -320,27 +323,7 @@ class {{ class_name }}Orchestrator:
         trace_id = secrets.token_hex(8)
         turn_id = secrets.token_hex(8)
 
-{% if memory_enabled %}
-        conscious = await self._memory.start_session(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=session_id,
-        )
-        retrieval = await self._memory.auto_retrieve(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            session_id=session_id,
-            prompt=query,
-        )
-{% else %}
-        conscious = {"conscious": []}
-        retrieval = {"snippets": []}
-{% endif %}
-
-        llm_context = {
-            "conscious_memories": conscious.get("conscious", []),
-            "retrieved_memories": retrieval.get("snippets", []),
-        }
+        llm_context: dict[str, Any] = {}
         base_tool_context = {
             "tenant_id": tenant_id,
             "user_id": user_id,
@@ -351,6 +334,10 @@ class {{ class_name }}Orchestrator:
             "is_subagent": False,
             "status_publisher": self._telemetry.publish_status,
         }
+{% if memory_enabled %}
+        if self._memory is not None:
+            base_tool_context["memory_client"] = self._memory
+{% endif %}
         merged_tool_context = {
             **self._tool_context_defaults,
             **(dict(tool_context or {})),
@@ -375,7 +362,8 @@ class {{ class_name }}Orchestrator:
                 )
             snapshot_tool_context = dict(merged_tool_context)
             snapshot_tool_context.pop(TASK_SERVICE_KEY, None)
-            session.update_context(llm_context=dict(llm_context), tool_context=snapshot_tool_context)
+            snapshot_tool_context.pop("memory_client", None)
+            session.update_context(tool_context=snapshot_tool_context)
 {% endif %}
 
         result = await self._planner.run(
@@ -452,6 +440,10 @@ class {{ class_name }}Orchestrator:
             "is_subagent": False,
             "status_publisher": self._telemetry.publish_status,
         }
+{% if memory_enabled %}
+        if self._memory is not None:
+            base_tool_context["memory_client"] = self._memory
+{% endif %}
         merged_tool_context = {
             **self._tool_context_defaults,
             **(dict(tool_context or {})),
@@ -476,7 +468,8 @@ class {{ class_name }}Orchestrator:
                 )
             snapshot_tool_context = dict(merged_tool_context)
             snapshot_tool_context.pop(TASK_SERVICE_KEY, None)
-            session.update_context(llm_context={}, tool_context=snapshot_tool_context)
+            snapshot_tool_context.pop("memory_client", None)
+            session.update_context(tool_context=snapshot_tool_context)
 {% endif %}
         result = await self._planner.resume(
             token=resume_token,

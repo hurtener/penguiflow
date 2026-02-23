@@ -178,8 +178,9 @@ async def search_documents(
     args: SearchDocumentsArgs,
     ctx: ToolContext
 ) -> SearchDocumentsResult:
-    # Access LLM context (memories, etc.)
-    memories = ctx.llm_context.get("retrieved_memories", [])
+    # Access external memory (developer-owned shape)
+    external_memory = ctx.llm_context.get("external_memory") or {}
+    memories = external_memory.get("retrieved_memories", []) if isinstance(external_memory, dict) else []
 
     # Access tool context (passed from orchestrator)
     db = ctx.tool_context.get("database")

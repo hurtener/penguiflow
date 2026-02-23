@@ -1062,16 +1062,9 @@ penguiflow new my-agent --no-memory
 ```python
 # WITHOUT --no-memory (default):
 async def execute(self, query: str, ...) -> AgentResponse:
-    # Load memory context
-    conscious = await self._memory.start_session(...)
-    retrieval = await self._memory.auto_retrieve(...)
-
-    llm_context = {
-        "conscious_memories": conscious.get("conscious", []),
-        "retrieved_memories": retrieval.get("snippets", []),
-    }
-
-    result = await self._planner.run(query=query, llm_context=llm_context, ...)
+    # The planner is configured with an opt-in pre-run hook that injects `external_memory`
+    # as a dedicated read-only system message.
+    result = await self._planner.run(query=query, llm_context={}, ...)
 
     # Store interaction
     await self._memory.ingest_interaction(...)
@@ -1583,8 +1576,9 @@ planner:
   # Required if memory enabled
   memory_prompt: |
     You have access to the user's memory context:
-    - conscious_memories: Recent session context
-    - retrieved_memories: Relevant historical information
+    - external_memory: Developer-owned object containing retrieved user context
+      - conscious_memories: Recent session context
+      - retrieved_memories: Relevant historical information
 
     Use memories to personalize responses and avoid
     asking for information already provided.
@@ -2545,20 +2539,9 @@ async def execute(self, query: str, ...) -> AgentResponse:
 ```python
 # DO: Follow the lifecycle
 async def execute(self, query: str, ...) -> AgentResponse:
-    # 1. Start session (load conscious)
-    conscious = await self._memory.start_session(...)
-
-    # 2. Retrieve relevant memories
-    retrieval = await self._memory.auto_retrieve(prompt=query, ...)
-
-    # 3. Execute with context
-    result = await self._planner.run(
-        llm_context={
-            "conscious_memories": conscious.get("conscious", []),
-            "retrieved_memories": retrieval.get("snippets", []),
-        },
-        ...
-    )
+    # 1. Execute with external memory hook enabled
+    # (planner constructed with llm_context_hooks=[ExternalMemoryHook(memory_client)])
+    result = await self._planner.run(query=query, llm_context={}, ...)
 
     # 4. Extract answer (v2.7+ uses raw_answer)
     payload = result.payload

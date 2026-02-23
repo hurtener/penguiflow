@@ -5,6 +5,7 @@ from __future__ import annotations
 from .context import AnyContext, ToolContext
 from .dspy_client import DSPyLLMClient
 from .error_recovery import ErrorRecoveryConfig
+from .llm_context_hooks import LLMContextHook, LLMContextHookInput
 from .llm import LLMErrorType
 from .models import (
     BackgroundTaskHandle,
@@ -46,6 +47,8 @@ __all__ = [
     "BackgroundTasksConfig",
     "BackgroundTaskHandle",
     "ErrorRecoveryConfig",
+    "LLMContextHook",
+    "LLMContextHookInput",
     "LLMErrorType",
     "JoinInjection",
     "ParallelCall",

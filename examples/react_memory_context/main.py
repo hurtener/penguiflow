@@ -1,8 +1,8 @@
-"""Example: Memory-based planning with custom context.
+"""Example: External memory hook injection.
 
-This demonstrates how to use system_prompt_extra and llm_context to provide
-custom memory structures to the planner. The library handles injection; you
-define the format and semantics.
+This demonstrates how to:
+- Define an opt-in pre-run hook that injects `external_memory` into llm_context.
+- Render external memory as a dedicated read-only system message.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
-from penguiflow.planner import ReactPlanner, ToolContext
+from penguiflow.planner import LLMContextHookInput, ReactPlanner, ToolContext
 from penguiflow.registry import ModelRegistry
 
 
@@ -66,11 +66,16 @@ class StubLLM:
         # In a real scenario, the LLM would see the context in messages
         # and use it to inform decisions
         print(f"\nLLM Call {self._call_count + 1}:")
-        print(f"System: {messages[0]['content'][:100]}...")
-        if len(messages) > 1:
-            user_msg = json.loads(messages[1]["content"])
+        system_messages = [m["content"] for m in messages if m.get("role") == "system"]
+        print(f"System messages: {len(system_messages)}")
+        for idx, content in enumerate(system_messages, start=1):
+            marker = "<read_only_external_memory_json>" in content
+            print(f"  system[{idx}] external_memory={marker}")
+        user_messages = [m["content"] for m in messages if m.get("role") == "user"]
+        if user_messages:
+            user_msg = json.loads(user_messages[0])
             if "context" in user_msg:
-                print(f"Context provided: {user_msg['context']}")
+                print(f"User JSON context keys: {list((user_msg.get('context') or {}).keys())}")
 
         result = self._responses[self._call_count]
         self._call_count += 1
@@ -78,7 +83,7 @@ class StubLLM:
 
 
 async def main() -> None:
-    """Run example with different memory formats."""
+    """Run example with a hook-injected external_memory payload."""
     registry = ModelRegistry()
     registry.register("search", Query, SearchResult)
     registry.register("analyze", SearchResult, Answer)
@@ -88,9 +93,18 @@ async def main() -> None:
         Node(analyze, name="analyze"),
     ]
 
-    # Example 1: JSON-structured memory
+    class StaticExternalMemoryHook:
+        async def before_run(self, inp: LLMContextHookInput) -> Mapping[str, Any]:
+            del inp
+            return {
+                "external_memory": {
+                    "retrieved_memories": [{"title": "pref", "snippet": "User prefers Python"}]
+                }
+            }
+
+    # Example: Hook-injected external memory
     print("=" * 60)
-    print("Example 1: JSON-structured user preferences")
+    print("Example: Hook-injected external memory")
     print("=" * 60)
 
     client1 = StubLLM(
@@ -112,105 +126,17 @@ async def main() -> None:
         llm_client=client1,
         catalog=build_catalog(nodes, registry),
         system_prompt_extra=(
-            "The context.user_prefs contains a JSON object with user preferences. "
-            "When selecting tools and arguments, prioritize these preferences."
+            "Use external_memory.retrieved_memories (read-only) to personalize planning."
         ),
+        llm_context_hooks=[StaticExternalMemoryHook()],
     )
 
     result1 = await planner1.run(
         "What programming language should I learn?",
-        llm_context={
-            "user_prefs": {"preferred_language": "Python", "experience": "beginner"}
-        },
+        llm_context={},
     )
     print(f"\nResult: {result1.reason}")
     print(f"Payload: {result1.payload}")
-
-    # Example 2: Text-based knowledge
-    print("\n" + "=" * 60)
-    print("Example 2: Free-form knowledge base")
-    print("=" * 60)
-
-    client2 = StubLLM(
-        [
-            {
-                "thought": "Based on previous failures, try different approach",
-                "next_node": "search",
-                "args": {"text": "JavaScript web development"},
-            },
-            {
-                "thought": "done",
-                "next_node": None,
-                "args": {"raw_answer": "JavaScript is popular for web development"},
-            },
-        ]
-    )
-
-    planner2 = ReactPlanner(
-        llm_client=client2,
-        catalog=build_catalog(nodes, registry),
-        system_prompt_extra=(
-            "The context.previous_failures lists approaches that failed. "
-            "Avoid repeating the same tool calls or arguments."
-        ),
-    )
-
-    result2 = await planner2.run(
-        "Help me learn web development",
-        llm_context={
-            "previous_failures": [
-                "search with 'Python web' returned no results",
-                "analyze timed out with large result set",
-            ]
-        },
-    )
-    print(f"\nResult: {result2.reason}")
-    print(f"Payload: {result2.payload}")
-
-    # Example 3: Hierarchical context
-    print("\n" + "=" * 60)
-    print("Example 3: Hierarchical memory structure")
-    print("=" * 60)
-
-    client3 = StubLLM(
-        [
-            {
-                "thought": "Check session history first",
-                "next_node": "search",
-                "args": {"text": "Python data science"},
-            },
-            {
-                "thought": "done",
-                "next_node": None,
-                "args": {"raw_answer": "Python excels in data science"},
-            },
-        ]
-    )
-
-    planner3 = ReactPlanner(
-        llm_client=client3,
-        catalog=build_catalog(nodes, registry),
-        system_prompt_extra=(
-            "The context.memory has nested structure:\n"
-            "- user_profile: Long-term preferences\n"
-            "- session_history: Recent interactions in this session\n"
-            "- task_context: Current task-specific info\n"
-            "Prioritize more specific context (task > session > profile)."
-        ),
-    )
-
-    result3 = await planner3.run(
-        "Recommend a learning path",
-        llm_context={
-            "memory": {
-                "user_profile": {"skill_level": "intermediate", "domain": "data"},
-                "session_history": ["asked about Python", "interested in ML"],
-                "task_context": {"deadline": "3 months", "goal": "job-ready"},
-            }
-        },
-    )
-    print(f"\nResult: {result3.reason}")
-    print(f"Payload: {result3.payload}")
 
 
 if __name__ == "__main__":

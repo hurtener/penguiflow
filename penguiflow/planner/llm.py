@@ -918,11 +918,15 @@ def _estimate_size(messages: Sequence[Mapping[str, str]]) -> int:
 async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str, str]]:
     llm_context = trajectory.llm_context
     conversation_memory = None
+    external_memory = None
     proactive_report = None
     if isinstance(llm_context, Mapping):
         if "conversation_memory" in llm_context:
             conversation_memory = llm_context.get("conversation_memory")
             llm_context = {k: v for k, v in llm_context.items() if k != "conversation_memory"}
+        if "external_memory" in llm_context:
+            external_memory = llm_context.get("external_memory")
+            llm_context = {k: v for k, v in llm_context.items() if k != "external_memory"}
         if "proactive_report" in llm_context:
             proactive_report = llm_context.get("proactive_report")
         cleaned, extracted = extract_background_results(llm_context)
@@ -1037,6 +1041,13 @@ async def build_messages(planner: Any, trajectory: Trajectory) -> list[dict[str,
     messages: list[dict[str, str]] = [
         {"role": "system", "content": system_prompt},
     ]
+    if external_memory is not None:
+        messages.append(
+            {
+                "role": "system",
+                "content": prompts.render_read_only_external_memory(external_memory),
+            }
+        )
     if conversation_memory is not None:
         messages.append(
             {
