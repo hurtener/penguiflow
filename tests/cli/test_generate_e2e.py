@@ -189,6 +189,7 @@ def test_run_generate_creates_planner_and_tools(tmp_path: Path) -> None:
     assert "ReflectionConfig" in planner_content
     assert "\"ordering\": ['fetch_data', 'write_data']" in planner_content or "ordering" in planner_content
     assert "absolute_max_parallel" in planner_content
+    assert "state_store" in planner_content
 
     flow_content = flow_file.read_text()
     assert "Flow bundle for pipeline" in flow_content
@@ -257,6 +258,8 @@ def test_run_generate_includes_background_tasks_wiring(tmp_path: Path) -> None:
     assert "build_task_tool_specs" in planner_content
     assert "BackgroundTasksConfig" in planner_content
     assert "background_tasks=" in planner_content
+    assert "state_store" in planner_content
+    assert "state_store=state_store" in planner_content
 
     config_content = config_file.read_text()
     assert "background_tasks_enabled" in config_content
@@ -269,6 +272,7 @@ def test_run_generate_includes_background_tasks_wiring(tmp_path: Path) -> None:
     orchestrator_content = orchestrator.read_text()
     assert "InProcessTaskService" in orchestrator_content
     assert "in-process fallback" in orchestrator_content
+    assert "state_store" in orchestrator_content
 
 
 def test_generate_cli_dry_run(tmp_path: Path) -> None:

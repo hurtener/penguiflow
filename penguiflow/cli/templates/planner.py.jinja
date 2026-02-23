@@ -162,6 +162,7 @@ def build_planner(
     *,
     event_callback=None,
     llm_context_hooks: Sequence[LLMContextHook] | None = None,
+    state_store: Any | None = None,
 ) -> PlannerBundle:
     """Build ReactPlanner with generated tool catalog."""
 
@@ -220,7 +221,11 @@ def build_planner(
     reflection_llm = None
 {% endif %}
 
-    artifact_store = _build_artifact_store(config)
+    artifact_store = None
+    if state_store is not None and hasattr(state_store, "artifact_store"):
+        artifact_store = state_store.artifact_store
+    else:
+        artifact_store = _build_artifact_store(config)
 
     rich_output_prompt = get_runtime().prompt_section()
 
@@ -278,6 +283,7 @@ def build_planner(
     planner = ReactPlanner(
         llm=config.llm_model,
         catalog=catalog,
+        state_store=state_store,
         system_prompt_extra=_build_system_prompt(config, rich_output_prompt),
         tool_search=tool_search_cfg,
         skills=skills_cfg,

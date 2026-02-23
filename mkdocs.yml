@@ -85,13 +85,18 @@ nav:
       - Playbooks (subflows): core/playbooks.md
   - Planner (ReactPlanner):
       - Overview: planner/overview.md
+      - Configuration: planner/configuration.md
       - Actions & schema: planner/actions-and-schema.md
       - Tool design: planner/tool-design.md
+      - Guardrails: planner/guardrails.md
       - Parallel & joins: planner/parallel-and-joins.md
       - Tooling: planner/tooling.md
       - Pause/resume (HITL): planner/pause-resume-hitl.md
       - Memory: planner/memory.md
+      - Steering: planner/steering.md
+      - Background tasks: planner/background-tasks.md
       - LLM clients: planner/llm-clients.md
+      - Native LLM layer: planner/native-llm.md
       - Observability: planner/observability.md
       - Troubleshooting: planner/troubleshooting.md
   - Tools & integrations:

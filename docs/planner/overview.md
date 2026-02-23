@@ -160,9 +160,14 @@ if __name__ == "__main__":
 
 ## Key integrations
 
+- Production configuration: **[Configuration](configuration.md)**
 - Tool execution: **[Tooling](tooling.md)** (ToolNode for MCP/UTCP/HTTP)
+- Safety/policy: **[Guardrails](guardrails.md)**
 - Human-in-the-loop: **[Pause/resume (HITL)](pause-resume-hitl.md)**
 - Short-term memory: **[Memory](memory.md)**
+- Runtime control: **[Steering](steering.md)**
+- Concurrent work: **[Background tasks](background-tasks.md)**
+- Provider integration: **[Native LLM layer](native-llm.md)** and **[LLM clients](llm-clients.md)**
 
 ## Troubleshooting checklist
 

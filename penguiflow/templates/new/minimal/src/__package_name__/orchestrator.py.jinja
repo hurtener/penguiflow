@@ -188,8 +188,10 @@ class {{ class_name }}Orchestrator:
         task_service: Any | None = None,
         session_manager: SessionManager | None = None,
 {% endif %}
+        state_store: Any | None = None,
     ) -> None:
         self._config = config
+        self._state_store = state_store
 {% if memory_enabled %}
         self._memory = MemoryClient(config.memory_base_url)
 {% else %}
@@ -222,6 +224,7 @@ class {{ class_name }}Orchestrator:
         self._planner = ReactPlanner(
             llm_client=self._llm,
             catalog=catalog,
+            state_store=self._state_store,
             system_prompt_extra=_build_system_prompt(rich_output_prompt),
             event_callback=self._telemetry.record_planner_event,
             llm_context_hooks=llm_context_hooks,
@@ -272,6 +275,7 @@ class {{ class_name }}Orchestrator:
         self._session_manager = self._session_manager or SessionManager(
             limits=limits,
             telemetry_sink=LoggingTaskTelemetrySink(logger=_LOGGER),
+            state_store=self._state_store,
         )
 
         planner = self._planner
