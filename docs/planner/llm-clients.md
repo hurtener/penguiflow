@@ -24,8 +24,13 @@ You can configure `ReactPlanner` in two ways:
 
 1. LiteLLM-backed:
    - `ReactPlanner(llm="gpt-4o-mini", ...)`
+   - (default; `use_native_llm=False`)
 2. Custom client:
    - `ReactPlanner(llm_client=my_client, ...)`
+3. Native LLM layer (adapter behind `JSONLLMClient`):
+   - `ReactPlanner(llm="...", use_native_llm=True, ...)`
+
+See **[Native LLM layer](native-llm.md)** for operational guidance.
 
 ### `JSONLLMClient.complete(...)`
 

@@ -25,8 +25,12 @@ Common event types include:
 
 - `step_start`, `step_complete`
 - `llm_call`
+- `tool_call_start`, `tool_call_end`, `tool_call_result`
 - `pause`, `resume`, `finish`
 - `stream_chunk`, `artifact_chunk`, `llm_stream_chunk`
+- `observation_clamped` (planner-level safety net for oversized observations)
+- `steering_received` (when steering inbox events are drained)
+- `guardrail_retry` (when a guardrail requests an LLM retry)
 
 ## Runnable example: logging PlannerEvent
 
@@ -90,4 +94,3 @@ Prefer:
 - **No planner events**: confirm `event_callback` is passed and not overwritten by per-session dispatch.
 - **Missing stream chunks**: verify `stream_final_response` and tool streaming usage; confirm UI is wired to the stream sink.
 - **High tool error rate**: tighten retries/timeouts and reduce concurrency to respect rate limits.
-

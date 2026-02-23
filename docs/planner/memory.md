@@ -121,6 +121,33 @@ stm = ShortTermMemoryConfig(
 - `truncation`: keep the last `full_zone_turns` and drop older content.
 - `rolling_summary`: keep recent turns + an LLM-maintained summary when healthy.
 
+### Memory hooks (operational callbacks)
+
+`ShortTermMemoryConfig` exposes optional async hooks you can use for metrics, audits, or external persistence coordination:
+
+- `on_turn_added(turn: ConversationTurn) -> Awaitable[None]`
+- `on_summary_updated(old: str, new: str) -> Awaitable[None]`
+- `on_health_changed(old: MemoryHealth, new: MemoryHealth) -> Awaitable[None]`
+
+Important semantics (production-critical):
+
+- Hooks are executed **fire-and-forget** in background tasks (they do not block the planner run).
+- Exceptions in hooks are swallowed intentionally. Treat hooks as best-effort.
+- Hooks may run concurrently; they must be thread-safe/async-safe for your environment.
+
+Example: emit metrics on memory health transitions
+
+```python
+from __future__ import annotations
+
+from penguiflow.planner.memory import MemoryHealth
+
+
+async def on_health_changed(old: MemoryHealth, new: MemoryHealth) -> None:
+    # Replace with your metrics sink.
+    print(f"stm_health: {old.value} -> {new.value}")
+```
+
 ### Budgets and overflow
 
 `MemoryBudget` enforces token caps. When exceeded:
@@ -128,6 +155,10 @@ stm = ShortTermMemoryConfig(
 - `truncate_oldest` removes older turns first (default).
 - `truncate_summary` shrinks the rolling summary first.
 - `error` raises `MemoryBudgetExceeded` (useful for hard-bound environments).
+
+!!! warning
+    Do not do long blocking I/O in hooks (e.g., synchronous DB writes). If you need durability, prefer a `StateStore`
+    that supports memory hydration/persistence and keep hooks for lightweight side effects.
 
 ## Failure modes & recovery
 

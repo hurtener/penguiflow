@@ -39,6 +39,8 @@ These values are opcodes, not tool names:
 
 Anything else is treated as a **tool call**.
 
+See **[Background tasks](background-tasks.md)** for the runtime wiring and safety/limits guidance.
+
 ## Operational defaults
 
 - **Always validate** tool args against the tool’s Pydantic args model.

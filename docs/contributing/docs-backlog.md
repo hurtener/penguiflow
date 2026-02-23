@@ -28,11 +28,11 @@ It exists to make the “enterprise depth” work measurable:
 
 Counts (current):
 
-- Tier A: 50
+- Tier A: 55
 - Tier B: 12
 - Tier C: 60
 - Shims: 5
-- Total: 127
+- Total: 132
 
 | File | Tier | Area | Outcome | Status | Target phase |
 |---|:---:|---|---|---|---:|
@@ -132,12 +132,17 @@ Counts (current):
 | `docs/patterns/roadmap_status_updates.md` | C | patterns | keep | draft | 6 |
 | `docs/patterns/topic-generation-flow.md` | C | patterns | keep | draft | 6 |
 | `docs/planner/actions-and-schema.md` | A | planner | keep | canonical | 1 |
+| `docs/planner/background-tasks.md` | A | planner | keep | canonical | 1 |
+| `docs/planner/configuration.md` | A | planner | keep | canonical | 1 |
+| `docs/planner/guardrails.md` | A | planner | keep | canonical | 1 |
 | `docs/planner/llm-clients.md` | A | planner | keep | canonical | 1 |
 | `docs/planner/memory.md` | A | planner | keep | canonical | 1 |
+| `docs/planner/native-llm.md` | A | planner | keep | canonical | 1 |
 | `docs/planner/observability.md` | A | planner | keep | canonical | 1 |
 | `docs/planner/overview.md` | A | planner | keep | canonical | 1 |
 | `docs/planner/parallel-and-joins.md` | A | planner | keep | canonical | 1 |
 | `docs/planner/pause-resume-hitl.md` | A | planner | keep | canonical | 1 |
+| `docs/planner/steering.md` | A | planner | keep | canonical | 1 |
 | `docs/planner/tool-design.md` | A | planner | keep | canonical | 1 |
 | `docs/planner/tooling.md` | A | planner | keep | canonical | 2 |
 | `docs/planner/troubleshooting.md` | A | planner | keep | canonical | 1 |

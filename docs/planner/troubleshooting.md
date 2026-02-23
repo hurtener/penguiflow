@@ -20,11 +20,16 @@ Use it when you are debugging:
 
 Before deep-diving, confirm these knobs and contracts:
 
+- production configuration: **[Configuration](configuration.md)**
 - action contract: **[Actions & schema](actions-and-schema.md)**
 - tool design: **[Tool design](tool-design.md)**
 - tool discovery/integration: **[Tooling](tooling.md)**
+- safety/policy: **[Guardrails](guardrails.md)**
 - pause/resume contract: **[Pause/resume (HITL)](pause-resume-hitl.md)**
 - memory isolation: **[Memory](memory.md)**
+- runtime control: **[Steering](steering.md)**
+- concurrent work: **[Background tasks](background-tasks.md)**
+- provider integration: **[Native LLM layer](native-llm.md)** / **[LLM clients](llm-clients.md)**
 
 Operationally important planner settings:
 
@@ -147,6 +152,52 @@ See **[Planner observability](observability.md)**.
 - ensure pause records are persisted (StateStore) in distributed deployments
 - ensure tokens are not re-used (tokens are consumed on load in some stores)
 - ensure TTL policies match your UX
+
+## Guardrail stops / redaction surprises
+
+**Symptoms**
+
+- tool call fails with `guardrail_stop:*`
+- output is unexpectedly redacted
+- planner pauses with `reason="approval_required"` even though your tools didn’t call `ctx.pause(...)`
+
+**Fix**
+
+- confirm whether the gateway is in `shadow` or `enforce` mode
+- inspect the `failure.guardrail` payload in tool call results (it includes `rule_id` and `reason`)
+- tune rule configs (allowlists, redaction patterns, timeouts)
+
+See **[Guardrails](guardrails.md)**.
+
+## Steering cancellation / redirect confusion
+
+**Symptoms**
+
+- `SteeringCancelled` raised unexpectedly
+- “redirect” doesn’t take effect until later
+
+**Fix**
+
+- ensure you pass the inbox into `run(..., steering=inbox)` / `resume(..., steering=inbox)`
+- treat `SteeringCancelled` as a normal control-path outcome (surface it to callers/UI)
+- validate/sanitize steering payloads at ingress
+
+See **[Steering](steering.md)**.
+
+## Background tasks don’t spawn
+
+**Symptoms**
+
+- `tasks.spawn` fails with `task_service_unavailable` or `session_id_missing`
+- tools marked as background-enabled still run inline
+
+**Fix**
+
+- ensure tasks.* tools are in the catalog (foreground)
+- ensure `tool_context["task_service"]` is present and `tool_context["session_id"]` is a string
+- confirm `BackgroundTasksConfig.enabled=True` and (for tool-initiated) `allow_tool_background=True`
+
+See **[Background tasks](background-tasks.md)**.
 
 ## Troubleshooting checklist
 
