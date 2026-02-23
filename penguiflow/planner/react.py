@@ -28,7 +28,6 @@ from .artifact_handling import (  # noqa: F401
 from .constraints import _ConstraintTracker
 from .context import PlannerPauseReason
 from .error_recovery import ErrorRecoveryConfig
-from .llm_context_hooks import LLMContextHook
 from .llm import (
     _estimate_size,
     _sanitize_json_schema,
@@ -39,6 +38,7 @@ from .llm import (
     request_revision,
     summarise_trajectory,
 )
+from .llm_context_hooks import LLMContextHook
 from .memory import (
     ConversationTurn,
     MemoryKey,
