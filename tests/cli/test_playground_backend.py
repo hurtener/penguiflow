@@ -241,4 +241,4 @@ def test_load_agent_injects_state_store_into_planner_builder(tmp_path: Path) -> 
 
     planner_module = sys.modules.get(f"{package_name}.planner")
     assert planner_module is not None
-    assert getattr(planner_module, "received_state_store") is sentinel
+    assert planner_module.received_state_store is sentinel
