@@ -1020,6 +1020,6 @@ async def update_schedule(job_id: str, request: UpdateScheduleRequest):
 
 ## References
 
-- [RFC_TASK_GROUPS.md](./RFC_TASK_GROUPS.md) - Related: coordinated background tasks
+- [RFC_TASK_GROUPS.md](./RFC/Done/RFC_TASK_GROUPS.md) - Related: coordinated background tasks
 - [penguiflow/sessions/scheduler.py](../penguiflow/sessions/scheduler.py) - Existing scheduler infrastructure
 - [croniter](https://github.com/kiorky/croniter) - Cron expression library

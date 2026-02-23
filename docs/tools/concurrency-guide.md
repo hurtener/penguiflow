@@ -2,6 +2,11 @@
 
 This guide explains Penguiflow's three-level concurrency model and how to tune it for production workloads.
 
+!!! note
+    Canonical pages:
+    - **[Planner parallelism](../planner/parallel-and-joins.md)**
+    - **[Tools configuration](configuration.md)** (ToolNode `max_concurrency`)
+
 ## Overview
 
 Penguiflow provides concurrency control at three levels:

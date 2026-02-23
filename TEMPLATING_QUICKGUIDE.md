@@ -2615,8 +2615,8 @@ Set safety limits in `src/<your_package>/planner.py`:
 
 ### Getting Help
 
-- Check the [PenguiFlow documentation](../README.md)
-- Review [examples/](../examples/) for working patterns
+- Check the [PenguiFlow documentation](README.md)
+- Review [examples/](examples/) for working patterns
 - File issues at [GitHub Issues](https://github.com/clear-tech-labs/penguiflow/issues)
 
 ---

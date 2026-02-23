@@ -1,8 +1,30 @@
+# PenguiFlow DAG Implementation Guide: Production Best Practices (legacy long-form)
+
+> **Status (Phase 6): legacy / extraction source**
+>
+> This document contains useful patterns, but it is **not the canonical documentation** for PenguiFlow.
+> Canonical, curated (enterprise-depth) pages live under `docs/` and the MkDocs site.
+>
+> Start here instead:
+>
+> - Runtime reliability: `docs/core/errors-retries-timeouts.md`
+> - Messages & envelopes: `docs/core/messages-and-envelopes.md`
+> - Concurrency + joins: `docs/core/concurrency.md`
+> - Routing & subflows: `docs/core/routers-and-policies.md`, `docs/core/playbooks.md`
+> - Deployment runbooks: `docs/deployment/production-deployment.md`, `docs/deployment/worker-integration.md`
+> - Distributed execution: `docs/deployment/distributed-execution.md`
+> - Observability runbooks: `docs/observability/telemetry-patterns.md`, `docs/observability/metrics-and-alerts.md`
+> - Testing + diagrams: `docs/reference/testing.md`, `docs/reference/visualization.md`
+>
+> This file will be trimmed over time as its most-used sections are promoted into curated pages.
+
 # PenguiFlow DAG Implementation Guide: Production Best Practices
 
 ## Introduction
 
-This guide distills production-tested patterns from an internal PenguiFlow deployment (referenced here as `memory_service`), a memory management system built entirely on PenguiFlow. The codebase demonstrates advanced flow orchestration patterns, error handling, validation, and testing practices to be adopted.
+This guide distills production-tested patterns from an internal PenguiFlow deployment (historically referenced here as `memory_service`).
+
+Note: that codebase is **not** part of this repository. Treat any “real example from …” references as illustrative, not as links you can follow locally.
 
 ---
 

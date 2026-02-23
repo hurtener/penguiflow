@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "penguiflow"
-version = "2.12.1"
+version = "2.12.2"
 description = "Async-first orchestration library for multi-agent and data pipelines"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -50,6 +50,11 @@ dev = [
     "google-genai>=1.57.0",
     "boto3>=1.42.0",
 ]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.6,<9.7",
+    "mkdocstrings[python]>=0.25",
+]
 cli = [
     "ag-ui-protocol>=0.0.42",
     "jinja2>=3.1",
@@ -94,7 +99,7 @@ penguiflow-admin = "penguiflow.admin:main"
 penguiflow = "penguiflow.cli.main:app"
 
 [project.urls]
-Homepage = "https://github.com/penguiflow/penguiflow"
+Homepage = "https://github.com/hurtener/penguiflow"
 
 [tool.setuptools]
 packages = { find = { include = ["penguiflow*", "penguiflow_a2a*", "examples*"] } }

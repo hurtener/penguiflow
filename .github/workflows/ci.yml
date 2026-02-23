@@ -12,8 +12,26 @@ jobs:
       - name: Validate frontend build
         run: ./scripts/validate_frontend.sh
 
-  test:
+  docs:
     needs: validate-frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v2
+      - name: Create virtual environment
+        run: uv venv
+      - name: Install dependencies
+        run: uv pip install -e ".[dev,docs]"
+      - name: MkDocs build (strict)
+        run: uv run mkdocs build --strict
+      - name: Check public markdown links
+        run: uv run python scripts/check_md_links.py
+
+  test:
+    needs: [validate-frontend, docs]
     runs-on: ubuntu-latest
     strategy:
       matrix:

@@ -1,5 +1,17 @@
 # PenguiFlow: React Planner Integration Guide (v2.4+)
 
+> **Canonical pages (curated docs site)**  
+> This file is a long-form reference and may include historical notes. For day-to-day implementation and operations, start with:
+> - `docs/planner/overview.md`
+> - `docs/planner/actions-and-schema.md`
+> - `docs/planner/tool-design.md`
+> - `docs/planner/parallel-and-joins.md`
+> - `docs/planner/pause-resume-hitl.md`
+> - `docs/planner/memory.md`
+> - `docs/planner/observability.md`
+> - `docs/planner/troubleshooting.md`
+> - `docs/planner/tooling.md` (ToolNode entry point)
+
 > **v2.8 Update**: Artifact Store for binary content (PDFs, images, large files). MCP tools can store artifacts accessible via the Playground UI and REST API. See [Artifact Store](#14-artifact-store) for configuration.
 >
 > **v2.7 Update**: Planner now returns structured `FinalPayload` with `raw_answer` field. All examples updated to show the new format. See [Handling Different Result Types](#handling-different-result-types) for payload extraction patterns.

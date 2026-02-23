@@ -2,6 +2,9 @@
 
 This guide covers MCP resources support in PenguiFlow, including resource listing, reading, caching, and generated tools.
 
+!!! note
+    Canonical page: **[MCP resources](mcp-resources.md)**.
+
 ## Overview
 
 MCP (Model Context Protocol) resources provide a way for servers to expose data that can be read by clients. Unlike tools (which execute actions), resources represent static or semi-static content like files, database records, or configuration data.
