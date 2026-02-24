@@ -161,12 +161,15 @@ if __name__ == "__main__":
 ## Key integrations
 
 - Production configuration: **[Configuration](configuration.md)**
+- Tool discovery and per-tenant filtering: **[Tool discovery & filtering](tool-discovery-and-filtering.md)**
 - Tool execution: **[Tooling](tooling.md)** (ToolNode for MCP/UTCP/HTTP)
+- Rich UI outputs: **[Rich output](rich-output.md)**
 - Safety/policy: **[Guardrails](guardrails.md)**
 - Human-in-the-loop: **[Pause/resume (HITL)](pause-resume-hitl.md)**
 - Short-term memory: **[Memory](memory.md)**
 - Runtime control: **[Steering](steering.md)**
 - Concurrent work: **[Background tasks](background-tasks.md)**
+- Playbook retrieval: **[Skills](skills.md)**
 - Provider integration: **[Native LLM layer](native-llm.md)** and **[LLM clients](llm-clients.md)**
 
 ## Troubleshooting checklist

@@ -40,6 +40,10 @@ Common patterns:
 - one or more ToolNodes that perform discovery,
 - a single combined catalog passed to `ReactPlanner`.
 
+For planner-level filtering and tool discovery (`tool_search`, `tool_get`, deferred activation), see:
+
+- **[Tool discovery & filtering](tool-discovery-and-filtering.md)**
+
 ## Operational defaults
 
 - Call `await tool_node.connect()` at service startup (or warm it on first request) and reuse the same ToolNode across sessions.
