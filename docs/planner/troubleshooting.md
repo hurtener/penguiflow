@@ -21,14 +21,17 @@ Use it when you are debugging:
 Before deep-diving, confirm these knobs and contracts:
 
 - production configuration: **[Configuration](configuration.md)**
+- tool discovery and per-tenant filtering: **[Tool discovery & filtering](tool-discovery-and-filtering.md)**
 - action contract: **[Actions & schema](actions-and-schema.md)**
 - tool design: **[Tool design](tool-design.md)**
 - tool discovery/integration: **[Tooling](tooling.md)**
+- rich UI outputs: **[Rich output](rich-output.md)**
 - safety/policy: **[Guardrails](guardrails.md)**
 - pause/resume contract: **[Pause/resume (HITL)](pause-resume-hitl.md)**
 - memory isolation: **[Memory](memory.md)**
 - runtime control: **[Steering](steering.md)**
 - concurrent work: **[Background tasks](background-tasks.md)**
+- playbook retrieval: **[Skills](skills.md)**
 - provider integration: **[Native LLM layer](native-llm.md)** / **[LLM clients](llm-clients.md)**
 
 Operationally important planner settings:

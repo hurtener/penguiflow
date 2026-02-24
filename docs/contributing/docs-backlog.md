@@ -28,11 +28,11 @@ It exists to make the “enterprise depth” work measurable:
 
 Counts (current):
 
-- Tier A: 55
+- Tier A: 58
 - Tier B: 12
 - Tier C: 60
 - Shims: 5
-- Total: 132
+- Total: 135
 
 | File | Tier | Area | Outcome | Status | Target phase |
 |---|:---:|---|---|---|---:|
@@ -142,8 +142,11 @@ Counts (current):
 | `docs/planner/overview.md` | A | planner | keep | canonical | 1 |
 | `docs/planner/parallel-and-joins.md` | A | planner | keep | canonical | 1 |
 | `docs/planner/pause-resume-hitl.md` | A | planner | keep | canonical | 1 |
+| `docs/planner/rich-output.md` | A | planner | keep | canonical | 5 |
+| `docs/planner/skills.md` | A | planner | keep | canonical | 5 |
 | `docs/planner/steering.md` | A | planner | keep | canonical | 1 |
 | `docs/planner/tool-design.md` | A | planner | keep | canonical | 1 |
+| `docs/planner/tool-discovery-and-filtering.md` | A | planner | keep | canonical | 5 |
 | `docs/planner/tooling.md` | A | planner | keep | canonical | 2 |
 | `docs/planner/troubleshooting.md` | A | planner | keep | canonical | 1 |
 | `docs/production-deployment.md` | shim | misc | deprecate | shim | 4 |
