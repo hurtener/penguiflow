@@ -38,3 +38,14 @@ export interface MetaResponse {
   tools?: Array<{ name: string; description: string; tags?: string[] }>;
   flows?: unknown[];
 }
+
+export interface PlaygroundSetupState {
+  fixed_session_id: string | null;
+  rewrite_agui: boolean;
+  fixed_session_source: 'runtime' | 'env' | 'none';
+  rewrite_agui_source: 'runtime' | 'env';
+  runtime_fixed_session_id: string | null;
+  runtime_rewrite_agui: boolean | null;
+  env_fixed_session_id: string | null;
+  env_rewrite_agui: boolean;
+}

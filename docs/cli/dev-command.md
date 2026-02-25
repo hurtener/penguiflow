@@ -57,6 +57,17 @@ uv pip install "penguiflow[planner]"
 - Put API keys in `<project_root>/.env` (uncommitted), and rely on `.env` precedence rules:
   - process env wins; `.env` fills only missing values.
 
+## Fixed Session Mode (No Wrapper Needed)
+
+Native Playground now supports fixed session mode directly. You no longer need a custom `playground.py` wrapper to pin sessions.
+
+- Set `.env` values:
+  - `PLAYGROUND_FIXED_SESSION_ID=<your-session-id>`
+  - `PLAYGROUND_REWRITE_AGUI=true|false` (default `false`)
+- These keys are included by default in `.env.example` for projects generated with `penguiflow new`.
+- Or update these at runtime from the Setup tab in the Playground UI.
+- Runtime Setup-tab values take precedence over `.env` values.
+
 ## Failure modes & recovery
 
 - **UI assets missing (`playground_ui/dist`)** (repo checkout): build the UI:

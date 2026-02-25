@@ -32,6 +32,15 @@ describe('setupStore', () => {
     it('defaults to SSE protocol', () => {
       expect(setupStore.useAgui).toBe(false);
     });
+
+    it('has no fixed session override by default', () => {
+      expect(setupStore.fixedSessionId).toBe('');
+      expect(setupStore.backendSetup).toBeNull();
+    });
+
+    it('defaults AG-UI rewrite toggle to false', () => {
+      expect(setupStore.rewriteAguiRequests).toBe(false);
+    });
   });
 
   describe('setters', () => {
@@ -58,6 +67,35 @@ describe('setupStore', () => {
     it('sets AG-UI toggle', () => {
       setupStore.useAgui = true;
       expect(setupStore.useAgui).toBe(true);
+    });
+
+    it('sets fixed session id', () => {
+      setupStore.fixedSessionId = 'fixed-session';
+      expect(setupStore.fixedSessionId).toBe('fixed-session');
+    });
+
+    it('sets AG-UI rewrite behavior', () => {
+      setupStore.rewriteAguiRequests = true;
+      expect(setupStore.rewriteAguiRequests).toBe(true);
+    });
+  });
+
+  describe('applyBackendSetup', () => {
+    it('applies effective setup payload', () => {
+      setupStore.applyBackendSetup({
+        fixed_session_id: 'env-session',
+        rewrite_agui: true,
+        fixed_session_source: 'env',
+        rewrite_agui_source: 'env',
+        runtime_fixed_session_id: null,
+        runtime_rewrite_agui: null,
+        env_fixed_session_id: 'env-session',
+        env_rewrite_agui: true
+      });
+
+      expect(setupStore.fixedSessionId).toBe('env-session');
+      expect(setupStore.rewriteAguiRequests).toBe(true);
+      expect(setupStore.backendSetup?.fixed_session_source).toBe('env');
     });
   });
 
@@ -124,6 +162,8 @@ describe('setupStore', () => {
       setupStore.userId = 'custom-user';
       setupStore.toolContextRaw = '{"key": "value"}';
       setupStore.llmContextRaw = '{"model": "test"}';
+      setupStore.fixedSessionId = 'fixed-abc';
+      setupStore.rewriteAguiRequests = true;
       setupStore.error = 'Some error';
       setupStore.useAgui = true;
       
@@ -133,6 +173,9 @@ describe('setupStore', () => {
       expect(setupStore.userId).toBe('playground-user');
       expect(setupStore.toolContextRaw).toBe('{}');
       expect(setupStore.llmContextRaw).toBe('{}');
+      expect(setupStore.fixedSessionId).toBe('');
+      expect(setupStore.rewriteAguiRequests).toBe(false);
+      expect(setupStore.backendSetup).toBeNull();
       expect(setupStore.error).toBeNull();
       expect(setupStore.useAgui).toBe(false);
     });

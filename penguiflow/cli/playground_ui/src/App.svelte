@@ -5,6 +5,7 @@
   } from "$lib/stores";
   import {
     loadMeta,
+    loadPlaygroundSetup,
     loadSpec,
     loadComponentRegistry,
     fetchTrajectory,
@@ -26,6 +27,8 @@
   import { MobileHeader, MobileBottomPanel } from "$lib/components/features/mobile";
   import { ChatCard } from "$lib/components/features/chat";
   import type { ChatMessage, PendingInteraction } from '$lib/types';
+
+  const SETUP_STORAGE_KEY = 'penguiflow.playground.setup.v1';
 
   const stores = initStores();
   const {
@@ -89,10 +92,11 @@
   });
 
   const initializeApp = async () => {
-    const [metaData, specData, componentData] = await Promise.all([
+    const [metaData, specData, componentData, setupData] = await Promise.all([
       loadMeta(),
       loadSpec(),
-      loadComponentRegistry()
+      loadComponentRegistry(),
+      loadPlaygroundSetup()
     ]);
     if (metaData) {
       agentStore.setFromResponse(metaData);
@@ -103,7 +107,45 @@
     if (componentData) {
       componentRegistryStore.setFromPayload(componentData);
     }
+    if (setupData) {
+      setupStore.applyBackendSetup(setupData);
+      if (setupData.fixed_session_id) {
+        sessionStore.sessionId = setupData.fixed_session_id;
+      }
+    }
   };
+
+  onMount(() => {
+    try {
+      const raw = window.localStorage.getItem(SETUP_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        if (typeof parsed.useAgui === 'boolean') {
+          setupStore.useAgui = parsed.useAgui;
+        }
+        if (typeof parsed.fixedSessionId === 'string') {
+          setupStore.fixedSessionId = parsed.fixedSessionId;
+        }
+        if (typeof parsed.rewriteAguiRequests === 'boolean') {
+          setupStore.rewriteAguiRequests = parsed.rewriteAguiRequests;
+        }
+      }
+    } catch {
+      // Ignore malformed local storage data.
+    }
+  });
+
+  $effect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const payload = {
+      useAgui: setupStore.useAgui,
+      fixedSessionId: setupStore.fixedSessionId,
+      rewriteAguiRequests: setupStore.rewriteAguiRequests
+    };
+    window.localStorage.setItem(SETUP_STORAGE_KEY, JSON.stringify(payload));
+  });
 
   const sendChat = () => {
     const query = chatStore.input.trim();

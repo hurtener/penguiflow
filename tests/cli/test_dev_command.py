@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest import mock
 
 from click.testing import CliRunner
+from fastapi import FastAPI
 
 from penguiflow.cli import app
 from penguiflow.cli.dev import run_dev
@@ -75,3 +76,29 @@ def test_dev_cli_invokes_run_dev(monkeypatch, tmp_path: Path) -> None:
     assert called["host"] == "0.0.0.0"
     assert called["port"] == 8100
     assert called["open_browser"] is False
+
+
+def test_run_dev_passes_discovered_state_store(monkeypatch, tmp_path: Path) -> None:
+    called = {}
+
+    class FakeServer:
+        def __init__(self, config) -> None:
+            called["config"] = config
+
+        def run(self) -> None:
+            called["run_called"] = True
+
+    def fake_create_playground_app(*, project_root, state_store=None):
+        called["project_root"] = project_root
+        called["state_store"] = state_store
+        return FastAPI()
+
+    monkeypatch.setattr("uvicorn.Server", FakeServer)
+    monkeypatch.setattr("penguiflow.cli.dev._ensure_ui_assets", lambda _: None)
+    monkeypatch.setattr("penguiflow.cli.dev._load_project_state_store", lambda _: {"kind": "store"})
+    monkeypatch.setattr("penguiflow.cli.dev.create_playground_app", fake_create_playground_app)
+
+    run_dev(project_root=tmp_path, host="127.0.0.1", port=9100, open_browser=False)
+
+    assert called["project_root"] == tmp_path
+    assert called["state_store"] == {"kind": "store"}

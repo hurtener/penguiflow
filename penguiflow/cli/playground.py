@@ -7,13 +7,16 @@ import importlib
 import inspect
 import json
 import logging
+import os
 import secrets
 import sys
+import threading
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import parse_qsl, urlencode
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -223,6 +226,319 @@ class AguiResumeRequest(BaseModel):
     tool_context: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="ignore")
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if not normalized:
+        return default
+    return normalized in {"1", "true", "yes", "on"}
+
+
+def _normalise_optional_session_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+class SetupStateResponse(BaseModel):
+    fixed_session_id: str | None
+    rewrite_agui: bool
+    fixed_session_source: Literal["runtime", "env", "none"]
+    rewrite_agui_source: Literal["runtime", "env"]
+    runtime_fixed_session_id: str | None
+    runtime_rewrite_agui: bool | None
+    env_fixed_session_id: str | None
+    env_rewrite_agui: bool
+
+
+class SetupUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fixed_session_id: str | None = None
+    rewrite_agui: bool | None = None
+
+
+class PlaygroundSetupState:
+    """Mutable runtime setup for fixed-session Playground behavior."""
+
+    _OVERRIDE_HEADER_NAMES: tuple[bytes, ...] = (
+        b"x-playground-fixed-session-id",
+        b"x-fixed-session-id",
+    )
+
+    def __init__(
+        self,
+        *,
+        env_fixed_session_id: str | None = None,
+        env_rewrite_agui: bool = False,
+    ) -> None:
+        self._env_fixed_session_id = _normalise_optional_session_id(env_fixed_session_id)
+        self._env_rewrite_agui = bool(env_rewrite_agui)
+        self._runtime_fixed_session_id: str | None = None
+        self._runtime_rewrite_agui: bool | None = None
+        self._lock = threading.RLock()
+
+    @classmethod
+    def from_env(cls) -> PlaygroundSetupState:
+        return cls(
+            env_fixed_session_id=os.getenv("PLAYGROUND_FIXED_SESSION_ID"),
+            env_rewrite_agui=_env_flag("PLAYGROUND_REWRITE_AGUI", default=False),
+        )
+
+    @staticmethod
+    def _extract_override_session(headers: list[tuple[bytes, bytes]] | None) -> str | None:
+        if not headers:
+            return None
+        for name, value in headers:
+            lowered = name.lower()
+            if lowered not in PlaygroundSetupState._OVERRIDE_HEADER_NAMES:
+                continue
+            raw = value.decode("utf-8", errors="ignore")
+            normalized = _normalise_optional_session_id(raw)
+            if normalized:
+                return normalized
+        return None
+
+    def effective_fixed_session_id(self, headers: list[tuple[bytes, bytes]] | None = None) -> str | None:
+        with self._lock:
+            if self._runtime_fixed_session_id:
+                return self._runtime_fixed_session_id
+            request_override = self._extract_override_session(headers)
+            if request_override:
+                return request_override
+            return self._env_fixed_session_id
+
+    def effective_rewrite_agui(self) -> bool:
+        with self._lock:
+            if self._runtime_rewrite_agui is not None:
+                return self._runtime_rewrite_agui
+            return self._env_rewrite_agui
+
+    def update_runtime(self, payload: SetupUpdateRequest) -> SetupStateResponse:
+        with self._lock:
+            fields_set = payload.model_fields_set
+            if "fixed_session_id" in fields_set:
+                self._runtime_fixed_session_id = _normalise_optional_session_id(payload.fixed_session_id)
+            if "rewrite_agui" in fields_set:
+                self._runtime_rewrite_agui = payload.rewrite_agui
+            return self.snapshot()
+
+    def snapshot(self) -> SetupStateResponse:
+        with self._lock:
+            if self._runtime_fixed_session_id:
+                fixed_source: Literal["runtime", "env", "none"] = "runtime"
+                fixed_session_id = self._runtime_fixed_session_id
+            elif self._env_fixed_session_id:
+                fixed_source = "env"
+                fixed_session_id = self._env_fixed_session_id
+            else:
+                fixed_source = "none"
+                fixed_session_id = None
+
+            if self._runtime_rewrite_agui is None:
+                rewrite_source: Literal["runtime", "env"] = "env"
+                rewrite_agui = self._env_rewrite_agui
+            else:
+                rewrite_source = "runtime"
+                rewrite_agui = self._runtime_rewrite_agui
+
+            return SetupStateResponse(
+                fixed_session_id=fixed_session_id,
+                rewrite_agui=rewrite_agui,
+                fixed_session_source=fixed_source,
+                rewrite_agui_source=rewrite_source,
+                runtime_fixed_session_id=self._runtime_fixed_session_id,
+                runtime_rewrite_agui=self._runtime_rewrite_agui,
+                env_fixed_session_id=self._env_fixed_session_id,
+                env_rewrite_agui=self._env_rewrite_agui,
+            )
+
+
+class FixedSessionRewriteMiddleware:
+    """Rewrite session values in query/header/body when a fixed session is active."""
+
+    _JSON_PATHS = {"/chat", "/agui/agent", "/agui/resume"}
+
+    def __init__(self, app: Any, setup_state: PlaygroundSetupState) -> None:
+        self.app = app
+        self.setup_state = setup_state
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        fixed_session_id = self.setup_state.effective_fixed_session_id(scope.get("headers"))
+        if not fixed_session_id:
+            await self.app(scope, receive, send)
+            return
+
+        method = str(scope.get("method", "")).upper()
+        path = str(scope.get("path", ""))
+        normalized_path = path.rstrip("/") or "/"
+
+        rewritten_scope = dict(scope)
+        rewritten_scope, _ = self._rewrite_query_session(rewritten_scope, fixed_session_id)
+        rewritten_scope, _ = self._rewrite_session_header(rewritten_scope, fixed_session_id)
+
+        request_receive = receive
+        if method in {"POST", "PUT", "PATCH"} and normalized_path in self._JSON_PATHS:
+            body = await self._read_body(receive)
+            payload = self._parse_json_body(body)
+            if payload is None:
+                request_receive = self._build_receive(body, receive)
+            else:
+                rewrite_agui = self.setup_state.effective_rewrite_agui()
+                payload = self._rewrite_json_payload(
+                    normalized_path,
+                    payload,
+                    fixed_session_id,
+                    rewrite_agui=rewrite_agui,
+                )
+                encoded = json.dumps(payload).encode("utf-8")
+                request_receive = self._build_receive(encoded, receive)
+                rewritten_scope = self._rewrite_content_length(rewritten_scope, len(encoded))
+
+        await self.app(rewritten_scope, request_receive, send)
+
+    @staticmethod
+    def _rewrite_query_session(scope: dict[str, Any], fixed_session_id: str) -> tuple[dict[str, Any], str | None]:
+        raw_qs = scope.get("query_string", b"")
+        if not raw_qs:
+            return scope, None
+
+        params = parse_qsl(raw_qs.decode("utf-8"), keep_blank_values=True)
+        rewritten = False
+        session_from: str | None = None
+        out: list[tuple[str, str]] = []
+
+        for key, value in params:
+            if key == "session_id" and value != fixed_session_id:
+                if value and session_from is None:
+                    session_from = value
+                value = fixed_session_id
+                rewritten = True
+            out.append((key, value))
+
+        if not rewritten:
+            return scope, session_from
+
+        new_scope = dict(scope)
+        new_scope["query_string"] = urlencode(out).encode("utf-8")
+        return new_scope, session_from
+
+    @staticmethod
+    def _rewrite_session_header(scope: dict[str, Any], fixed_session_id: str) -> tuple[dict[str, Any], str | None]:
+        headers = list(scope.get("headers", []))
+        rewritten = False
+        session_from: str | None = None
+        out: list[tuple[bytes, bytes]] = []
+
+        for name, value in headers:
+            if name.lower() == b"x-session-id":
+                current = value.decode("utf-8", errors="ignore")
+                if current and current != fixed_session_id:
+                    if session_from is None:
+                        session_from = current
+                    value = fixed_session_id.encode("utf-8")
+                    rewritten = True
+            out.append((name, value))
+
+        if not rewritten:
+            return scope, session_from
+
+        new_scope = dict(scope)
+        new_scope["headers"] = out
+        return new_scope, session_from
+
+    @staticmethod
+    def _rewrite_content_length(scope: dict[str, Any], body_len: int) -> dict[str, Any]:
+        headers = list(scope.get("headers", []))
+        out: list[tuple[bytes, bytes]] = []
+        replaced = False
+        for name, value in headers:
+            if name.lower() == b"content-length":
+                out.append((name, str(body_len).encode("ascii")))
+                replaced = True
+            else:
+                out.append((name, value))
+        if not replaced:
+            out.append((b"content-length", str(body_len).encode("ascii")))
+        new_scope = dict(scope)
+        new_scope["headers"] = out
+        return new_scope
+
+    @staticmethod
+    def _rewrite_json_payload(
+        normalized_path: str,
+        payload: dict[str, Any],
+        fixed_session_id: str,
+        *,
+        rewrite_agui: bool,
+    ) -> dict[str, Any]:
+        if normalized_path == "/chat":
+            payload["session_id"] = fixed_session_id
+            tool_context = payload.get("tool_context")
+            if tool_context is None:
+                tool_context = {}
+                payload["tool_context"] = tool_context
+            if isinstance(tool_context, dict):
+                tool_context["session_id"] = fixed_session_id
+            return payload
+
+        if normalized_path in {"/agui/agent", "/agui/resume"} and rewrite_agui:
+            if "thread_id" in payload:
+                payload["thread_id"] = fixed_session_id
+            if "threadId" in payload:
+                payload["threadId"] = fixed_session_id
+            if "thread_id" not in payload and "threadId" not in payload:
+                if normalized_path == "/agui/resume":
+                    payload["thread_id"] = fixed_session_id
+                else:
+                    payload["threadId"] = fixed_session_id
+        return payload
+
+    @staticmethod
+    async def _read_body(receive: Any) -> bytes:
+        chunks: list[bytes] = []
+        more = True
+        while more:
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                break
+            if message.get("type") != "http.request":
+                continue
+            chunks.append(message.get("body", b""))
+            more = bool(message.get("more_body", False))
+        return b"".join(chunks)
+
+    @staticmethod
+    def _build_receive(body: bytes, original_receive: Any) -> Any:
+        sent = False
+
+        async def _receive() -> dict[str, Any]:
+            nonlocal sent
+            if sent:
+                return await original_receive()
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        return _receive
+
+    @staticmethod
+    def _parse_json_body(body: bytes) -> dict[str, Any] | None:
+        if not body:
+            return {}
+        try:
+            parsed = json.loads(body.decode("utf-8"))
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
 
 def _parse_context_arg(raw: str | None) -> dict[str, Any]:
@@ -829,6 +1145,7 @@ def create_playground_app(
     ui_dir = Path(__file__).resolve().parent / "playground_ui" / "dist"
     spec_payload, parsed_spec = _load_spec_payload(Path(project_root or ".").resolve())
     meta_payload = _meta_from_spec(parsed_spec)
+    setup_state = PlaygroundSetupState.from_env()
 
     # Determine session_store first so we can create SessionManager before load_agent.
     # This allows the orchestrator to share the same SessionManager for background task visibility.
@@ -881,6 +1198,7 @@ def create_playground_app(
                 await agent_wrapper.shutdown()
 
     app = FastAPI(title="PenguiFlow Playground", version="0.1.0", lifespan=_lifespan)
+    app.add_middleware(FixedSessionRewriteMiddleware, setup_state)  # type: ignore[arg-type]
     proactive_setup: Callable[[Any], None] | None = None
 
     # Optional: enable platform task-management meta-tools when a planner factory is available.
@@ -1184,6 +1502,14 @@ def create_playground_app(
     @app.get("/ui/meta", response_model=MetaPayload)
     async def ui_meta() -> MetaPayload:
         return meta_payload
+
+    @app.get("/ui/setup", response_model=SetupStateResponse)
+    async def ui_setup() -> SetupStateResponse:
+        return setup_state.snapshot()
+
+    @app.put("/ui/setup", response_model=SetupStateResponse)
+    async def ui_setup_update(payload: SetupUpdateRequest) -> SetupStateResponse:
+        return setup_state.update_runtime(payload)
 
     @app.get("/ui/components", response_model=ComponentRegistryPayload)
     async def ui_components() -> ComponentRegistryPayload:
@@ -2141,6 +2467,7 @@ def create_playground_app(
     app.state.agent_wrapper = agent_wrapper
     app.state.state_store = store
     app.state.broker = broker
+    app.state.setup_state = setup_state
     return app
 
 

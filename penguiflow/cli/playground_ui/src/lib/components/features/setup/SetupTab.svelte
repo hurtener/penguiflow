@@ -1,6 +1,7 @@
 <script lang="ts">
   import { readable } from 'svelte/store';
   import { ErrorList } from '$lib/components/composites';
+  import { savePlaygroundSetup } from '$lib/services';
   import { getEventsStore, getInteractionsStore, getSessionStore, getSetupStore, getTrajectoryStore } from '$lib/stores';
   import { MessageList, StateDebugger, setAGUIContext, type AGUIStore } from '$lib/agui';
   import SetupField from './SetupField.svelte';
@@ -47,6 +48,29 @@
   const trajectoryStore = getTrajectoryStore();
   const eventsStore = getEventsStore();
   const interactionsStore = getInteractionsStore();
+  let isSavingSetup = $state(false);
+  let setupSaveMessage = $state<string | null>(null);
+
+  const saveRuntimeSetup = async () => {
+    setupStore.clearError();
+    setupSaveMessage = null;
+    isSavingSetup = true;
+    const fixedSessionId = setupStore.fixedSessionId.trim();
+    const updated = await savePlaygroundSetup({
+      fixed_session_id: fixedSessionId ? fixedSessionId : null,
+      rewrite_agui: setupStore.rewriteAguiRequests
+    });
+    isSavingSetup = false;
+    if (!updated) {
+      setupStore.error = 'Failed to save Playground setup.';
+      return;
+    }
+    setupStore.applyBackendSetup(updated);
+    setupSaveMessage = 'Playground setup saved.';
+    if (updated.fixed_session_id) {
+      sessionStore.sessionId = updated.fixed_session_id;
+    }
+  };
 
   setAGUIContext(previewStore);
 </script>
@@ -68,6 +92,29 @@
           New
         </button>
       </div>
+    </SetupField>
+
+    <SetupField
+      label="Fixed Session ID (Optional)"
+      hint="Pins query/header/body session IDs in the backend. Leave blank for default dynamic sessions."
+      full
+    >
+      <input class="setup-input" bind:value={setupStore.fixedSessionId} placeholder="e.g. test-session-001" />
+      <div class="action-row">
+        <button class="ghost-btn small" onclick={saveRuntimeSetup} disabled={isSavingSetup}>
+          {isSavingSetup ? 'Saving...' : 'Save Playground Setup'}
+        </button>
+      </div>
+      {#if setupStore.backendSetup}
+        <div class="setup-note">
+          Effective session:
+          <code>{setupStore.backendSetup.fixed_session_id ?? 'dynamic'}</code>
+          ({setupStore.backendSetup.fixed_session_source})
+        </div>
+      {/if}
+      {#if setupSaveMessage}
+        <div class="setup-note">{setupSaveMessage}</div>
+      {/if}
     </SetupField>
 
     <SetupField label="Tenant ID">
@@ -100,6 +147,17 @@
         bind:value={setupStore.llmContextRaw}
         placeholder={'{}'}
       ></textarea>
+    </SetupField>
+
+    <SetupField
+      label="AG-UI Thread Rewrite"
+      hint="When enabled, fixed session mode rewrites AG-UI thread_id/threadId for /agui requests."
+      full
+    >
+      <label class="toggle-row">
+        <input class="toggle-input" type="checkbox" bind:checked={setupStore.rewriteAguiRequests} />
+        <span>Rewrite AG-UI thread IDs to fixed session</span>
+      </label>
     </SetupField>
 
     <SetupField
@@ -207,6 +265,18 @@
   .agui-preview-title {
     font-size: 12px;
     font-weight: 600;
+    color: var(--color-text-secondary, #3c3a36);
+  }
+
+  .action-row {
+    margin-top: 8px;
+    display: flex;
+    gap: 8px;
+  }
+
+  .setup-note {
+    margin-top: 8px;
+    font-size: 11px;
     color: var(--color-text-secondary, #3c3a36);
   }
 

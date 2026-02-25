@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import pytest
 
-from penguiflow.cli.dev import CLIError, _ensure_ui_assets, _load_env_file
+from penguiflow.cli.dev import (
+    _MEMORY_BASE_URL_ALIASES,
+    CLIError,
+    _ensure_ui_assets,
+    _load_env_file,
+    _load_project_state_store,
+    _memory_base_url_compat_env,
+)
 
 
 class TestLoadEnvFile:
@@ -98,3 +107,130 @@ class TestEnsureUiAssets:
         (tmp_path / "playground_ui" / "dist").mkdir(parents=True)
         # Should not raise
         _ensure_ui_assets(tmp_path)
+
+
+class TestMemoryBaseUrlCompatibility:
+    def test_temporarily_maps_memory_base_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MEMORY_BASE_URL", "http://localhost:6004")
+        for key in _MEMORY_BASE_URL_ALIASES:
+            monkeypatch.delenv(key, raising=False)
+        with _memory_base_url_compat_env():
+            for key in _MEMORY_BASE_URL_ALIASES:
+                assert os.environ[key] == "http://localhost:6004"
+        for key in _MEMORY_BASE_URL_ALIASES:
+            assert key not in os.environ
+
+    def test_preserves_existing_legacy_alias(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        alias_key = _MEMORY_BASE_URL_ALIASES[0]
+        monkeypatch.setenv(alias_key, "http://platform:7000")
+        monkeypatch.setenv("MEMORY_BASE_URL", "http://memory:6004")
+        with _memory_base_url_compat_env():
+            assert os.environ[alias_key] == "http://platform:7000"
+        assert os.environ[alias_key] == "http://platform:7000"
+
+
+class TestProjectStateStoreLoader:
+    def test_loads_state_store_builder_from_project_src(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        agentiv_dir = tmp_path / "src" / "agentiv"
+        agentiv_dir.mkdir(parents=True)
+        (agentiv_dir / "__init__.py").write_text("", encoding="utf-8")
+        (agentiv_dir / "state_store.py").write_text(
+            "def build_agentiv_state_store_from_env():\n"
+            "    return {'kind': 'state_store'}\n",
+            encoding="utf-8",
+        )
+        sys.modules.pop("agentiv", None)
+        sys.modules.pop("agentiv.state_store", None)
+        sys.modules.pop("agentiv.state_store_enhanced", None)
+        store = _load_project_state_store(tmp_path)
+        assert store == {"kind": "state_store"}
+
+    def test_builder_can_use_memory_base_url_only(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        alias_key = _MEMORY_BASE_URL_ALIASES[0]
+        agentiv_dir = tmp_path / "src" / "agentiv"
+        agentiv_dir.mkdir(parents=True)
+        (agentiv_dir / "__init__.py").write_text("", encoding="utf-8")
+        (agentiv_dir / "state_store.py").write_text(
+            "import os\n"
+            "def build_agentiv_state_store_from_env():\n"
+            f"    val = os.getenv({alias_key!r})\n"
+            "    if not val:\n"
+            f"        raise ValueError('missing {alias_key}')\n"
+            "    return {'kind': 'state_store', 'url': val}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv(alias_key, raising=False)
+        monkeypatch.setenv("MEMORY_BASE_URL", "http://memory-only:6004")
+        sys.modules.pop("agentiv", None)
+        sys.modules.pop("agentiv.state_store", None)
+        sys.modules.pop("agentiv.state_store_enhanced", None)
+
+        store = _load_project_state_store(tmp_path)
+        assert store == {"kind": "state_store", "url": "http://memory-only:6004"}
+
+    def test_builder_helper_ignoring_env_still_uses_memory_base_url(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        alias_key = _MEMORY_BASE_URL_ALIASES[0]
+        agentiv_dir = tmp_path / "src" / "agentiv"
+        agentiv_dir.mkdir(parents=True)
+        (agentiv_dir / "__init__.py").write_text("", encoding="utf-8")
+        (agentiv_dir / "state_store.py").write_text(
+            "def from_env_or_dotenv(env_var_name: str, default: str) -> str:\n"
+            "    # Simulate legacy helper that ignores os.environ locally.\n"
+            "    return default\n"
+            "def build_agentiv_state_store_from_env():\n"
+            f"    val = from_env_or_dotenv({alias_key!r}, '')\n"
+            "    if not val:\n"
+            "        raise ValueError('missing alias url')\n"
+            "    return {'kind': 'state_store', 'url': val}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MEMORY_BASE_URL", "http://memory-helper:6004")
+        monkeypatch.delenv(alias_key, raising=False)
+        sys.modules.pop("agentiv", None)
+        sys.modules.pop("agentiv.state_store", None)
+        sys.modules.pop("agentiv.state_store_enhanced", None)
+
+        store = _load_project_state_store(tmp_path)
+        assert store == {"kind": "state_store", "url": "http://memory-helper:6004"}
+
+    def test_builder_helper_cwd_dotenv_value_does_not_override_memory_base_url(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        alias_key = _MEMORY_BASE_URL_ALIASES[0]
+        agentiv_dir = tmp_path / "src" / "agentiv"
+        agentiv_dir.mkdir(parents=True)
+        (agentiv_dir / "__init__.py").write_text("", encoding="utf-8")
+        (agentiv_dir / "state_store.py").write_text(
+            "def from_env_or_dotenv(env_var_name: str, default: str) -> str:\n"
+            "    if env_var_name == 'PLATFORM_URL':\n"
+            "        return 'http://localhost:8000'\n"
+            "    return default\n"
+            "def build_agentiv_state_store_from_env():\n"
+            "    val = from_env_or_dotenv('PLATFORM_URL', '')\n"
+            "    if not val:\n"
+            "        raise ValueError('missing alias url')\n"
+            "    return {'kind': 'state_store', 'url': val}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MEMORY_BASE_URL", "http://memory-final:6004")
+        monkeypatch.delenv(alias_key, raising=False)
+        sys.modules.pop("agentiv", None)
+        sys.modules.pop("agentiv.state_store", None)
+        sys.modules.pop("agentiv.state_store_enhanced", None)
+
+        store = _load_project_state_store(tmp_path)
+        assert store == {"kind": "state_store", "url": "http://memory-final:6004"}

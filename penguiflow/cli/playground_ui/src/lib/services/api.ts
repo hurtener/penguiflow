@@ -1,5 +1,6 @@
 import type {
   MetaResponse,
+  PlaygroundSetupState,
   SpecData,
   ValidationResult,
   TrajectoryPayload,
@@ -62,6 +63,30 @@ export async function loadMeta(): Promise<MetaResponse | null> {
   const result = await fetchWithErrorHandling<MetaResponse>(`${BASE_URL}/ui/meta`);
   if (!result.ok) {
     console.error('meta load failed', result.error);
+    return null;
+  }
+  return result.data;
+}
+
+export async function loadPlaygroundSetup(): Promise<PlaygroundSetupState | null> {
+  const result = await fetchWithErrorHandling<PlaygroundSetupState>(`${BASE_URL}/ui/setup`);
+  if (!result.ok) {
+    console.error('setup load failed', result.error);
+    return null;
+  }
+  return result.data;
+}
+
+export async function savePlaygroundSetup(
+  payload: Partial<Pick<PlaygroundSetupState, 'fixed_session_id' | 'rewrite_agui'>>
+): Promise<PlaygroundSetupState | null> {
+  const result = await fetchWithErrorHandling<PlaygroundSetupState>(`${BASE_URL}/ui/setup`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!result.ok) {
+    console.error('setup save failed', result.error);
     return null;
   }
   return result.data;

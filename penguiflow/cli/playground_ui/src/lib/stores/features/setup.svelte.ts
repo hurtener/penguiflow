@@ -1,4 +1,5 @@
 import { getContext, setContext } from 'svelte';
+import type { PlaygroundSetupState } from '$lib/types';
 import { parseJsonObject } from '$lib/utils';
 
 const SETUP_STORE_KEY = Symbol('setup-store');
@@ -13,8 +14,12 @@ export interface SetupStore {
   userId: string;
   toolContextRaw: string;
   llmContextRaw: string;
+  fixedSessionId: string;
+  rewriteAguiRequests: boolean;
+  backendSetup: PlaygroundSetupState | null;
   error: string | null;
   useAgui: boolean;
+  applyBackendSetup(setup: PlaygroundSetupState): void;
   parseContexts(): SetupContext | null;
   clearError(): void;
   reset(): void;
@@ -25,6 +30,9 @@ export function createSetupStore(): SetupStore {
   let userId = $state('playground-user');
   let toolContextRaw = $state('{}');
   let llmContextRaw = $state('{}');
+  let fixedSessionId = $state('');
+  let rewriteAguiRequests = $state(false);
+  let backendSetup = $state<PlaygroundSetupState | null>(null);
   let error = $state<string | null>(null);
   let useAgui = $state(false);
 
@@ -41,11 +49,26 @@ export function createSetupStore(): SetupStore {
     get llmContextRaw() { return llmContextRaw; },
     set llmContextRaw(v: string) { llmContextRaw = v; },
 
+    get fixedSessionId() { return fixedSessionId; },
+    set fixedSessionId(v: string) { fixedSessionId = v; },
+
+    get rewriteAguiRequests() { return rewriteAguiRequests; },
+    set rewriteAguiRequests(v: boolean) { rewriteAguiRequests = v; },
+
+    get backendSetup() { return backendSetup; },
+    set backendSetup(v: PlaygroundSetupState | null) { backendSetup = v; },
+
     get error() { return error; },
     set error(v: string | null) { error = v; },
 
     get useAgui() { return useAgui; },
     set useAgui(v: boolean) { useAgui = v; },
+
+    applyBackendSetup(setup: PlaygroundSetupState) {
+      backendSetup = setup;
+      fixedSessionId = setup.fixed_session_id ?? '';
+      rewriteAguiRequests = setup.rewrite_agui;
+    },
 
     /**
      * Parse and validate contexts
@@ -77,6 +100,9 @@ export function createSetupStore(): SetupStore {
       userId = 'playground-user';
       toolContextRaw = '{}';
       llmContextRaw = '{}';
+      fixedSessionId = '';
+      rewriteAguiRequests = false;
+      backendSetup = null;
       error = null;
       useAgui = false;
     }

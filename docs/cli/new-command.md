@@ -70,6 +70,9 @@ Choose based on how you will operate the system:
 - Use `--dry-run` in repos to avoid accidental writes.
 - Prefer `react` unless you already know you’re building a pure runtime DAG.
 - Prefer envelope-style messaging and `trace_id` scoping in production systems (see **[Messages & envelopes](../core/messages-and-envelopes.md)**).
+- Generated templates include Playground fixed-session env keys in `.env.example`:
+  - `PLAYGROUND_FIXED_SESSION_ID`
+  - `PLAYGROUND_REWRITE_AGUI`
 
 ## Runnable example (typical usage)
 

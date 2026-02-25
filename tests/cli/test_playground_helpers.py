@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 from penguiflow.cli.playground import (
+    FixedSessionRewriteMiddleware,
+    PlaygroundSetupState,
+    SetupUpdateRequest,
     _discover_spec_path,
     _done_frame,
     _error_frame,
@@ -74,6 +77,79 @@ class TestMergeContexts:
         secondary = {"b": 3, "c": 4}
         result = _merge_contexts(primary, secondary)
         assert result == {"a": 1, "b": 3, "c": 4}
+
+
+class TestFixedSessionRewriteMiddlewareHelpers:
+    """Tests for fixed-session payload rewrite helpers."""
+
+    def test_rewrites_agui_thread_ids_when_enabled(self) -> None:
+        payload = {"thread_id": "old-thread", "threadId": "old-thread-camel", "run_id": "run-1"}
+        rewritten = FixedSessionRewriteMiddleware._rewrite_json_payload(
+            "/agui/resume",
+            payload,
+            "fixed-thread",
+            rewrite_agui=True,
+        )
+        assert rewritten["thread_id"] == "fixed-thread"
+        assert rewritten["threadId"] == "fixed-thread"
+        assert rewritten["run_id"] == "run-1"
+
+    def test_does_not_rewrite_agui_thread_ids_when_disabled(self) -> None:
+        payload = {"threadId": "original-thread", "runId": "run-2"}
+        rewritten = FixedSessionRewriteMiddleware._rewrite_json_payload(
+            "/agui/agent",
+            payload,
+            "fixed-thread",
+            rewrite_agui=False,
+        )
+        assert rewritten["threadId"] == "original-thread"
+        assert rewritten["runId"] == "run-2"
+
+    def test_rewrites_query_and_header_session_id(self) -> None:
+        scope = {
+            "query_string": b"trace_id=t1&session_id=old-session",
+            "headers": [(b"x-session-id", b"old-header")],
+        }
+        rewritten_scope, query_from = FixedSessionRewriteMiddleware._rewrite_query_session(scope, "fixed-session")
+        rewritten_scope, header_from = FixedSessionRewriteMiddleware._rewrite_session_header(
+            rewritten_scope,
+            "fixed-session",
+        )
+        assert query_from == "old-session"
+        assert header_from == "old-header"
+        assert rewritten_scope["query_string"] == b"trace_id=t1&session_id=fixed-session"
+        assert rewritten_scope["headers"][0] == (b"x-session-id", b"fixed-session")
+
+    def test_invalid_json_payload_returns_none(self) -> None:
+        parsed = FixedSessionRewriteMiddleware._parse_json_body(b"{not-json")
+        assert parsed is None
+
+
+class TestPlaygroundSetupState:
+    def test_precedence_runtime_then_request_then_env(self) -> None:
+        state = PlaygroundSetupState(env_fixed_session_id="env-session", env_rewrite_agui=False)
+
+        # Request override beats env when runtime override is not set.
+        request_value = state.effective_fixed_session_id([(b"x-playground-fixed-session-id", b"request-session")])
+        assert request_value == "request-session"
+
+        updated = state.update_runtime(SetupUpdateRequest(fixed_session_id="runtime-session"))
+        assert updated.fixed_session_id == "runtime-session"
+
+        # Runtime override beats request override.
+        effective = state.effective_fixed_session_id([(b"x-playground-fixed-session-id", b"request-session")])
+        assert effective == "runtime-session"
+
+    def test_snapshot_tracks_sources(self) -> None:
+        state = PlaygroundSetupState(env_fixed_session_id="env-session", env_rewrite_agui=True)
+        snapshot = state.snapshot()
+        assert snapshot.fixed_session_source == "env"
+        assert snapshot.rewrite_agui_source == "env"
+
+        updated = state.update_runtime(SetupUpdateRequest(fixed_session_id="runtime-session", rewrite_agui=False))
+        assert updated.fixed_session_source == "runtime"
+        assert updated.rewrite_agui_source == "runtime"
+        assert updated.rewrite_agui is False
 
 
 class TestDiscoverSpecPath:

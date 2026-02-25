@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   loadMeta,
+  loadPlaygroundSetup,
+  savePlaygroundSetup,
   loadSpec,
   validateSpec,
   generateProject,
@@ -47,6 +49,59 @@ describe('api service', () => {
       const result = await loadMeta();
 
       expect(result).toBeNull();
+    });
+  });
+
+  describe('playground setup APIs', () => {
+    it('loads setup successfully', async () => {
+      const mockSetup = {
+        fixed_session_id: 'session-1',
+        rewrite_agui: false,
+        fixed_session_source: 'env',
+        rewrite_agui_source: 'env',
+        runtime_fixed_session_id: null,
+        runtime_rewrite_agui: null,
+        env_fixed_session_id: 'session-1',
+        env_rewrite_agui: false
+      };
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockSetup)
+      });
+
+      const result = await loadPlaygroundSetup();
+      expect(fetch).toHaveBeenCalledWith('/ui/setup');
+      expect(result).toEqual(mockSetup);
+    });
+
+    it('saves setup successfully', async () => {
+      const mockSetup = {
+        fixed_session_id: 'session-2',
+        rewrite_agui: true,
+        fixed_session_source: 'runtime',
+        rewrite_agui_source: 'runtime',
+        runtime_fixed_session_id: 'session-2',
+        runtime_rewrite_agui: true,
+        env_fixed_session_id: null,
+        env_rewrite_agui: false
+      };
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockSetup)
+      });
+
+      const result = await savePlaygroundSetup({
+        fixed_session_id: 'session-2',
+        rewrite_agui: true
+      });
+      expect(fetch).toHaveBeenCalledWith('/ui/setup', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fixed_session_id: 'session-2', rewrite_agui: true })
+      });
+      expect(result).toEqual(mockSetup);
     });
   });
 

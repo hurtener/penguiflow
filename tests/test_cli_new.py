@@ -67,6 +67,23 @@ def test_cli_new_command_creates_project(tmp_path: Path) -> None:
     "template",
     ["minimal", "react", "parallel", "flow", "controller", "rag_server", "wayfinder", "analyst", "enterprise"],
 )
+def test_generated_env_example_includes_fixed_session_options(tmp_path: Path, template: str) -> None:
+    name = f"{template}-env-agent"
+    project_dir, _ = _project_paths(tmp_path, name)
+    result = run_new(name=name, template=template, output_dir=tmp_path, quiet=True)
+    assert result.success
+
+    env_example = project_dir / ".env.example"
+    assert env_example.exists()
+    content = env_example.read_text(encoding="utf-8")
+    assert "PLAYGROUND_FIXED_SESSION_ID=" in content
+    assert "PLAYGROUND_REWRITE_AGUI=" in content
+
+
+@pytest.mark.parametrize(
+    "template",
+    ["minimal", "react", "parallel", "flow", "controller", "rag_server", "wayfinder", "analyst", "enterprise"],
+)
 def test_generated_project_tests_pass(tmp_path: Path, template: str) -> None:
     name = f"{template}-proj"
     project_dir, _ = _project_paths(tmp_path, name)

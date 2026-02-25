@@ -68,6 +68,66 @@ class MockAgentWrapper(AgentWrapper):
         return self._chat_result
 
 
+class CapturingAgentWrapper(MockAgentWrapper):
+    """Wrapper that records the final chat inputs seen by the backend."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_chat_session_id: str | None = None
+        self.last_chat_tool_context: dict[str, Any] | None = None
+
+    async def chat(
+        self,
+        query: str,
+        *,
+        session_id: str,
+        llm_context: dict[str, Any] | None = None,
+        tool_context: dict[str, Any] | None = None,
+        event_consumer: Any = None,
+        trace_id_hint: str | None = None,
+        steering: Any = None,
+    ) -> ChatResult:
+        del query, llm_context, event_consumer, trace_id_hint, steering
+        self.last_chat_session_id = session_id
+        self.last_chat_tool_context = dict(tool_context or {})
+        return ChatResult(
+            trace_id="captured-trace",
+            session_id=session_id,
+            answer="captured",
+            metadata={"ok": True},
+            pause=None,
+        )
+
+
+class _ArtifactRef:
+    def __init__(self, artifact_id: str = "artifact-1") -> None:
+        self.id = artifact_id
+        self.mime_type = "text/plain"
+        self.filename = "artifact.txt"
+
+    def model_dump(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "mime_type": self.mime_type,
+            "filename": self.filename,
+        }
+
+
+class RecordingArtifactStore:
+    def __init__(self) -> None:
+        self.last_session_check: str | None = None
+
+    async def get_with_session_check(self, artifact_id: str, session_id: str) -> bytes | None:
+        self.last_session_check = session_id
+        return f"artifact:{artifact_id}:{session_id}".encode()
+
+    async def get(self, artifact_id: str) -> bytes | None:
+        return f"artifact:{artifact_id}:raw".encode()
+
+    async def get_ref(self, artifact_id: str) -> _ArtifactRef | None:
+        return _ArtifactRef(artifact_id=artifact_id)
+
+
 class TestHealthEndpoint:
     """Tests for /health endpoint (line 719)."""
 
@@ -158,6 +218,38 @@ class TestUIMetaEndpoint:
         assert "planner" in data
         assert "services" in data
         assert "tools" in data
+
+
+class TestUISetupEndpoint:
+    """Tests for /ui/setup runtime fixed-session configuration."""
+
+    def test_ui_setup_reads_env_defaults(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("PLAYGROUND_FIXED_SESSION_ID", "env-session")
+        monkeypatch.setenv("PLAYGROUND_REWRITE_AGUI", "true")
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/ui/setup")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["fixed_session_id"] == "env-session"
+        assert payload["rewrite_agui"] is True
+        assert payload["fixed_session_source"] == "env"
+
+    def test_ui_setup_runtime_override_wins(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("PLAYGROUND_FIXED_SESSION_ID", "env-session")
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        update = client.put("/ui/setup", json={"fixed_session_id": "runtime-session", "rewrite_agui": True})
+        assert update.status_code == 200
+        payload = update.json()
+        assert payload["fixed_session_id"] == "runtime-session"
+        assert payload["fixed_session_source"] == "runtime"
+        assert payload["rewrite_agui"] is True
+        assert payload["rewrite_agui_source"] == "runtime"
 
 
 class TestUIComponentsEndpoint:
@@ -392,6 +484,60 @@ class TestChatEndpoint:
         assert "Chat failed" in response.json()["detail"]
 
 
+class TestFixedSessionMiddleware:
+    """Integration tests for fixed-session rewrite behavior."""
+
+    def test_rewrites_chat_body_session_fields(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("PLAYGROUND_FIXED_SESSION_ID", "fixed-session-123")
+        wrapper = CapturingAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/chat",
+            json={
+                "query": "Hello",
+                "session_id": "request-session",
+                "tool_context": {"session_id": "tool-session"},
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["session_id"] == "fixed-session-123"
+        assert wrapper.last_chat_session_id == "fixed-session-123"
+        assert wrapper.last_chat_tool_context is not None
+        assert wrapper.last_chat_tool_context["session_id"] == "fixed-session-123"
+
+    def test_request_override_header_beats_env_when_runtime_not_set(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("PLAYGROUND_FIXED_SESSION_ID", "env-session")
+        wrapper = CapturingAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/chat",
+            headers={"X-Playground-Fixed-Session-ID": "request-session"},
+            json={"query": "Hello", "session_id": "body-session"},
+        )
+        assert response.status_code == 200
+        assert response.json()["session_id"] == "request-session"
+        assert wrapper.last_chat_session_id == "request-session"
+
+    def test_invalid_json_passes_through_without_middleware_crash(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("PLAYGROUND_FIXED_SESSION_ID", "fixed-session-123")
+        wrapper = CapturingAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/chat",
+            content="{invalid-json",
+            headers={"Content-Type": "application/json"},
+        )
+        # FastAPI validation failure is expected; middleware should not convert this into 500.
+        assert response.status_code == 422
+
+
 class TestChatStreamEndpoint:
     """Tests for /chat/stream endpoint (lines 831-881)."""
 
@@ -563,6 +709,34 @@ class TestArtifactEndpoints:
         response = client.get("/artifacts/test-id/meta")
         assert response.status_code == 501
         assert "Artifact storage not enabled" in response.json()["detail"]
+
+    def test_get_artifact_rewrites_query_session_id(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("PLAYGROUND_FIXED_SESSION_ID", "fixed-session-query")
+        wrapper = MockAgentWrapper()
+        recording_store = RecordingArtifactStore()
+        wrapper._planner = MagicMock()
+        wrapper._planner.artifact_store = recording_store
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/artifacts/a-1", params={"session_id": "wrong-query"})
+        assert response.status_code == 200
+        assert recording_store.last_session_check == "fixed-session-query"
+
+    def test_get_artifact_rewrites_session_header(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("PLAYGROUND_FIXED_SESSION_ID", "fixed-session-header")
+        wrapper = MockAgentWrapper()
+        recording_store = RecordingArtifactStore()
+        wrapper._planner = MagicMock()
+        wrapper._planner.artifact_store = recording_store
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/artifacts/a-2", headers={"X-Session-ID": "wrong-header"})
+        assert response.status_code == 200
+        assert recording_store.last_session_check == "fixed-session-header"
 
 
 class TestResourceEndpoints:
