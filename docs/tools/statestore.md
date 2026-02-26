@@ -45,6 +45,19 @@ Short-term memory persistence:
 - `save_memory_state(key: str, state: dict) -> None`
 - `load_memory_state(key: str) -> dict | None`
 
+Session KV facade (tool `ctx.kv`):
+
+- Tools can persist intermediate state without calling the StateStore directly:
+  - `await ctx.kv.set("state", {"phase": "queried"})`
+- Backed by the same optional memory persistence methods above (`save_memory_state` / `load_memory_state`).
+- Reserved keyspace (do not use for your own app data):
+  - session-scoped (default, no TTL): `kv:v1:{tenant}:{user}:{session}:session:{namespace}:{key}`
+  - task-scoped (opt-in, fixed TTL=3600s): `kv:v1:{tenant}:{user}:{session}:task:{task_id}:{namespace}:{key}`
+- Observability:
+  - each KV mutation emits planner events (`kv_set`, `kv_patch`, etc.) and is projected into `StateUpdate(update_type=CHECKPOINT)`
+- Consistency:
+  - best-effort multi-writer (no CAS) when implemented via `save_memory_state` / `load_memory_state`
+
 Planner event storage:
 
 - `save_planner_event(trace_id: str, event: PlannerEvent) -> None`
