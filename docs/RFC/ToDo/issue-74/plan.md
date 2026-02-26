@@ -44,6 +44,14 @@ def _scope_matches(artifact_scope: ArtifactScope | None, filter_scope: ArtifactS
       as having all-None fields — so it matches any filter field that is None,
       but FAILS any filter field that is non-None.
     """
+    for field in ("tenant_id", "user_id", "session_id", "trace_id"):
+        filter_val = getattr(filter_scope, field)
+        if filter_val is None:
+            continue  # None filter = wildcard, matches anything
+        artifact_val = getattr(artifact_scope, field) if artifact_scope is not None else None
+        if artifact_val != filter_val:
+            return False
+    return True
 ```
 
 ### 1.2 NoOpArtifactStore — `penguiflow/artifacts.py`
@@ -89,6 +97,8 @@ Simple delegation: `return await self._store.list(scope=scope)` (no event needed
 
 This step is a pure mechanical rename. After this step, all existing code continues to work identically — `_artifacts` returns the same raw `ArtifactStore`/proxy it always did. Run `pytest`, `ruff check`, and `mypy` after this step to confirm nothing broke before moving on.
 
+> **ATOMICITY:** All sub-steps §2.1 through §2.10 must be applied together before running the checkpoint. Applying §2.1 alone (renaming the protocol property) without updating all implementations and call sites will break tests and type checks. Do NOT run `pytest`/`ruff`/`mypy` until every §2.x sub-step is complete.
+
 ### 2.1 Update `ToolContext` Protocol — `penguiflow/planner/context.py`
 
 - Rename the existing `artifacts` property to `_artifacts` (same return type: `ArtifactStore`)
@@ -103,6 +113,7 @@ def _artifacts(self) -> ArtifactStore:
 ### 2.2 Rename in `_PlannerContext` — `penguiflow/planner/planner_context.py`
 
 - Rename current `artifacts` property to `_artifacts` (returns the raw `_EventEmittingArtifactStoreProxy`)
+- **CRITICAL — `kv` property call site (line 102):** The `kv` property passes `artifacts=self.artifacts` to `SessionKVFacade`. This must be updated to `artifacts=self._artifact_proxy` (referencing the raw proxy directly). Using `self._artifacts` would also work, but `self._artifact_proxy` is more explicit and avoids going through the property layer. **If this site is not updated:** after Enhancement 2, `self.artifacts` will raise `AttributeError` (property no longer exists). After Enhancement 3, `self.artifacts` would pass a `ScopedArtifacts` facade to `SessionKVFacade` which expects `ArtifactStore` — the facade has different method names (`upload`/`download` vs `put_text`/`get`) and would break at runtime.
 
 ### 2.3 Rename in `ToolJobContext` — `penguiflow/sessions/tool_jobs.py`
 
@@ -110,6 +121,7 @@ def _artifacts(self) -> ArtifactStore:
 - Rename internal attribute `self._artifacts` → `self._artifacts_store` to avoid collision with the new `_artifacts` property name. This includes updating the `__init__` assignment:
   - **Before:** `self._artifacts = artifacts or NoOpArtifactStore()`
   - **After:** `self._artifacts_store = artifacts or NoOpArtifactStore()`
+- **`kv` property (line 71):** The `kv` property currently has `artifacts=self._artifacts`, referencing the **instance attribute**. After the rename, the instance attribute is `self._artifacts_store`, and `self._artifacts` now resolves to the new **property** `_artifacts` (which returns `self._artifacts_store`). This still produces the correct value (the raw `ArtifactStore`), so **no change is needed on line 71**. Do NOT rename it to `self._artifacts_store` — leaving it as `self._artifacts` is correct and consistent with the property-based access pattern.
 
 ### 2.4 Migrate all call sites from `ctx.artifacts` to `ctx._artifacts`
 
@@ -120,7 +132,7 @@ def _artifacts(self) -> ArtifactStore:
 - Line 1615: `artifact_store=ctx.artifacts` → `artifact_store=ctx._artifacts`
 
 **`penguiflow/sessions/tool_jobs.py`** (1 site):
-- Line 236: `artifact_store=ctx.artifacts` → `artifact_store=ctx._artifacts`
+- Line 275: `artifact_store=ctx.artifacts` → `artifact_store=ctx._artifacts`
 
 ### 2.4b Verify completeness with codebase-wide grep
 
@@ -296,8 +308,22 @@ async def delete(self, artifact_id: str) -> bool:
     ...
 
 def _check_scope(self, ref: ArtifactRef) -> bool:
-    """Check if an artifact's scope is compatible with this facade's scope."""
-    ...
+    """Check if an artifact's scope is compatible with this facade's scope.
+
+    Access control semantics (NOT filtering):
+    - If artifact has no scope (ref.scope is None) → PASS (unrestricted artifact).
+    - For each of tenant_id, user_id, session_id (NOT trace_id):
+      if BOTH facade field and artifact field are non-None, they must match.
+      If either is None, that dimension passes.
+    """
+    if ref.scope is None:
+        return True
+    for field in ("tenant_id", "user_id", "session_id"):
+        facade_val = getattr(self._scope, field)
+        artifact_val = getattr(ref.scope, field)
+        if facade_val is not None and artifact_val is not None and facade_val != artifact_val:
+            return False
+    return True
 ```
 
 **Scope check rules for `download`/`get_metadata`/`list`/`exists`/`delete` (reads & deletes):**
@@ -507,21 +533,21 @@ async def emit_artifact(
 
 Several documentation files reference the old `ctx.artifacts.put_bytes()`/`put_text()` API which is replaced by `ctx.artifacts.upload()` for tool developers. Update these references:
 
+**Scope rule:** Only update references that describe the **tool developer** API (`ctx.artifacts.*`). References that describe the **internal framework pipeline** (e.g., what ToolNode's extraction layers do internally) should remain as-is, because internal code still uses `ctx._artifacts.put_bytes()`/`put_text()`.
+
 ### 4.0.1 `docs/tools/artifacts-guide.md`
 
-- Line 274: `ref = await ctx.artifacts.put_bytes(` → `ref = await ctx.artifacts.upload(`
-- Line 829: table entry `ctx.artifacts.put_bytes()` → `ctx.artifacts.upload()`
-- Update any surrounding prose that describes the `put_bytes`/`put_text` API as the tool developer interface.
+- Line 274: `ref = await ctx.artifacts.put_bytes(` → `ref = await ctx.artifacts.upload(` — this is a tool-developer code example, so update it.
+- Line 829: table entry `ctx.artifacts.put_bytes()` in the "Binary Storage" row — this describes the **internal pipeline component**, NOT the tool-developer API. **Do NOT update this row.** It documents how the framework stores artifacts internally.
+- Update any surrounding prose that describes `put_bytes`/`put_text` as the tool developer interface, but leave internal architecture descriptions unchanged.
 
 ### 4.0.2 `docs/tools/artifacts-and-resources.md`
 
-- Lines 70-71: `ctx.artifacts.put_text(...)` / `ctx.artifacts.put_bytes(...)` → `ctx.artifacts.upload(...)`
+- Lines 70-71: `ctx.artifacts.put_text(...)` / `ctx.artifacts.put_bytes(...)` — these describe what ToolNode's **internal extraction pipeline** does (clamping large strings, extracting binary content). These are internal framework calls, NOT tool-developer API. **Do NOT update these lines.** After this plan, the internal pipeline uses `ctx._artifacts.put_text()`/`put_bytes()`.
 
 ### 4.0.3 `docs/planner/tool-design.md`
 
-- Line 80: `ctx.artifacts` reference — verify context. If it describes the tool developer API, update to mention `ctx.artifacts.upload()`.
-
-**Note:** Only update references that describe the **tool developer** API (`ctx.artifacts.*`). References to the internal `ArtifactStore` protocol methods (`put_bytes`, `put_text`) in implementation/architecture docs should remain as-is.
+- Line 80: `ctx.artifacts` reference — this says "store them in `ctx.artifacts` and return a compact reference". This IS tool-developer guidance. After this plan, `ctx.artifacts` returns the `ScopedArtifacts` facade, so the reference is **correct as-is**. The method name is `upload()`, so optionally expand to `ctx.artifacts.upload(...)` for clarity, but the current text is not wrong.
 
 ---
 
@@ -550,7 +576,7 @@ All new tests go in the existing `tests/test_artifacts.py` file alongside the cu
 |---|---|
 | `test_list_always_empty` | `NoOpArtifactStore().list()` returns `[]` regardless of scope. |
 
-**Class: `TestPlaygroundArtifactStoreList`** (may go in a separate test file if `PlaygroundArtifactStore` tests are already elsewhere)
+**Class: `TestPlaygroundArtifactStoreList`** (in `tests/test_artifacts.py` alongside other artifact store tests)
 
 | Test | Description |
 |---|---|
@@ -656,8 +682,8 @@ All new tests go in the existing `tests/test_artifacts.py` file alongside the cu
 | `penguiflow/state/in_memory.py` | 1 | Add `list` to `PlaygroundArtifactStore` |
 | `penguiflow/planner/artifact_handling.py` | 1 | Add `list` delegation to `_EventEmittingArtifactStoreProxy` |
 | `penguiflow/planner/context.py` | 2, 3 | Rename `artifacts` → `_artifacts`; later add new `artifacts` property returning `ScopedArtifacts`; add imports |
-| `penguiflow/planner/planner_context.py` | 2, 3 | Rename `artifacts` → `_artifacts`; later add `_scoped_artifacts` slot + facade + new `artifacts` property |
-| `penguiflow/sessions/tool_jobs.py` | 2, 3 | Rename `artifacts` → `_artifacts` + attribute rename (`self._artifacts` → `self._artifacts_store`); later add `ScopedArtifacts` facade + new `artifacts` property; 1 call-site migration (line 236) |
+| `penguiflow/planner/planner_context.py` | 2, 3 | Rename `artifacts` → `_artifacts`; update `kv` property (line 102) `self.artifacts` → `self._artifact_proxy`; later add `_scoped_artifacts` slot + facade + new `artifacts` property |
+| `penguiflow/sessions/tool_jobs.py` | 2, 3 | Rename `artifacts` → `_artifacts` + attribute rename (`self._artifacts` → `self._artifacts_store`); later add `ScopedArtifacts` facade + new `artifacts` property; 1 call-site migration (line 275) |
 | `penguiflow/tools/node.py` | 2 | 9 sites: `ctx.artifacts` → `ctx._artifacts` |
 | `penguiflow/cli/playground.py` | 2 | Rename `artifacts` → `_artifacts` + attribute rename (`self._artifacts` → `self._artifacts_store`) in `MinimalCtx`. **Critical:** without this, playground resource reads break at runtime. |
 | `tests/test_rich_output_nodes.py` | 2, 3 | Rename attribute + property in `DummyContext`; `ctx.artifacts.put_text` → `ctx._artifacts.put_text`; later add `ScopedArtifacts` facade |
@@ -667,9 +693,9 @@ All new tests go in the existing `tests/test_artifacts.py` file alongside the cu
 | `tests/a2a/test_a2a_planner_tools.py` | 2, 3 | Rename `artifacts` → `_artifacts` in `_FakeCtx` (line 185), change return from `None` to `NoOpArtifactStore()`; later add `artifacts` property returning `ScopedArtifacts` |
 | `penguiflow/cli/templates/conftest.py.jinja` | 3 | Add `_artifacts` and `artifacts` `None`-stub properties to `DummyToolContext` |
 | `penguiflow/templates/new/react/tests/conftest.py.jinja` | 3 | Add `_artifacts` and `artifacts` `None`-stub properties to `DummyToolContext` |
-| `docs/tools/artifacts-guide.md` | 4 | Update `ctx.artifacts.put_bytes()` references to `ctx.artifacts.upload()` |
-| `docs/tools/artifacts-and-resources.md` | 4 | Update `ctx.artifacts.put_text()`/`put_bytes()` references to `ctx.artifacts.upload()` |
-| `docs/planner/tool-design.md` | 4 | Update `ctx.artifacts` API references if describing tool developer interface |
+| `docs/tools/artifacts-guide.md` | 4 | Update tool-developer code example (line 274) to `ctx.artifacts.upload()`. Leave internal pipeline table row (line 829) unchanged. |
+| `docs/tools/artifacts-and-resources.md` | 4 | **No changes needed** — lines 70-71 describe internal pipeline, not tool-developer API. |
+| `docs/planner/tool-design.md` | 4 | **No changes needed** — line 80 `ctx.artifacts` reference is correct as-is (optionally expand to `ctx.artifacts.upload()` for clarity). |
 | `tests/test_artifacts.py` | 1, 3 | See section "Tests" above — all test classes in §4.1–§4.3 |
 
 ---
