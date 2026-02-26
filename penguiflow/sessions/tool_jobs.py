@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from collections import ChainMap
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Callable, Mapping, MutableMapping
 from types import MappingProxyType
 from typing import Any
 
@@ -34,10 +34,15 @@ class ToolJobContext(ToolContext):
         llm_context: Mapping[str, Any],
         tool_context: dict[str, Any],
         artifacts: ArtifactStore | None,
+        state_store: object | None = None,
+        checkpoint_publisher: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
         self._llm_context = dict(llm_context)
         self._tool_context = dict(tool_context)
         self._artifacts = artifacts or NoOpArtifactStore()
+        self._state_store = state_store
+        self._checkpoint_publisher = checkpoint_publisher
+        self._kv = None
 
     @property
     def llm_context(self) -> Mapping[str, Any]:
@@ -55,6 +60,19 @@ class ToolJobContext(ToolContext):
     @property
     def artifacts(self) -> ArtifactStore:
         return self._artifacts
+
+    @property
+    def kv(self):
+        from .session_kv import SessionKVFacade
+
+        if self._kv is None:
+            self._kv = SessionKVFacade(
+                state_store=self._state_store,
+                artifacts=self._artifacts,
+                tool_context=self._tool_context,
+                emit_checkpoint_update=self._checkpoint_publisher,
+            )
+        return self._kv
 
     async def pause(
         self,
@@ -217,10 +235,31 @@ def build_tool_job_pipeline(
             },
         )
         snapshot: TaskContextSnapshot = runtime.context_snapshot
+        # SessionStateStore may be an adapter over a core StateStore; Session KV needs
+        # access to the core store for save_memory_state/load_memory_state.
+        kv_store = getattr(runtime.session._state_store, "_store", runtime.session._state_store)
+        tool_call_id = f"job:{runtime.state.task_id}"
+        trace_id = (
+            runtime.state.trace_id
+            or runtime.context_snapshot.trace_id
+            or tool_call_id
+        )
+        def _publish_checkpoint(payload: Mapping[str, Any]) -> None:
+            runtime.emit_update(UpdateType.CHECKPOINT, dict(payload))
+            return None
+
         ctx = ToolJobContext(
             llm_context=snapshot.llm_context or {},
-            tool_context={**(snapshot.tool_context or {}), "task_id": runtime.state.task_id},
+            tool_context={
+                **(snapshot.tool_context or {}),
+                "task_id": runtime.state.task_id,
+                "trace_id": trace_id,
+                "_current_tool_name": spec.name,
+                "_current_tool_call_id": tool_call_id,
+            },
             artifacts=artifacts,
+            state_store=kv_store,
+            checkpoint_publisher=_publish_checkpoint,
         )
         parsed_args = spec.args_model.model_validate(args_payload)
         result = await spec.node.func(parsed_args, ctx)
