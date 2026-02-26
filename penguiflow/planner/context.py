@@ -21,6 +21,51 @@ PlannerPauseReason = Literal[
     "constraints_conflict",
 ]
 
+KVScope = Literal["session", "task"]
+
+
+class SessionKV(Protocol):
+    async def get(self, key: str, *, scope: KVScope = "session", namespace: str | None = None) -> Any | None: ...
+
+    async def set(
+        self,
+        key: str,
+        value: Any,
+        *,
+        scope: KVScope = "session",
+        namespace: str | None = None,
+        emit_update: bool = True,
+    ) -> Any: ...
+
+    async def patch(
+        self,
+        key: str,
+        patch: Mapping[str, Any],
+        *,
+        scope: KVScope = "session",
+        namespace: str | None = None,
+        emit_update: bool = True,
+    ) -> Any: ...
+
+    async def get_or_init(
+        self,
+        key: str,
+        default: Any,
+        *,
+        scope: KVScope = "session",
+        namespace: str | None = None,
+        emit_update: bool = True,
+    ) -> Any: ...
+
+    async def delete(
+        self,
+        key: str,
+        *,
+        scope: KVScope = "session",
+        namespace: str | None = None,
+        emit_update: bool = True,
+    ) -> bool: ...
+
 
 class ToolContext(Protocol):
     """Protocol for planner tool execution context."""
@@ -51,6 +96,15 @@ class ToolContext(Protocol):
                 filename="report.pdf",
             )
             return {"artifact": ref, "summary": "Downloaded PDF"}
+        """
+
+    @property
+    def kv(self) -> SessionKV:
+        """Durable session key/value facade.
+
+        Backed by the configured StateStore's optional memory persistence.
+        Default scope is session-scoped with no TTL. Task scope is opt-in and
+        uses a fixed TTL of 3600 seconds.
         """
 
     def pause(

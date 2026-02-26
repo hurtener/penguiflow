@@ -63,6 +63,9 @@ If you use `DefaultShortTermMemory` (the built-in implementation), it can persis
 
 See `penguiflow.state.protocol.SupportsMemoryState`.
 
+!!! note
+    These same methods are also used by the durable tool KV facade (`ctx.kv`) under a reserved keyspace prefix `kv:v1:`. If your StateStore implements STM persistence, it should accept arbitrary composite keys (not just `tenant:user:session`).
+
 ## What STM stores
 
 At a high level STM maintains:

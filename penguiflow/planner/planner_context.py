@@ -30,6 +30,7 @@ class _PlannerContext(ToolContext):
         "_artifact_seq",
         "_artifact_proxy",
         "_meta_warned",
+        "_kv",
     )
 
     def __init__(self, planner: ReactPlanner, trajectory: Trajectory) -> None:
@@ -48,6 +49,7 @@ class _PlannerContext(ToolContext):
             registry=planner._artifact_registry,
         )
         self._meta_warned = False
+        self._kv = None
 
     @property
     def llm_context(self) -> Mapping[str, Any]:
@@ -79,6 +81,29 @@ class _PlannerContext(ToolContext):
         when artifacts are stored (e.g., for real-time UI updates).
         """
         return self._artifact_proxy
+
+    @property
+    def kv(self):
+        from penguiflow.sessions.session_kv import SessionKVFacade
+
+        if self._kv is None:
+            def _emit(event_type: str, payload: Mapping[str, Any]) -> None:
+                self._planner._emit_event(
+                    PlannerEvent(
+                        event_type=event_type,
+                        ts=self._planner._time_source(),
+                        trajectory_step=len(self._trajectory.steps),
+                        extra=dict(payload),
+                    )
+                )
+
+            self._kv = SessionKVFacade(
+                state_store=getattr(self._planner, "_state_store", None),
+                artifacts=self.artifacts,
+                tool_context=self._tool_context,
+                emit_planner_event=_emit,
+            )
+        return self._kv
 
     async def emit_chunk(
         self,
