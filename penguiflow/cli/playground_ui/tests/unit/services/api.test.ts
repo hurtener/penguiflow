@@ -5,6 +5,7 @@ import {
   validateSpec,
   generateProject,
   fetchTrajectory,
+  listSessionMessages,
   extractFilename,
   downloadArtifact,
   getArtifactMeta
@@ -195,6 +196,34 @@ describe('api service', () => {
 
       const result = await fetchTrajectory('trace', 'session');
 
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('listSessionMessages', () => {
+    it('fetches session messages with query params', async () => {
+      const mockData = [
+        { id: 'm1', role: 'user', content: 'Hi', ts: 1700000000 }
+      ];
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockData)
+      });
+
+      const result = await listSessionMessages('session-1', 'tenant-1', 'user-1', 10);
+
+      const mockedFetch = globalThis.fetch as unknown as { mock: { calls: Array<[unknown]> } };
+      const [calledUrl] = mockedFetch.mock.calls[0] ?? [];
+      expect(String(calledUrl)).toContain('/sessions/session-1/messages');
+      expect(String(calledUrl)).toContain('tenant_id=tenant-1');
+      expect(String(calledUrl)).toContain('user_id=user-1');
+      expect(String(calledUrl)).toContain('limit=10');
+      expect(result).toEqual(mockData);
+    });
+
+    it('returns null when request fails', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: false });
+      const result = await listSessionMessages('session-2');
       expect(result).toBeNull();
     });
   });

@@ -5,7 +5,8 @@ import type {
   TrajectoryPayload,
   ArtifactRef,
   ComponentRegistryPayload,
-  TaskState
+  TaskState,
+  SessionHistoryMessage
 } from '$lib/types';
 import type { Result } from '$lib/utils/result';
 
@@ -242,6 +243,24 @@ export async function listTasks(sessionId: string, status?: string): Promise<Tas
   const result = await fetchWithErrorHandling<TaskState[]>(url.toString());
   if (!result.ok) {
     console.error('tasks fetch failed', result.error);
+    return null;
+  }
+  return result.data;
+}
+
+export async function listSessionMessages(
+  sessionId: string,
+  tenantId = 'playground-tenant',
+  userId = 'playground-user',
+  limit = 200
+): Promise<SessionHistoryMessage[] | null> {
+  const url = new URL(`${BASE_URL}/sessions/${encodeURIComponent(sessionId)}/messages`, window.location.origin);
+  url.searchParams.set('tenant_id', tenantId);
+  url.searchParams.set('user_id', userId);
+  url.searchParams.set('limit', String(limit));
+  const result = await fetchWithErrorHandling<SessionHistoryMessage[]>(url.toString());
+  if (!result.ok) {
+    console.error('session messages fetch failed', result.error);
     return null;
   }
   return result.data;

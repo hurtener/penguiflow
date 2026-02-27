@@ -81,4 +81,56 @@ describe('sessionStreamManager', () => {
     expect(interactionsStore.artifacts[0]?.props.title).toBe('Hello');
     expect(interactionsStore.artifacts[0]?.message_id).toBe(chatStore.messages[0]?.id);
   });
+
+  it('clears chat and hydrates session messages on start', async () => {
+    globalThis.fetch = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/tasks')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve([])
+        });
+      }
+      if (url.includes('/sessions/session-restore/messages')) {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve([
+              { id: 'm1', role: 'user', content: 'restored user', ts: 1700000000 },
+              { id: 'm2', role: 'assistant', content: 'restored assistant', ts: 1700000001 }
+            ])
+        });
+      }
+      return Promise.resolve({
+        ok: false,
+        json: () => Promise.resolve({})
+      });
+    });
+
+    const tasksStore = createTasksStore();
+    const notificationsStore = createNotificationsStore();
+    const chatStore = createChatStore();
+    const artifactsStore = createArtifactsStore();
+    const interactionsStore = createInteractionsStore();
+    const manager = createSessionStreamManager({
+      tasksStore,
+      notificationsStore,
+      chatStore,
+      artifactsStore,
+      interactionsStore
+    });
+
+    chatStore.addUserMessage('old message');
+    expect(chatStore.messages).toHaveLength(1);
+
+    manager.start('session-restore', { tenantId: 't1', userId: 'u1' });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(chatStore.messages).toHaveLength(2);
+    expect(chatStore.messages[0]?.role).toBe('user');
+    expect(chatStore.messages[0]?.text).toBe('restored user');
+    expect(chatStore.messages[1]?.role).toBe('agent');
+    expect(chatStore.messages[1]?.text).toBe('restored assistant');
+  });
 });

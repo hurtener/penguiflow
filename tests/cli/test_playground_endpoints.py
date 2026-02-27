@@ -463,6 +463,98 @@ class TestEventsEndpoint:
         assert "Trace not found" in response.json()["detail"]
 
 
+class TestSessionMessagesEndpoint:
+    """Tests for /sessions/{session_id}/messages endpoint."""
+
+    def test_session_messages_recovers_from_memory_state(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        store = InMemoryStateStore()
+        key = "playground-tenant:playground-user:session-1"
+        store._memory_state[key] = {
+            "turns": [
+                {"user_message": "Hello", "assistant_response": "Hi there", "ts": 1700000000.0},
+                {"user_message": "How are you?", "assistant_response": "Doing great.", "ts": 1700000001.0},
+            ]
+        }
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/sessions/session-1/messages")
+        assert response.status_code == 200
+        data = response.json()
+        assert [item["role"] for item in data] == ["user", "assistant", "user", "assistant"]
+        assert [item["content"] for item in data] == ["Hello", "Hi there", "How are you?", "Doing great."]
+
+    def test_session_messages_honors_limit(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        store = InMemoryStateStore()
+        key = "playground-tenant:playground-user:session-2"
+        store._memory_state[key] = {
+            "turns": [
+                {"user_message": "U1", "assistant_response": "A1", "ts": 1},
+                {"user_message": "U2", "assistant_response": "A2", "ts": 2},
+            ]
+        }
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/sessions/session-2/messages", params={"limit": 2})
+        assert response.status_code == 200
+        data = response.json()
+        assert [item["content"] for item in data] == ["U2", "A2"]
+
+    def test_session_messages_respects_tenant_user_isolation(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        store = InMemoryStateStore()
+        store._memory_state["tenant-a:user-a:session-3"] = {
+            "turns": [{"user_message": "Hidden", "assistant_response": "Secret", "ts": 1}]
+        }
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        wrong = client.get(
+            "/sessions/session-3/messages",
+            params={"tenant_id": "tenant-b", "user_id": "user-a"},
+        )
+        assert wrong.status_code == 200
+        assert wrong.json() == []
+
+        ok = client.get(
+            "/sessions/session-3/messages",
+            params={"tenant_id": "tenant-a", "user_id": "user-a"},
+        )
+        assert ok.status_code == 200
+        assert len(ok.json()) == 2
+
+    def test_session_messages_returns_empty_for_invalid_memory_payload(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        store = InMemoryStateStore()
+        key = "playground-tenant:playground-user:session-4"
+        store._memory_state[key] = {"turns": "invalid"}
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/sessions/session-4/messages")
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_session_messages_returns_empty_when_store_has_no_memory_api(self, tmp_path: Path) -> None:
+        class _NoMemoryStore:
+            pass
+
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=_NoMemoryStore())
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/sessions/session-5/messages")
+        assert response.status_code == 200
+        assert response.json() == []
+
+
 class TestAguiResumeEndpoint:
     """Tests for /agui/resume endpoint."""
 

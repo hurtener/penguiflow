@@ -8,6 +8,7 @@ export interface ChatStore {
   readonly messages: ChatMessage[];
   input: string;
   readonly isEmpty: boolean;
+  setMessages(items: ChatMessage[]): void;
   addUserMessage(text: string): ChatMessage;
   addAgentMessage(): ChatMessage;
   findMessage(id: string): ChatMessage | undefined;
@@ -26,6 +27,10 @@ export function createChatStore(): ChatStore {
     set input(v: string) { input = v; },
 
     get isEmpty() { return messages.length === 0; },
+
+    setMessages(items: ChatMessage[]) {
+      messages = items.map(item => ({ ...item }));
+    },
 
     addUserMessage(text: string): ChatMessage {
       const msg: ChatMessage = {

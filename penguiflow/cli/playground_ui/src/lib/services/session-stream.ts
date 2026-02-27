@@ -1,9 +1,16 @@
 import { safeParse } from '$lib/utils';
-import { listTasks } from './api';
+import { listSessionMessages, listTasks } from './api';
 import type { AppStores } from '$lib/stores';
 import type { NotificationLevel } from '$lib/stores/ui/notifications.svelte';
 import type { BackgroundTaskInfo } from '$lib/stores/features/tasks.svelte';
-import type { ArtifactChunkPayload, ArtifactRef, ArtifactStoredEvent, StateUpdate } from '$lib/types';
+import type {
+  ArtifactChunkPayload,
+  ArtifactRef,
+  ArtifactStoredEvent,
+  ChatMessage,
+  SessionHistoryMessage,
+  StateUpdate
+} from '$lib/types';
 
 type SessionStreamStores = Pick<
   AppStores,
@@ -90,12 +97,34 @@ class SessionStreamManager {
   private lastUpdateId: string | null = null;
   private activeSessionId: string | null = null;
 
-  start(sessionId: string): void {
+  start(
+    sessionId: string,
+    options: {
+      tenantId?: string;
+      userId?: string;
+      messageLimit?: number;
+    } = {}
+  ): void {
     this.close();
     if (this.activeSessionId !== sessionId) {
       this.lastUpdateId = null;
     }
     this.activeSessionId = sessionId;
+    this.stores.chatStore.clear();
+    this.stores.interactionsStore.clearPendingInteraction();
+
+    listSessionMessages(
+      sessionId,
+      options.tenantId,
+      options.userId,
+      options.messageLimit
+    ).then(messages => {
+      if (!messages || this.activeSessionId !== sessionId) {
+        return;
+      }
+      this.stores.chatStore.setMessages(messages.map((message, idx) => toChatMessage(message, idx)));
+    });
+
     listTasks(sessionId).then(tasks => {
       if (tasks) {
         this.stores.tasksStore.setTasks(tasks);
@@ -304,4 +333,27 @@ function toArtifactRef(stored: ArtifactStoredEvent): ArtifactRef {
     sha256: null,
     source: stored.source ?? {}
   };
+}
+
+function toChatMessage(message: SessionHistoryMessage, index: number): ChatMessage {
+  const ts = normalizeMessageTs(message.ts, index);
+  return {
+    id: message.id || `history-${index}-${ts}`,
+    role: message.role === 'assistant' ? 'agent' : 'user',
+    text: message.content,
+    ts,
+    isStreaming: false,
+    isThinking: false
+  };
+}
+
+function normalizeMessageTs(value: number | null | undefined, index: number): number {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return Date.now() + index;
+  }
+  // Memory-state timestamps are seconds (`time.time()`); chat UI expects epoch ms.
+  if (value < 1_000_000_000_000) {
+    return Math.round(value * 1000);
+  }
+  return Math.round(value);
 }
