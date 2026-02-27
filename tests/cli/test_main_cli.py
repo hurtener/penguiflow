@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+import os
 
 from click.testing import CliRunner
 
@@ -109,9 +110,7 @@ class TestGenerateCommand:
         runner = CliRunner()
         spec_file = tmp_path / "spec.yaml"
         spec_file.write_text("agent:\n  name: test\n")
-        result = runner.invoke(
-            app, ["generate", "--init", "my-agent", "--spec", str(spec_file)]
-        )
+        result = runner.invoke(app, ["generate", "--init", "my-agent", "--spec", str(spec_file)])
         assert result.exit_code == 1
         assert "Cannot use --init and --spec together" in result.output
 
@@ -188,3 +187,111 @@ class TestGenerateCommand:
             result = runner.invoke(app, ["generate", "--spec", str(spec_file)])
             assert result.exit_code == 1
             assert "Generate failed" in result.output
+
+
+class TestEvalCommand:
+    def test_run_requires_spec_file(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(app, ["eval", "run"])
+        assert result.exit_code != 0
+
+    def test_run_invokes_api_and_prints_json(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        spec_file = tmp_path / "eval.spec.json"
+        spec_file.write_text(
+            """
+{
+  "project_root": ".",
+  "query_suite_path": "query_suite.json",
+  "candidates_path": "candidates.json",
+  "metric_spec": "demo.metric:metric",
+  "output_dir": "artifacts/eval/run-local",
+  "session_id": "session-1",
+  "dataset_tag": "dataset:demo",
+  "agent_package": "demo_pkg"
+}
+""".strip(),
+            encoding="utf-8",
+        )
+        with patch("penguiflow.evals.api.run_eval") as mock_run_eval:
+            mock_run_eval.return_value = {"winner_id": "baseline"}
+            result = runner.invoke(app, ["eval", "run", "--spec", str(spec_file)])
+
+        assert result.exit_code == 0
+        assert '"winner_id": "baseline"' in result.output
+        assert mock_run_eval.call_args.kwargs["agent_package"] == "demo_pkg"
+
+    def test_run_loads_env_files_from_spec(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        env_file = tmp_path / "credentials.env"
+        env_key = "PENGUIFLOW_EVAL_TEST_SECRET"
+        env_file.write_text(f"{env_key}=loaded_from_file\n", encoding="utf-8")
+        spec_file = tmp_path / "eval.spec.json"
+        spec_file.write_text(
+            f"""
+{{
+  "project_root": ".",
+  "query_suite_path": "query_suite.json",
+  "candidates_path": "candidates.json",
+  "metric_spec": "demo.metric:metric",
+  "output_dir": "artifacts/eval/run-local",
+  "session_id": "session-1",
+  "dataset_tag": "dataset:demo",
+  "env_files": ["{env_file.name}"]
+}}
+""".strip(),
+            encoding="utf-8",
+        )
+        os.environ.pop(env_key, None)
+        with patch("penguiflow.evals.api.run_eval") as mock_run_eval:
+            mock_run_eval.return_value = {"winner_id": "baseline"}
+            result = runner.invoke(app, ["eval", "run", "--spec", str(spec_file)])
+
+        assert result.exit_code == 0
+        assert os.environ.get(env_key) == "loaded_from_file"
+
+    def test_run_uses_api_spec_loader(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        spec_file = tmp_path / "eval.spec.json"
+        spec_file.write_text("{}", encoding="utf-8")
+        with patch("penguiflow.evals.api.load_eval_run_spec") as mock_load_spec:
+            mock_spec = MagicMock()
+            mock_spec.project_root = Path(".")
+            mock_spec.query_suite_path = Path("query_suite.json")
+            mock_spec.candidates_path = Path("candidates.json")
+            mock_spec.metric_spec = "demo.metric:metric"
+            mock_spec.output_dir = Path("artifacts/eval/run-local")
+            mock_spec.session_id = "session-1"
+            mock_spec.dataset_tag = "dataset:demo"
+            mock_spec.agent_package = None
+            mock_spec.state_store_spec = None
+            mock_spec.run_one_spec = None
+            mock_spec.env_files = ()
+            mock_load_spec.return_value = mock_spec
+            with patch("penguiflow.evals.api.run_eval") as mock_run_eval:
+                mock_run_eval.return_value = {"winner_id": "baseline"}
+                result = runner.invoke(app, ["eval", "run", "--spec", str(spec_file)])
+
+        assert result.exit_code == 0
+        assert mock_load_spec.called
+
+    def test_evaluate_invokes_api_with_dataset(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        spec_file = tmp_path / "eval.spec.json"
+        spec_file.write_text(
+            """
+{
+  "dataset_path": "dataset.jsonl",
+  "candidates_path": "candidates.json",
+  "metric_spec": "demo.metric:metric",
+  "output_dir": "artifacts/eval/rerun"
+}
+""".strip(),
+            encoding="utf-8",
+        )
+        with patch("penguiflow.evals.api.evaluate_dataset_from_spec_file") as mock_eval:
+            mock_eval.return_value = {"winner_id": "baseline"}
+            result = runner.invoke(app, ["eval", "evaluate", "--spec", str(spec_file)])
+
+        assert result.exit_code == 0
+        assert '"winner_id": "baseline"' in result.output

@@ -127,6 +127,20 @@ async def test_inmemory_statestore_trajectory_isolation_and_traces() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inmemory_statestore_lists_trace_refs_across_sessions() -> None:
+    store = InMemoryStateStore()
+    await store.save_trajectory("trace-1", "session-a", Trajectory(query="hello"))
+    await store.save_trajectory("trace-2", "session-b", Trajectory(query="world"))
+
+    refs = await store.list_trace_refs()
+
+    assert refs == [
+        {"trace_id": "trace-2", "session_id": "session-b"},
+        {"trace_id": "trace-1", "session_id": "session-a"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_inmemory_statestore_planner_events_and_alias() -> None:
     store = InMemoryStateStore()
     event = PlannerEvent(event_type="step_start", ts=time.time(), trajectory_step=0)

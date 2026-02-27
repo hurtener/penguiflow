@@ -9,6 +9,7 @@ PenguiFlow ships a CLI to bootstrap agent projects, run the playground, and vali
 - `penguiflow init` generates VS Code helpers (`.vscode/*`)
 - `penguiflow generate` generates an agent workspace from a YAML spec
 - `penguiflow tools` lists/connects ToolNode presets and can discover tool names
+- `penguiflow eval` runs trace-derived eval workflows from committed JSON specs
 
 Use the CLI when you want a repeatable “scaffold → run → iterate” loop and you want to avoid bespoke glue code on day 1.
 
@@ -53,11 +54,21 @@ uv run penguiflow tools list
 uv run penguiflow tools connect github --discover
 ```
 
+### Workflow D: run eval recipe (collect -> export -> evaluate)
+
+```bash
+uv run penguiflow eval run --spec examples/my_agent/datasets/eval_v1/eval.spec.json
+uv run penguiflow eval evaluate --spec examples/my_agent/datasets/eval_v1/evaluate.spec.json
+```
+
+For full eval spec fields and artifact layout, see **[`penguiflow eval`](eval-command.md)**.
+
 ## Failure modes & recovery
 
 - **`penguiflow new` fails with “Jinja2 is required”**: install `penguiflow[cli]` (or `jinja2`).
 - **`penguiflow dev` fails with missing UI assets** (repo checkout): build UI assets under `penguiflow/cli/playground_ui`.
 - **`penguiflow tools` fails with “penguiflow[planner] is required”**: install `penguiflow[planner]`.
+- **`penguiflow eval` fails with missing import path**: verify `metric_spec`/`run_one_spec` use `module:callable` and `project_root` points to an importable package.
 - **Environment mismatch in playground**: the playground runs in *penguiflow’s* Python environment, not the agent project’s venv (see **[`penguiflow dev`](dev-command.md)**).
 
 ## Observability

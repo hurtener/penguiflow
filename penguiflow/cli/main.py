@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import os
 
 import click
 
@@ -310,6 +311,160 @@ def tools_connect(
         if e.hint:
             click.echo(f"  Hint: {e.hint}", err=True)
         sys.exit(1)
+
+
+@app.group()
+def eval() -> None:
+    """Run trace-derived dataset export and evaluation workflows."""
+
+
+@eval.command("run")
+@click.option(
+    "--spec",
+    "spec_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=str),
+    help="Path to eval spec JSON file.",
+)
+@click.option(
+    "--env-file",
+    "env_files",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=str),
+    help="Optional environment file(s) loaded before evaluation.",
+)
+def eval_run(spec_path: str, env_files: tuple[str, ...]) -> None:
+    """Run collect->export->evaluate workflow from spec."""
+    import asyncio
+    import json
+    from pathlib import Path
+
+    from penguiflow.evals.api import load_eval_run_spec, run_eval
+
+    path = Path(spec_path).resolve()
+
+    def _load_env_file_values(file_path: Path) -> dict[str, str]:
+        if not file_path.exists():
+            return {}
+        values: dict[str, str] = {}
+        for line in file_path.read_text(encoding="utf-8").splitlines():
+            raw = line.strip()
+            if not raw or raw.startswith("#") or "=" not in raw:
+                continue
+            key, _, value = raw.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                value = value[1:-1]
+            values[key] = value
+        return values
+
+    try:
+        run_spec = load_eval_run_spec(path)
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
+
+    ordered_env_files: list[Path] = list(run_spec.env_files)
+    ordered_env_files.extend(Path(item).resolve() for item in env_files)
+    for env_path in ordered_env_files:
+        if not env_path.exists():
+            click.echo(f"✗ env file does not exist: {env_path}", err=True)
+            sys.exit(1)
+
+    for env_path in ordered_env_files:
+        for key, value in _load_env_file_values(env_path).items():
+            if key not in os.environ:
+                os.environ[key] = value
+
+    try:
+        result = asyncio.run(
+            run_eval(
+                project_root=run_spec.project_root,
+                query_suite_path=run_spec.query_suite_path,
+                candidates_path=run_spec.candidates_path,
+                metric_spec=run_spec.metric_spec,
+                output_dir=run_spec.output_dir,
+                session_id=run_spec.session_id,
+                dataset_tag=run_spec.dataset_tag,
+                agent_package=run_spec.agent_package,
+                state_store_spec=run_spec.state_store_spec,
+                run_one_spec=run_spec.run_one_spec,
+            )
+        )
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(json.dumps(result, indent=2, sort_keys=True))
+
+
+@eval.command("evaluate")
+@click.option(
+    "--spec",
+    "spec_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=str),
+    help="Path to eval dataset spec JSON file.",
+)
+@click.option(
+    "--env-file",
+    "env_files",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=str),
+    help="Optional environment file(s) loaded before evaluation.",
+)
+def eval_evaluate(spec_path: str, env_files: tuple[str, ...]) -> None:
+    """Run evaluation against an existing dataset bundle from spec."""
+    import asyncio
+    import json
+    from pathlib import Path
+
+    from penguiflow.evals.api import evaluate_dataset_from_spec_file, load_eval_dataset_spec
+
+    path = Path(spec_path).resolve()
+
+    def _load_env_file_values(file_path: Path) -> dict[str, str]:
+        if not file_path.exists():
+            return {}
+        values: dict[str, str] = {}
+        for line in file_path.read_text(encoding="utf-8").splitlines():
+            raw = line.strip()
+            if not raw or raw.startswith("#") or "=" not in raw:
+                continue
+            key, _, value = raw.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                value = value[1:-1]
+            values[key] = value
+        return values
+
+    try:
+        spec = load_eval_dataset_spec(path)
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
+
+    ordered_env_files: list[Path] = list(spec.env_files)
+    ordered_env_files.extend(Path(item).resolve() for item in env_files)
+    for env_path in ordered_env_files:
+        if not env_path.exists():
+            click.echo(f"✗ env file does not exist: {env_path}", err=True)
+            sys.exit(1)
+
+    for env_path in ordered_env_files:
+        for key, value in _load_env_file_values(env_path).items():
+            if key not in os.environ:
+                os.environ[key] = value
+
+    try:
+        result = asyncio.run(evaluate_dataset_from_spec_file(path))
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(json.dumps(result, indent=2, sort_keys=True))
 
 
 @app.command()
