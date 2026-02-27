@@ -180,6 +180,15 @@ class TaskStateResponse(BaseModel):
     background_tasks: list[dict[str, Any]]
 
 
+class SessionMessagePayload(BaseModel):
+    """Recovered chat message payload for session restore."""
+
+    id: str
+    role: Literal["user", "assistant"]
+    content: str
+    ts: float | None = None
+
+
 class SessionContextUpdate(BaseModel):
     llm_context: dict[str, Any] | None = None
     tool_context: dict[str, Any] | None = None
@@ -241,6 +250,79 @@ def _merge_contexts(primary: dict[str, Any], secondary: dict[str, Any] | None) -
     merged = dict(primary)
     merged.update(secondary)
     return merged
+
+
+def _build_memory_state_key(*, tenant_id: str, user_id: str, session_id: str) -> str:
+    tenant = tenant_id.strip() or "playground-tenant"
+    user = user_id.strip() or "playground-user"
+    session = session_id.strip()
+    return f"{tenant}:{user}:{session}"
+
+
+def _coerce_turn_ts(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        if isinstance(value, bool):  # pragma: no cover - defensive
+            return None
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+    return None
+
+
+def _messages_from_memory_state(
+    state: Mapping[str, Any],
+    *,
+    limit: int,
+) -> list[SessionMessagePayload]:
+    turn_entries: list[tuple[float | None, int, str, str]] = []
+    sequence = 0
+    for section in ("turns", "pending", "backlog"):
+        raw_turns = state.get(section)
+        if not isinstance(raw_turns, list):
+            continue
+        for raw_turn in raw_turns:
+            if not isinstance(raw_turn, Mapping):
+                continue
+            user_message = raw_turn.get("user_message")
+            assistant_response = raw_turn.get("assistant_response")
+            if not isinstance(user_message, str) or not isinstance(assistant_response, str):
+                continue
+            if not user_message.strip() and not assistant_response.strip():
+                continue
+            turn_entries.append((_coerce_turn_ts(raw_turn.get("ts")), sequence, user_message, assistant_response))
+            sequence += 1
+
+    turn_entries.sort(key=lambda item: (item[0] is None, item[0] or 0.0, item[1]))
+    messages: list[SessionMessagePayload] = []
+    for idx, (ts, _seq, user_message, assistant_response) in enumerate(turn_entries):
+        if user_message.strip():
+            messages.append(
+                SessionMessagePayload(
+                    id=f"memory-{idx}-user",
+                    role="user",
+                    content=user_message,
+                    ts=ts,
+                )
+            )
+        if assistant_response.strip():
+            messages.append(
+                SessionMessagePayload(
+                    id=f"memory-{idx}-assistant",
+                    role="assistant",
+                    content=assistant_response,
+                    ts=ts,
+                )
+            )
+
+    if limit > 0:
+        return messages[-limit:]
+    return []
 
 
 def _format_resume_input(input: AguiResumeRequest) -> str | None:
@@ -1588,6 +1670,38 @@ def create_playground_app(
             context_version=session.context_version,
             context_hash=session.context_hash,
         )
+
+    @app.get("/sessions/{session_id}/messages", response_model=list[SessionMessagePayload])
+    async def session_messages(
+        session_id: str,
+        tenant_id: str = "playground-tenant",
+        user_id: str = "playground-user",
+        limit: int = 200,
+    ) -> list[SessionMessagePayload]:
+        if store is None:
+            return []
+        load_memory_state = getattr(store, "load_memory_state", None)
+        if not callable(load_memory_state):
+            return []
+
+        bounded_limit = max(0, min(limit, 2000))
+        key = _build_memory_state_key(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        try:
+            state = await load_memory_state(key)
+        except Exception as exc:  # pragma: no cover - defensive
+            _LOGGER.debug(
+                "playground_session_messages_load_failed",
+                extra={"session_id": session_id, "key": key, "error": str(exc)},
+            )
+            return []
+
+        if not isinstance(state, Mapping):
+            return []
+        return _messages_from_memory_state(state, limit=bounded_limit)
 
     @app.get("/session/{session_id}/task-state", response_model=TaskStateResponse)
     async def get_task_state(session_id: str) -> TaskStateResponse:

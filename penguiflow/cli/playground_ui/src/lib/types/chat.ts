@@ -24,6 +24,13 @@ export type ChatMessage = {
   artifacts?: ArtifactRef[];
 };
 
+export type SessionHistoryMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  ts?: number | null;
+};
+
 export type PlannerEventPayload = {
   id: string;
   event: string;

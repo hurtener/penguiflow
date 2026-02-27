@@ -113,4 +113,19 @@ describe('chatStore', () => {
       expect(chatStore.isEmpty).toBe(true);
     });
   });
+
+  describe('setMessages', () => {
+    it('replaces existing messages', () => {
+      chatStore.addUserMessage('old');
+      chatStore.setMessages([
+        { id: 'restored-1', role: 'user', text: 'restored user', ts: 1 },
+        { id: 'restored-2', role: 'agent', text: 'restored agent', ts: 2 }
+      ]);
+
+      expect(chatStore.messages).toHaveLength(2);
+      expect(chatStore.messages[0]?.id).toBe('restored-1');
+      expect(chatStore.messages[1]?.id).toBe('restored-2');
+      expect(chatStore.messages[1]?.role).toBe('agent');
+    });
+  });
 });

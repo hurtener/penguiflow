@@ -49,6 +49,7 @@
 
   // Responsive breakpoint detection
   let isMobile = $state(false);
+  let hydratedSessionId = $state<string | null>(null);
 
   const checkMobile = () => {
     isMobile = window.innerWidth <= 1200;
@@ -83,9 +84,12 @@
 
   $effect(() => {
     const sessionId = sessionStore.sessionId;
-    if (sessionId) {
-      sessionStreamManager.start(sessionId);
-    }
+    if (!sessionId || sessionId === hydratedSessionId) return;
+    hydratedSessionId = sessionId;
+    sessionStreamManager.start(sessionId, {
+      tenantId: setupStore.tenantId,
+      userId: setupStore.userId
+    });
   });
 
   const initializeApp = async () => {
