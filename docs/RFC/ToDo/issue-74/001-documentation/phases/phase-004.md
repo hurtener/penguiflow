@@ -94,3 +94,37 @@ grep -n "ctx\._artifacts" /Users/martin.alonso/Documents/lg/repos/penguiflow/doc
 # --- Step 3: mkdocs build ---
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv pip install -e ".[dev,docs]" && uv run mkdocs build --strict
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-02-27
+
+### Summary of Changes
+- **TEMPLATING_QUICKGUIDE.md**: Inserted the "Developer API" blockquote after the "Artifact Store Configuration" block (after the 4-bullet list under "When artifact store is enabled"). The blockquote explains the `ctx.artifacts` / `ScopedArtifacts` porcelain facade vs. the raw `ctx._artifacts` / `ArtifactStore` plumbing distinction.
+- **Cross-file consistency verification**: All 5 checks passed across the 8 documentation files modified in phases 000-003.
+- **mkdocs build**: `mkdocs build --strict` completed successfully with zero errors or warnings. Only informational messages about 7 nav-excluded pages were emitted, which is expected.
+
+### Key Considerations
+- The TEMPLATING_QUICKGUIDE.md file is ~86KB. Used exact text matching on the string `- REST endpoint '/artifacts/{id}' serves binary content` followed by `**Generated config fields:**` to locate the unique insertion point. This avoids fragile line-number-based edits.
+- The blockquote was inserted with proper blank-line separation (blank line before the blockquote, blank line after) to ensure correct Markdown rendering.
+- Verification checks were run against all 8 files from the documentation plan, not just the file modified in this phase, to validate the cumulative consistency of all phases 000-004.
+
+### Assumptions
+- Assumed that phases 000-003 were fully and correctly implemented, as stated in the phase file's dependencies. The verification checks confirmed this assumption.
+- Assumed that `docs/tools/artifacts-guide.md` referenced in the verification commands exists. It was checked for `ctx.artifacts.put_` patterns (none found).
+- Assumed the 7 methods in the ArtifactStore protocol are: `put_bytes`, `put_text`, `get`, `get_ref`, `delete`, `exists`, `list`. All 7 were confirmed present in `STATESTORE_IMPLEMENTATION_SPEC.md`.
+- The mkdocs INFO messages about 7 pages existing in `docs/` but not in `nav` are expected and not errors. These are separate pages not part of this documentation update.
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- The mkdocs build emits informational messages about 7 pages not included in the nav configuration (MEMORY_GUIDE.md, MIGRATION_V24.md, production-deployment.md, telemetry-patterns.md, migration/MEMORY_ADOPTION.md, migration/penguiflow-adoption.md, migration/upgrade-notes.md). These are pre-existing and unrelated to this documentation update, but a reviewer may want to confirm these are intentionally excluded.
+- The `TEMPLATING_QUICKGUIDE.md` is excluded from the published mkdocs site, so the new blockquote will only be visible to developers reading the file directly in the repository. This is by design per the phase plan.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/TEMPLATING_QUICKGUIDE.md` (edited: added Developer API blockquote)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-74/001-documentation/phases/phase-004.md` (edited: appended implementation notes)

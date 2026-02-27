@@ -72,3 +72,38 @@ grep -n "ctx._artifacts" /Users/martin.alonso/Documents/lg/repos/penguiflow/docs
 grep -n "including the .list. method" /Users/martin.alonso/Documents/lg/repos/penguiflow/docs/tools/statestore.md
 grep -n "ScopedArtifacts" /Users/martin.alonso/Documents/lg/repos/penguiflow/docs/tools/statestore.md
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-02-27
+
+### Summary of Changes
+- **`docs/planner/tool-design.md` (line 99):** Replaced the `artifacts` bullet in the `ToolContext` listing from the generic "artifact store for large/binary payloads" to a precise description referencing `ScopedArtifacts` facade with `upload()`/`download()`/`list()` and automatic scope injection.
+- **`docs/tools/configuration.md` (after line 96):** Inserted a blockquote note in the "Artifact extraction and resources" section clarifying that the extraction pipeline is internal plumbing using `ctx._artifacts`, while tool developers should use `ctx.artifacts` (the `ScopedArtifacts` facade). Blank lines before and after the blockquote ensure proper markdown rendering.
+- **`docs/tools/statestore.md` (line 68):** Expanded the artifacts bullet to mention the required `list` method on `ArtifactStore` and to clarify the porcelain/plumbing distinction (`ctx.artifacts` as `ScopedArtifacts` facade vs. raw `ArtifactStore`).
+
+### Key Considerations
+- Used em-dashes (unicode `U+2014`) in the replacement text as specified in the task instructions, rather than the double-hyphen (`--`) used in the phase plan's quoted text. The plan specified "Use em-dashes where specified" and the replacement text in the detailed steps used `--` as a plain-text representation of em-dashes.
+- Ensured blank lines surround the blockquote in `configuration.md` so that markdown renderers (and mkdocs) correctly parse it as a standalone blockquote rather than a continuation of the previous paragraph.
+- Each edit was a single, targeted replacement matched on exact text content rather than line numbers, ensuring robustness if line numbers shift between edits.
+
+### Assumptions
+- The `--` in the phase plan's replacement text (e.g., "scoped artifact facade ... -- use") was intended to represent an em-dash (`---`) in the rendered output. I used the actual em-dash character (`---`) since the task instructions explicitly said "Use em-dashes where specified."
+- No other files reference the old text "artifact store for large/binary payloads" in a way that needs updating (this phrase was only present in `tool-design.md`).
+- The mkdocs build validation referenced in the plan (phase-004) will be handled separately.
+
+### Deviations from Plan
+None. All three edits were implemented exactly as specified.
+
+### Potential Risks & Reviewer Attention Points
+- The blockquote syntax (`> **Note:** ...`) in `configuration.md` should render correctly in mkdocs Material theme, but verify it renders as expected in the actual documentation build.
+- The em-dash character should display correctly across all browsers and editors. If the project prefers ASCII-only markdown, the `---` characters could be reverted to `--`.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/planner/tool-design.md`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/tools/configuration.md`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/tools/statestore.md`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-74/001-documentation/phases/phase-002.md` (this file, implementation notes appended)

@@ -261,7 +261,7 @@ charts = result.artifacts.get("gather_data_from_genie", {}).get("chart_artifacts
 
 ## Storing Binary Content via ToolContext
 
-Tools can store binary/large text via the `ToolContext.artifacts` API:
+Tools store binary/large text via `ctx.artifacts` -- a `ScopedArtifacts` facade that automatically injects tenant/user/session/trace scope on writes and enforces it on reads. This is the **porcelain** API for tool and agent developers; penguiflow internals use `ctx._artifacts` (the raw `ArtifactStore`) instead.
 
 ```python
 from penguiflow.planner.context import ToolContext
@@ -826,7 +826,7 @@ Check `ttl_seconds` in your retention config. Artifacts accessed within TTL are 
 | **Field Marker** | `json_schema_extra={"artifact": True}` | Declare artifact fields |
 | **Redaction** | `_redact_artifacts()` in `llm.py` | Remove artifacts from LLM context |
 | **Collection** | `_ArtifactCollector` | Gather artifacts for lateral passing |
-| **Binary Storage** | `ctx.artifacts.put_bytes()` | Store binary out-of-band |
+| **Binary Storage** | `ctx._artifacts.put_bytes()` | Store binary out-of-band (internal) |
 | **Size Guardrail** | `_clamp_observation()` | Final safety net for large observations |
 | **Registry** | `ArtifactRegistry` | Track artifacts for UI rendering |
 | **Event Emission** | `_EventEmittingArtifactStoreProxy` | Real-time UI updates |

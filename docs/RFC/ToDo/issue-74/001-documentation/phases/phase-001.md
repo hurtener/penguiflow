@@ -77,3 +77,39 @@ grep -n "raw.*ArtifactStore.*penguiflow internals" /Users/martin.alonso/Document
 grep -c "ctx\.artifacts\.put_" /Users/martin.alonso/Documents/lg/repos/penguiflow/docs/tools/artifacts-and-resources.md
 # Expected: 0
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-02-27
+
+### Summary of Changes
+- **`docs/tools/artifacts-guide.md` (line 264):** Replaced the one-line porcelain API description with an expanded description that names the `ScopedArtifacts` facade, explains automatic scope injection, and explicitly labels it as the **porcelain** API while noting that `ctx._artifacts` is the plumbing layer used by internals.
+- **`docs/tools/artifacts-guide.md` (line 829):** Changed the summary table "Binary Storage" row from `ctx.artifacts.put_bytes()` to `ctx._artifacts.put_bytes()` and appended "(internal)" to the purpose column.
+- **`docs/tools/artifacts-and-resources.md` (lines 70-71):** Changed two bullet points in the ToolNode integration section from `ctx.artifacts.put_text(...)` / `ctx.artifacts.put_bytes(...)` to `ctx._artifacts.put_text(...)` / `ctx._artifacts.put_bytes(...)` and appended "(internal)" to each.
+- **`docs/tools/artifacts-and-resources.md` (after line 72):** Inserted a blockquote note explaining that `ctx._artifacts` is the raw `ArtifactStore` for internals and that tool developers should use `ctx.artifacts` (the `ScopedArtifacts` facade). Blank lines are present before and after the blockquote for proper markdown rendering.
+
+### Key Considerations
+- All edits were matched on exact text content rather than line numbers, as the plan specified line numbers are approximate.
+- The blockquote in `artifacts-and-resources.md` uses markdown `>` syntax (not MkDocs `!!!` admonition syntax) as specified in the phase plan. Since this file is published in the mkdocs site, the `>` blockquote will render as a standard HTML blockquote.
+- Blank lines before and after the blockquote were verified to ensure proper markdown rendering per the exit criteria.
+- The `artifacts-guide.md` file is noted as excluded from the mkdocs build, so the changes there are for internal reference only and will not affect the published site.
+
+### Assumptions
+- The phrase "ScopedArtifacts facade" in the replacement text on line 264 is wrapped in backticks as part of a code reference, consistent with the surrounding markdown style.
+- The `ctx.artifacts.upload()` call in the code block at lines 274-279 of `artifacts-guide.md` was intentionally left unchanged, as the phase plan only targets the prose description line and the summary table row -- the code example correctly demonstrates the porcelain API usage.
+- No other occurrences of `ctx.artifacts.put_bytes` or `ctx.artifacts.put_text` exist in these two files that need updating (verified by grep returning 0 matches for the old patterns).
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- The `artifacts-guide.md` code example at line 274 still shows `ctx.artifacts.upload(...)` which is correct (it demonstrates the porcelain API). A reviewer should confirm this is intentionally left as-is.
+- The blockquote in `artifacts-and-resources.md` uses `>` markdown syntax. If the MkDocs theme expects `!!!` admonition blocks for notes, this may render differently than other notes in the published documentation. However, the phase plan explicitly specified the `>` blockquote format.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/tools/artifacts-guide.md`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/tools/artifacts-and-resources.md`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-74/001-documentation/phases/phase-001.md` (this file, implementation notes appended)

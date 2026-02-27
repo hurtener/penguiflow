@@ -93,3 +93,41 @@ grep -n "list(scope=...)" /Users/martin.alonso/Documents/lg/repos/penguiflow/doc
 grep -c "enforcement happens at HTTP layer" /Users/martin.alonso/Documents/lg/repos/penguiflow/docs/spec/STATESTORE_IMPLEMENTATION_SPEC.md
 # Expected: 0
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-02-27
+
+### Summary of Changes
+- **Step 1 (ArtifactStore protocol):** Inserted `async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]` with docstring and `...` body inside the ArtifactStore protocol code block, between the `exists` method and the closing code fence (now at line 1137).
+- **Step 2 (Scope enforcement note):** Replaced the old single-layer note at line 1170 with the new two-layer enforcement note referencing `ScopedArtifacts` facade and HTTP layer, with an internal anchor link.
+- **Step 3 (ScopedArtifacts Facade subsection):** Inserted the full subsection (lines 1172-1215) between the updated note and `### ArtifactRetentionConfig`. Includes: heading, prose paragraph, Python class definition code block, `#### Scope semantics` table (3 operation rows), and `#### Immutability` explanation.
+- **Step 4 (Implementation Checklist):** Added `- [ ] \`list(scope=...)\` method implemented on ArtifactStore` as the last item under `### Artifact Store (if applicable)` (line 2335).
+
+### Key Considerations
+- Edits were processed top-to-bottom as instructed, since earlier insertions shift subsequent line numbers.
+- Matched on exact text content rather than line numbers, since the spec file is ~78KB and line numbers in the plan were approximate.
+- The ScopedArtifacts Facade subsection was inserted verbatim from plan section 1.3, using em-dashes as they appear in the plan (the plan uses `--` in the phase file's abbreviated version but the full plan content uses proper em-dashes `---`; the actual insertion used the em-dashes from the plan's markdown content block).
+- Proper blank lines were ensured around all headings, code fences, and blockquotes for correct markdown rendering.
+- The heading hierarchy is consistent: `### ScopedArtifacts Facade` is at the same level as adjacent sections (`### ArtifactScope`, `### ArtifactRetentionConfig`), with `####` sub-headings for Scope semantics and Immutability.
+
+### Assumptions
+- The `ArtifactStore` protocol code block has exactly one `exists` method followed by the closing code fence -- this was confirmed by reading the file before editing.
+- The scope enforcement note appeared exactly once in the file -- confirmed by grep returning a single match.
+- The `### Artifact Store (if applicable)` checklist section has exactly one instance of `Session-scoped access patterns supported` -- confirmed by grep.
+- The plan's section 1.3 content (delimited by the ```` fence in the plan) is the canonical source for the ScopedArtifacts Facade subsection and was inserted verbatim.
+
+### Deviations from Plan
+None. All four steps were implemented exactly as specified in the phase file and plan.
+
+### Potential Risks & Reviewer Attention Points
+- The anchor link `[ScopedArtifacts Facade](#scopedartifacts-facade)` in the updated scope note (Step 2) depends on markdown anchor generation from the heading `### ScopedArtifacts Facade`. Most markdown renderers (including GitHub and mkdocs) will generate `scopedartifacts-facade` as the anchor -- however, since this spec file is excluded from the published mkdocs site, this link will only work in GitHub's markdown renderer or similar tools.
+- The `list` method signature in the ArtifactStore protocol block includes `list[ArtifactRef]` as the return type, which shadows the built-in `list`. This matches the existing pattern in the protocol (the `exists` method also uses bare type hints), but reviewers should confirm this aligns with the actual implementation.
+- The ScopedArtifacts Facade code block shows the class definition as a stub (with `...` bodies). This is consistent with the ArtifactStore protocol block style in the same spec document.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/spec/STATESTORE_IMPLEMENTATION_SPEC.md` (modified -- 4 edits)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-74/001-documentation/phases/phase-000.md` (modified -- appended implementation notes)

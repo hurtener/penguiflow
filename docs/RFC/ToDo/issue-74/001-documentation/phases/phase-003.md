@@ -153,3 +153,41 @@ grep -c "artifact_store.put_bytes" /Users/martin.alonso/Documents/lg/repos/pengu
 # Verify best practices update
 grep -n "tenant_id.*user_id.*tool_context" /Users/martin.alonso/Documents/lg/repos/penguiflow/REACT_PLANNER_INTEGRATION_GUIDE.md
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-02-27
+
+### Summary of Changes
+- **Step 1 (line 468):** Changed import from `ArtifactStore` to `ScopedArtifacts` in the `ToolContext` protocol code listing.
+- **Step 2 (lines 484-490):** Updated the `artifacts` property return type from `ArtifactStore` to `ScopedArtifacts` and expanded the docstring to describe the porcelain API (upload/download/list) with a note about the internal `ctx._artifacts` escape hatch.
+- **Step 3 (inserted at line 1293):** Added a blockquote note before the ASCII architecture diagram explaining the porcelain vs plumbing distinction for tool developers.
+- **Step 4 (line 1307):** Replaced `get_bytes(id, scope) -> bytes` with `get(artifact_id) -> bytes | None` in the ASCII architecture diagram, preserving column alignment with the surrounding box characters.
+- **Step 5 (line 1386):** Rewrote the MCP Tool Integration prose to describe the `ScopedArtifacts` facade and `_EventEmittingArtifactStoreProxy` plumbing, removing the old 3-item list and replacing with a 2-item list.
+- **Step 6 (lines 1391-1397):** Replaced the code example from `artifact_store.put_bytes()` with `ctx.artifacts.upload()`, removing explicit `scope=ArtifactScope(...)` argument and adding a comment about automatic scope injection.
+- **Step 7 (line 1448):** Updated Best Practices item 4 to mention `session_id`, `tenant_id`, and `user_id` and reference the `ScopedArtifacts` facade for automatic scope enforcement.
+
+### Key Considerations
+- Edits were applied top-to-bottom (by line number) as specified in the phase file, since earlier insertions (Step 3's blockquote) shift subsequent line numbers.
+- The ASCII art diagram alignment in Step 4 was carefully matched: `get(artifact_id) -> bytes | None` with trailing spaces produces the same visual width as the original `get_bytes(id, scope) -> bytes` line, keeping the right-side `|    |` box border aligned.
+- The `### Architecture` heading appears twice in the file (once at line ~47 for the planner overview, once at line ~1287 for the Artifact Store section). The edit target was disambiguated by including surrounding context (the MCP Tool box lines) in the match string, ensuring the correct section was modified.
+
+### Assumptions
+- The phase file specifies the exact replacement text for each step, so the implementation follows those verbatim without deviation.
+- The file is excluded from mkdocs build validation (as noted in the phase file), so no docs build was run.
+- No other files reference the old `ArtifactStore` type in this context, so no cross-file changes were needed.
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- The ASCII art diagram alignment should be visually inspected in a fixed-width font to confirm the box borders line up perfectly. The replacement has the same character count including trailing spaces, but rendered display may vary by editor.
+- The `_EventEmittingArtifactStoreProxy` class name in the MCP prose (Step 5) references an internal implementation detail -- if this class gets renamed in the codebase, this guide will need updating.
+- The `ToolContext` protocol listing now imports `ScopedArtifacts` but the actual `penguiflow.artifacts` module needs to export this name for the example to be accurate. This was presumably handled in an earlier phase.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/REACT_PLANNER_INTEGRATION_GUIDE.md` (7 edits applied)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-74/001-documentation/phases/phase-003.md` (implementation notes appended)
