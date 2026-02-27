@@ -28,6 +28,7 @@ __all__ = [
     "ArtifactRetentionConfig",
     "NoOpArtifactStore",
     "InMemoryArtifactStore",
+    "ScopedArtifacts",
     "discover_artifact_store",
 ]
 
@@ -217,6 +218,156 @@ class ArtifactStore(Protocol):
         """
         ...
 
+    async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]:
+        """List artifacts matching the given scope filter.
+
+        None fields in scope = don't filter on that dimension.
+        If scope is None, returns all artifacts.
+        """
+        ...
+
+
+class ScopedArtifacts:
+    """Scoped facade over ArtifactStore for tool developers.
+
+    Automatically injects tenant_id/user_id/session_id/trace_id on writes
+    and enforces scope on reads. Immutable after construction.
+    """
+
+    __slots__ = ("_store", "_scope", "_read_scope")
+
+    _store: ArtifactStore
+    _scope: ArtifactScope
+    _read_scope: ArtifactScope
+
+    def __init__(
+        self,
+        store: ArtifactStore,
+        *,
+        tenant_id: str | None,
+        user_id: str | None,
+        session_id: str | None,
+        trace_id: str | None,
+    ) -> None:
+        # IMPORTANT: Must use object.__setattr__ because __setattr__ is
+        # overridden to raise AttributeError (immutability).
+        object.__setattr__(self, "_store", store)
+        object.__setattr__(
+            self,
+            "_scope",
+            ArtifactScope(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+                trace_id=trace_id,
+            ),
+        )
+        # Read scope: same as _scope but without trace_id, so reads
+        # return all artifacts for the tenant/user/session.
+        object.__setattr__(
+            self,
+            "_read_scope",
+            ArtifactScope(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+                trace_id=None,
+            ),
+        )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("ScopedArtifacts is immutable")
+
+    @property
+    def scope(self) -> ArtifactScope:
+        """Read-only access to the fixed scope."""
+        return self._scope
+
+    async def upload(
+        self,
+        data: bytes | str,
+        *,
+        mime_type: str | None = None,
+        filename: str | None = None,
+        namespace: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> ArtifactRef:
+        """Store data and return an ArtifactRef. Scope is always injected."""
+        if isinstance(data, str):
+            return await self._store.put_text(
+                data,
+                mime_type=mime_type or "text/plain",  # resolve None -> "text/plain"
+                filename=filename,
+                namespace=namespace,
+                scope=self._scope,
+                meta=meta,
+            )
+        else:
+            return await self._store.put_bytes(
+                data,
+                mime_type=mime_type,  # None is valid for bytes
+                filename=filename,
+                namespace=namespace,
+                scope=self._scope,
+                meta=meta,
+            )
+
+    async def download(self, artifact_id: str) -> bytes | None:
+        """Retrieve artifact bytes by ID (scope-checked)."""
+        ref = await self._store.get_ref(artifact_id)
+        if ref is None:
+            return None
+        if not self._check_scope(ref):
+            return None
+        return await self._store.get(artifact_id)
+
+    async def get_metadata(self, artifact_id: str) -> ArtifactRef | None:
+        """Retrieve artifact metadata by ID (scope-checked)."""
+        ref = await self._store.get_ref(artifact_id)
+        if ref is None:
+            return None
+        if not self._check_scope(ref):
+            return None
+        return ref
+
+    async def list(self) -> list[ArtifactRef]:
+        """List artifacts matching this facade's tenant/user/session (not trace)."""
+        return await self._store.list(scope=self._read_scope)
+
+    async def exists(self, artifact_id: str) -> bool:
+        """Check if an artifact exists and passes scope check."""
+        ref = await self._store.get_ref(artifact_id)
+        if ref is None:
+            return False
+        return self._check_scope(ref)
+
+    async def delete(self, artifact_id: str) -> bool:
+        """Delete an artifact if it passes scope check."""
+        ref = await self._store.get_ref(artifact_id)
+        if ref is None:
+            return False
+        if not self._check_scope(ref):
+            return False
+        return await self._store.delete(artifact_id)
+
+    def _check_scope(self, ref: ArtifactRef) -> bool:
+        """Check if an artifact's scope is compatible with this facade's scope.
+
+        Access control semantics (NOT filtering):
+        - If artifact has no scope (ref.scope is None) -> PASS (unrestricted artifact).
+        - For each of tenant_id, user_id, session_id (NOT trace_id):
+          if BOTH facade field and artifact field are non-None, they must match.
+          If either is None, that dimension passes.
+        """
+        if ref.scope is None:
+            return True
+        for field in ("tenant_id", "user_id", "session_id"):
+            facade_val = getattr(self._scope, field)
+            artifact_val = getattr(ref.scope, field)
+            if facade_val is not None and artifact_val is not None and facade_val != artifact_val:
+                return False
+        return True
+
 
 # -----------------------------------------------------------------------------
 # Discovery
@@ -265,6 +416,27 @@ def _generate_artifact_id(
     content_hash = hashlib.sha256(data).hexdigest()[:12]
     prefix = namespace or "art"
     return f"{prefix}_{content_hash}"
+
+
+def _scope_matches(artifact_scope: ArtifactScope | None, filter_scope: ArtifactScope) -> bool:
+    """Check if an artifact's scope matches a filter scope.
+
+    Matching rules:
+    - If filter_scope has a non-None field, the artifact must have the same value
+      in that field to match.
+    - If filter_scope has a None field, any value (including None) matches.
+    - If the artifact has no scope at all (artifact_scope is None), it is treated
+      as having all-None fields -- so it matches any filter field that is None,
+      but FAILS any filter field that is non-None.
+    """
+    for field in ("tenant_id", "user_id", "session_id", "trace_id"):
+        filter_val = getattr(filter_scope, field)
+        if filter_val is None:
+            continue  # None filter = wildcard, matches anything
+        artifact_val = getattr(artifact_scope, field) if artifact_scope is not None else None
+        if artifact_val != filter_val:
+            return False
+    return True
 
 
 class NoOpArtifactStore:
@@ -380,6 +552,10 @@ class NoOpArtifactStore:
     async def exists(self, artifact_id: str) -> bool:
         """No-op store never has artifacts."""
         return False
+
+    async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]:
+        """No-op list always returns empty."""
+        return []
 
 
 class _StoredArtifact(BaseModel):
@@ -524,6 +700,13 @@ class InMemoryArtifactStore:
         """Check if an artifact exists."""
         await self._expire_old_artifacts()
         return artifact_id in self._artifacts
+
+    async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]:
+        """List artifacts matching the given scope filter."""
+        await self._expire_old_artifacts()
+        if scope is None:
+            return [stored.ref for stored in self._artifacts.values()]
+        return [stored.ref for stored in self._artifacts.values() if _scope_matches(stored.ref.scope, scope)]
 
     async def _expire_old_artifacts(self) -> None:
         """Remove expired artifacts based on TTL."""

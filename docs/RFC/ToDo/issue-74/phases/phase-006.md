@@ -73,3 +73,32 @@ grep -n 'ctx.artifacts.upload' docs/tools/artifacts-guide.md
 grep -n 'ctx.artifacts.put_bytes' docs/tools/artifacts-guide.md
 # The second grep should still find the line 829 table entry (internal pipeline).
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-02-26
+
+### Summary of Changes
+- `docs/tools/artifacts-guide.md` line 274: Changed `ctx.artifacts.put_bytes(` to `ctx.artifacts.upload(` in the tool-developer code example under the "Storing Binary Content via ToolContext" section.
+
+### Key Considerations
+- The change was made using a targeted string replacement scoped to the exact surrounding block (the `# Store in artifact store` comment through the closing parenthesis of the call), ensuring no other occurrences were affected.
+- The scope rule documented in the phase — only update tool-developer API references, leave internal pipeline references alone — was strictly followed. The summary table entry on line 829 (`ctx.artifacts.put_bytes()` in the "Binary Storage" row) was deliberately left untouched.
+
+### Assumptions
+- The optional prose update around `put_bytes`/`put_text` in the surrounding text was not performed. Reading the surrounding content in the "Storing Binary Content via ToolContext" section, the prose introduces the change by saying "Tools can store binary/large text via the `ToolContext.artifacts` API" and then shows the code example — there is no standalone prose sentence that says "call `put_bytes`", so no additional prose update was needed.
+- The optional clarity improvement in `docs/planner/tool-design.md` (expanding `ctx.artifacts` to `ctx.artifacts.upload(...)`) was not applied, consistent with the "no changes needed" instruction and the intent to keep scope minimal in a documentation-only phase.
+
+### Deviations from Plan
+None. The single required change (line 274) was applied. All three verification conditions from the exit criteria were confirmed via grep before writing these notes.
+
+### Potential Risks & Reviewer Attention Points
+- Confirm that `ctx.artifacts.upload()` is in fact the live API exposed by `ScopedArtifacts` once Phases 003-005 are merged. This phase is purely editorial; if those phases have not yet landed, the documentation would momentarily describe an API that does not yet exist.
+- The summary table entry on line 829 still reads `ctx.artifacts.put_bytes()`. Reviewers should decide whether that row should eventually be updated to reflect the `ScopedArtifacts` upload facade (or removed) in a future cleanup phase, since the label "Binary Storage" could be confusing once the public API is `upload()`.
+
+### Files Modified
+- `docs/tools/artifacts-guide.md` — one-line change on line 274 (`put_bytes` → `upload`)
+- `docs/RFC/ToDo/issue-74/phases/phase-006.md` — appended this implementation notes section

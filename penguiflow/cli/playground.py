@@ -2121,11 +2121,11 @@ def create_playground_app(
         # Create a context-like object for the read operation
         class MinimalCtx:
             def __init__(self, artifacts: Any):
-                self._artifacts = artifacts
+                self._artifacts_store = artifacts
 
             @property
-            def artifacts(self) -> Any:
-                return self._artifacts
+            def _artifacts(self) -> Any:
+                return self._artifacts_store
 
         ctx = MinimalCtx(scoped_store)
 

@@ -324,3 +324,37 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow
 uv run ruff check tests/test_artifacts.py
 uv run pytest tests/test_artifacts.py -x -q -v
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-02-26
+
+### Summary of Changes
+- Added `ScopedArtifacts` to the import block in `tests/test_artifacts.py` (inserted alphabetically between `NoOpArtifactStore` and `_scope_matches`).
+- Appended four test classes after the existing `TestScopeMatches` class (the last Phase 007 class):
+  - `TestScopedArtifactsImmutability` (5 test methods)
+  - `TestScopedArtifactsUpload` (6 test methods)
+  - `TestScopedArtifactsDownload` (6 test methods)
+  - `TestScopedArtifactsGetMetadata` (4 test methods)
+
+### Key Considerations
+- The test code was taken verbatim from the phase file's "Required Code" section, as it was complete and correct.
+- The import was placed in alphabetical order within the existing import block to match the project's isort convention (enforced by ruff).
+- All 21 new tests pass, and ruff reports no issues. The total test count in the file went from 58 to 79.
+
+### Assumptions
+- The phase file's "after the Phase 007 classes" refers to appending after `TestScopeMatches`, which is the last class in the file and was the final class added in Phase 007.
+- The `@pytest.mark.asyncio` decorators are present in the phase code as written; since the project uses `asyncio_mode = "auto"`, these decorators are technically redundant but harmless, and were kept to match the phase specification exactly.
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- The `test_cannot_add_new_attribute` test does not use `match="immutable"` in its `pytest.raises` call, unlike the other immutability tests. This is intentional per the phase spec -- `__slots__` may raise a different error message than the custom `__setattr__` for attributes not in `__slots__`, so matching on "immutable" could be fragile there.
+- The download/get_metadata scope-denial tests only cover tenant and session mismatches. User-level scope denial is not tested but could be added in a future phase if needed.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/test_artifacts.py` (modified: added import + 4 test classes)

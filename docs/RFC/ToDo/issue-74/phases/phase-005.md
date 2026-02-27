@@ -276,3 +276,47 @@ uv run ruff check .
 uv run mypy
 uv run pytest tests/ -x -q
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-02-26
+
+### Summary of Changes
+- **tests/test_rich_output_nodes.py**: Added `ScopedArtifacts` to the import from `penguiflow.artifacts`. Added `self._scoped_artifacts` construction in `DummyContext.__init__` and a new `artifacts` property returning it.
+- **tests/test_toolnode_phase1.py**: Added `ScopedArtifacts` to the import from `penguiflow.artifacts`. Added `artifacts` property to `DummyCtx` that creates a `ScopedArtifacts` inline with all-None scope fields.
+- **tests/test_toolnode_phase2.py**: Added `ScopedArtifacts` to the import from `penguiflow.artifacts`. Added `artifacts` property to `DummyCtx` that creates a `ScopedArtifacts` inline with all-None scope fields.
+- **tests/test_task_tools.py**: Added new import `from penguiflow.artifacts import NoOpArtifactStore, ScopedArtifacts`. Added `artifacts` property to `DummyContext` wrapping `NoOpArtifactStore()`.
+- **tests/a2a/test_a2a_planner_tools.py**: Added `ScopedArtifacts` to the existing `NoOpArtifactStore` import. Added `artifacts` property to `_FakeCtx` with `# pragma: no cover` annotation.
+- **penguiflow/cli/templates/conftest.py.jinja**: Added `_artifacts` property, `artifacts` property, and `emit_artifact` async method stubs to `DummyToolContext` dataclass.
+- **penguiflow/templates/new/react/tests/conftest.py.jinja**: Same additions as the cli template above.
+
+### Key Considerations
+- The `ScopedArtifacts` constructor uses keyword-only arguments (after `*`) for `tenant_id`, `user_id`, `session_id`, `trace_id`. The phase plan code snippets correctly pass `store` positionally and the scope fields as keyword arguments.
+- For `test_rich_output_nodes.py`, the `ScopedArtifacts` is cached in `__init__` (as `self._scoped_artifacts`) because this test file actually uses the artifact store in tests. For `test_toolnode_phase1.py` and `test_toolnode_phase2.py`, the `ScopedArtifacts` is created inline in the property getter, which is acceptable for test fixtures as noted in the plan.
+- For `test_task_tools.py` and `test_a2a_planner_tools.py`, `NoOpArtifactStore` is used since these test files do not exercise artifacts.
+- The Jinja template stubs return `None` for both `_artifacts` and `artifacts` since generated project tests do not exercise artifact functionality.
+
+### Assumptions
+- The pre-existing 21 test failures (all in `test_databricks_provider.py`, `test_llm_provider_databricks.py`, and `test_llm_provider_google.py`) are unrelated to this phase and acceptable.
+- The `ScopedArtifacts` class was already implemented in a prior phase (Phase 003) and is available in `penguiflow.artifacts`.
+- The `_artifacts` property was already renamed from `artifacts` to `_artifacts` in a prior phase (Phase 001) across all these test fixtures.
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- The `artifacts` property in `test_toolnode_phase1.py` and `test_toolnode_phase2.py` creates a new `ScopedArtifacts` instance on every access. This is fine for tests but would be wasteful in production code.
+- The `artifacts` property in `test_task_tools.py` and `test_a2a_planner_tools.py` creates both a new `NoOpArtifactStore()` and a new `ScopedArtifacts` on every access. Again, acceptable for test fixtures.
+- The Jinja templates' `_artifacts` and `artifacts` return `None`. If a generated project's tools begin using `ctx.artifacts`, the developer will need to replace these stubs with real implementations.
+
+### Files Modified
+- `tests/test_rich_output_nodes.py`
+- `tests/test_toolnode_phase1.py`
+- `tests/test_toolnode_phase2.py`
+- `tests/test_task_tools.py`
+- `tests/a2a/test_a2a_planner_tools.py`
+- `penguiflow/cli/templates/conftest.py.jinja`
+- `penguiflow/templates/new/react/tests/conftest.py.jinja`

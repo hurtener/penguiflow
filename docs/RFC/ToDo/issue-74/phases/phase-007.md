@@ -330,3 +330,44 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow
 uv run ruff check tests/test_artifacts.py
 uv run pytest tests/test_artifacts.py -x -q -v
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-02-26
+
+### Summary of Changes
+- Added `import time` to the top-level imports in `tests/test_artifacts.py`.
+- Added `_scope_matches` to the existing `penguiflow.artifacts` import block.
+- Added `from penguiflow.state.in_memory import PlaygroundArtifactStore` as a new top-level import.
+- Appended 5 new test classes (18 test methods total) after the existing `TestNoOpArtifactStoreWarning` class:
+  - `TestInMemoryArtifactStoreList` (8 tests): empty store, no-scope returns all, filter by tenant_id, filter by session_id, filter by user_id, multi-dimension filter, unscoped artifact matching, TTL expiration exclusion.
+  - `TestNoOpArtifactStoreList` (1 test): always returns empty list.
+  - `TestPlaygroundArtifactStoreList` (2 tests): session-scoped filtering, no-scope aggregation across sessions.
+  - `TestEventEmittingProxyList` (1 test): delegation to inner store with scope filter and without.
+  - `TestScopeMatches` (6 tests): None artifact scope with all-None filter, None scope with non-None filter, exact match, partial filter match, mismatch, None filter field wildcard.
+
+### Key Considerations
+- The test code follows exactly what was specified in the phase file's "Required Code" section.
+- The `_EventEmittingArtifactStoreProxy` and `Trajectory` imports are done inside the test method (not at module level) to avoid making the planner extras a hard dependency for the entire test file. This matches the pattern used in the phase specification.
+- The `_StoredArtifact` import inside `test_list_expired_artifacts_excluded` is similarly scoped to the method since it is an internal/private class.
+- All test classes are placed after the last existing class (`TestNoOpArtifactStoreWarning`) as specified.
+
+### Assumptions
+- The `list` method already exists on all store implementations (Phase 000 dependency is satisfied). Verified by reading `artifacts.py`, `state/in_memory.py`, and `planner/artifact_handling.py`.
+- The `_scope_matches` function is exported (accessible) from `penguiflow.artifacts` even though it is a private function (prefixed with `_`). Verified it is importable.
+- `PlaygroundArtifactStore` is importable from `penguiflow.state.in_memory`. Verified against the module's `__all__`.
+- The `asyncio_mode = "auto"` setting in pytest means `@pytest.mark.asyncio` decorators are not strictly required, but they are included for explicitness as specified in the phase file code.
+
+### Deviations from Plan
+None. The implementation follows the phase file exactly as specified.
+
+### Potential Risks & Reviewer Attention Points
+- The `test_list_expired_artifacts_excluded` test directly manipulates the private `store._artifacts` dict and uses the private `_StoredArtifact` class. This is fragile if the internal storage representation changes, but it is the only way to simulate TTL expiration without actually waiting.
+- The `test_exact_match` test in `TestScopeMatches` uses `trace_id="tr1"` which tests all four scope dimensions. If the `_scope_matches` function's field iteration changes, this test will catch regressions.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/test_artifacts.py` (modified: added imports and 5 test classes with 18 test methods)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-74/phases/phase-007.md` (modified: appended implementation notes)

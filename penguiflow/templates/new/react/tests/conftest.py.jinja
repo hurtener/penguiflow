@@ -52,6 +52,28 @@ class DummyToolContext:
         """Record status updates for assertions."""
         self.updates.append(update)
 
+    @property
+    def _artifacts(self) -> Any:
+        """Raw artifact store stub -- not used in generated project tests."""
+        return None
+
+    @property
+    def artifacts(self) -> Any:
+        """Scoped artifacts stub -- not used in generated project tests."""
+        return None
+
+    async def emit_artifact(
+        self,
+        stream_id: str,
+        chunk: Any,
+        *,
+        done: bool = False,
+        artifact_type: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        """Artifact streaming stub -- not used in generated project tests."""
+        del stream_id, chunk, done, artifact_type, meta
+
 
 @pytest.fixture
 def dummy_ctx() -> DummyToolContext:

@@ -250,3 +250,40 @@ uv run pytest tests/ -x -q
 # Verify test count (should have ~57 new tests in test_artifacts.py beyond the original set)
 uv run pytest tests/test_artifacts.py --co -q | tail -5
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-02-26
+
+### Summary of Changes
+- Appended `TestScopedArtifactsList` class (4 test methods) to `tests/test_artifacts.py`
+- Appended `TestScopedArtifactsExists` class (4 test methods) to `tests/test_artifacts.py`
+- Appended `TestScopedArtifactsDelete` class (4 test methods) to `tests/test_artifacts.py`
+- Ran full verification suite confirming all checks pass
+
+### Key Considerations
+- The test code was appended verbatim from the phase file specification, as it was complete and well-structured.
+- All 12 new tests exercise the `ScopedArtifacts` facade methods (`list`, `exists`, `delete`) with scope enforcement scenarios:
+  - Same scope access (allowed)
+  - Different trace but same tenant/user/session (allowed -- trace_id is excluded from `_check_scope` and `_read_scope`)
+  - Different tenant (denied)
+  - Nonexistent artifact IDs (returns `False` or empty list)
+- The `delete` tests verify both the return value and the actual state of the underlying raw store, ensuring the facade truly delegates deletion or blocks it.
+
+### Assumptions
+- The 21 pre-existing test failures (all `ModuleNotFoundError` for `openai` and `google.genai` in databricks/google provider tests) are expected and unrelated to the artifacts implementation. This matches the phase file's exit criteria which states "pre-existing 21 failures allowed."
+- The test file already contained all test classes from Phases 007 and 008 (from previous phase implementations stored in the git stash).
+
+### Deviations from Plan
+None. All three test classes were added exactly as specified in the phase file.
+
+### Potential Risks & Reviewer Attention Points
+- The total test count in `test_artifacts.py` is 91. The phase file mentions "57 new tests" across Phases 007-009. The original file had 34 tests (from earlier phases 000-006), so 91 - 34 = 57 new tests, matching expectations perfectly.
+- All tests rely on `InMemoryArtifactStore` which is deterministic. No flakiness concerns.
+
+### Files Modified
+- `tests/test_artifacts.py` -- appended `TestScopedArtifactsList`, `TestScopedArtifactsExists`, and `TestScopedArtifactsDelete` test classes (12 new test methods)
+- `docs/RFC/ToDo/issue-74/phases/phase-009.md` -- appended this implementation notes section

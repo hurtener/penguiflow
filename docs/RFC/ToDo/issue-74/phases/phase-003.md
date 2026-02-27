@@ -209,3 +209,35 @@ uv run ruff check penguiflow/artifacts.py
 uv run mypy
 uv run pytest tests/test_artifacts.py -x -q
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-02-26
+
+### Summary of Changes
+- Added the `ScopedArtifacts` class to `penguiflow/artifacts.py`, placed between the `ArtifactStore` protocol (line 227) and the Discovery section (line 372), exactly as specified.
+- Added `"ScopedArtifacts"` to the `__all__` list in `penguiflow/artifacts.py`.
+- Added explicit type annotations for `__slots__` attributes (`_store`, `_scope`, `_read_scope`) to satisfy mypy's type checking in the presence of the `__setattr__` override.
+
+### Key Considerations
+- The `__setattr__` override that raises `AttributeError` for immutability causes mypy to believe that no attributes can be accessed on `self`, since mypy interprets the custom `__setattr__` as the sole way to set attributes. To fix this, explicit class-level type annotations were added for the three `__slots__` members (`_store: ArtifactStore`, `_scope: ArtifactScope`, `_read_scope: ArtifactScope`). These annotations do not create class variables when `__slots__` is present -- they only provide type information to mypy. This is the standard pattern for making `__slots__` + `__setattr__` override work with mypy.
+- The `_check_scope` method is intentionally independent from `_scope_matches`, as documented in the plan. They have different `None`-handling semantics: `_scope_matches` treats a `None` artifact field as a mismatch against a non-`None` filter (filtering semantics), while `_check_scope` treats a `None` artifact field as unrestricted access (access control semantics).
+- The `upload` method uses `mime_type or "text/plain"` for `str` data to avoid passing `None` to `put_text`, whose signature requires `str` (not `str | None`) for `mime_type`.
+
+### Assumptions
+- The `ArtifactStore` protocol's `list` method (added in Phase 000) is already present, which was confirmed by reading the existing file.
+- The three type annotations added for slots will not interfere with the `__slots__` mechanism at runtime, which is guaranteed by Python's behavior when `__slots__` and class-level annotations coexist.
+
+### Deviations from Plan
+- Added three class-level type annotations (`_store: ArtifactStore`, `_scope: ArtifactScope`, `_read_scope: ArtifactScope`) that were not in the plan's code block. This was necessary to pass mypy type checking. Without these annotations, mypy reports 14 `attr-defined` errors because the custom `__setattr__` makes mypy think no attributes are accessible. This is a minimal, non-behavioral change that only affects static analysis.
+
+### Potential Risks & Reviewer Attention Points
+- The class-level type annotations for slots are purely for mypy and have no runtime effect. However, reviewers should verify they are comfortable with this pattern being used here.
+- The `ScopedArtifacts` class is not yet wired into any context (per the plan, that happens in Phases 004-005). Until then, the class is available via `__all__` but unused in the codebase.
+- The `_check_scope` method uses `getattr` for field access, which is slightly less performant than direct attribute access but keeps the code DRY. Given this is an access-control check (not a hot path), this is acceptable.
+
+### Files Modified
+- `penguiflow/artifacts.py` -- Added `ScopedArtifacts` class (lines 230-369) and added `"ScopedArtifacts"` to `__all__` (line 31)

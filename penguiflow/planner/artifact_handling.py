@@ -146,6 +146,10 @@ class _EventEmittingArtifactStoreProxy:
     async def exists(self, artifact_id: str) -> bool:
         return await self._store.exists(artifact_id)
 
+    async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]:
+        """Delegate list to underlying store (no event for reads)."""
+        return await self._store.list(scope=scope)
+
 
 class _ArtifactCollector:
     """Collect artifact-marked fields during planner execution."""

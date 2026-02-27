@@ -124,3 +124,39 @@ uv run ruff check .
 uv run mypy
 uv run pytest tests/ -x -q
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-02-26
+
+### Summary of Changes
+- **`tests/test_toolnode_phase1.py`**: Renamed `self._artifacts` to `self._artifacts_store` in `DummyCtx.__init__`, renamed `artifacts` property to `_artifacts` returning `self._artifacts_store`.
+- **`tests/test_toolnode_phase2.py`**: Identical rename as phase1 -- `self._artifacts` to `self._artifacts_store` in `DummyCtx.__init__`, renamed `artifacts` property to `_artifacts` returning `self._artifacts_store`.
+- **`tests/a2a/test_a2a_planner_tools.py`**: Added `from penguiflow.artifacts import NoOpArtifactStore` import, renamed `artifacts` property to `_artifacts` in `_FakeCtx`, changed return from `None` to `NoOpArtifactStore()`. Import ordering was auto-fixed by `ruff --fix` (isort splits `from penguiflow import ...` lines alphabetically).
+- **`penguiflow/rich_output/nodes.py`** (additional fix): Changed `getattr(ctx, "artifacts", None)` to `getattr(ctx, "_artifacts", None)` on line 106. This was a call site missed in Phase 001 that used `getattr` with a string literal (not `ctx.artifacts` dot access), so it was not caught by the Phase 001 grep patterns.
+
+### Key Considerations
+- The three test file changes were straightforward mechanical renames exactly as specified in the plan.
+- The import ordering in `test_a2a_planner_tools.py` required `ruff --fix` to auto-sort, since `penguiflow` first-party imports must be grouped and sorted alphabetically per the project's isort configuration. The initial manual placement triggered an `I001` lint error.
+- The `getattr(ctx, "artifacts", None)` in `rich_output/nodes.py` was discovered during checkpoint verification when `test_list_artifacts_ingests_background_results_for_artifact_refs` failed. This call site uses a string literal for attribute lookup rather than direct dot access, which is why it was missed by the `ctx\.artifacts` grep pattern used in Phase 001.
+
+### Assumptions
+- The `getattr(ctx, "artifacts", None)` fix in `rich_output/nodes.py` is a legitimate completion of the Phase 001 rename that was missed during that phase. Since Phase 002 explicitly instructs to "migrate any new call sites found before proceeding" (Step 4), this fix falls within scope.
+- The 21 pre-existing test failures (all in `test_databricks_provider.py`, `test_llm_provider_databricks.py`, `test_google_provider_streaming.py`, and `test_llm_provider_google.py`) are caused by missing optional dependencies (`openai`, `google` provider packages) and are unrelated to this work.
+
+### Deviations from Plan
+- **Additional fix in `penguiflow/rich_output/nodes.py`**: The plan did not mention this file, but the Phase 002 grep verification step (Step 4) explicitly instructs to fix any remaining call sites found. The `getattr(ctx, "artifacts", None)` pattern was a call site that used string-based attribute lookup and was missed in Phase 001. Without this fix, `test_list_artifacts_ingests_background_results_for_artifact_refs` would fail (22 failures instead of the expected 21).
+
+### Potential Risks & Reviewer Attention Points
+- The `_artifacts` property name uses a single leading underscore, which is a Python convention for "internal" but does not trigger name mangling. External code (like tests) can still access `ctx._artifacts` without issue. However, this means the property is accessible from outside the class, which is intentional per the protocol design.
+- The `getattr(ctx, "_artifacts", None)` pattern in `rich_output/nodes.py` still returns `None` for contexts that do not implement the `_artifacts` property. This is the same graceful fallback behavior as before the rename.
+- Reviewers should verify that no other `getattr` patterns with `"artifacts"` string literals exist elsewhere in the codebase. A grep for `getattr\([^,]+, ['\"]artifacts['\"]` confirmed no remaining instances.
+
+### Files Modified
+- `tests/test_toolnode_phase1.py` -- Renamed attribute and property in `DummyCtx`
+- `tests/test_toolnode_phase2.py` -- Renamed attribute and property in `DummyCtx`
+- `tests/a2a/test_a2a_planner_tools.py` -- Added import, renamed property in `_FakeCtx`, changed return value
+- `penguiflow/rich_output/nodes.py` -- Fixed missed `getattr(ctx, "artifacts", None)` to use `"_artifacts"`

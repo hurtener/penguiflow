@@ -173,3 +173,37 @@ uv run ruff check penguiflow/planner/context.py penguiflow/planner/planner_conte
 uv run mypy
 # Note: pytest may fail until test fixtures are updated in Phase 005
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-02-26
+
+### Summary of Changes
+- **`penguiflow/planner/context.py`**: Added `ScopedArtifacts` to the `TYPE_CHECKING` import block. Added `artifacts` property (returning `ScopedArtifacts`) to the `ToolContext` protocol, placed directly after the existing `_artifacts` property, with a docstring and usage example.
+- **`penguiflow/planner/planner_context.py`**: Added `ScopedArtifacts` to the runtime import from `..artifacts`. Added `"_scoped_artifacts"` to `__slots__`. Constructed `ScopedArtifacts` facade in `__init__` using scope values extracted from `self._tool_context`. Added `artifacts` property returning `self._scoped_artifacts`.
+- **`penguiflow/sessions/tool_jobs.py`**: Added `ScopedArtifacts` to the runtime import from `penguiflow.artifacts`. Constructed `ScopedArtifacts` facade in `__init__` using scope values extracted from the `tool_context` parameter. Added `artifacts` property returning `self._scoped_artifacts`.
+
+### Key Considerations
+- In `_PlannerContext`, the plan's code used `self._tool_context["key"]` directly in long ternary expressions, which caused the `session_id` line to exceed the 120-character ruff line-length limit. I introduced a local variable `tc = self._tool_context` to shorten the lines while preserving identical semantics. This is a style-only change to satisfy ruff E501.
+- The `ScopedArtifacts` import in `context.py` is under `TYPE_CHECKING` (matching the existing pattern for `ArtifactStore`), while in `planner_context.py` and `tool_jobs.py` it is a runtime import because the classes actually construct `ScopedArtifacts` instances.
+- The `artifacts` property in the protocol has no `...` body -- it follows the same pattern as the existing `_artifacts` property in the protocol.
+
+### Assumptions
+- `ScopedArtifacts` was already implemented in Phase 003 and is exported from `penguiflow/artifacts.py`. Verified this was the case.
+- The `tool_context` dicts may or may not contain `tenant_id`, `user_id`, `session_id`, `trace_id` keys. The `.get()` with `is not None` pattern handles both missing keys and explicit `None` values gracefully.
+- Existing tests may need updates in Phase 005 to account for the new `artifacts` property on the protocol, but that is out of scope for this phase.
+
+### Deviations from Plan
+- **Line-length fix in `planner_context.py`**: The plan's verbatim code for `_PlannerContext.__init__` used `self._tool_context["session_id"]` and `self._tool_context.get("session_id")` in a single line that was 123 characters, exceeding the 120-character ruff limit. I extracted `self._tool_context` into a local `tc` variable for the `ScopedArtifacts` constructor call. All four scope keyword arguments use `tc` consistently for readability.
+
+### Potential Risks & Reviewer Attention Points
+- **Test fixtures**: As noted in the phase file, pytest may fail until test fixtures are updated in Phase 005, since any test constructing `ToolJobContext` or `_PlannerContext` now requires `tool_context` dicts to be compatible with `ScopedArtifacts` construction (the `.get()` calls are safe, but the `ScopedArtifacts` constructor itself is called unconditionally).
+- **`ToolJobContext.__init__` parameter shadowing**: The `__init__` parameter is named `artifacts` (type `ArtifactStore | None`) while the new property is also named `artifacts` (type `ScopedArtifacts`). This is not a conflict because the parameter is only used during `__init__` and the property reads from `self._scoped_artifacts`, but reviewers should note the naming overlap.
+
+### Files Modified
+- `penguiflow/planner/context.py`
+- `penguiflow/planner/planner_context.py`
+- `penguiflow/sessions/tool_jobs.py`

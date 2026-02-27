@@ -271,7 +271,7 @@ async def my_tool(ctx: ToolContext, url: str) -> dict:
     pdf_bytes = await download_pdf(url)
 
     # Store in artifact store
-    ref = await ctx.artifacts.put_bytes(
+    ref = await ctx.artifacts.upload(
         pdf_bytes,
         mime_type="application/pdf",
         filename="report.pdf",

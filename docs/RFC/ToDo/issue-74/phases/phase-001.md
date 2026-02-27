@@ -235,3 +235,45 @@ uv run ruff check .
 uv run mypy
 uv run pytest tests/ -x -q
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-02-26
+
+### Summary of Changes
+- **`penguiflow/planner/context.py`**: Renamed `artifacts` property to `_artifacts` in the `ToolContext` protocol. Replaced the multi-line docstring with a single-line "Raw artifact store for framework-internal use." docstring.
+- **`penguiflow/planner/planner_context.py`**: Renamed `artifacts` property to `_artifacts` in `_PlannerContext`. Replaced the multi-line docstring with the simplified internal-use docstring. Changed `kv` property to pass `self._artifact_proxy` directly instead of going through `self.artifacts`.
+- **`penguiflow/sessions/tool_jobs.py`**: Renamed internal attribute `self._artifacts` to `self._artifacts_store` in `ToolJobContext.__init__`. Renamed `artifacts` property to `_artifacts`, returning `self._artifacts_store`. Updated the `ctx.artifacts` call site on line 275 to `ctx._artifacts`. Left the `kv` property's `artifacts=self._artifacts` unchanged as it now resolves to the new `_artifacts` property correctly.
+- **`penguiflow/tools/node.py`**: Replaced all 9 occurrences of `ctx.artifacts.` and `ctx.artifacts,` with `ctx._artifacts.` and `ctx._artifacts,` using replace-all.
+- **`penguiflow/cli/playground.py`**: In `MinimalCtx`, renamed `self._artifacts` to `self._artifacts_store` and renamed `artifacts` property to `_artifacts`.
+- **`tests/test_rich_output_nodes.py`**: In `DummyContext`, renamed `self._artifacts` to `self._artifacts_store`, renamed `artifacts` property to `_artifacts`, and updated the `ctx.artifacts.put_text(` call site to `ctx._artifacts.put_text(`.
+- **`tests/test_task_tools.py`**: In `DummyContext`, renamed `artifacts` property to `_artifacts`.
+
+### Key Considerations
+- The `kv` property in `ToolJobContext` (line 71) was intentionally left unchanged. After renaming the instance attribute from `self._artifacts` to `self._artifacts_store`, the reference `self._artifacts` in the `kv` property now resolves to the new `_artifacts` **property** (not the old instance attribute). This property returns `self._artifacts_store`, so the behavior is preserved.
+- The `kv` property in `_PlannerContext` was changed from `self.artifacts` to `self._artifact_proxy` (the raw instance attribute) rather than `self._artifacts` (the new property). This matches the plan's guidance to be more explicit and avoid going through the property layer.
+- Used `replace_all=true` for the `node.py` changes since all `ctx.artifacts.` and `ctx.artifacts,` patterns needed the same transformation, and there were no false-positive matches.
+
+### Assumptions
+- The plan explicitly states not to run verification (pytest, ruff, mypy) after this phase. This is because other test files (`test_toolnode_phase1.py`, `test_toolnode_phase2.py`, `test_a2a_planner_tools.py`) still have `DummyCtx`/`_FakeCtx` classes with the old `artifacts` property name, which will be updated in Phase 002.
+- No other production files reference `ctx.artifacts` or `self.artifacts` beyond what was listed in the plan. This was verified via grep after making changes.
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- **Incomplete rename**: Until Phase 002 is applied, running the test suite will fail because several test fixture classes still use the old `artifacts` property name. This is expected and documented in the plan.
+- **Property shadowing in ToolJobContext**: The `kv` property references `self._artifacts` which now resolves as a property call rather than a direct attribute access. This is functionally correct but subtly different -- if someone adds `__slots__` to `ToolJobContext` in the future, they would need to be aware that `_artifacts` is a property, not a slot.
+- **MinimalCtx scope**: `MinimalCtx` is a local class inside a function in `playground.py`. Its `_artifacts` property has the leading underscore convention consistent with the protocol, but since it is a tiny inline class it does not implement the full `ToolContext` protocol -- it only provides what `read_resource` needs.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/planner/context.py`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/planner/planner_context.py`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/sessions/tool_jobs.py`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/tools/node.py`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground.py`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/test_rich_output_nodes.py`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/test_task_tools.py`
