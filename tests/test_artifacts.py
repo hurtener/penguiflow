@@ -32,6 +32,7 @@ class TestArtifactRef:
         assert ref.filename is None
         assert ref.sha256 is None
         assert ref.scope is None
+        assert ref.namespace is None
         assert ref.source == {}
 
     def test_full_ref(self) -> None:
@@ -49,6 +50,7 @@ class TestArtifactRef:
             filename="report.pdf",
             sha256="a" * 64,
             scope=scope,
+            namespace="tableau",
             source={"tool": "tableau.download_workbook"},
         )
         assert ref.id == "pdf_abc123def456"
@@ -57,6 +59,7 @@ class TestArtifactRef:
         assert ref.filename == "report.pdf"
         assert ref.sha256 == "a" * 64
         assert ref.scope.session_id == "session1"
+        assert ref.namespace == "tableau"
         assert ref.source["tool"] == "tableau.download_workbook"
 
     def test_ref_serialization(self) -> None:
@@ -65,15 +68,18 @@ class TestArtifactRef:
             id="test_123",
             mime_type="text/plain",
             size_bytes=100,
+            namespace="test_ns",
         )
         data = ref.model_dump()
         assert data["id"] == "test_123"
         assert data["mime_type"] == "text/plain"
         assert data["size_bytes"] == 100
+        assert data["namespace"] == "test_ns"
 
         # Verify it can be reconstructed
         ref2 = ArtifactRef.model_validate(data)
         assert ref2.id == ref.id
+        assert ref2.namespace == "test_ns"
 
 
 class TestArtifactRetentionConfig:
@@ -328,6 +334,7 @@ class TestInMemoryArtifactStore:
         ref = await store.put_bytes(b"data", namespace="tableau")
 
         assert ref.id.startswith("tableau_")
+        assert ref.namespace == "tableau"
 
     @pytest.mark.asyncio
     async def test_scope_assignment(self) -> None:
@@ -555,6 +562,7 @@ class TestNoOpArtifactStoreWarning:
         )
 
         assert ref.id.startswith("myns_")
+        assert ref.namespace == "myns"
         assert ref.scope == scope
         assert ref.source["key"] == "value"
 
@@ -574,6 +582,7 @@ class TestNoOpArtifactStoreWarning:
         )
 
         assert ref.id.startswith("myns_")
+        assert ref.namespace == "myns"
         assert ref.scope == scope
         assert ref.source["key"] == "value"
 
@@ -892,6 +901,7 @@ class TestScopedArtifactsUpload:
         )
         ref = await facade.upload(b"data", namespace="my_tool")
         assert ref.id.startswith("my_tool_")
+        assert ref.namespace == "my_tool"
 
     @pytest.mark.asyncio
     async def test_upload_passes_meta(self) -> None:

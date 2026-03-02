@@ -302,6 +302,7 @@ function toArtifactRef(stored: ArtifactStoredEvent): ArtifactRef {
     size_bytes: stored.size_bytes ?? null,
     filename: stored.filename ?? null,
     sha256: null,
+    namespace: getString(stored.source?.namespace) ?? null,
     source: stored.source ?? {}
   };
 }

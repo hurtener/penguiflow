@@ -145,3 +145,41 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_
 # Verify the namespace field appears in the built JS bundle
 grep -r "namespace" /Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui/dist/assets/*.js | head -5
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-02
+
+### Summary of Changes
+- **`penguiflow/cli/playground_ui/src/lib/types/artifacts.ts`**: Added `namespace: string | null` field to the `ArtifactRef` interface with JSDoc comment, placed after `sha256` and before `source`. The `ArtifactStoredEvent` interface was left unchanged.
+- **`penguiflow/cli/playground_ui/src/lib/stores/domain/artifacts.svelte.ts`**: Updated the `addArtifact()` method to include `namespace` in the `ArtifactRef` object literal, derived via `typeof event.source?.namespace === 'string' ? event.source.namespace : null`.
+- **`penguiflow/cli/playground_ui/src/lib/services/session-stream.ts`**: Updated `toArtifactRef()` to include `namespace` derived via `getString(stored.source?.namespace) ?? null`. The `toArtifactStoredEvent()` function was left unchanged.
+- **`penguiflow/cli/playground_ui/tests/unit/stores/artifacts.test.ts`**: Added `expect(artifact?.namespace).toBeNull()` assertion to the existing `'stores correct artifact properties'` test. Added new test `'derives namespace from source.namespace'` that verifies namespace is correctly extracted when `source.namespace` is present.
+- **`penguiflow/cli/playground_ui/dist/`**: Rebuilt via `npm run build` after source changes. The `namespace` field appears 3 times in the main `index-Diw15VpQ.js` bundle.
+
+### Key Considerations
+- Used two different derivation strategies as specified in the plan: `typeof` check in the Svelte store (because `getString` is file-private to `session-stream.ts`) and `getString()` helper in `session-stream.ts` (where it is locally available). Both produce the same result for string values and null/undefined.
+- Field ordering in `ArtifactRef` mirrors the Python model ordering (after `sha256`, before `source`) for consistency across the stack.
+- The `ArtifactStoredEvent` interface intentionally does not get a `namespace` field because namespace is nested inside `source.namespace` in the SSE payload, and the conversion functions extract it when creating `ArtifactRef` objects.
+
+### Assumptions
+- The `source` field on `ArtifactStoredEvent` is typed as `Record<string, unknown>`, which means accessing `source.namespace` works at the type level (returns `unknown`). The `typeof` check and `getString()` helper both handle this correctly.
+- The existing mock data in tests (e.g., `{ tool: 'screenshot_tool', view_id: 'view-1' }`) does not have a `namespace` key, so the result correctly resolves to `null` for backward-compatible tests.
+- Phase 000 (Python model changes) has been completed, so SSE events can carry `namespace` inside `source`.
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- The `dist/` rebuild produces deterministic output but the asset filenames include content hashes. If other source changes are made before committing, a second rebuild will be needed.
+- The `ArtifactsCard.test.ts` was confirmed to not need changes (it tests DOM elements, not `ArtifactRef` shape), consistent with the plan's notes.
+
+### Files Modified
+- `penguiflow/cli/playground_ui/src/lib/types/artifacts.ts` (modified)
+- `penguiflow/cli/playground_ui/src/lib/stores/domain/artifacts.svelte.ts` (modified)
+- `penguiflow/cli/playground_ui/src/lib/services/session-stream.ts` (modified)
+- `penguiflow/cli/playground_ui/tests/unit/stores/artifacts.test.ts` (modified)
+- `penguiflow/cli/playground_ui/dist/` (rebuilt -- multiple asset files regenerated)

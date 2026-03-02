@@ -59,6 +59,7 @@ describe('artifactsStore', () => {
       expect(artifact?.size_bytes).toBe(2048);
       expect(artifact?.filename).toBe('screenshot.png');
       expect(artifact?.sha256).toBeNull();
+      expect(artifact?.namespace).toBeNull();
       expect(artifact?.source).toEqual({ tool: 'screenshot_tool', view_id: 'view-1' });
     });
 
@@ -88,6 +89,19 @@ describe('artifactsStore', () => {
       expect(artifactsStore.has('artifact-1')).toBe(true);
       expect(artifactsStore.has('artifact-2')).toBe(true);
       expect(artifactsStore.has('artifact-3')).toBe(true);
+    });
+
+    it('derives namespace from source.namespace', () => {
+      const event = createMockEvent({
+        artifact_id: 'ns-artifact',
+        source: { tool: 'test_tool', namespace: 'my_ns' }
+      });
+
+      artifactsStore.addArtifact(event);
+      const artifact = artifactsStore.get('ns-artifact');
+
+      expect(artifact).toBeDefined();
+      expect(artifact?.namespace).toBe('my_ns');
     });
   });
 

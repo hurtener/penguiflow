@@ -78,6 +78,9 @@ class ArtifactRef(BaseModel):
     scope: ArtifactScope | None = None
     """Scoping information for access control."""
 
+    namespace: str | None = None
+    """Namespace for artifact grouping (e.g., tool name)."""
+
     source: dict[str, Any] = Field(default_factory=dict)
     """Additional metadata (tool name, warnings, preview, etc.)."""
 
@@ -487,6 +490,7 @@ class NoOpArtifactStore:
             filename=filename,
             sha256=content_hash,
             scope=scope,
+            namespace=namespace,
             source=source,
         )
 
@@ -534,6 +538,7 @@ class NoOpArtifactStore:
             filename=filename,
             sha256=content_hash,
             scope=scope,
+            namespace=namespace,
             source=source,
         )
 
@@ -628,6 +633,7 @@ class InMemoryArtifactStore:
             filename=filename,
             sha256=content_hash,
             scope=effective_scope,
+            namespace=namespace,
             source=dict(meta or {}),
         )
 

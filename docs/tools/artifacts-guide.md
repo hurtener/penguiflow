@@ -76,6 +76,7 @@ ref = ArtifactRef(
     size_bytes=1048576,             # 1MB
     filename="report.pdf",          # Suggested download name
     sha256="abc123...",             # Content hash for integrity
+    namespace="tableau",            # Artifact grouping
     scope=ArtifactScope(            # Access control metadata
         session_id="sess_123",
         user_id="user_456",
@@ -761,6 +762,7 @@ class S3ArtifactStore:
             size_bytes=len(data),
             filename=filename,
             sha256=hashlib.sha256(data).hexdigest(),
+            namespace=namespace,
             scope=scope,
             source=dict(meta or {}),
         )

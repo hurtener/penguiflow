@@ -132,3 +132,39 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run pytest tests/tes
 ```bash
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run ruff check tests/test_artifacts.py
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-02
+
+### Summary of Changes
+- **`tests/test_artifacts.py`**: Added 7 namespace-related assertions across 7 existing test functions:
+  1. `test_minimal_ref`: Added `assert ref.namespace is None` to verify default value.
+  2. `test_full_ref`: Added `namespace="tableau"` to the `ArtifactRef` constructor and `assert ref.namespace == "tableau"` to verify explicit assignment.
+  3. `test_ref_serialization`: Added `namespace="test_ns"` to the constructor, `assert data["namespace"] == "test_ns"` to verify serialization, and `assert ref2.namespace == "test_ns"` to verify round-trip reconstruction.
+  4. `test_namespace_in_id`: Added `assert ref.namespace == "tableau"` to verify the namespace is stored on the ref (not just in the ID prefix).
+  5. `test_put_bytes_with_namespace_and_scope`: Added `assert ref.namespace == "myns"` to verify the `NoOpArtifactStore` propagates namespace to the returned ref.
+  6. `test_put_text_with_namespace_and_scope`: Added `assert ref.namespace == "myns"` to verify the `NoOpArtifactStore` propagates namespace to the returned ref.
+  7. `test_upload_passes_namespace`: Added `assert ref.namespace == "my_tool"` to verify the `ScopedArtifacts` facade forwards namespace through to the ref.
+
+### Key Considerations
+- Each assertion was placed in the exact location specified by the phase plan, maintaining the logical ordering of assertions within each test (field-by-field checks in declaration order).
+- For `test_full_ref`, the `namespace="tableau"` keyword was placed after `scope=scope,` and before `source=` in the constructor call, matching the field ordering convention in `ArtifactRef`.
+- For `test_ref_serialization`, the namespace assertion on `model_dump()` output was placed right after the `size_bytes` check, and the round-trip assertion right after the `id` equality check, keeping related assertions together.
+
+### Assumptions
+- Phase 000 has already been implemented, meaning the `namespace: str | None = None` field exists on `ArtifactRef` and all store implementations (`InMemoryArtifactStore`, `NoOpArtifactStore`, `PlaygroundArtifactStore`) pass `namespace` through to the constructed `ArtifactRef`. This was confirmed by inspecting `penguiflow/artifacts.py` which shows the field at line 81 and namespace propagation throughout the store methods.
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- The `test_full_ref` assertion uses `assert ref.scope.session_id == "session1"` (existing) rather than `assert ref.scope == scope` as mentioned in the plan's prose. The assertion was added after the existing `ref.scope.session_id` check and before the `ref.source` check, which matches the plan's placement intent. The plan's "Required Code" section was followed exactly.
+- All 7 targeted tests pass, all 91 artifact tests pass, and the full suite (2462 tests) passes with 84.71% coverage (above the 84.5% threshold).
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/test_artifacts.py` (modified -- 7 assertion additions across 7 test functions)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-74/002-namespace/phases/phase-001.md` (modified -- appended implementation notes)

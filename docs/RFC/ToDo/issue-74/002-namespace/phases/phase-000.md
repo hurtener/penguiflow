@@ -160,3 +160,36 @@ assert r4.namespace is None
 print('All checks passed.')
 "
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-02
+
+### Summary of Changes
+- Added `namespace: str | None = None` field with docstring to `ArtifactRef` model in `penguiflow/artifacts.py`, positioned after `scope` and before `source` (line 81-82 in the updated file).
+- Updated `NoOpArtifactStore.put_bytes()` ArtifactRef constructor to pass `namespace=namespace` after `scope=scope` and before `source=source`.
+- Updated `NoOpArtifactStore.put_text()` ArtifactRef constructor to pass `namespace=namespace` after `scope=scope` and before `source=source`.
+- Updated `InMemoryArtifactStore.put_bytes()` ArtifactRef constructor to pass `namespace=namespace` after `scope=effective_scope` and before `source=dict(meta or {})`.
+
+### Key Considerations
+- The field placement after `scope` and before `source` groups all metadata/scoping fields together, which is consistent with the existing model structure and the plan's specification.
+- All three store construction sites already had `namespace` available as a method parameter, so the forwarding was straightforward with no parameter threading required.
+- `InMemoryArtifactStore.put_text()` delegates to `put_bytes()` and already forwards `namespace`, so no change was needed there -- consistent with the plan's note.
+
+### Assumptions
+- The `namespace` field is purely additive metadata with no validation constraints (no regex pattern, no enum restriction). This matches the `str | None = None` type annotation specified in the plan.
+- Existing serialized `ArtifactRef` JSON that lacks the `namespace` key will deserialize correctly with `None` as the default -- this is standard Pydantic v2 behavior and was confirmed by the verification script.
+- No other files in the codebase construct `ArtifactRef` instances directly (other than the three sites updated here). The plan explicitly states that `ScopedArtifacts`, `_EventEmittingArtifactStoreProxy`, `ArtifactRegistry`, `ToolNode`, playground endpoints, `payload_builders.py`, `sessions/tool_jobs.py`, and `state/in_memory.py` all delegate to the stores updated here or use `ref.model_dump()`.
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- The `namespace` field is placed after `scope` in the model field order, but `model_dump()` output will include it in definition order. Any downstream consumers that rely on positional field ordering (unlikely with Pydantic dict output, but worth noting) should be verified.
+- The existing 93 artifact-related tests all pass (`tests/test_artifacts.py` and `tests/test_artifact_registry.py`), confirming backward compatibility.
+
+### Files Modified
+- `penguiflow/artifacts.py` -- Added `namespace` field to `ArtifactRef` model and updated three `ArtifactRef(...)` constructor calls in `NoOpArtifactStore.put_bytes()`, `NoOpArtifactStore.put_text()`, and `InMemoryArtifactStore.put_bytes()`.

@@ -56,6 +56,7 @@ export function createArtifactsStore(): ArtifactsStore {
         size_bytes: event.size_bytes,
         filename: event.filename,
         sha256: null,
+        namespace: typeof event.source?.namespace === 'string' ? event.source.namespace : null,
         source: event.source
       };
       // Create new Map to trigger reactivity
