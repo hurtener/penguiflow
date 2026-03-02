@@ -2,21 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 import importlib
 import inspect
 import json
 import secrets
 import sys
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from penguiflow.cli.playground import discover_agent
 from penguiflow.cli.playground_wrapper import ChatResult, PlannerAgentWrapper, _build_trajectory, _normalise_answer
 from penguiflow.state import InMemoryStateStore
-from .inputs import load_query_suite
+
 from .export import export_trace_dataset
+from .inputs import load_query_suite
 from .runner import run_harness_eval
 from .sweep import run_manual_sweep
 from .workflow import run_eval_workflow
@@ -78,6 +79,25 @@ class EvalDatasetSpec:
     env_files: tuple[Path, ...] = ()
     agent_package: str | None = None
     run_one_spec: str | None = None
+
+
+@dataclass(frozen=True)
+class EvalCollectSpec:
+    """Declarative config for collect->export workflows without evaluation.
+
+    Collect-only runs are useful for metric development and debugging, where the
+    primary goal is inspecting exported traces and contexts before defining a
+    scoring function.
+    """
+
+    project_root: Path
+    query_suite_path: Path
+    output_dir: Path
+    session_id: str
+    dataset_tag: str
+    env_files: tuple[Path, ...] = ()
+    agent_package: str | None = None
+    state_store_spec: str | None = None
 
 
 @dataclass(frozen=True)
@@ -502,7 +522,11 @@ def _discover_agent_with_package(project_root: str | Path, agent_package: str | 
             if callable(from_env):
                 config_factory = from_env
             else:
-                config_factory = lambda: config_cls()
+
+                def _config_factory() -> Any:
+                    return config_cls()
+
+                config_factory = _config_factory
     except ModuleNotFoundError:
         config_factory = None
 
@@ -779,6 +803,90 @@ async def run_eval(
     }
 
 
+async def collect_and_export_traces(
+    *,
+    project_root: str | Path,
+    query_suite_path: str | Path,
+    output_dir: str | Path,
+    session_id: str,
+    dataset_tag: str,
+    agent_package: str | None = None,
+    state_store_spec: str | None = None,
+) -> dict[str, Any]:
+    """Collect traces from a query suite and export them, without evaluation.
+
+    This exists for metric development and debugging: users often want to
+    inspect exported trace artifacts (contexts, planner steps, events) before
+    writing a metric or defining patch candidates.
+    """
+
+    ensure_project_on_sys_path(project_root)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if state_store_spec is not None:
+        state_store_factory = resolve_callable(state_store_spec)
+        state_store = await _maybe_await(state_store_factory())
+    else:
+        state_store = InMemoryStateStore()
+
+    suite = load_query_suite(query_suite_path)
+    query_rows = suite.get("queries", [])
+    if not isinstance(query_rows, list) or not query_rows:
+        raise ValueError("query_suite must contain at least one query")
+
+    query_cases: list[str | Mapping[str, Any]] = []
+    for row in query_rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("query rows must be JSON objects")
+        query_text = str(row.get("text") or row.get("query") or "").strip()
+        if not query_text:
+            raise ValueError("query_suite contains empty query text")
+        tags = [str(dataset_tag)]
+        query_id = row.get("query_id")
+        if query_id is not None:
+            tags.append(f"query_id:{query_id}")
+        split_value = row.get("split")
+        split = str(split_value) if split_value is not None else None
+        query_cases.append(
+            {
+                "query": query_text,
+                "split": split,
+                "tags": tags,
+            }
+        )
+
+    collect_result = await collect_traces(
+        project_root=project_root,
+        state_store=state_store,
+        session_id=session_id,
+        queries=query_cases,
+        agent_package=agent_package,
+    )
+    trace_ids = [str(trace_id) for trace_id in collect_result.get("trace_ids", [])]
+    if not trace_ids:
+        raise ValueError("trace collection produced no trace ids")
+
+    trace_ids_path = out_dir / "trace_ids.generated.txt"
+    trace_ids_path.write_text("\n".join(trace_ids) + "\n", encoding="utf-8")
+
+    export_result = await export_trace_dataset(
+        state_store=state_store,
+        trace_ids=trace_ids,
+        output_dir=out_dir,
+        session_id=session_id,
+        workload=agent_package,
+    )
+
+    return {
+        "trace_count": len(trace_ids),
+        "trace_ids_path": str(trace_ids_path),
+        "trace_path": export_result["trace_path"],
+        "manifest_path": export_result["manifest_path"],
+        "output_dir": str(out_dir),
+    }
+
+
 def _resolve_against(base_dir: Path, value: str | Path) -> Path:
     candidate = Path(value)
     if candidate.is_absolute():
@@ -817,7 +925,8 @@ def load_candidates(path: str | Path) -> list[dict[str, Any]]:
             raise ValueError(f"candidate row {idx} field 'patches' must be a JSON object")
         if not patches:
             raise ValueError(
-                "candidate patches must be non-empty patches; baseline is evaluated automatically and should not be listed"
+                "candidate patches must be non-empty patches; "
+                "baseline is evaluated automatically and should not be listed"
             )
 
         fingerprint = json.dumps(patches, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -918,6 +1027,45 @@ def load_eval_run_spec(path: str | Path) -> EvalRunSpec:
         agent_package=str(payload["agent_package"]) if payload.get("agent_package") is not None else None,
         state_store_spec=(str(payload["state_store_spec"]) if payload.get("state_store_spec") is not None else None),
         run_one_spec=(str(payload["run_one_spec"]) if payload.get("run_one_spec") is not None else None),
+    )
+
+
+def load_eval_collect_spec(path: str | Path) -> EvalCollectSpec:
+    """Load collect spec and resolve relative paths.
+
+    Collect specs intentionally mirror the env-file and path normalization
+    behavior of eval run/evaluate specs so teams can move between commands
+    without changing their secret-loading posture.
+    """
+
+    spec_path = Path(path).resolve()
+    payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("eval collect spec must be a JSON object")
+
+    required = ["project_root", "query_suite_path", "output_dir", "session_id", "dataset_tag"]
+    missing = [key for key in required if key not in payload]
+    if missing:
+        raise ValueError(f"eval collect spec missing required keys: {', '.join(sorted(missing))}")
+
+    base_dir = spec_path.parent
+    raw_env_files = payload.get("env_files", [])
+    if raw_env_files is None:
+        raw_env_files = []
+    if not isinstance(raw_env_files, list):
+        raise ValueError("eval collect spec field 'env_files' must be a list")
+
+    env_files = tuple(_resolve_against(base_dir, str(item)) for item in raw_env_files)
+
+    return EvalCollectSpec(
+        project_root=_resolve_against(base_dir, str(payload["project_root"])),
+        query_suite_path=_resolve_against(base_dir, str(payload["query_suite_path"])),
+        output_dir=_resolve_against(base_dir, str(payload["output_dir"])),
+        session_id=str(payload["session_id"]),
+        dataset_tag=str(payload["dataset_tag"]),
+        env_files=env_files,
+        agent_package=str(payload["agent_package"]) if payload.get("agent_package") is not None else None,
+        state_store_spec=(str(payload["state_store_spec"]) if payload.get("state_store_spec") is not None else None),
     )
 
 
@@ -1175,17 +1323,20 @@ async def run_eval_from_spec_file(path: str | Path) -> dict[str, Any]:
 
 
 __all__ = [
+    "EvalCollectSpec",
     "EvalSpec",
     "EvalRunSpec",
     "EvalDatasetSpec",
     "QueryCase",
     "TraceSelector",
     "collect_traces",
+    "collect_and_export_traces",
     "evaluate_dataset",
     "evaluate_dataset_from_spec_file",
     "ensure_project_on_sys_path",
     "export_dataset",
     "load_candidates",
+    "load_eval_collect_spec",
     "load_eval_spec",
     "load_eval_run_spec",
     "load_eval_dataset_spec",

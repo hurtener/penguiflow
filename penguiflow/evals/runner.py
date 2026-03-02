@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import uuid
-import hashlib
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 MetricFn = Callable[[object, object, object | None, str | None, object | None], float | dict[str, object]]
 RunOneFn = Callable[[dict[str, Any], dict[str, Any] | None], Any]

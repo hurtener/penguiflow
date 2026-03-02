@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from pathlib import Path
 import json
+from pathlib import Path
 
 import pytest
 
 from penguiflow.evals.api import (
+    EvalCollectSpec,
     EvalRunSpec,
     ensure_project_on_sys_path,
-    load_eval_spec,
-    load_eval_run_spec,
     load_candidates,
+    load_eval_collect_spec,
+    load_eval_run_spec,
+    load_eval_spec,
     resolve_callable,
     run_eval_from_spec_file,
     run_eval_from_specs,
@@ -100,10 +102,16 @@ async def test_run_eval_from_specs_loads_project_hooks(tmp_path, monkeypatch: py
         "    if _store is not None:\n"
         "        return _store\n"
         "    store = InMemoryStateStore()\n"
-        "    await store.save_event(StoredEvent(trace_id='trace-val', ts=1.0, kind='node_succeeded', node_name='triage_query', node_id='triage_query', payload={'ok': True}))\n"
-        "    await store.save_event(StoredEvent(trace_id='trace-test', ts=2.0, kind='node_succeeded', node_name='triage_query', node_id='triage_query', payload={'ok': True}))\n"
-        "    await store.save_trajectory('trace-val', 'session-1', Trajectory(query='Question val', llm_context={'tenant_id': 'tenant-a'}, tool_context={'request_id': 'r-1'}, metadata={'tags': ['split:val', 'dataset:eval']}))\n"
-        "    await store.save_trajectory('trace-test', 'session-1', Trajectory(query='Question test', llm_context={'tenant_id': 'tenant-a'}, tool_context={'request_id': 'r-2'}, metadata={'tags': ['split:test', 'dataset:eval']}))\n"
+        "    await store.save_event(StoredEvent(trace_id='trace-val', ts=1.0, kind='node_succeeded', "
+        "node_name='triage_query', node_id='triage_query', payload={'ok': True}))\n"
+        "    await store.save_event(StoredEvent(trace_id='trace-test', ts=2.0, kind='node_succeeded', "
+        "node_name='triage_query', node_id='triage_query', payload={'ok': True}))\n"
+        "    await store.save_trajectory('trace-val', 'session-1', Trajectory(query='Question val', "
+        "llm_context={'tenant_id': 'tenant-a'}, "
+        "tool_context={'request_id': 'r-1'}, metadata={'tags': ['split:val', 'dataset:eval']}))\n"
+        "    await store.save_trajectory('trace-test', 'session-1', Trajectory(query='Question test', "
+        "llm_context={'tenant_id': 'tenant-a'}, "
+        "tool_context={'request_id': 'r-2'}, metadata={'tags': ['split:test', 'dataset:eval']}))\n"
         "    _store = store\n"
         "    return store\n"
         "\n"
@@ -281,6 +289,33 @@ def test_load_eval_run_spec_resolves_env_files(tmp_path) -> None:
     )
 
 
+def test_load_eval_collect_spec_resolves_env_files(tmp_path) -> None:
+    spec_path = tmp_path / "collect.spec.json"
+    (tmp_path / "env").mkdir()
+    spec_path.write_text(
+        json.dumps(
+            {
+                "project_root": ".",
+                "query_suite_path": "datasets/query_suite.json",
+                "output_dir": "artifacts/eval/collect-001",
+                "session_id": "session-a",
+                "dataset_tag": "dataset:demo",
+                "env_files": ["env/local.env", "env/secrets.env"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    spec = load_eval_collect_spec(spec_path)
+
+    assert isinstance(spec, EvalCollectSpec)
+    assert spec.project_root == tmp_path
+    assert spec.env_files == (
+        tmp_path / "env/local.env",
+        tmp_path / "env/secrets.env",
+    )
+
+
 @pytest.mark.asyncio
 async def test_run_eval_from_spec_file_runs_pipeline(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     project_root = tmp_path / "proj"
@@ -299,10 +334,16 @@ async def test_run_eval_from_spec_file_runs_pipeline(tmp_path, monkeypatch: pyte
         "    if _store is not None:\n"
         "        return _store\n"
         "    store = InMemoryStateStore()\n"
-        "    await store.save_event(StoredEvent(trace_id='trace-val', ts=1.0, kind='node_succeeded', node_name='triage_query', node_id='triage_query', payload={'ok': True}))\n"
-        "    await store.save_event(StoredEvent(trace_id='trace-test', ts=2.0, kind='node_succeeded', node_name='triage_query', node_id='triage_query', payload={'ok': True}))\n"
-        "    await store.save_trajectory('trace-val', 'session-1', Trajectory(query='Question val', llm_context={'tenant_id': 'tenant-a'}, tool_context={'request_id': 'r-1'}, metadata={'tags': ['split:val', 'dataset:eval']}))\n"
-        "    await store.save_trajectory('trace-test', 'session-1', Trajectory(query='Question test', llm_context={'tenant_id': 'tenant-a'}, tool_context={'request_id': 'r-2'}, metadata={'tags': ['split:test', 'dataset:eval']}))\n"
+        "    await store.save_event(StoredEvent(trace_id='trace-val', ts=1.0, kind='node_succeeded', "
+        "node_name='triage_query', node_id='triage_query', payload={'ok': True}))\n"
+        "    await store.save_event(StoredEvent(trace_id='trace-test', ts=2.0, kind='node_succeeded', "
+        "node_name='triage_query', node_id='triage_query', payload={'ok': True}))\n"
+        "    await store.save_trajectory('trace-val', 'session-1', Trajectory(query='Question val', "
+        "llm_context={'tenant_id': 'tenant-a'}, "
+        "tool_context={'request_id': 'r-1'}, metadata={'tags': ['split:val', 'dataset:eval']}))\n"
+        "    await store.save_trajectory('trace-test', 'session-1', Trajectory(query='Question test', "
+        "llm_context={'tenant_id': 'tenant-a'}, "
+        "tool_context={'request_id': 'r-2'}, metadata={'tags': ['split:test', 'dataset:eval']}))\n"
         "    _store = store\n"
         "    return store\n"
         "\n"
