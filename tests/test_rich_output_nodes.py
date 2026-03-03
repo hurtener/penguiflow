@@ -9,9 +9,24 @@ from penguiflow.artifacts import InMemoryArtifactStore
 from penguiflow.planner import Trajectory
 from penguiflow.planner.artifact_registry import ArtifactRegistry
 from penguiflow.planner.trajectory import BackgroundTaskResult
-from penguiflow.rich_output.nodes import list_artifacts, render_component, ui_form
+from penguiflow.rich_output.nodes import (
+    _dedupe_key,
+    _summarise_component,
+    describe_component,
+    list_artifacts,
+    render_component,
+    ui_confirm,
+    ui_form,
+    ui_select_option,
+)
 from penguiflow.rich_output.runtime import RichOutputConfig, configure_rich_output, reset_runtime
-from penguiflow.rich_output.tools import ListArtifactsArgs, RenderComponentArgs, UIFormArgs
+from penguiflow.rich_output.tools import (
+    ListArtifactsArgs,
+    RenderComponentArgs,
+    UIConfirmArgs,
+    UIFormArgs,
+    UISelectOptionArgs,
+)
 
 
 class PauseSignal(Exception):
@@ -79,6 +94,37 @@ async def test_render_component_emits_artifact() -> None:
 
 
 @pytest.mark.asyncio
+async def test_render_component_raises_when_disabled() -> None:
+    configure_rich_output(RichOutputConfig(enabled=False))
+    ctx = DummyContext()
+    args = RenderComponentArgs(component="markdown", props={"content": "Hello"})
+    with pytest.raises(RuntimeError, match="Rich output is disabled"):
+        await render_component(args, ctx)
+
+
+def test_dedupe_key_falls_back_for_unserializable_payload() -> None:
+    payload: dict[str, object] = {}
+    payload["self"] = payload
+    key = _dedupe_key(payload)
+    assert len(key) == 16
+
+
+@pytest.mark.parametrize(
+    ("component", "props", "expected"),
+    [
+        ("report", {"sections": [1, 2]}, "Rendered report (2 sections)"),
+        ("report", {}, "Rendered report"),
+        ("grid", {"items": [1, 2, 3]}, "Rendered grid (3 items)"),
+        ("tabs", {"tabs": [1]}, "Rendered tabs (1 tabs)"),
+        ("accordion", {"items": [1]}, "Rendered accordion (1 items)"),
+        ("custom", {}, "Rendered custom"),
+    ],
+)
+def test_summarise_component_variants(component: str, props: dict, expected: str) -> None:
+    assert _summarise_component(component, props) == expected
+
+
+@pytest.mark.asyncio
 async def test_render_component_validation_error_includes_schema_hint() -> None:
     configure_rich_output(
         RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
@@ -90,6 +136,58 @@ async def test_render_component_validation_error_includes_schema_hint() -> None:
         await render_component(args, ctx)
     message = str(exc.value)
     assert "describe_component" in message
+
+
+@pytest.mark.asyncio
+async def test_render_component_rejects_invalid_component_and_props_types() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["markdown"], max_payload_bytes=2000, max_total_bytes=2000)
+    )
+    ctx = DummyContext()
+
+    with pytest.raises(RuntimeError, match="requires a component name"):
+        bad_component = RenderComponentArgs.model_construct(component=123, props={})
+        await render_component(bad_component, ctx)
+
+    with pytest.raises(RuntimeError, match="props must be an object"):
+        bad_props = RenderComponentArgs.model_construct(component="markdown", props="nope")
+        await render_component(bad_props, ctx)
+
+
+@pytest.mark.asyncio
+async def test_render_component_requires_registry_for_artifact_refs() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
+    )
+    ctx = DummyContext()
+    args = RenderComponentArgs(
+        component="report",
+        props={"sections": [{"components": [{"artifact_ref": "artifact_0"}]}]},
+    )
+
+    with pytest.raises(RuntimeError, match="artifact_ref usage requires an active planner run"):
+        await render_component(args, ctx)
+
+
+@pytest.mark.asyncio
+async def test_render_component_rejects_invalid_resolved_props() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
+    )
+    ctx = DummyContext()
+    ctx._planner = SimpleNamespace(_artifact_registry=ArtifactRegistry())
+    args = RenderComponentArgs(
+        component="report",
+        props={"sections": [{"components": [{"artifact_ref": "artifact_0"}]}]},
+    )
+
+    async def _resolve_invalid(*_args, **_kwargs):
+        return []
+
+    with pytest.raises(RuntimeError, match="artifact_ref resolution returned invalid props"):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("penguiflow.rich_output.nodes.resolve_artifact_refs_async", _resolve_invalid)
+            await render_component(args, ctx)
 
 
 @pytest.mark.asyncio
@@ -160,6 +258,40 @@ async def test_list_artifacts_reads_registry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_artifacts_returns_empty_without_registry() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
+    )
+    ctx = DummyContext()
+    result = await list_artifacts(ListArtifactsArgs(), ctx)
+    assert result.artifacts == []
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_raises_when_disabled() -> None:
+    configure_rich_output(RichOutputConfig(enabled=False))
+    ctx = DummyContext()
+    with pytest.raises(RuntimeError, match="Rich output is disabled"):
+        await list_artifacts(ListArtifactsArgs(), ctx)
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_ignores_ingest_exceptions() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["report", "echarts"], max_payload_bytes=2000, max_total_bytes=2000)
+    )
+    registry = ArtifactRegistry()
+    registry.ingest_background_results = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bg"))  # type: ignore[assignment]
+    registry.ingest_llm_context = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("ctx"))  # type: ignore[assignment]
+    ctx = DummyContext()
+    trajectory = Trajectory(query="x")
+    ctx._planner = SimpleNamespace(_artifact_registry=registry, _active_trajectory=trajectory)
+
+    result = await list_artifacts(ListArtifactsArgs(), ctx)
+    assert result.artifacts == []
+
+
+@pytest.mark.asyncio
 async def test_list_artifacts_tool_artifact_kind_includes_ui_components() -> None:
     configure_rich_output(
         RichOutputConfig(enabled=True, allowlist=["report", "echarts"], max_payload_bytes=2000, max_total_bytes=4000)
@@ -227,3 +359,71 @@ async def test_list_artifacts_ingests_background_results_for_artifact_refs() -> 
     emitted_props = ctx.emitted[0]["chunk"]["props"]
     component = emitted_props["sections"][0]["components"][0]
     assert component["component"] == "echarts"
+
+
+@pytest.mark.asyncio
+async def test_ui_confirm_and_select_option_pause() -> None:
+    configure_rich_output(
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["confirm", "select_option"],
+            max_payload_bytes=2000,
+            max_total_bytes=2000,
+        )
+    )
+    ctx = DummyContext()
+
+    with pytest.raises(PauseSignal) as confirm_exc:
+        await ui_confirm(UIConfirmArgs(message="Proceed?"), ctx)
+    assert confirm_exc.value.payload["tool"] == "ui_confirm"
+    assert confirm_exc.value.payload["component"] == "confirm"
+
+    with pytest.raises(PauseSignal) as select_exc:
+        await ui_select_option(
+            UISelectOptionArgs(
+                options=[{"label": "One", "value": "one"}],
+            ),
+            ctx,
+        )
+    assert select_exc.value.payload["tool"] == "ui_select_option"
+    assert select_exc.value.payload["component"] == "select_option"
+
+
+@pytest.mark.asyncio
+async def test_ui_interactions_return_when_pause_does_not_raise() -> None:
+    configure_rich_output(
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["form", "confirm", "select_option"],
+            max_payload_bytes=2000,
+            max_total_bytes=2000,
+        )
+    )
+
+    class SoftPauseContext(DummyContext):
+        async def pause(self, reason: str, payload: dict | None = None):
+            self.tool_context["pause"] = {"reason": reason, "payload": payload}
+            return None
+
+    ctx = SoftPauseContext()
+
+    form_result = await ui_form(UIFormArgs(fields=[{"name": "title", "type": "text"}]), ctx)
+    confirm_result = await ui_confirm(UIConfirmArgs(message="Proceed?"), ctx)
+    select_result = await ui_select_option(
+        UISelectOptionArgs(options=[{"label": "One", "value": "one"}]),
+        ctx,
+    )
+
+    assert form_result.ok is True
+    assert confirm_result.ok is True
+    assert select_result.ok is True
+
+
+@pytest.mark.asyncio
+async def test_describe_component_returns_component_schema() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["markdown"], max_payload_bytes=2000, max_total_bytes=2000)
+    )
+    ctx = DummyContext()
+    result = await describe_component(args=SimpleNamespace(name="markdown"), ctx=ctx)  # type: ignore[arg-type]
+    assert result.component["name"] == "markdown"
