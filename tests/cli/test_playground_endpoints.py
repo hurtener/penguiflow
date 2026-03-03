@@ -598,9 +598,7 @@ class TestListArtifactsEndpoint:
         """Valid session with artifacts returns list of artifact dicts without scope field."""
         store = InMemoryArtifactStore()
         scope = ArtifactScope(session_id="sess-1", tenant_id="t-1", user_id="u-1")
-        asyncio.get_event_loop().run_until_complete(
-            store.put_text("hello", mime_type="text/plain", filename="test.txt", scope=scope)
-        )
+        asyncio.run(store.put_text("hello", mime_type="text/plain", filename="test.txt", scope=scope))
 
         wrapper = MockAgentWrapper()
         wrapper._planner = MagicMock()
@@ -625,9 +623,7 @@ class TestListArtifactsEndpoint:
         """Session via X-Session-ID header resolves correctly."""
         store = InMemoryArtifactStore()
         scope = ArtifactScope(session_id="header-sess")
-        asyncio.get_event_loop().run_until_complete(
-            store.put_text("data", scope=scope)
-        )
+        asyncio.run(store.put_text("data", scope=scope))
 
         wrapper = MockAgentWrapper()
         wrapper._planner = MagicMock()
@@ -645,12 +641,8 @@ class TestListArtifactsEndpoint:
         store = InMemoryArtifactStore()
         scope_query = ArtifactScope(session_id="query-sess")
         scope_header = ArtifactScope(session_id="header-sess")
-        asyncio.get_event_loop().run_until_complete(
-            store.put_text("query data", scope=scope_query)
-        )
-        asyncio.get_event_loop().run_until_complete(
-            store.put_text("header data", scope=scope_header)
-        )
+        asyncio.run(store.put_text("query data", scope=scope_query))
+        asyncio.run(store.put_text("header data", scope=scope_header))
 
         wrapper = MockAgentWrapper()
         wrapper._planner = MagicMock()
