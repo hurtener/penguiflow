@@ -45,15 +45,19 @@ class _EventEmittingArtifactStoreProxy:
         self._registry = registry
 
     def _resolve_scope(self, scope: ArtifactScope | None) -> ArtifactScope | None:
-        """Inject session_id from trajectory if scope is missing."""
+        """Inject scope fields from trajectory if scope is missing."""
         if scope is not None:
             return scope
-        # Get session_id from trajectory's tool_context for proper session scoping
         tool_ctx = self._trajectory.tool_context
         if tool_ctx and isinstance(tool_ctx, dict):
             session_id = tool_ctx.get("session_id")
             if session_id:
-                return ArtifactScope(session_id=str(session_id))
+                return ArtifactScope(
+                    session_id=str(session_id),
+                    tenant_id=tool_ctx.get("tenant_id"),
+                    user_id=tool_ctx.get("user_id"),
+                    trace_id=tool_ctx.get("trace_id"),
+                )
         return None
 
     async def put_bytes(
@@ -145,6 +149,10 @@ class _EventEmittingArtifactStoreProxy:
 
     async def exists(self, artifact_id: str) -> bool:
         return await self._store.exists(artifact_id)
+
+    async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]:
+        """Delegate list to underlying store (no event for reads)."""
+        return await self._store.list(scope=scope)
 
 
 class _ArtifactCollector:

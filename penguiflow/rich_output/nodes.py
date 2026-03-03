@@ -103,7 +103,7 @@ async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> Rende
             registry=registry,
             trajectory=getattr(ctx, "_trajectory", None),
             session_id=str(session_id) if session_id is not None else None,
-            artifact_store=getattr(ctx, "artifacts", None),
+            artifact_store=getattr(ctx, "_artifacts", None),
         )
         if not isinstance(props, Mapping):
             raise RuntimeError("artifact_ref resolution returned invalid props")

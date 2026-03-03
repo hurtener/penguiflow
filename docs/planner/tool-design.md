@@ -96,7 +96,7 @@ Guidelines:
 
 - `llm_context`: LLM-visible context (read-only mapping)
 - `tool_context`: tool-only context (secrets, clients, loggers)
-- `artifacts`: artifact store for large/binary payloads
+- `artifacts`: scoped artifact facade (`ScopedArtifacts`) — use `upload()`/`download()`/`list()` for large/binary payloads with automatic scope injection
 - `pause(...)`: pause execution for approvals/OAuth
 - `emit_chunk(...)`: stream partial output
 

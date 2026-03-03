@@ -95,6 +95,8 @@ ToolNode can extract large/binary content into artifacts and handle MCP resource
 - `ExternalToolConfig.artifact_extraction` controls the extraction pipeline
 - MCP resources can generate tools like `{namespace}.resources_read` (see **[MCP resources](mcp-resources.md)**)
 
+> **Note:** The extraction pipeline is an internal (plumbing) mechanism — it uses `ctx._artifacts` (the raw `ArtifactStore`) directly. Tool developers storing artifacts manually should use `ctx.artifacts` (the `ScopedArtifacts` facade) with `upload()`/`download()`/`list()`.
+
 See **[Artifacts & resources](artifacts-and-resources.md)**.
 
 ## Operational defaults (recommended)

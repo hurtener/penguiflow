@@ -12,7 +12,7 @@ import base64
 
 import pytest
 
-from penguiflow.artifacts import InMemoryArtifactStore
+from penguiflow.artifacts import InMemoryArtifactStore, ScopedArtifacts
 from penguiflow.registry import ModelRegistry
 from penguiflow.tools.config import ExternalToolConfig, TransportType
 from penguiflow.tools.node import ToolNode
@@ -41,7 +41,7 @@ class DummyCtx:
         self._tool_context: dict[str, str] = {}
         self._llm_context: dict[str, str] = {}
         self._meta: dict[str, str] = {}
-        self._artifacts = artifact_store or InMemoryArtifactStore()
+        self._artifacts_store = artifact_store or InMemoryArtifactStore()
 
     @property
     def tool_context(self):
@@ -56,8 +56,18 @@ class DummyCtx:
         return self._meta
 
     @property
+    def _artifacts(self):
+        return self._artifacts_store
+
+    @property
     def artifacts(self):
-        return self._artifacts
+        return ScopedArtifacts(
+            self._artifacts_store,
+            tenant_id=None,
+            user_id=None,
+            session_id=None,
+            trace_id=None,
+        )
 
 
 def build_config(**overrides):

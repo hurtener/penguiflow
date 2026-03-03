@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { createArtifactsStore } from '$lib/stores';
-import type { ArtifactStoredEvent } from '$lib/types';
+import type { ArtifactRef, ArtifactStoredEvent } from '$lib/types';
 
 const artifactsStore = createArtifactsStore();
 
@@ -59,6 +59,7 @@ describe('artifactsStore', () => {
       expect(artifact?.size_bytes).toBe(2048);
       expect(artifact?.filename).toBe('screenshot.png');
       expect(artifact?.sha256).toBeNull();
+      expect(artifact?.namespace).toBeNull();
       expect(artifact?.source).toEqual({ tool: 'screenshot_tool', view_id: 'view-1' });
     });
 
@@ -88,6 +89,19 @@ describe('artifactsStore', () => {
       expect(artifactsStore.has('artifact-1')).toBe(true);
       expect(artifactsStore.has('artifact-2')).toBe(true);
       expect(artifactsStore.has('artifact-3')).toBe(true);
+    });
+
+    it('derives namespace from source.namespace', () => {
+      const event = createMockEvent({
+        artifact_id: 'ns-artifact',
+        source: { tool: 'test_tool', namespace: 'my_ns' }
+      });
+
+      artifactsStore.addArtifact(event);
+      const artifact = artifactsStore.get('ns-artifact');
+
+      expect(artifact).toBeDefined();
+      expect(artifact?.namespace).toBe('my_ns');
     });
   });
 
@@ -197,6 +211,65 @@ describe('artifactsStore', () => {
 
       artifactsStore.clear();
       expect(artifactsStore.count).toBe(0);
+    });
+  });
+
+  describe('hydrate', () => {
+    const createMockRef = (overrides: Partial<ArtifactRef> = {}): ArtifactRef => ({
+      id: 'ref-1',
+      mime_type: 'application/json',
+      size_bytes: 512,
+      filename: 'data.json',
+      sha256: null,
+      namespace: null,
+      source: {},
+      ...overrides
+    });
+
+    it('hydrates empty store with all refs', () => {
+      const refs = [
+        createMockRef({ id: 'h-1', filename: 'file1.json' }),
+        createMockRef({ id: 'h-2', filename: 'file2.json' }),
+        createMockRef({ id: 'h-3', filename: 'file3.json' }),
+      ];
+
+      artifactsStore.hydrate(refs);
+
+      expect(artifactsStore.count).toBe(3);
+      expect(artifactsStore.has('h-1')).toBe(true);
+      expect(artifactsStore.has('h-2')).toBe(true);
+      expect(artifactsStore.has('h-3')).toBe(true);
+    });
+
+    it('hydrate with empty array is no-op', () => {
+      artifactsStore.addArtifact(createMockEvent({ artifact_id: 'existing' }));
+      expect(artifactsStore.count).toBe(1);
+
+      artifactsStore.hydrate([]);
+
+      expect(artifactsStore.count).toBe(1);
+      expect(artifactsStore.has('existing')).toBe(true);
+    });
+
+    it('hydrate skips existing artifacts (SSE-delivered take priority)', () => {
+      // SSE-delivered artifact arrives first
+      artifactsStore.addArtifact(createMockEvent({
+        artifact_id: 'sse-first',
+        filename: 'sse-version.pdf'
+      }));
+
+      // Hydration arrives later with same ID but different data
+      const refs = [
+        createMockRef({ id: 'sse-first', filename: 'hydrated-version.pdf' }),
+        createMockRef({ id: 'new-artifact', filename: 'new.pdf' }),
+      ];
+
+      artifactsStore.hydrate(refs);
+
+      // SSE version preserved, new artifact added
+      expect(artifactsStore.count).toBe(2);
+      expect(artifactsStore.get('sse-first')?.filename).toBe('sse-version.pdf');
+      expect(artifactsStore.get('new-artifact')?.filename).toBe('new.pdf');
     });
   });
 });

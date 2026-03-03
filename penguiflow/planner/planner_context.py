@@ -8,7 +8,7 @@ from collections.abc import Mapping, MutableMapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
-from ..artifacts import ArtifactStore
+from ..artifacts import ArtifactStore, ScopedArtifacts
 from .artifact_handling import _EventEmittingArtifactStoreProxy, _normalise_artifact_value
 from .context import PlannerPauseReason, ToolContext
 from .models import PlannerEvent, PlannerPause
@@ -29,6 +29,7 @@ class _PlannerContext(ToolContext):
         "_artifact_chunks",
         "_artifact_seq",
         "_artifact_proxy",
+        "_scoped_artifacts",
         "_meta_warned",
         "_kv",
     )
@@ -47,6 +48,14 @@ class _PlannerContext(ToolContext):
             time_source=planner._time_source,
             trajectory=trajectory,
             registry=planner._artifact_registry,
+        )
+        tc = self._tool_context
+        self._scoped_artifacts = ScopedArtifacts(
+            self._artifact_proxy,
+            tenant_id=str(tc["tenant_id"]) if tc.get("tenant_id") is not None else None,
+            user_id=str(tc["user_id"]) if tc.get("user_id") is not None else None,
+            session_id=str(tc["session_id"]) if tc.get("session_id") is not None else None,
+            trace_id=str(tc["trace_id"]) if tc.get("trace_id") is not None else None,
         )
         self._meta_warned = False
         self._kv = None
@@ -71,16 +80,14 @@ class _PlannerContext(ToolContext):
         return ChainMap(self._tool_context, self._llm_context)
 
     @property
-    def artifacts(self) -> ArtifactStore:
-        """Binary/large-text artifact storage.
-
-        Use this to store binary content (PDFs, images) or large text
-        out-of-band, keeping only compact ArtifactRef in LLM context.
-
-        Note: This returns an event-emitting proxy that notifies frontends
-        when artifacts are stored (e.g., for real-time UI updates).
-        """
+    def _artifacts(self) -> ArtifactStore:
+        """Raw artifact store for framework-internal use."""
         return self._artifact_proxy
+
+    @property
+    def artifacts(self) -> ScopedArtifacts:
+        """Scoped artifact facade for tool developers."""
+        return self._scoped_artifacts
 
     @property
     def kv(self):
@@ -99,7 +106,7 @@ class _PlannerContext(ToolContext):
 
             self._kv = SessionKVFacade(
                 state_store=getattr(self._planner, "_state_store", None),
-                artifacts=self.artifacts,
+                artifacts=self._artifact_proxy,
                 tool_context=self._tool_context,
                 emit_planner_event=_emit,
             )

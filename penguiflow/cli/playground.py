@@ -1916,6 +1916,36 @@ def create_playground_app(
 
     # ─── Artifact Endpoints ───────────────────────────────────────────────────
 
+    @app.get("/artifacts")
+    async def list_artifacts(
+        session_id: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        x_session_id: str | None = Header(None, alias="X-Session-ID"),
+    ) -> list[Mapping[str, Any]]:
+        """List artifacts for a session (best-effort hydration)."""
+        artifact_store = _discover_artifact_store()
+        if artifact_store is None:
+            return []
+
+        resolved_session = session_id or x_session_id
+        if resolved_session is None:
+            return []
+
+        from penguiflow.artifacts import ArtifactScope
+
+        scope = ArtifactScope(
+            session_id=resolved_session,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+        try:
+            refs = await artifact_store.list(scope=scope)
+        except Exception:
+            _LOGGER.warning("Failed to list artifacts for session %s", resolved_session, exc_info=True)
+            return []
+        return [ref.model_dump(exclude={"scope"}) for ref in refs]
+
     @app.get("/artifacts/{artifact_id}")
     async def get_artifact(
         artifact_id: str,
@@ -2069,6 +2099,8 @@ def create_playground_app(
         namespace: str,
         uri: str,
         session_id: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
         x_session_id: str | None = Header(None, alias="X-Session-ID"),
     ) -> Mapping[str, Any]:
         """Read a resource by URI from an MCP server.
@@ -2115,17 +2147,21 @@ def create_playground_app(
 
             scoped_store = _ScopedArtifactStore(
                 artifact_store,
-                ArtifactScope(session_id=resolved_session),
+                ArtifactScope(
+                    session_id=resolved_session,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                ),
             )
 
         # Create a context-like object for the read operation
         class MinimalCtx:
             def __init__(self, artifacts: Any):
-                self._artifacts = artifacts
+                self._artifacts_store = artifacts
 
             @property
-            def artifacts(self) -> Any:
-                return self._artifacts
+            def _artifacts(self) -> Any:
+                return self._artifacts_store
 
         ctx = MinimalCtx(scoped_store)
 
