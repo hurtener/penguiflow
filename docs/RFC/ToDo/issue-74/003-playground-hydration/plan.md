@@ -6,6 +6,8 @@ When a playground session is resumed (e.g. browser refresh), the Artifacts panel
 
 ## Changes (~8 files, 1 new endpoint)
 
+> **Application order for `playground.py`:** Sections 0d and 1 both modify this file. Apply section 0d first (modifies `read_resource` at line 2068+), then section 1 (inserts before line 1919). Since 0d's changes are below 1's insertion point, applying 0d first keeps all line references stable. Alternatively, use function/decorator anchors (`read_resource`, `get_artifact`) rather than line numbers.
+
 ### 0. Upstream fix: Propagate full scope in artifact storage paths
 
 Four artifact storage paths only set `session_id` on the scope (or no scope at all), omitting `tenant_id`/`user_id`. This causes `artifact_store.list(scope=...)` to return no results when filtering by `tenant_id`/`user_id`, since `_scope_matches` requires exact match for non-None filter fields. Fix all paths to propagate the full scope from `tool_context` (matching the existing pattern in `sessions/session_kv.py:412-417`).
@@ -67,7 +69,7 @@ async def _extract_artifacts_from_observation(
 ) -> list[dict[str, Any]]:
 ```
 
-Inside the function, **replace line 192** (`scope = ArtifactScope(session_id=session_id) if session_id else None`) with the comment `# `scope` is now captured from the outer function's parameter (no local override)`. The inner `_store` function will now resolve `scope` via closure capture from the outer function's `scope` parameter — no changes to `_store`'s signature needed. The resulting `_store` body should be (note the comment on the former line 192 is prescriptive — add it to the code):
+Inside the **inner `_store` closure** (not the outer function), **replace line 192** (`scope = ArtifactScope(session_id=session_id) if session_id else None`) with the comment `# `scope` is now captured from the outer function's parameter (no local override)`. Note: line 192 is a local variable definition inside `_store`'s body — removing it causes Python to resolve `scope` via closure capture from the enclosing `_extract_artifacts_from_observation`'s `scope` parameter instead. No changes to `_store`'s signature needed. The resulting `_store` body should be (note the comment on the former line 192 is prescriptive — add it to the code):
 
 ```python
 async def _store(
@@ -208,6 +210,8 @@ Add `ArtifactScope` to the existing import from `..artifacts` (already imported 
 
 The `GET /resources/{namespace}/{uri}` endpoint creates `ArtifactScope(session_id=resolved_session)` without `tenant_id`/`user_id`. Add query parameters and propagate them.
 
+> **Note:** `trace_id` is intentionally omitted from HTTP endpoints (steps 0d and 1). HTTP callers don't have trace context — `trace_id` is an internal planner concept. Passing `trace_id=None` in the scope means "don't filter on that dimension", so the list endpoint correctly returns all session artifacts across all traces.
+
 Add `tenant_id` and `user_id` query params to the endpoint signature:
 ```python
 @app.get("/resources/{namespace}/{uri:path}")
@@ -245,15 +249,37 @@ async def list_artifacts(
     user_id: str | None = None,
     x_session_id: str | None = Header(None, alias="X-Session-ID"),
 ) -> list[Mapping[str, Any]]:
+    """List artifacts for a session (best-effort hydration)."""
+    artifact_store = _discover_artifact_store()
+    if artifact_store is None:
+        return []
+
+    resolved_session = session_id or x_session_id
+    if resolved_session is None:
+        return []
+
+    from penguiflow.artifacts import ArtifactScope
+
+    scope = ArtifactScope(
+        session_id=resolved_session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+    try:
+        refs = await artifact_store.list(scope=scope)
+    except Exception:
+        _LOGGER.warning("Failed to list artifacts for session %s", resolved_session, exc_info=True)
+        return []
+    return [ref.model_dump(exclude={"scope"}) for ref in refs]
 ```
 
-- Obtain the artifact store via `_discover_artifact_store()` (line 1020). If it returns `None`, return `[]` immediately (hydration is best-effort, unlike existing endpoints that return 501)
-- Resolve session_id: `resolved_session = session_id or x_session_id` (matches existing `get_artifact`/`get_artifact_meta` endpoints). If `resolved_session` is `None`, return `[]`
-- **Import `ArtifactScope` locally** inside the function body: `from penguiflow.artifacts import ArtifactScope` (follows existing pattern at line 2114 — top-level imports use lazy loading for optional deps)
-- Builds `ArtifactScope(session_id=resolved_session, tenant_id=tenant_id, user_id=user_id)` from the resolved params
-- Calls `artifact_store.list(scope=scope)` on the discovered store **inside a `try/except Exception`** — on any `Exception`, log a warning via the module-level `logger` and return `[]` (best-effort: hydration failures must not break the playground; use `except Exception` to preserve `SystemExit`/`KeyboardInterrupt`)
-- **Logger:** `playground.py` has `import logging` (line 9) but no module-level logger. Add `logger = logging.getLogger(__name__)` near the top of the file (after imports) and use `logger.warning(...)` for the catch block
-- Returns `[ref.model_dump(exclude={"scope"}) for ref in refs]` — exclude `scope` to avoid leaking scoping metadata to the client
+Implementation notes:
+- Returns `[]` (not error) when artifact store is absent or session is missing — hydration is best-effort, unlike existing endpoints that return 501
+- `resolved_session = session_id or x_session_id` matches existing `get_artifact`/`get_artifact_meta` convention
+- **Local import** of `ArtifactScope` follows existing pattern at line 2114 (top-level imports use lazy loading for optional deps)
+- `except Exception` preserves `SystemExit`/`KeyboardInterrupt` while catching all store failures
+- **Logger:** `_LOGGER` already exists at line 81 — do **not** create a new logger variable
+- `exclude={"scope"}` prevents leaking scoping metadata (`tenant_id`, `user_id`, `session_id`, `trace_id`) to the client
 
 ### 2. Frontend: Add `listArtifacts()` API function
 
@@ -276,8 +302,19 @@ export async function listArtifacts(
 
 **File:** `penguiflow/cli/playground_ui/src/lib/stores/domain/artifacts.svelte.ts` — add to interface + implementation
 
+Add `hydrate(refs: ArtifactRef[]): void` to the `ArtifactsStore` interface and implement it:
+
 ```typescript
-hydrate(refs: ArtifactRef[]): void
+hydrate(refs: ArtifactRef[]): void {
+  if (refs.length === 0) return;
+  const newMap = new Map(artifacts);
+  for (const ref of refs) {
+    if (!newMap.has(ref.id)) {
+      newMap.set(ref.id, ref);
+    }
+  }
+  artifacts = newMap;
+},
 ```
 
 - Bulk-loads artifacts into the Map via a single new Map creation (for Svelte 5 `$state` reactivity)
@@ -335,6 +372,7 @@ End users should always use the public `ctx.artifacts` API (`ScopedArtifacts`), 
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -357,9 +395,10 @@ def _make_proxy(tool_context: dict[str, Any]) -> _EventEmittingArtifactStoreProx
     registry = MagicMock(spec=ArtifactRegistry)
     return _EventEmittingArtifactStoreProxy(
         store=NoOpArtifactStore(),
-        trajectory=traj,
         emit_event=_noop_emit,
-        artifact_registry=registry,
+        time_source=time.monotonic,
+        trajectory=traj,
+        registry=registry,
     )
 ```
 
@@ -367,7 +406,7 @@ def _make_proxy(tool_context: dict[str, Any]) -> _EventEmittingArtifactStoreProx
 
 **File:** `tests/test_tool_jobs.py` — add to existing file
 
-2. **`_extract_artifacts_from_observation` receives full scope** → import the private function directly via `from penguiflow.sessions.tool_jobs import _extract_artifacts_from_observation`. When called with a scope containing `session_id`, `tenant_id`, `user_id`, and `trace_id`, verify via `artifact_store.get_ref()` that stored artifacts have matching scope fields (inspect the store directly, not just the returned dicts)
+2. **`_extract_artifacts_from_observation` receives full scope** → import the private function directly via `from penguiflow.sessions.tool_jobs import _extract_artifacts_from_observation`. When called with a scope containing `session_id`, `tenant_id`, `user_id`, and `trace_id`, verify via `artifact_store.list(scope=ArtifactScope(session_id=...))` that stored artifacts have matching scope fields on the returned `ArtifactRef` objects (inspect the store directly, not just the returned dicts)
 
 **File:** `tests/test_payload_builders.py` — **create new file** (does not exist yet). Use this scaffold:
 
@@ -385,7 +424,8 @@ import pytest
 from penguiflow.artifacts import ArtifactScope, InMemoryArtifactStore
 from penguiflow.planner.artifact_registry import ArtifactRegistry
 from penguiflow.planner.models import PlannerEvent
-from penguiflow.planner.payload_builders import _clamp_observation, ObservationGuardrailConfig
+from penguiflow.planner.models import ObservationGuardrailConfig
+from penguiflow.planner.payload_builders import _clamp_observation
 
 
 def _make_config(*, auto_artifact_threshold: int = 100) -> ObservationGuardrailConfig:
@@ -418,7 +458,7 @@ Call `_clamp_observation` with:
 
 **Test fixture setup:** Tests 3-6 require an artifact store injected into the mock agent. `_discover_artifact_store()` traverses `agent_wrapper → _planner → artifact_store`. To configure:
 - Use `InMemoryArtifactStore` from `penguiflow.artifacts`
-- Set it on the mock planner: give `MockAgentWrapper` a `_planner` attribute (or nested `_orchestrator._planner`) with an `artifact_store` attribute pointing to the `InMemoryArtifactStore` instance
+- Set it on the mock planner: give `MockAgentWrapper` a direct `_planner` attribute (the first path `_discover_planner()` checks) with an `artifact_store` attribute pointing to the `InMemoryArtifactStore` instance
 - Pre-populate with `await store.put_text(...)` using an `ArtifactScope(session_id=..., tenant_id=..., user_id=...)` to match the query params used in the test
 - Use `pytest`'s async fixtures or call `asyncio.run()` / `loop.run_until_complete()` for setup if needed
 
