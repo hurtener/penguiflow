@@ -360,6 +360,71 @@ class TestProviderFactory:
             assert "meta-llama" in provider.model
             assert provider.provider_name == "databricks"
 
+    def test_create_databricks_provider_with_prefixes(self) -> None:
+        """Test both databricks/ and databricks- routing branches."""
+        mock_openai = MagicMock()
+        mock_client = MagicMock()
+        mock_openai.AsyncOpenAI.return_value = mock_client
+
+        with patch.dict(sys.modules, {"openai": mock_openai}):
+            from penguiflow.llm.providers import create_provider
+
+            provider_from_slash = create_provider(
+                "databricks/databricks-meta-llama-3-1-70b-instruct",
+                token="test-token",
+                host="https://my-workspace.cloud.databricks.com/serving-endpoints",
+            )
+            provider_from_dash = create_provider(
+                "databricks-meta-llama-3-1-70b-instruct",
+                token="test-token",
+                host="https://my-workspace.cloud.databricks.com/serving-endpoints",
+            )
+
+            assert provider_from_slash.provider_name == "databricks"
+            assert provider_from_dash.provider_name == "databricks"
+
+    def test_create_provider_bedrock_prefix_and_heuristic(self) -> None:
+        from penguiflow.llm.providers import create_provider
+
+        with patch("penguiflow.llm.providers.bedrock.BedrockProvider") as mock_bedrock:
+            prefixed = create_provider("bedrock/anthropic.claude-sonnet-4")
+            heuristic = create_provider("amazon.nova-pro")
+
+            assert prefixed is mock_bedrock.return_value
+            assert heuristic is mock_bedrock.return_value
+            assert mock_bedrock.call_args_list[0].args[0] == "anthropic.claude-sonnet-4"
+            assert mock_bedrock.call_args_list[1].args[0] == "amazon.nova-pro"
+
+    def test_create_provider_prefixed_openai_anthropic_google(self) -> None:
+        mock_openai = MagicMock()
+        mock_anthropic = MagicMock()
+        mock_google = MagicMock()
+
+        with patch.dict(
+            sys.modules,
+            {"openai": mock_openai, "anthropic": mock_anthropic, "google.genai": mock_google, "google": MagicMock()},
+        ):
+            from penguiflow.llm.providers import create_provider
+
+            openai_provider = create_provider("openai/gpt-4o", api_key="k")
+            anthropic_provider = create_provider("anthropic/claude-sonnet-4-5", api_key="k")
+            google_provider = create_provider("google/gemini-2.5-flash", api_key="k")
+
+            assert openai_provider.provider_name == "openai"
+            assert anthropic_provider.provider_name == "anthropic"
+            assert google_provider.provider_name == "google"
+
+    def test_create_provider_defaults_to_openai_for_unknown_model(self) -> None:
+        mock_openai = MagicMock()
+        mock_client = MagicMock()
+        mock_openai.AsyncOpenAI.return_value = mock_client
+
+        with patch.dict(sys.modules, {"openai": mock_openai}):
+            from penguiflow.llm.providers import create_provider
+
+            provider = create_provider("custom-local-model", api_key="test-key")
+            assert provider.provider_name == "openai"
+
 
 class TestProviderRouting:
     """Test that model names route to correct providers."""
@@ -553,3 +618,10 @@ class TestToolCallIdGeneration:
         assert generated_id.startswith("call_")
         # UUID hex is 32 chars, we use 16 chars
         assert len(generated_id) == len("call_") + 16
+
+
+def test_providers_module_unknown_attribute_raises() -> None:
+    import penguiflow.llm.providers as providers
+
+    with pytest.raises(AttributeError):
+        _ = providers.NoSuchProvider

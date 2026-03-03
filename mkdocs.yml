@@ -108,6 +108,8 @@ nav:
       - MCP resources: tools/mcp-resources.md
       - Artifacts & resources: tools/artifacts-and-resources.md
       - State store: tools/statestore.md
+      - Common tools:
+          - Web (Brave): common-tools/web.md
   - Deployment:
       - Overview: deployment/overview.md
       - Worker integration: deployment/worker-integration.md
