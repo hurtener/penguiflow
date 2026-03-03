@@ -189,3 +189,36 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run pytest tests/tes
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run ruff check penguiflow/sessions/tool_jobs.py tests/test_tool_jobs.py
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run mypy penguiflow/sessions/tool_jobs.py
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-03
+
+### Summary of Changes
+- **`penguiflow/sessions/tool_jobs.py`**: Changed `_extract_artifacts_from_observation` function signature from `session_id: str | None` to `scope: ArtifactScope | None`. Removed the local `scope` variable inside the `_store` closure (which previously constructed a limited `ArtifactScope` from only `session_id`) and replaced it with a comment indicating the closure now captures `scope` from the outer function parameter. Updated the call site in `build_tool_job_pipeline` to construct a full `ArtifactScope` with `session_id`, `tenant_id`, `user_id`, and `trace_id` extracted from `snapshot.tool_context`, and pass it as `scope=artifact_scope`.
+- **`tests/test_tool_jobs.py`**: Added imports for `ArtifactScope`, `InMemoryArtifactStore`, and `_extract_artifacts_from_observation`. Added `ArtifactOut` Pydantic model with an artifact-annotated `report` field. Added `test_extract_artifacts_from_observation_propagates_full_scope` async test that verifies all four scope fields (`session_id`, `tenant_id`, `user_id`, `trace_id`) are correctly propagated to stored artifacts.
+
+### Key Considerations
+- The import ordering in the test file required adjustment: the plan specified adding imports after existing imports, but ruff's isort rules require `penguiflow.artifacts` to come before `penguiflow.catalog` alphabetically. The imports were placed in proper sorted order.
+- The `_extract_artifacts_from_observation` import was merged into the existing `from penguiflow.sessions.tool_jobs import ...` line rather than adding a separate import line, keeping imports consolidated per ruff conventions.
+- The new test does not use the `@pytest.mark.asyncio` decorator, consistent with `asyncio_mode = "auto"` in the project configuration. The existing tests in the file do use the decorator, but both styles work equivalently.
+
+### Assumptions
+- `InMemoryArtifactStore` stores artifacts with the full `ArtifactScope` passed to `put_text` and makes it available via `store.list(scope=scope)` -- this was confirmed by the passing test.
+- No other callers of `_extract_artifacts_from_observation` exist beyond the single call site in `build_tool_job_pipeline`. This was verified by the fact that no other files needed updating and all tests pass.
+- The `snapshot.tool_context` dictionary may or may not contain `tenant_id`, `user_id`, and `trace_id` keys -- using `.get()` safely returns `None` for missing keys.
+
+### Deviations from Plan
+- The plan specified adding the `_extract_artifacts_from_observation` import as a separate line. Instead, it was merged into the existing `from penguiflow.sessions.tool_jobs import ...` line to satisfy ruff's import sorting rules (I001). This is a stylistic deviation with no functional impact.
+
+### Potential Risks & Reviewer Attention Points
+- The `_store` closure now captures `scope` from the enclosing function via Python closure semantics. Since `scope` is not reassigned within the `for field_name` loop (it is a parameter of the outer function), the closure captures the correct value. This is safe, but worth noting for reviewers unfamiliar with Python closure behavior.
+- The existing tests (`test_build_tool_job_pipeline_collects_artifact_fields`) continue to pass because `StreamingSession` does not set a `session_id` on the snapshot in a way that triggers `ArtifactScope` construction (it falls through to `artifact_scope = None`), so the behavior for the existing artifact extraction path is unchanged.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/sessions/tool_jobs.py` (modified)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/test_tool_jobs.py` (modified)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-74/003-playground-hydration/phases/phase-001.md` (modified -- appended implementation notes)

@@ -257,3 +257,37 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run pytest tests/cli
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run ruff check penguiflow/cli/playground.py tests/cli/test_playground_endpoints.py
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run mypy penguiflow/cli/playground.py
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-03
+
+### Summary of Changes
+- **`penguiflow/cli/playground.py`**: Added `tenant_id: str | None = None` and `user_id: str | None = None` query parameters to the `read_resource` endpoint signature (Step 1). Updated `ArtifactScope` construction within `read_resource` to propagate `tenant_id` and `user_id` (Step 1). Added new `GET /artifacts` list endpoint before the existing `GET /artifacts/{artifact_id}` endpoint to support best-effort session artifact hydration (Step 2).
+- **`tests/cli/test_playground_endpoints.py`**: Added `asyncio`, `ArtifactScope`, and `InMemoryArtifactStore` imports. Added `TestListArtifactsEndpoint` class with 6 integration tests covering: no store returns empty, no session returns empty, valid session returns artifact dicts without scope, session via header, query param priority over header, and empty session returns empty (Step 3).
+
+### Key Considerations
+- **Route ordering**: The `GET /artifacts` endpoint was inserted before `GET /artifacts/{artifact_id}` to prevent FastAPI from matching the exact path as a path parameter value. This is critical for correct routing.
+- **Best-effort semantics**: The list endpoint returns `[]` (not an error) when the artifact store is absent or no session is provided. This aligns with the hydration use case where missing data should not block the UI.
+- **Local import pattern**: `ArtifactScope` is imported locally inside the `list_artifacts` endpoint, following the existing lazy-import pattern used in the `read_resource` endpoint (line 2146). This avoids importing optional dependencies at module level.
+- **Scope exclusion**: `ref.model_dump(exclude={"scope"})` prevents leaking tenant/user/trace metadata to the client, as specified in the plan.
+- **Exception handling**: The list endpoint catches all exceptions from `artifact_store.list()` and logs them with `exc_info=True` via the existing `_LOGGER`, returning `[]` to maintain best-effort behavior.
+
+### Assumptions
+- The `_discover_artifact_store()` helper correctly returns `None` for unconfigured or `NoOpArtifactStore` scenarios, as documented in the plan and verified by existing test patterns.
+- The `InMemoryArtifactStore.list(scope=...)` method correctly filters artifacts by scope using `_scope_matches`, which was verified by reading the implementation in `artifacts.py`.
+- The `asyncio.get_event_loop().run_until_complete()` pattern used in tests is acceptable for synchronous test setup of async store operations, matching the plan's recommendation. A deprecation warning is emitted but does not affect test correctness.
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- **DeprecationWarning in tests**: The `asyncio.get_event_loop()` call in `test_list_artifacts_valid_session` emits a `DeprecationWarning: There is no current event loop`. This is cosmetic and does not affect test correctness. If desired, these tests could be converted to async test functions using `pytest-asyncio` in a future cleanup.
+- **Scope matching semantics**: The `_scope_matches` function in `artifacts.py` determines which artifacts are returned for a given scope. Tests verify correct behavior for exact matches but do not test partial scope matching edge cases (e.g., matching on `session_id` alone when artifacts also have `tenant_id`). This is existing behavior in the artifact store, not something introduced by this phase.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground.py` (modified)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/cli/test_playground_endpoints.py` (modified)

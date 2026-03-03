@@ -343,3 +343,42 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run pytest tests/tes
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run ruff check penguiflow/planner/artifact_handling.py penguiflow/planner/payload_builders.py penguiflow/planner/react.py tests/test_artifact_handling.py tests/test_payload_builders.py
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run mypy penguiflow/planner/artifact_handling.py penguiflow/planner/payload_builders.py penguiflow/planner/react.py
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-03
+
+### Summary of Changes
+- **`penguiflow/planner/artifact_handling.py`**: Updated `_resolve_scope` method on `_EventEmittingArtifactStoreProxy` to return an `ArtifactScope` with all four fields (`session_id`, `tenant_id`, `user_id`, `trace_id`) from `tool_context`, instead of only `session_id`. Updated the docstring accordingly.
+- **`penguiflow/planner/payload_builders.py`**: Added `ArtifactScope` to the import from `..artifacts`. Added `scope: ArtifactScope | None = None` parameter to `_clamp_observation` function signature. Passed `scope=scope` to the `artifact_store.put_text()` call inside the artifact storage branch.
+- **`penguiflow/planner/react.py`**: Added `ArtifactScope` to the import from `..artifacts`. Updated the `_clamp_observation` wrapper method in `ReactPlanner` to build a full `ArtifactScope` from `self._active_trajectory.tool_context` and pass it as `scope=scope` to `_clamp_observation_impl`.
+- **`tests/test_artifact_handling.py`**: Created new test file with three tests: `test_resolve_scope_includes_all_fields`, `test_resolve_scope_returns_none_without_session_id`, `test_resolve_scope_passes_through_explicit_scope`.
+- **`tests/test_payload_builders.py`**: Created new test file with two tests: `test_clamp_observation_stores_artifact_with_full_scope`, `test_clamp_observation_stores_artifact_with_none_scope`.
+
+### Key Considerations
+- The `_resolve_scope` change is minimal and surgical -- only the `ArtifactScope` constructor call was expanded. The control flow (check `scope is not None`, check `tool_ctx` is dict, check `session_id` is truthy) remains identical to the original.
+- The `scope` parameter in `_clamp_observation` defaults to `None` for full backwards compatibility. All existing callers that do not pass `scope` continue to work unchanged.
+- The `react.py` wrapper method builds the scope from `self._active_trajectory.tool_context` using the same pattern as `_resolve_scope` in `artifact_handling.py`. This is intentional duplication per the plan -- the two code paths serve different artifact storage entry points (proxy store vs. observation clamping).
+
+### Assumptions
+- The plan's test scaffold specified `{"data": "x" * 200}` as the large observation, but this only produces ~215 chars of JSON, well under the `max_observation_chars` minimum of 1000 (enforced by Pydantic `ge=1000`). The observation would hit the fast-path return and never reach the artifact storage code. I adjusted the tests to use `"x" * 2000` and explicitly set `max_observation_chars=1000` so the observation exceeds the limit and triggers artifact storage.
+- The unused `pytest` and `typing.Any` imports in the plan's test scaffolds were removed to satisfy ruff F401 lint rules.
+
+### Deviations from Plan
+- **Test observation size**: Changed from `"x" * 200` to `"x" * 2000` and added `max_observation_chars=1000` to `_make_config`. Without this change, the observation would never exceed `max_observation_chars` (minimum 1000, default 50,000) and the tests would always fail because `_clamp_observation` returns `(observation, False)` on the fast path.
+- **Removed unused imports in tests**: Removed `import pytest` from `test_artifact_handling.py` and removed `from typing import Any` and `import pytest` from `test_payload_builders.py` to pass ruff F401 checks.
+
+### Potential Risks & Reviewer Attention Points
+- The `_resolve_scope` method now reads `tenant_id`, `user_id`, and `trace_id` from `tool_context` via `.get()` which returns `None` if the key is missing. These `None` values are passed to `ArtifactScope` where all four fields default to `None`. This means partial scope is possible (e.g., `session_id` + `tenant_id` but no `user_id`). This is consistent with the `ArtifactScope` model design.
+- The `react.py` wrapper duplicates the scope-building logic from `_resolve_scope`. If the logic needs to change in the future, both places must be updated. The plan explicitly calls for this pattern.
+- The `InMemoryArtifactStore.list(scope=...)` filtering behavior is relied upon in the payload_builders test. If the in-memory store's scope matching semantics change, the test may need updating.
+
+### Files Modified
+- `penguiflow/planner/artifact_handling.py` (modified)
+- `penguiflow/planner/payload_builders.py` (modified)
+- `penguiflow/planner/react.py` (modified)
+- `tests/test_artifact_handling.py` (created)
+- `tests/test_payload_builders.py` (created)

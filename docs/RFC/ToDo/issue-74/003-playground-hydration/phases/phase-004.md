@@ -106,3 +106,37 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run pytest tests/test_artifact_handling.py tests/test_payload_builders.py tests/test_tool_jobs.py tests/cli/test_playground_endpoints.py -v
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run ruff check . && uv run mypy
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-03
+
+### Summary of Changes
+- **`session-stream.ts`**: Widened `SessionStreamStores` Pick type to include `'setupStore'`, added `listArtifacts` to the import from `'./api'`, and inserted the artifact hydration call in the `start()` method immediately after the existing `listTasks` hydration block. The hydration call destructures `tenantId` and `userId` from `this.stores.setupStore`, calls `listArtifacts(sessionId, tenantId, userId)`, and pipes results to `this.stores.artifactsStore.hydrate(refs)` using the same fire-and-forget `.then()` pattern as the existing `listTasks` call.
+- **`session-stream.test.ts`**: Updated the test to include `createSetupStore` in imports and pass `setupStore` to `createSessionStreamManager()`, since widening the `SessionStreamStores` type made `setupStore` a required property.
+- **`ArtifactItem.test.ts`**: Added missing `namespace: null` to the `mockArtifact` test fixture to match the `ArtifactRef` interface (which gained the `namespace` field in Phase 003).
+
+### Key Considerations
+- The hydration call is placed after the `listTasks` call but before the `EventSource` setup, matching the existing pattern. Both are fire-and-forget (no `await`), so the SSE connection is not blocked by either hydration call.
+- The `tenantId` and `userId` are read synchronously from the reactive setup store at the moment `start()` is called. This is correct because these values are set during the initial app setup and remain stable for the duration of the session.
+- The `refs && refs.length > 0` guard handles both the `null` failure case and the empty-array case, avoiding unnecessary reactive store updates.
+
+### Assumptions
+- The `ArtifactItem.test.ts` fix for the missing `namespace` field was a pre-existing issue introduced in Phase 003 when the `ArtifactRef` type gained the `namespace` property. The test was not updated at that time. This fix is necessary for `svelte-check` to pass with zero errors.
+- The `tsc --noEmit` command in the verification section fails with a pre-existing `TS2688: Cannot find type definition file for 'node'` error because `@types/node` is not installed in the playground UI workspace. This is unrelated to the phase changes. The `svelte-check` tool (the project's actual TypeScript validator for Svelte) passes with zero errors and zero warnings, which is the correct verification path.
+
+### Deviations from Plan
+- **Added `setupStore` to session-stream test**: The plan did not mention updating the test file, but widening `SessionStreamStores` to include `'setupStore'` made it a required property, causing a TypeScript error in the existing test. The fix was minimal: import `createSetupStore` and pass it in the mock stores object.
+- **Fixed `namespace` field in ArtifactItem test**: The plan did not mention this file, but `svelte-check` flagged it as a type error. Added `namespace: null` to the mock fixture to satisfy the `ArtifactRef` interface. This was a pre-existing gap from Phase 003.
+
+### Potential Risks & Reviewer Attention Points
+- The hydration call captures `tenantId` and `userId` synchronously at call time. If a user changes these values in the setup panel after `start()` has been called but before the promise resolves, the API call will use the original values. This is the correct behavior since the session was started with those credentials.
+- No error logging is added for the `listArtifacts` failure case in `session-stream.ts` because `listArtifacts` in `api.ts` already logs `'artifacts list failed'` to the console on error. Adding another log here would be redundant.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui/src/lib/services/session-stream.ts` (modified: import, type, hydration call)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui/tests/unit/services/session-stream.test.ts` (modified: added setupStore to test mock)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui/tests/unit/components/sidebar-right/ArtifactItem.test.ts` (modified: added missing namespace field)

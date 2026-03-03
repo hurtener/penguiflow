@@ -168,7 +168,7 @@ async def _extract_artifacts_from_observation(
     out_model: type[BaseModel],
     observation: Mapping[str, Any],
     artifact_store: ArtifactStore,
-    session_id: str | None,
+    scope: ArtifactScope | None,
 ) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     for field_name, field_info in out_model.model_fields.items():
@@ -189,7 +189,7 @@ async def _extract_artifacts_from_observation(
             _node_name: str = node_name,
         ) -> None:
             serialized = json.dumps(item, ensure_ascii=False)
-            scope = ArtifactScope(session_id=session_id) if session_id else None
+            # `scope` is now captured from the outer function's parameter (no local override)
             ref = await artifact_store.put_text(
                 serialized,
                 mime_type="application/json",
@@ -278,6 +278,13 @@ def build_tool_job_pipeline(
         observation: BaseModel = spec.out_model.model_validate(result)
         payload = observation.model_dump(mode="json")
         session_id = snapshot.session_id if isinstance(snapshot.session_id, str) and snapshot.session_id else None
+        tool_ctx = snapshot.tool_context or {}
+        artifact_scope = ArtifactScope(
+            session_id=session_id,
+            tenant_id=tool_ctx.get("tenant_id"),
+            user_id=tool_ctx.get("user_id"),
+            trace_id=tool_ctx.get("trace_id"),
+        ) if session_id else None
         extracted_artifacts = []
         if isinstance(payload, Mapping):
             extracted_artifacts = await _extract_artifacts_from_observation(
@@ -285,7 +292,7 @@ def build_tool_job_pipeline(
                 out_model=spec.out_model,
                 observation=payload,
                 artifact_store=ctx._artifacts,
-                session_id=session_id,
+                scope=artifact_scope,
             )
         patch = ContextPatch(
             task_id=runtime.state.task_id,

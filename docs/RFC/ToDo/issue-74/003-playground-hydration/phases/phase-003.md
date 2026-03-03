@@ -187,3 +187,39 @@ export async function listArtifacts(
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui && npm test -- --run tests/unit/stores/artifacts.test.ts
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui && npx tsc --noEmit 2>&1 | head -30
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-03
+
+### Summary of Changes
+- **`api.ts`**: Added `listArtifacts(sessionId, tenantId?, userId?)` function between `getArtifactMeta()` and `steerTask()`. Uses the `new URL()` + `searchParams.set()` pattern consistent with `listTasks()`. Returns `ArtifactRef[] | null`.
+- **`artifacts.svelte.ts`**: Added `hydrate(refs: ArtifactRef[]): void` to the `ArtifactsStore` interface and implemented it in `createArtifactsStore()`. The implementation uses add-if-absent semantics (existing artifacts from SSE are never overwritten) and creates a new Map to trigger Svelte 5 `$state` reactivity.
+- **`artifacts.test.ts`**: Added `ArtifactRef` to the type import. Added a `describe('hydrate', ...)` block with a `createMockRef` helper and three tests: (1) hydrate empty store with all refs, (2) hydrate with empty array is a no-op, (3) hydrate skips existing artifacts so SSE-delivered data takes priority.
+
+### Key Considerations
+- The `listArtifacts()` function follows the exact same error-handling pattern as `listTasks()` and `getArtifactMeta()`: use `fetchWithErrorHandling<T>()`, log on failure, return `null`.
+- The `hydrate()` method uses `new Map(artifacts)` to clone the existing map before adding new entries, then reassigns `artifacts = newMap`. This is the same pattern used by `addArtifact()` and `remove()` in the store, ensuring Svelte 5 `$state` reactivity is properly triggered.
+- The add-if-absent strategy in `hydrate()` ensures that if an SSE event delivers an artifact before the hydration response arrives, the more recent SSE data is preserved rather than being overwritten by potentially stale hydration data.
+
+### Assumptions
+- The `ArtifactRef` type is already imported in `api.ts` (verified: it is, used by `getArtifactMeta`).
+- The `BASE_URL` constant in `api.ts` is an empty string for same-origin requests (verified).
+- The backend `GET /artifacts` endpoint (implemented in Phase 002) returns an array of objects matching the `ArtifactRef` shape.
+- The pre-existing `npx tsc --noEmit` error about `@types/node` is an infrastructure issue unrelated to this phase and does not indicate a problem with the new code.
+
+### Deviations from Plan
+- Changed `source: null` to `source: {}` in the `createMockRef` test helper. The `ArtifactRef` type defines `source` as `Record<string, unknown>` (non-nullable), and with `strictNullChecks: true` in `tsconfig.json`, assigning `null` would cause a TypeScript compilation error. Using an empty object `{}` is semantically equivalent for testing purposes and satisfies the type system.
+
+### Potential Risks & Reviewer Attention Points
+- The `source: null` vs `source: {}` deviation from the plan is worth verifying: if the backend can actually return `null` for the `source` field in the `GET /artifacts` response, the `ArtifactRef` TypeScript type definition should be updated to `source: Record<string, unknown> | null` in a follow-up. As currently defined, the type does not permit `null`.
+- The `listArtifacts()` function uses `window.location.origin` for URL construction (same as `listTasks()`). This works in browser contexts but would need mocking in any future API-level unit tests.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui/src/lib/services/api.ts` (added `listArtifacts()` function)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui/src/lib/stores/domain/artifacts.svelte.ts` (added `hydrate()` to interface and implementation)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui/tests/unit/stores/artifacts.test.ts` (added `ArtifactRef` import, added `describe('hydrate', ...)` block with 3 tests)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-74/003-playground-hydration/phases/phase-003.md` (appended implementation notes)

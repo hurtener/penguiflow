@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -9,6 +10,7 @@ from unittest.mock import MagicMock
 from ag_ui.core import RunAgentInput
 from fastapi.testclient import TestClient
 
+from penguiflow.artifacts import ArtifactScope, InMemoryArtifactStore
 from penguiflow.cli.playground import create_playground_app
 from penguiflow.cli.playground_state import InMemoryStateStore
 from penguiflow.cli.playground_wrapper import AgentWrapper, ChatResult
@@ -563,6 +565,123 @@ class TestArtifactEndpoints:
         response = client.get("/artifacts/test-id/meta")
         assert response.status_code == 501
         assert "Artifact storage not enabled" in response.json()["detail"]
+
+
+class TestListArtifactsEndpoint:
+    """Tests for GET /artifacts list endpoint."""
+
+    def test_list_artifacts_no_store_returns_empty(self, tmp_path: Path) -> None:
+        """When no artifact store is configured, returns []."""
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/artifacts", params={"session_id": "sess-1"})
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_list_artifacts_no_session_returns_empty(self, tmp_path: Path) -> None:
+        """When no session ID is provided (no query param, no header), returns []."""
+        store = InMemoryArtifactStore()
+        wrapper = MockAgentWrapper()
+        wrapper._planner = MagicMock()
+        wrapper._planner.artifact_store = store
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/artifacts")
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_list_artifacts_valid_session(self, tmp_path: Path) -> None:
+        """Valid session with artifacts returns list of artifact dicts without scope field."""
+        store = InMemoryArtifactStore()
+        scope = ArtifactScope(session_id="sess-1", tenant_id="t-1", user_id="u-1")
+        asyncio.get_event_loop().run_until_complete(
+            store.put_text("hello", mime_type="text/plain", filename="test.txt", scope=scope)
+        )
+
+        wrapper = MockAgentWrapper()
+        wrapper._planner = MagicMock()
+        wrapper._planner.artifact_store = store
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/artifacts", params={
+            "session_id": "sess-1",
+            "tenant_id": "t-1",
+            "user_id": "u-1",
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        # Verify scope field is excluded from response
+        assert "scope" not in data[0]
+        assert "id" in data[0]
+
+    def test_list_artifacts_session_via_header(self, tmp_path: Path) -> None:
+        """Session via X-Session-ID header resolves correctly."""
+        store = InMemoryArtifactStore()
+        scope = ArtifactScope(session_id="header-sess")
+        asyncio.get_event_loop().run_until_complete(
+            store.put_text("data", scope=scope)
+        )
+
+        wrapper = MockAgentWrapper()
+        wrapper._planner = MagicMock()
+        wrapper._planner.artifact_store = store
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/artifacts", headers={"X-Session-ID": "header-sess"})
+        assert response.status_code == 200
+        assert len(response.json()) == 1
+
+    def test_list_artifacts_query_param_priority_over_header(self, tmp_path: Path) -> None:
+        """Session via query param takes priority over header when both provided."""
+        store = InMemoryArtifactStore()
+        scope_query = ArtifactScope(session_id="query-sess")
+        scope_header = ArtifactScope(session_id="header-sess")
+        asyncio.get_event_loop().run_until_complete(
+            store.put_text("query data", scope=scope_query)
+        )
+        asyncio.get_event_loop().run_until_complete(
+            store.put_text("header data", scope=scope_header)
+        )
+
+        wrapper = MockAgentWrapper()
+        wrapper._planner = MagicMock()
+        wrapper._planner.artifact_store = store
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get(
+            "/artifacts",
+            params={"session_id": "query-sess"},
+            headers={"X-Session-ID": "header-sess"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        # Should return only the query-sess artifact
+        assert len(data) == 1
+
+    def test_list_artifacts_empty_session(self, tmp_path: Path) -> None:
+        """Empty session (no artifacts stored) returns []."""
+        store = InMemoryArtifactStore()
+        wrapper = MockAgentWrapper()
+        wrapper._planner = MagicMock()
+        wrapper._planner.artifact_store = store
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/artifacts", params={"session_id": "empty-sess"})
+        assert response.status_code == 200
+        assert response.json() == []
 
 
 class TestResourceEndpoints:
