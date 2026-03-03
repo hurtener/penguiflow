@@ -67,9 +67,11 @@ ToolNode has its own artifact extraction pipeline configured via:
 
 It can:
 
-- clamp large inline strings into `ctx.artifacts.put_text(...)`
-- extract binary content into `ctx.artifacts.put_bytes(...)`
+- clamp large inline strings into `ctx._artifacts.put_text(...)` (internal)
+- extract binary content into `ctx._artifacts.put_bytes(...)` (internal)
 - turn MCP `resource_link` blocks into “stubs” that point to resources tooling
+
+> **Note:** `ctx._artifacts` is the raw `ArtifactStore` used by penguiflow internals. Tool developers should use `ctx.artifacts` (the `ScopedArtifacts` facade) which provides `upload()`/`download()`/`list()` with automatic scope injection.
 
 ## Operational defaults
 

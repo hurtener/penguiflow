@@ -16,6 +16,7 @@ export interface ArtifactsStore {
   addArtifact(event: ArtifactStoredEvent): void;
   remove(id: string): boolean;
   clear(): void;
+  hydrate(refs: ArtifactRef[]): void;
 }
 
 export function createArtifactsStore(): ArtifactsStore {
@@ -56,6 +57,7 @@ export function createArtifactsStore(): ArtifactsStore {
         size_bytes: event.size_bytes,
         filename: event.filename,
         sha256: null,
+        namespace: typeof event.source?.namespace === 'string' ? event.source.namespace : null,
         source: event.source
       };
       // Create new Map to trigger reactivity
@@ -84,7 +86,23 @@ export function createArtifactsStore(): ArtifactsStore {
      */
     clear(): void {
       artifacts = new Map();
-    }
+    },
+
+    /**
+     * Bulk-load artifacts from a list of ArtifactRef objects.
+     * Uses add-if-absent strategy: existing artifacts (e.g., from SSE) are not overwritten.
+     * Called during session hydration to restore pre-existing artifacts.
+     */
+    hydrate(refs: ArtifactRef[]): void {
+      if (refs.length === 0) return;
+      const newMap = new Map(artifacts);
+      for (const ref of refs) {
+        if (!newMap.has(ref.id)) {
+          newMap.set(ref.id, ref);
+        }
+      }
+      artifacts = newMap;
+    },
   };
 }
 

@@ -1133,6 +1133,13 @@ class ArtifactStore(Protocol):
     async def get_ref(self, artifact_id: str) -> ArtifactRef | None: ...
     async def delete(self, artifact_id: str) -> bool: ...
     async def exists(self, artifact_id: str) -> bool: ...
+
+    async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]:
+        """List artifacts matching the given scope filter.
+        None fields in scope = don't filter on that dimension.
+        If scope is None, returns all artifacts.
+        """
+        ...
 ```
 
 ### ArtifactRef (Compact Reference)
@@ -1160,7 +1167,52 @@ class ArtifactScope(BaseModel):
     trace_id: str | None = None
 ```
 
-**Note:** Scope is stored by ArtifactStore but **enforcement happens at HTTP layer**.
+**Note:** Scope is stored by `ArtifactStore` and **enforced at two layers**: the `ScopedArtifacts` facade (application-level, for tool/agent developers via `ctx.artifacts`) and the HTTP layer (for API consumers). See [ScopedArtifacts Facade](#scopedartifacts-facade) below.
+
+### ScopedArtifacts Facade
+
+Tool and agent developers interact with artifacts through `ctx.artifacts` — an instance of `ScopedArtifacts`. This is the **porcelain** API. PenguiFlow internals (ToolNode extraction pipeline, playground, etc.) use `ctx._artifacts` — the raw `ArtifactStore` — which is the **plumbing** API.
+
+```python
+class ScopedArtifacts:
+    """Scoped facade over ArtifactStore for tool developers.
+
+    Automatically injects tenant_id/user_id/session_id/trace_id on writes
+    and enforces scope on reads. Immutable after construction.
+    """
+
+    def __init__(
+        self,
+        store: ArtifactStore,
+        *,
+        tenant_id: str | None,
+        user_id: str | None,
+        session_id: str | None,
+        trace_id: str | None,
+    ) -> None: ...
+
+    @property
+    def scope(self) -> ArtifactScope: ...
+
+    async def upload(self, data: bytes | str, *, mime_type=None, filename=None, namespace=None, meta=None) -> ArtifactRef: ...
+    async def download(self, artifact_id: str) -> bytes | None: ...
+    async def get_metadata(self, artifact_id: str) -> ArtifactRef | None: ...
+    async def list(self) -> list[ArtifactRef]: ...
+    async def exists(self, artifact_id: str) -> bool: ...
+    async def delete(self, artifact_id: str) -> bool: ...
+```
+
+#### Scope semantics
+
+| Operation | Scope behavior |
+|---|---|
+| `upload()` | Injects **full scope** (tenant + user + session + trace) into the stored artifact |
+| `download()` / `get_metadata()` / `exists()` / `delete()` | Checks **tenant + user + session only** (not trace) — so reads return artifacts across traces within the same session |
+| `list()` | Delegates to `ArtifactStore.list(scope=...)` with **tenant + user + session** (not trace) |
+
+#### Immutability
+
+`ScopedArtifacts` is immutable after construction — `__setattr__` raises `AttributeError`. The `_store`, `_scope`, and `_read_scope` attributes are set via `object.__setattr__` in `__init__` only.
 
 ### ArtifactRetentionConfig
 
@@ -2280,6 +2332,7 @@ Use this checklist to verify your implementation is complete:
 - [ ] `artifact_store` property returns `ArtifactStore` or `None`
 - [ ] Retention config honored (TTL, max sizes)
 - [ ] Session-scoped access patterns supported
+- [ ] `list(scope=...)` method implemented on ArtifactStore
 
 ### Production Readiness
 

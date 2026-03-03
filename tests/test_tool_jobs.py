@@ -5,11 +5,12 @@ import asyncio
 import pytest
 from pydantic import BaseModel, Field
 
+from penguiflow.artifacts import ArtifactScope, InMemoryArtifactStore
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
 from penguiflow.registry import ModelRegistry
 from penguiflow.sessions import StreamingSession, TaskType, UpdateType
-from penguiflow.sessions.tool_jobs import ToolJobContext, build_tool_job_pipeline
+from penguiflow.sessions.tool_jobs import ToolJobContext, _extract_artifacts_from_observation, build_tool_job_pipeline
 
 
 class Args(BaseModel):
@@ -18,6 +19,10 @@ class Args(BaseModel):
 
 class Out(BaseModel):
     answer: str
+
+
+class ArtifactOut(BaseModel):
+    report: str = Field(json_schema_extra={"artifact": True})
 
 
 @tool(desc="Tool for job mode.")
@@ -94,3 +99,34 @@ async def test_build_tool_job_pipeline_collects_artifact_fields() -> None:
     assert "config" not in stub
     assert stub["artifact"]["id"]
     assert result.artifacts == result.context_patch.artifacts
+
+
+async def test_extract_artifacts_from_observation_propagates_full_scope() -> None:
+    """_extract_artifacts_from_observation stores artifacts with the full scope."""
+    store = InMemoryArtifactStore()
+    scope = ArtifactScope(
+        session_id="sess-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        trace_id="trace-1",
+    )
+    observation = {"report": "some report data"}
+
+    result = await _extract_artifacts_from_observation(
+        node_name="test_node",
+        out_model=ArtifactOut,
+        observation=observation,
+        artifact_store=store,
+        scope=scope,
+    )
+
+    assert len(result) == 1
+    # Verify the stored artifact has the correct scope by listing from the store
+    refs = await store.list(scope=scope)
+    assert len(refs) >= 1
+    ref = refs[0]
+    assert ref.scope is not None
+    assert ref.scope.session_id == "sess-1"
+    assert ref.scope.tenant_id == "tenant-1"
+    assert ref.scope.user_id == "user-1"
+    assert ref.scope.trace_id == "trace-1"

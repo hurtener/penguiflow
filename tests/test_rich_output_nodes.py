@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from penguiflow.artifacts import InMemoryArtifactStore
+from penguiflow.artifacts import InMemoryArtifactStore, ScopedArtifacts
 from penguiflow.planner import Trajectory
 from penguiflow.planner.artifact_registry import ArtifactRegistry
 from penguiflow.planner.trajectory import BackgroundTaskResult
@@ -38,7 +38,14 @@ class PauseSignal(Exception):
 class DummyContext:
     def __init__(self) -> None:
         self._llm_context: dict = {}
-        self._artifacts = InMemoryArtifactStore()
+        self._artifacts_store = InMemoryArtifactStore()
+        self._scoped_artifacts = ScopedArtifacts(
+            self._artifacts_store,
+            tenant_id=None,
+            user_id=None,
+            session_id=None,
+            trace_id=None,
+        )
         self.tool_context: dict = {}
         self.emitted: list[dict] = []
 
@@ -47,8 +54,12 @@ class DummyContext:
         return self._llm_context
 
     @property
+    def _artifacts(self):  # type: ignore[no-untyped-def]
+        return self._artifacts_store
+
+    @property
     def artifacts(self):  # type: ignore[no-untyped-def]
-        return self._artifacts
+        return self._scoped_artifacts
 
     async def emit_artifact(
         self,
@@ -322,7 +333,7 @@ async def test_list_artifacts_ingests_background_results_for_artifact_refs() -> 
         "type": "echarts",
         "config": {"title": {"text": "From background"}, "series": [{"data": [1, 2, 3]}]},
     }
-    ref = await ctx.artifacts.put_text(
+    ref = await ctx._artifacts.put_text(
         json.dumps(stored_payload, ensure_ascii=False),
         mime_type="application/json",
         filename="bg.echarts.json",

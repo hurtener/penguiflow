@@ -208,6 +208,34 @@ export async function getArtifactMeta(
   return result.data;
 }
 
+/**
+ * List artifacts for a session (for hydration on session resume).
+ * @param sessionId - The session ID to list artifacts for
+ * @param tenantId - Optional tenant ID for scope filtering
+ * @param userId - Optional user ID for scope filtering
+ * @returns Array of ArtifactRef objects, or null on failure
+ */
+export async function listArtifacts(
+  sessionId: string,
+  tenantId?: string,
+  userId?: string,
+): Promise<ArtifactRef[] | null> {
+  const url = new URL(`${BASE_URL}/artifacts`, window.location.origin);
+  url.searchParams.set('session_id', sessionId);
+  if (tenantId) {
+    url.searchParams.set('tenant_id', tenantId);
+  }
+  if (userId) {
+    url.searchParams.set('user_id', userId);
+  }
+  const result = await fetchWithErrorHandling<ArtifactRef[]>(url.toString());
+  if (!result.ok) {
+    console.error('artifacts list failed', result.error);
+    return null;
+  }
+  return result.data;
+}
+
 export async function steerTask(
   sessionId: string,
   taskId: string,

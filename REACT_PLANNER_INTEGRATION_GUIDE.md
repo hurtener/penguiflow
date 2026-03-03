@@ -465,7 +465,7 @@ elif result.reason == "budget_exhausted":
 from collections.abc import Mapping, MutableMapping
 from typing import Any, Protocol
 
-from penguiflow.artifacts import ArtifactStore
+from penguiflow.artifacts import ScopedArtifacts
 from penguiflow.planner import PlannerPause, PlannerPauseReason
 
 class ToolContext(Protocol):
@@ -482,8 +482,12 @@ class ToolContext(Protocol):
         """Combined context. DEPRECATED: use llm_context/tool_context."""
 
     @property
-    def artifacts(self) -> ArtifactStore:
-        """Binary/large-text artifact storage (out-of-band)."""
+    def artifacts(self) -> ScopedArtifacts:
+        """Scoped artifact facade for tool developers (porcelain API).
+
+        Use upload()/download()/list() -- scope is injected automatically.
+        Internal framework code uses ctx._artifacts (raw ArtifactStore) instead.
+        """
 
     async def pause(
         self,
@@ -1286,6 +1290,8 @@ The Artifact Store provides:
 
 ### Architecture
 
+> **Note:** This diagram shows the internal plumbing. Tool developers interact with `ctx.artifacts` (a `ScopedArtifacts` facade providing `upload()`/`download()`/`list()`). The facade delegates to the raw `ArtifactStore` internally, injecting scope automatically.
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        ReactPlanner                              │
@@ -1298,7 +1304,7 @@ The Artifact Store provides:
 │  ┌─────────────────────────────────────────────────────────┐    │
 │  │              InMemoryArtifactStore                       │    │
 │  │  put_bytes(data, mime_type, filename, scope)            │    │
-│  │  get_bytes(id, scope) → bytes                           │    │
+│  │  get(artifact_id) -> bytes | None                        │    │
 │  └───────────────────────────┬─────────────────────────────┘    │
 │                              │                                   │
 │                              ▼                                   │
@@ -1377,22 +1383,19 @@ store = planner.artifact_store  # InMemoryArtifactStore or NoOpArtifactStore
 
 ### MCP Tool Integration
 
-MCP tools automatically use the artifact store when configured. The planner wraps the store with an event-emitting proxy that:
+MCP tools access artifacts through `ctx.artifacts` -- a `ScopedArtifacts` facade that automatically injects `tenant_id`/`user_id`/`session_id`/`trace_id` from `tool_context`. Internally, the facade delegates to an `_EventEmittingArtifactStoreProxy` (plumbing) that:
 
-1. Injects `session_id` from `tool_context` into artifact scope
-2. Emits `artifact_stored` events for real-time UI updates
-3. Stores artifacts with proper session isolation
+1. Emits `artifact_stored` events for real-time UI updates
+2. Delegates to the underlying `ArtifactStore` for persistence
 
 ```python
-# Example: Tableau MCP tool storing a PDF
-# (handled automatically by ToolNode)
-ref = await artifact_store.put_bytes(
+# Tool developer stores a PDF via the porcelain API
+ref = await ctx.artifacts.upload(
     pdf_data,
     mime_type="application/pdf",
     filename="dashboard_export.pdf",
-    scope=ArtifactScope(session_id=session_id),
 )
-# ref.id is now accessible for download
+# Scope (tenant/user/session/trace) is injected automatically
 ```
 
 ### Playground Integration
@@ -1442,7 +1445,7 @@ When artifact store is enabled, the Playground:
 1. **Enable for MCP integrations**: If using MCP tools that export files, enable artifact store
 2. **Set appropriate TTL**: Short-lived for ephemeral exports, longer for audit trails
 3. **Size limits**: Configure based on expected file sizes and concurrency
-4. **Session isolation**: Always pass `session_id` in `tool_context` for proper scoping
+4. **Session isolation**: Always pass `session_id`, `tenant_id`, and `user_id` in `tool_context` -- the `ScopedArtifacts` facade uses these to enforce scope automatically
 
 ```python
 # In orchestrator

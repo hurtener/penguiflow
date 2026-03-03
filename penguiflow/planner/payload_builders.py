@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from ..artifacts import ArtifactStore
+from ..artifacts import ArtifactScope, ArtifactStore
 from .artifact_registry import ArtifactRegistry
 from .models import FinalPayload, ObservationGuardrailConfig, PlannerEvent
 from .trajectory import Trajectory
@@ -127,6 +127,7 @@ async def _clamp_observation(
     active_trajectory: Trajectory | None,
     emit_event: Callable[[PlannerEvent], None],
     time_source: Callable[[], float],
+    scope: ArtifactScope | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Apply observation size guardrails to prevent context overflow.
 
@@ -152,6 +153,7 @@ async def _clamp_observation(
             ref = await artifact_store.put_text(
                 serialized,
                 namespace=f"observation.{spec_name}",
+                scope=scope,
             )
             artifact_registry.register_binary_artifact(
                 ref,

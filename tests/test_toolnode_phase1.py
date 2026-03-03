@@ -5,7 +5,7 @@ import time
 import pytest
 from pydantic import create_model
 
-from penguiflow.artifacts import InMemoryArtifactStore
+from penguiflow.artifacts import InMemoryArtifactStore, ScopedArtifacts
 from penguiflow.registry import ModelRegistry
 from penguiflow.tools.auth import InMemoryTokenStore, OAuthManager, OAuthProviderConfig
 from penguiflow.tools.config import (
@@ -40,7 +40,7 @@ class DummyCtx:
         self._llm_context: dict[str, str] = {}
         self._meta: dict[str, str] = {}
         self.paused_payload = None
-        self._artifacts = artifact_store or InMemoryArtifactStore()
+        self._artifacts_store = artifact_store or InMemoryArtifactStore()
 
     @property
     def llm_context(self):
@@ -55,8 +55,18 @@ class DummyCtx:
         return self._tool_context
 
     @property
+    def _artifacts(self):
+        return self._artifacts_store
+
+    @property
     def artifacts(self):
-        return self._artifacts
+        return ScopedArtifacts(
+            self._artifacts_store,
+            tenant_id=None,
+            user_id=None,
+            session_id=None,
+            trace_id=None,
+        )
 
     async def pause(self, reason, payload=None):  # pragma: no cover - not used in Phase 1 tests
         self.paused_payload = {"reason": reason, "payload": payload}

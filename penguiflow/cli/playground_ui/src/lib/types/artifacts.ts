@@ -13,6 +13,8 @@ export interface ArtifactRef {
   filename: string | null;
   /** SHA256 hash of the artifact content */
   sha256: string | null;
+  /** Namespace for artifact grouping (e.g., tool name) */
+  namespace: string | null;
   /** Source metadata (tool name, parameters, etc.) */
   source: Record<string, unknown>;
 }

@@ -19,7 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from penguiflow.artifacts import ArtifactScope, ArtifactStore, NoOpArtifactStore
+from penguiflow.artifacts import ArtifactScope, ArtifactStore, NoOpArtifactStore, ScopedArtifacts
 from penguiflow.catalog import NodeSpec
 from penguiflow.planner.context import PlannerPauseReason, ToolContext
 
@@ -39,10 +39,17 @@ class ToolJobContext(ToolContext):
     ) -> None:
         self._llm_context = dict(llm_context)
         self._tool_context = dict(tool_context)
-        self._artifacts = artifacts or NoOpArtifactStore()
+        self._artifacts_store = artifacts or NoOpArtifactStore()
         self._state_store = state_store
         self._checkpoint_publisher = checkpoint_publisher
         self._kv = None
+        self._scoped_artifacts = ScopedArtifacts(
+            self._artifacts_store,
+            tenant_id=str(tool_context["tenant_id"]) if tool_context.get("tenant_id") is not None else None,
+            user_id=str(tool_context["user_id"]) if tool_context.get("user_id") is not None else None,
+            session_id=str(tool_context["session_id"]) if tool_context.get("session_id") is not None else None,
+            trace_id=str(tool_context["trace_id"]) if tool_context.get("trace_id") is not None else None,
+        )
 
     @property
     def llm_context(self) -> Mapping[str, Any]:
@@ -58,8 +65,13 @@ class ToolJobContext(ToolContext):
         return ChainMap(self._tool_context, self._llm_context)
 
     @property
-    def artifacts(self) -> ArtifactStore:
-        return self._artifacts
+    def _artifacts(self) -> ArtifactStore:
+        return self._artifacts_store
+
+    @property
+    def artifacts(self) -> ScopedArtifacts:
+        """Scoped artifact facade for tool developers."""
+        return self._scoped_artifacts
 
     @property
     def kv(self):
@@ -156,7 +168,7 @@ async def _extract_artifacts_from_observation(
     out_model: type[BaseModel],
     observation: Mapping[str, Any],
     artifact_store: ArtifactStore,
-    session_id: str | None,
+    scope: ArtifactScope | None,
 ) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     for field_name, field_info in out_model.model_fields.items():
@@ -177,7 +189,7 @@ async def _extract_artifacts_from_observation(
             _node_name: str = node_name,
         ) -> None:
             serialized = json.dumps(item, ensure_ascii=False)
-            scope = ArtifactScope(session_id=session_id) if session_id else None
+            # `scope` is now captured from the outer function's parameter (no local override)
             ref = await artifact_store.put_text(
                 serialized,
                 mime_type="application/json",
@@ -266,14 +278,21 @@ def build_tool_job_pipeline(
         observation: BaseModel = spec.out_model.model_validate(result)
         payload = observation.model_dump(mode="json")
         session_id = snapshot.session_id if isinstance(snapshot.session_id, str) and snapshot.session_id else None
+        tool_ctx = snapshot.tool_context or {}
+        artifact_scope = ArtifactScope(
+            session_id=session_id,
+            tenant_id=tool_ctx.get("tenant_id"),
+            user_id=tool_ctx.get("user_id"),
+            trace_id=tool_ctx.get("trace_id"),
+        ) if session_id else None
         extracted_artifacts = []
         if isinstance(payload, Mapping):
             extracted_artifacts = await _extract_artifacts_from_observation(
                 node_name=spec.name,
                 out_model=spec.out_model,
                 observation=payload,
-                artifact_store=ctx.artifacts,
-                session_id=session_id,
+                artifact_store=ctx._artifacts,
+                scope=artifact_scope,
             )
         patch = ContextPatch(
             task_id=runtime.state.task_id,

@@ -65,7 +65,7 @@ Planner event storage:
 
 Artifacts:
 
-- expose `artifact_store` or implement `ArtifactStore` so the planner can discover it (`discover_artifact_store`)
+- expose `artifact_store` or implement `ArtifactStore` (including the `list` method) so the planner can discover it (`discover_artifact_store`). Tool developers access artifacts via `ctx.artifacts` (a `ScopedArtifacts` facade); the raw `ArtifactStore` is plumbing.
 
 Sessions/tasks/steering/trajectories:
 
