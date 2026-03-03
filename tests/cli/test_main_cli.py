@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-import os
 
 from click.testing import CliRunner
 
@@ -221,8 +222,9 @@ class TestEvalCommand:
         assert '"winner_id": "baseline"' in result.output
         assert mock_run_eval.call_args.kwargs["agent_package"] == "demo_pkg"
 
-    def test_run_loads_env_files_from_spec(self, tmp_path: Path) -> None:
+    def test_run_loads_env_files_from_spec(self, tmp_path: Path, monkeypatch) -> None:
         runner = CliRunner()
+        monkeypatch.chdir(tmp_path)
         env_file = tmp_path / "credentials.env"
         env_key = "PENGUIFLOW_EVAL_TEST_SECRET"
         env_file.write_text(f"{env_key}=loaded_from_file\n", encoding="utf-8")
@@ -274,6 +276,74 @@ class TestEvalCommand:
 
         assert result.exit_code == 0
         assert mock_load_spec.called
+        assert '"resolved_paths"' in result.output
+
+    def test_run_resolves_cli_env_files_relative_to_project_root(self, tmp_path: Path, monkeypatch) -> None:
+        runner = CliRunner()
+        monkeypatch.chdir(tmp_path)
+        project_root = tmp_path / "project"
+        project_root.mkdir(parents=True)
+        env_file = project_root / "cli.env"
+        env_key = "PENGUIFLOW_EVAL_TEST_CLI_BASE"
+        env_file.write_text(f"{env_key}=loaded_from_cli\n", encoding="utf-8")
+
+        spec_file = tmp_path / "eval.spec.json"
+        spec_file.write_text(
+            json.dumps(
+                {
+                    "project_root": "project",
+                    "query_suite_path": "query_suite.json",
+                    "candidates_path": "candidates.json",
+                    "metric_spec": "demo.metric:metric",
+                    "output_dir": "artifacts/eval/run-local",
+                    "session_id": "session-1",
+                    "dataset_tag": "dataset:demo",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        os.environ.pop(env_key, None)
+        with patch("penguiflow.evals.api.run_eval") as mock_run_eval:
+            mock_run_eval.return_value = {"winner_id": "baseline"}
+            result = runner.invoke(
+                app,
+                ["eval", "run", "--spec", str(spec_file), "--env-file", "cli.env"],
+            )
+
+        assert result.exit_code == 0
+        assert os.environ.get(env_key) == "loaded_from_cli"
+
+    def test_collect_nested_spec_uses_cwd_project_root_for_env_file(self, tmp_path: Path, monkeypatch) -> None:
+        runner = CliRunner()
+        monkeypatch.chdir(tmp_path)
+        env_key = "PENGUIFLOW_EVAL_COLLECT_CWD_BASE"
+        (tmp_path / ".env").write_text(f"{env_key}=from_root\n", encoding="utf-8")
+
+        spec_dir = tmp_path / "evals" / "native_avails_v1"
+        spec_dir.mkdir(parents=True)
+        spec_file = spec_dir / "collect.spec.json"
+        spec_file.write_text(
+            json.dumps(
+                {
+                    "project_root": ".",
+                    "query_suite_path": "evals/native_avails_v1/query_suite.json",
+                    "output_dir": "artifacts/eval/native_avails_v1/collect-local",
+                    "session_id": "session-collect",
+                    "dataset_tag": "dataset:demo",
+                    "env_files": [".env"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        os.environ.pop(env_key, None)
+        with patch("penguiflow.evals.api.collect_and_export_traces") as mock_collect:
+            mock_collect.return_value = {"trace_count": 1, "trace_path": "trace.jsonl"}
+            result = runner.invoke(app, ["eval", "collect", "--spec", str(spec_file)])
+
+        assert result.exit_code == 0
+        assert os.environ.get(env_key) == "from_root"
 
     def test_evaluate_invokes_api_with_dataset(self, tmp_path: Path) -> None:
         runner = CliRunner()
@@ -295,3 +365,32 @@ class TestEvalCommand:
 
         assert result.exit_code == 0
         assert '"winner_id": "baseline"' in result.output
+
+    def test_collect_requires_spec_file(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(app, ["eval", "collect"])
+        assert result.exit_code != 0
+
+    def test_collect_uses_api_spec_loader_and_invokes_api(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        spec_file = tmp_path / "collect.spec.json"
+        spec_file.write_text("{}", encoding="utf-8")
+        with patch("penguiflow.evals.api.load_eval_collect_spec") as mock_load_spec:
+            mock_spec = MagicMock()
+            mock_spec.project_root = Path(".")
+            mock_spec.query_suite_path = Path("query_suite.json")
+            mock_spec.output_dir = Path("artifacts/eval/collect-local")
+            mock_spec.session_id = "session-1"
+            mock_spec.dataset_tag = "dataset:demo"
+            mock_spec.agent_package = "demo_pkg"
+            mock_spec.state_store_spec = None
+            mock_spec.env_files = ()
+            mock_load_spec.return_value = mock_spec
+            with patch("penguiflow.evals.api.collect_and_export_traces") as mock_collect:
+                mock_collect.return_value = {"trace_count": 1, "trace_path": "trace.jsonl"}
+                result = runner.invoke(app, ["eval", "collect", "--spec", str(spec_file)])
+
+        assert result.exit_code == 0
+        assert '"trace_count": 1' in result.output
+        assert mock_load_spec.called
+        assert mock_collect.call_args.kwargs["agent_package"] == "demo_pkg"

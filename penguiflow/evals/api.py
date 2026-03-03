@@ -894,6 +894,37 @@ def _resolve_against(base_dir: Path, value: str | Path) -> Path:
     return (base_dir / candidate).resolve()
 
 
+def _resolve_project_root(*, payload: Mapping[str, Any], spec_path: Path, required: bool) -> Path | None:
+    """Resolve project_root from spec payload using current working directory.
+
+    Why: eval commands are invoked from a project workspace, and users expect
+    `project_root: "."` to refer to that workspace regardless of where spec
+    files are stored.
+    """
+
+    del spec_path
+    raw = payload.get("project_root")
+    if raw is None:
+        if required:
+            raise ValueError("spec missing required key: project_root")
+        return None
+
+    candidate = Path(str(raw))
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (Path.cwd() / candidate).resolve()
+
+
+def _resolution_base(*, project_root: Path | None, spec_path: Path) -> Path:
+    """Return canonical base for all relative path-like fields.
+
+    Why: using one base prevents fragile specs where moving the spec file
+    silently changes some paths but not others.
+    """
+
+    return project_root if project_root is not None else spec_path.parent
+
+
 def load_candidates(path: str | Path) -> list[dict[str, Any]]:
     """Load patch candidates with strict shape checks.
 
@@ -967,9 +998,11 @@ def load_eval_spec(path: str | Path) -> EvalSpec:
     if missing:
         raise ValueError(f"eval spec is missing required keys: {', '.join(sorted(missing))}")
 
-    base_dir = spec_path.parent
+    project_root = _resolve_project_root(payload=payload, spec_path=spec_path, required=True)
+    assert project_root is not None
+    base_dir = _resolution_base(project_root=project_root, spec_path=spec_path)
     return EvalSpec(
-        project_root=_resolve_against(base_dir, str(payload["project_root"])),
+        project_root=project_root,
         state_store_spec=str(payload["state_store_spec"]),
         run_one_spec=str(payload["run_one_spec"]),
         metric_spec=str(payload["metric_spec"]),
@@ -1006,7 +1039,9 @@ def load_eval_run_spec(path: str | Path) -> EvalRunSpec:
     if missing:
         raise ValueError(f"eval run spec missing required keys: {', '.join(sorted(missing))}")
 
-    base_dir = spec_path.parent
+    project_root = _resolve_project_root(payload=payload, spec_path=spec_path, required=True)
+    assert project_root is not None
+    base_dir = _resolution_base(project_root=project_root, spec_path=spec_path)
     raw_env_files = payload.get("env_files", [])
     if raw_env_files is None:
         raw_env_files = []
@@ -1016,7 +1051,7 @@ def load_eval_run_spec(path: str | Path) -> EvalRunSpec:
     env_files = tuple(_resolve_against(base_dir, str(item)) for item in raw_env_files)
 
     return EvalRunSpec(
-        project_root=_resolve_against(base_dir, str(payload["project_root"])),
+        project_root=project_root,
         query_suite_path=_resolve_against(base_dir, str(payload["query_suite_path"])),
         candidates_path=_resolve_against(base_dir, str(payload["candidates_path"])),
         metric_spec=str(payload["metric_spec"]),
@@ -1048,7 +1083,9 @@ def load_eval_collect_spec(path: str | Path) -> EvalCollectSpec:
     if missing:
         raise ValueError(f"eval collect spec missing required keys: {', '.join(sorted(missing))}")
 
-    base_dir = spec_path.parent
+    project_root = _resolve_project_root(payload=payload, spec_path=spec_path, required=True)
+    assert project_root is not None
+    base_dir = _resolution_base(project_root=project_root, spec_path=spec_path)
     raw_env_files = payload.get("env_files", [])
     if raw_env_files is None:
         raw_env_files = []
@@ -1058,7 +1095,7 @@ def load_eval_collect_spec(path: str | Path) -> EvalCollectSpec:
     env_files = tuple(_resolve_against(base_dir, str(item)) for item in raw_env_files)
 
     return EvalCollectSpec(
-        project_root=_resolve_against(base_dir, str(payload["project_root"])),
+        project_root=project_root,
         query_suite_path=_resolve_against(base_dir, str(payload["query_suite_path"])),
         output_dir=_resolve_against(base_dir, str(payload["output_dir"])),
         session_id=str(payload["session_id"]),
@@ -1082,7 +1119,8 @@ def load_eval_dataset_spec(path: str | Path) -> EvalDatasetSpec:
     if missing:
         raise ValueError(f"eval dataset spec missing required keys: {', '.join(sorted(missing))}")
 
-    base_dir = spec_path.parent
+    project_root = _resolve_project_root(payload=payload, spec_path=spec_path, required=False)
+    base_dir = _resolution_base(project_root=project_root, spec_path=spec_path)
     raw_env_files = payload.get("env_files", [])
     if raw_env_files is None:
         raw_env_files = []
@@ -1094,11 +1132,7 @@ def load_eval_dataset_spec(path: str | Path) -> EvalDatasetSpec:
         candidates_path=_resolve_against(base_dir, str(payload["candidates_path"])),
         metric_spec=str(payload["metric_spec"]),
         output_dir=_resolve_against(base_dir, str(payload["output_dir"])),
-        project_root=(
-            _resolve_against(base_dir, str(payload["project_root"]))
-            if payload.get("project_root") is not None
-            else None
-        ),
+        project_root=project_root,
         env_files=tuple(_resolve_against(base_dir, str(item)) for item in raw_env_files),
         agent_package=str(payload["agent_package"]) if payload.get("agent_package") is not None else None,
         run_one_spec=str(payload["run_one_spec"]) if payload.get("run_one_spec") is not None else None,

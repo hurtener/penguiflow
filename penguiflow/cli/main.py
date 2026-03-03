@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import click
 
@@ -318,20 +319,63 @@ def eval() -> None:
     """Run trace-derived dataset export and evaluation workflows."""
 
 
+def _load_env_file_values(file_path: Path) -> dict[str, str]:
+    if not file_path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for line in file_path.read_text(encoding="utf-8").splitlines():
+        raw = line.strip()
+        if not raw or raw.startswith("#") or "=" not in raw:
+            continue
+        key, _, value = raw.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def _resolve_cli_env_files(raw_paths: tuple[str, ...], *, base_dir: Path) -> list[Path]:
+    resolved: list[Path] = []
+    for raw in raw_paths:
+        candidate = Path(raw)
+        resolved.append(candidate.resolve() if candidate.is_absolute() else (base_dir / candidate).resolve())
+    return resolved
+
+
+def _apply_env_files(
+    *,
+    spec_env_files: tuple[Path, ...],
+    cli_env_files: tuple[str, ...],
+    base_dir: Path,
+) -> None:
+    ordered_env_files: list[Path] = list(spec_env_files)
+    ordered_env_files.extend(_resolve_cli_env_files(cli_env_files, base_dir=base_dir))
+    for env_path in ordered_env_files:
+        if not env_path.exists():
+            raise ValueError(f"env file does not exist: {env_path} (resolution base: {base_dir})")
+
+    for env_path in ordered_env_files:
+        for key, value in _load_env_file_values(env_path).items():
+            if key not in os.environ:
+                os.environ[key] = value
+
+
 @eval.command("run")
 @click.option(
     "--spec",
     "spec_path",
     required=True,
     type=click.Path(exists=True, dir_okay=False, path_type=str),
-    help="Path to eval spec JSON file.",
+    help="Path to eval spec JSON file. Relative spec fields resolve from project_root.",
 )
 @click.option(
     "--env-file",
     "env_files",
     multiple=True,
-    type=click.Path(exists=True, dir_okay=False, path_type=str),
-    help="Optional environment file(s) loaded before evaluation.",
+    type=click.Path(dir_okay=False, path_type=str),
+    help="Optional environment file(s) loaded before evaluation (relative to project_root).",
 )
 def eval_run(spec_path: str, env_files: tuple[str, ...]) -> None:
     """Run collect->export->evaluate workflow from spec."""
@@ -343,39 +387,21 @@ def eval_run(spec_path: str, env_files: tuple[str, ...]) -> None:
 
     path = Path(spec_path).resolve()
 
-    def _load_env_file_values(file_path: Path) -> dict[str, str]:
-        if not file_path.exists():
-            return {}
-        values: dict[str, str] = {}
-        for line in file_path.read_text(encoding="utf-8").splitlines():
-            raw = line.strip()
-            if not raw or raw.startswith("#") or "=" not in raw:
-                continue
-            key, _, value = raw.partition("=")
-            key = key.strip()
-            value = value.strip()
-            if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
-                value = value[1:-1]
-            values[key] = value
-        return values
-
     try:
         run_spec = load_eval_run_spec(path)
     except Exception as exc:
         click.echo(f"✗ {exc}", err=True)
         sys.exit(1)
 
-    ordered_env_files: list[Path] = list(run_spec.env_files)
-    ordered_env_files.extend(Path(item).resolve() for item in env_files)
-    for env_path in ordered_env_files:
-        if not env_path.exists():
-            click.echo(f"✗ env file does not exist: {env_path}", err=True)
-            sys.exit(1)
-
-    for env_path in ordered_env_files:
-        for key, value in _load_env_file_values(env_path).items():
-            if key not in os.environ:
-                os.environ[key] = value
+    try:
+        _apply_env_files(
+            spec_env_files=run_spec.env_files,
+            cli_env_files=env_files,
+            base_dir=run_spec.project_root,
+        )
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
 
     try:
         result = asyncio.run(
@@ -396,7 +422,23 @@ def eval_run(spec_path: str, env_files: tuple[str, ...]) -> None:
         click.echo(f"✗ {exc}", err=True)
         sys.exit(1)
 
-    click.echo(json.dumps(result, indent=2, sort_keys=True))
+    click.echo(
+        json.dumps(
+            {
+                **result,
+                "resolved_paths": {
+                    "resolution_base": str(run_spec.project_root),
+                    "project_root": str(run_spec.project_root),
+                    "query_suite_path": str(run_spec.query_suite_path),
+                    "candidates_path": str(run_spec.candidates_path),
+                    "output_dir": str(run_spec.output_dir),
+                    "env_files": [str(item) for item in run_spec.env_files],
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 @eval.command("collect")
@@ -405,14 +447,14 @@ def eval_run(spec_path: str, env_files: tuple[str, ...]) -> None:
     "spec_path",
     required=True,
     type=click.Path(exists=True, dir_okay=False, path_type=str),
-    help="Path to eval collect spec JSON file.",
+    help="Path to eval collect spec JSON file. Relative spec fields resolve from project_root.",
 )
 @click.option(
     "--env-file",
     "env_files",
     multiple=True,
-    type=click.Path(exists=True, dir_okay=False, path_type=str),
-    help="Optional environment file(s) loaded before collection.",
+    type=click.Path(dir_okay=False, path_type=str),
+    help="Optional environment file(s) loaded before collection (relative to project_root).",
 )
 def eval_collect(spec_path: str, env_files: tuple[str, ...]) -> None:
     """Run collect->export workflow from spec (no evaluation)."""
@@ -424,39 +466,21 @@ def eval_collect(spec_path: str, env_files: tuple[str, ...]) -> None:
 
     path = Path(spec_path).resolve()
 
-    def _load_env_file_values(file_path: Path) -> dict[str, str]:
-        if not file_path.exists():
-            return {}
-        values: dict[str, str] = {}
-        for line in file_path.read_text(encoding="utf-8").splitlines():
-            raw = line.strip()
-            if not raw or raw.startswith("#") or "=" not in raw:
-                continue
-            key, _, value = raw.partition("=")
-            key = key.strip()
-            value = value.strip()
-            if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
-                value = value[1:-1]
-            values[key] = value
-        return values
-
     try:
         collect_spec = load_eval_collect_spec(path)
     except Exception as exc:
         click.echo(f"✗ {exc}", err=True)
         sys.exit(1)
 
-    ordered_env_files: list[Path] = list(collect_spec.env_files)
-    ordered_env_files.extend(Path(item).resolve() for item in env_files)
-    for env_path in ordered_env_files:
-        if not env_path.exists():
-            click.echo(f"✗ env file does not exist: {env_path}", err=True)
-            sys.exit(1)
-
-    for env_path in ordered_env_files:
-        for key, value in _load_env_file_values(env_path).items():
-            if key not in os.environ:
-                os.environ[key] = value
+    try:
+        _apply_env_files(
+            spec_env_files=collect_spec.env_files,
+            cli_env_files=env_files,
+            base_dir=collect_spec.project_root,
+        )
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
 
     try:
         result = asyncio.run(
@@ -474,7 +498,22 @@ def eval_collect(spec_path: str, env_files: tuple[str, ...]) -> None:
         click.echo(f"✗ {exc}", err=True)
         sys.exit(1)
 
-    click.echo(json.dumps(result, indent=2, sort_keys=True))
+    click.echo(
+        json.dumps(
+            {
+                **result,
+                "resolved_paths": {
+                    "resolution_base": str(collect_spec.project_root),
+                    "project_root": str(collect_spec.project_root),
+                    "query_suite_path": str(collect_spec.query_suite_path),
+                    "output_dir": str(collect_spec.output_dir),
+                    "env_files": [str(item) for item in collect_spec.env_files],
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 @eval.command("evaluate")
@@ -483,14 +522,14 @@ def eval_collect(spec_path: str, env_files: tuple[str, ...]) -> None:
     "spec_path",
     required=True,
     type=click.Path(exists=True, dir_okay=False, path_type=str),
-    help="Path to eval dataset spec JSON file.",
+    help="Path to eval dataset spec JSON file. Relative spec fields resolve from project_root if provided.",
 )
 @click.option(
     "--env-file",
     "env_files",
     multiple=True,
-    type=click.Path(exists=True, dir_okay=False, path_type=str),
-    help="Optional environment file(s) loaded before evaluation.",
+    type=click.Path(dir_okay=False, path_type=str),
+    help="Optional environment file(s) loaded before evaluation (relative to project_root if set).",
 )
 def eval_evaluate(spec_path: str, env_files: tuple[str, ...]) -> None:
     """Run evaluation against an existing dataset bundle from spec."""
@@ -502,39 +541,22 @@ def eval_evaluate(spec_path: str, env_files: tuple[str, ...]) -> None:
 
     path = Path(spec_path).resolve()
 
-    def _load_env_file_values(file_path: Path) -> dict[str, str]:
-        if not file_path.exists():
-            return {}
-        values: dict[str, str] = {}
-        for line in file_path.read_text(encoding="utf-8").splitlines():
-            raw = line.strip()
-            if not raw or raw.startswith("#") or "=" not in raw:
-                continue
-            key, _, value = raw.partition("=")
-            key = key.strip()
-            value = value.strip()
-            if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
-                value = value[1:-1]
-            values[key] = value
-        return values
-
     try:
         spec = load_eval_dataset_spec(path)
     except Exception as exc:
         click.echo(f"✗ {exc}", err=True)
         sys.exit(1)
 
-    ordered_env_files: list[Path] = list(spec.env_files)
-    ordered_env_files.extend(Path(item).resolve() for item in env_files)
-    for env_path in ordered_env_files:
-        if not env_path.exists():
-            click.echo(f"✗ env file does not exist: {env_path}", err=True)
-            sys.exit(1)
-
-    for env_path in ordered_env_files:
-        for key, value in _load_env_file_values(env_path).items():
-            if key not in os.environ:
-                os.environ[key] = value
+    eval_base = spec.project_root if spec.project_root is not None else path.parent
+    try:
+        _apply_env_files(
+            spec_env_files=spec.env_files,
+            cli_env_files=env_files,
+            base_dir=eval_base,
+        )
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
 
     try:
         result = asyncio.run(evaluate_dataset_from_spec_file(path))
@@ -542,7 +564,23 @@ def eval_evaluate(spec_path: str, env_files: tuple[str, ...]) -> None:
         click.echo(f"✗ {exc}", err=True)
         sys.exit(1)
 
-    click.echo(json.dumps(result, indent=2, sort_keys=True))
+    click.echo(
+        json.dumps(
+            {
+                **result,
+                "resolved_paths": {
+                    "resolution_base": str(eval_base),
+                    "project_root": str(spec.project_root) if spec.project_root is not None else None,
+                    "dataset_path": str(spec.dataset_path),
+                    "candidates_path": str(spec.candidates_path),
+                    "output_dir": str(spec.output_dir),
+                    "env_files": [str(item) for item in spec.env_files],
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 @app.command()

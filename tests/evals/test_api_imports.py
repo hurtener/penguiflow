@@ -7,10 +7,12 @@ import pytest
 
 from penguiflow.evals.api import (
     EvalCollectSpec,
+    EvalDatasetSpec,
     EvalRunSpec,
     ensure_project_on_sys_path,
     load_candidates,
     load_eval_collect_spec,
+    load_eval_dataset_spec,
     load_eval_run_spec,
     load_eval_spec,
     resolve_callable,
@@ -234,7 +236,8 @@ def test_load_candidates_rejects_duplicate_patch_sets(tmp_path) -> None:
         load_candidates(path)
 
 
-def test_load_eval_spec_resolves_relative_paths(tmp_path) -> None:
+def test_load_eval_spec_resolves_relative_paths(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
     spec_path = tmp_path / "eval.spec.json"
     (tmp_path / "datasets").mkdir()
     spec_path.write_text(
@@ -260,7 +263,8 @@ def test_load_eval_spec_resolves_relative_paths(tmp_path) -> None:
     assert spec.output_dir == tmp_path / "artifacts/eval/run-001"
 
 
-def test_load_eval_run_spec_resolves_env_files(tmp_path) -> None:
+def test_load_eval_run_spec_resolves_env_files(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
     spec_path = tmp_path / "eval.run.json"
     (tmp_path / "env").mkdir()
     spec_path.write_text(
@@ -289,7 +293,8 @@ def test_load_eval_run_spec_resolves_env_files(tmp_path) -> None:
     )
 
 
-def test_load_eval_collect_spec_resolves_env_files(tmp_path) -> None:
+def test_load_eval_collect_spec_resolves_env_files(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
     spec_path = tmp_path / "collect.spec.json"
     (tmp_path / "env").mkdir()
     spec_path.write_text(
@@ -314,6 +319,183 @@ def test_load_eval_collect_spec_resolves_env_files(tmp_path) -> None:
         tmp_path / "env/local.env",
         tmp_path / "env/secrets.env",
     )
+
+
+def test_load_eval_run_spec_resolves_relative_fields_from_project_root(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    project_root = tmp_path / "project"
+    spec_dir = tmp_path / "specs" / "nested"
+    spec_dir.mkdir(parents=True)
+    spec_path = spec_dir / "eval.spec.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "project_root": "project",
+                "query_suite_path": "datasets/query_suite.json",
+                "candidates_path": "datasets/candidates.json",
+                "metric_spec": "demo.metric:metric",
+                "output_dir": "artifacts/eval/run",
+                "session_id": "session-1",
+                "dataset_tag": "dataset:demo",
+                "env_files": ["env/local.env"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    spec = load_eval_run_spec(spec_path)
+
+    assert isinstance(spec, EvalRunSpec)
+    assert spec.project_root == project_root
+    assert spec.query_suite_path == project_root / "datasets/query_suite.json"
+    assert spec.candidates_path == project_root / "datasets/candidates.json"
+    assert spec.output_dir == project_root / "artifacts/eval/run"
+    assert spec.env_files == (project_root / "env/local.env",)
+
+
+def test_load_eval_collect_spec_resolves_relative_fields_from_project_root(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    project_root = tmp_path / "project"
+    spec_dir = tmp_path / "specs"
+    spec_dir.mkdir(parents=True)
+    spec_path = spec_dir / "collect.spec.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "project_root": "project",
+                "query_suite_path": "datasets/query_suite.json",
+                "output_dir": "artifacts/eval/collect",
+                "session_id": "session-collect",
+                "dataset_tag": "dataset:demo",
+                "env_files": ["env/collect.env"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    spec = load_eval_collect_spec(spec_path)
+
+    assert isinstance(spec, EvalCollectSpec)
+    assert spec.project_root == project_root
+    assert spec.query_suite_path == project_root / "datasets/query_suite.json"
+    assert spec.output_dir == project_root / "artifacts/eval/collect"
+    assert spec.env_files == (project_root / "env/collect.env",)
+
+
+def test_load_eval_dataset_spec_resolves_relative_fields_from_project_root_when_provided(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    project_root = tmp_path / "project"
+    spec_dir = tmp_path / "specs" / "nested"
+    spec_dir.mkdir(parents=True)
+    spec_path = spec_dir / "evaluate.spec.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "project_root": "project",
+                "dataset_path": "bundle/dataset.jsonl",
+                "candidates_path": "datasets/candidates.json",
+                "metric_spec": "demo.metric:metric",
+                "output_dir": "artifacts/eval/rerun",
+                "env_files": ["env/evaluate.env"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    spec = load_eval_dataset_spec(spec_path)
+
+    assert isinstance(spec, EvalDatasetSpec)
+    assert spec.project_root == project_root
+    assert spec.dataset_path == project_root / "bundle/dataset.jsonl"
+    assert spec.candidates_path == project_root / "datasets/candidates.json"
+    assert spec.output_dir == project_root / "artifacts/eval/rerun"
+    assert spec.env_files == (project_root / "env/evaluate.env",)
+
+
+def test_load_eval_run_spec_resolves_project_root_from_cwd(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    spec_dir = tmp_path / "evals" / "native_avails_v1"
+    spec_dir.mkdir(parents=True)
+    spec_path = spec_dir / "eval.spec.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "project_root": ".",
+                "query_suite_path": "evals/native_avails_v1/query_suite.json",
+                "candidates_path": "evals/native_avails_v1/candidates.json",
+                "metric_spec": "demo.metric:metric",
+                "output_dir": "artifacts/eval/native_avails_v1/run-local",
+                "session_id": "session-1",
+                "dataset_tag": "dataset:demo",
+                "env_files": [".env"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    spec = load_eval_run_spec(spec_path)
+
+    assert spec.project_root == tmp_path
+    assert spec.env_files == (tmp_path / ".env",)
+    assert spec.query_suite_path == tmp_path / "evals/native_avails_v1/query_suite.json"
+
+
+def test_load_eval_collect_spec_resolves_project_root_from_cwd(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    spec_dir = tmp_path / "evals" / "native_avails_v1"
+    spec_dir.mkdir(parents=True)
+    spec_path = spec_dir / "collect.spec.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "project_root": ".",
+                "query_suite_path": "evals/native_avails_v1/query_suite.json",
+                "output_dir": "artifacts/eval/native_avails_v1/collect-local",
+                "session_id": "session-collect",
+                "dataset_tag": "dataset:demo",
+                "env_files": [".env"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    spec = load_eval_collect_spec(spec_path)
+
+    assert spec.project_root == tmp_path
+    assert spec.env_files == (tmp_path / ".env",)
+    assert spec.query_suite_path == tmp_path / "evals/native_avails_v1/query_suite.json"
+
+
+def test_load_eval_dataset_spec_resolves_project_root_from_cwd(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    spec_dir = tmp_path / "evals" / "native_avails_v1"
+    spec_dir.mkdir(parents=True)
+    spec_path = spec_dir / "evaluate.spec.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "project_root": ".",
+                "dataset_path": "artifacts/eval/native_avails_v1/run-local/bundle/dataset.jsonl",
+                "candidates_path": "evals/native_avails_v1/candidates.json",
+                "metric_spec": "demo.metric:metric",
+                "output_dir": "artifacts/eval/native_avails_v1/rerun",
+                "env_files": [".env"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    spec = load_eval_dataset_spec(spec_path)
+
+    assert spec.project_root == tmp_path
+    assert spec.env_files == (tmp_path / ".env",)
+    assert spec.dataset_path == tmp_path / "artifacts/eval/native_avails_v1/run-local/bundle/dataset.jsonl"
 
 
 @pytest.mark.asyncio
