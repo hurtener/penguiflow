@@ -51,6 +51,9 @@ from .base import OpenAICompatibleProvider
 if TYPE_CHECKING:
     from ..types import CancelToken, StreamCallback
 
+_XAI_ROUTE_PREFIXES = frozenset({"x-ai", "xai"})
+_REASONING_OFF_VALUES = frozenset({"off", "none", "false", "0", "disable", "disabled", "no"})
+
 
 class OpenRouterProvider(OpenAICompatibleProvider):
     """OpenRouter provider with model routing.
@@ -167,6 +170,59 @@ class OpenRouterProvider(OpenAICompatibleProvider):
             return model_name, provider_hint
 
         return model, None
+
+    def _is_xai_route(self) -> bool:
+        provider = self._model.split("/", 1)[0].lower().strip()
+        return provider in _XAI_ROUTE_PREFIXES
+
+    @staticmethod
+    def _coerce_reasoning_enabled(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value != 0
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "enable", "enabled"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "disable", "disabled"}:
+                return False
+        return None
+
+    @staticmethod
+    def _reasoning_enabled_from_effort(reasoning_effort: Any) -> bool | None:
+        if reasoning_effort is None:
+            return None
+        effort = str(reasoning_effort).strip().lower()
+        if not effort:
+            return None
+        return effort not in _REASONING_OFF_VALUES
+
+    def _normalize_reasoning_controls(self, extra: dict[str, Any]) -> None:
+        if not self._is_xai_route():
+            extra.pop("reasoning_enabled", None)
+            return
+
+        reasoning_effort = extra.pop("reasoning_effort", None)
+        reasoning_enabled = extra.pop("reasoning_enabled", None)
+
+        raw_extra_body = extra.get("extra_body")
+        extra_body = dict(raw_extra_body) if isinstance(raw_extra_body, dict) else {}
+
+        if "reasoning" in extra:
+            reasoning_payload = extra.pop("reasoning")
+            extra_body["reasoning"] = reasoning_payload
+            extra["extra_body"] = extra_body
+            return
+
+        enabled = self._coerce_reasoning_enabled(reasoning_enabled)
+        if enabled is None:
+            enabled = self._reasoning_enabled_from_effort(reasoning_effort)
+        if enabled is None:
+            return
+
+        extra_body["reasoning"] = {"enabled": enabled}
+        extra["extra_body"] = extra_body
 
     async def complete(
         self,
@@ -338,6 +394,7 @@ class OpenRouterProvider(OpenAICompatibleProvider):
 
         if request.extra:
             extra = dict(request.extra)
+            self._normalize_reasoning_controls(extra)
             # Handle OpenRouter-specific options
             openrouter_keys = ["transforms", "route", "provider", "models"]
             for key in openrouter_keys:

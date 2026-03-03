@@ -37,6 +37,8 @@ PROVIDER_PROFILE_MAPPING = {
     "perplexity": "perplexity",
     "qwen": "qwen",
     "stepfun": "stepfun",
+    "x-ai": "xai",
+    "xai": "xai",
 }
 
 # Profiles for OpenRouter-specific models
@@ -523,6 +525,30 @@ PROFILES: dict[str, ModelProfile] = {
         max_context_tokens=131072,
         max_output_tokens=8192,
     ),
+    "x-ai/grok-4.1-fast": ModelProfile(
+        supports_schema_guided_output=False,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="tools",
+        native_structured_kind="openai_compatible_tools",
+        strict_mode_default=False,
+        max_context_tokens=2000000,
+        max_output_tokens=30000,
+    ),
+    "xai/grok-4.1-fast": ModelProfile(
+        supports_schema_guided_output=False,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="tools",
+        native_structured_kind="openai_compatible_tools",
+        strict_mode_default=False,
+        max_context_tokens=2000000,
+        max_output_tokens=10000,
+    ),
 }
 
 
@@ -593,6 +619,15 @@ def get_openrouter_profile(model: str) -> ModelProfile:
                 model_name = parts[-1] if len(parts) > 1 else model
                 for key, profile in PROFILES.items():
                     if not key.startswith("stepfun/"):
+                        continue
+                    key_model = key.split("/", 1)[-1]
+                    if model_name.startswith(key_model) or key_model in model_name:
+                        return profile
+
+            elif profile_type == "xai":
+                model_name = parts[-1] if len(parts) > 1 else model
+                for key, profile in PROFILES.items():
+                    if not (key.startswith("x-ai/") or key.startswith("xai/")):
                         continue
                     key_model = key.split("/", 1)[-1]
                     if model_name.startswith(key_model) or key_model in model_name:

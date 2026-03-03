@@ -372,6 +372,90 @@ class TestOpenRouterProviderBuildParams:
             assert "response_format" in params
             assert params["response_format"]["type"] == "json_object"
 
+    def test_build_params_xai_maps_reasoning_enabled(self, mock_openai_sdk: MagicMock) -> None:
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.openrouter import OpenRouterProvider
+
+            provider = OpenRouterProvider(
+                "openrouter/x-ai/grok-4.1-fast",
+                api_key="key",
+            )
+
+            request = LLMRequest(
+                model="x-ai/grok-4.1-fast",
+                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                extra={"reasoning_enabled": True},
+            )
+
+            params = provider._build_params(request)
+
+            assert params["extra_body"]["reasoning"] == {"enabled": True}
+            assert "reasoning_enabled" not in params
+            assert "reasoning" not in params
+
+    def test_build_params_xai_maps_reasoning_effort_off(self, mock_openai_sdk: MagicMock) -> None:
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.openrouter import OpenRouterProvider
+
+            provider = OpenRouterProvider(
+                "openrouter/x-ai/grok-4.1-fast",
+                api_key="key",
+            )
+
+            request = LLMRequest(
+                model="x-ai/grok-4.1-fast",
+                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                extra={"reasoning_effort": "off"},
+            )
+
+            params = provider._build_params(request)
+
+            assert params["extra_body"]["reasoning"] == {"enabled": False}
+            assert "reasoning_effort" not in params
+            assert "reasoning" not in params
+
+    def test_build_params_xai_keeps_explicit_reasoning(self, mock_openai_sdk: MagicMock) -> None:
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.openrouter import OpenRouterProvider
+
+            provider = OpenRouterProvider(
+                "openrouter/x-ai/grok-4.1-fast",
+                api_key="key",
+            )
+
+            request = LLMRequest(
+                model="x-ai/grok-4.1-fast",
+                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                extra={"reasoning": {"enabled": False}, "reasoning_enabled": True, "reasoning_effort": "high"},
+            )
+
+            params = provider._build_params(request)
+
+            assert params["extra_body"]["reasoning"] == {"enabled": False}
+            assert "reasoning_enabled" not in params
+            assert "reasoning_effort" not in params
+            assert "reasoning" not in params
+
+    def test_build_params_non_xai_keeps_reasoning_effort(self, mock_openai_sdk: MagicMock) -> None:
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.openrouter import OpenRouterProvider
+
+            provider = OpenRouterProvider(
+                "anthropic/claude-sonnet-4.5",
+                api_key="key",
+            )
+
+            request = LLMRequest(
+                model="anthropic/claude-sonnet-4.5",
+                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                extra={"reasoning_enabled": True, "reasoning_effort": "high"},
+            )
+
+            params = provider._build_params(request)
+
+            assert params["reasoning_effort"] == "high"
+            assert "reasoning_enabled" not in params
+
 
 def test_openrouter_stepfun_profile_disables_json_output_modes() -> None:
     from penguiflow.llm.profiles.openrouter import get_openrouter_profile
@@ -379,6 +463,14 @@ def test_openrouter_stepfun_profile_disables_json_output_modes() -> None:
     profile = get_openrouter_profile("openrouter/stepfun/step-3.5-flash")
     assert profile.supports_schema_guided_output is False
     assert profile.supports_json_only_output is False
+
+
+def test_openrouter_xai_profile_supports_reasoning() -> None:
+    from penguiflow.llm.profiles.openrouter import get_openrouter_profile
+
+    profile = get_openrouter_profile("openrouter/x-ai/grok-4.1-fast:thinking")
+    assert profile.supports_reasoning is True
+    assert profile.max_context_tokens == 2000000
 
 
 class TestOpenRouterProviderComplete:

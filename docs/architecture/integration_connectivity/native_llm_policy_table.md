@@ -61,7 +61,15 @@ Resolved by route prefix inside `openrouter/<provider>/<model>`:
 
 - `openai`, `google`: keep requested mode
 - `stepfun`: force `text`
+- `x-ai`, `xai`: use conservative mode and normalize reasoning controls to `extra_body.reasoning.enabled`
 - others: force `json_object`
+
+Reasoning control behavior for `x-ai` / `xai` routes:
+
+- `reasoning_enabled` is mapped to `extra_body.reasoning.enabled`
+- `reasoning_effort` is mapped to `extra_body.reasoning.enabled` (`off|none|false|0|disable|disabled|no` => disabled)
+- explicit `reasoning` payload wins over derived mapping (moved into `extra_body.reasoning`)
+- canonical `reasoning_enabled` is stripped before provider call (all OpenRouter routes)
 
 ### NIM
 
