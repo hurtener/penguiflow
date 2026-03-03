@@ -568,6 +568,10 @@ You can discover additional tools using `tool_search`.
 - Describe the capability you need.
 - Use `tool_get` to fetch the tool schema/examples if needed.
 - Use the tool name to call it.
+
+IMPORTANT (deferred tools):
+- Tools returned by `tool_search` are permitted to be called even if they are currently deferred/hidden
+  in the visible catalog; the runtime will activate them on first call.
 Only tools permitted for this request will appear.
 </tool_discovery>"""
 
@@ -774,7 +778,8 @@ Every response follows this structure:
 
 Field meanings:
 - next_node:
-  - Tool call: a tool name from the catalog
+  - Tool call: a tool name from the catalog. If a tool was returned by `tool_search` but is deferred/hidden,
+    you may still call it by name; the runtime will activate it on first call.
   - Parallel: "parallel" (executes tools concurrently)
   - Background tasks: "task.subagent" or "task.tool" (spawns a task; only use if task management is enabled)
   - Terminal: "final_response" (streams args.answer to the user)
