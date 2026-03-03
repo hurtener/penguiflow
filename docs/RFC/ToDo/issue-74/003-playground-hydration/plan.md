@@ -4,11 +4,18 @@
 
 When a playground session is resumed (e.g. browser refresh), the Artifacts panel starts empty and only shows artifacts as new `artifact_stored` SSE events arrive. Pre-existing artifacts from the session are invisible until the agent produces new ones. The fix: call `ArtifactStore.list()` at session init to hydrate the panel with existing artifacts.
 
-## Changes (~6 files, 1 new endpoint)
+## Changes (~8 files, 1 new endpoint)
 
 ### 0. Upstream fix: Propagate full scope in artifact storage paths
 
-Two artifact storage paths only set `session_id` on the scope, omitting `tenant_id`/`user_id`. This causes `artifact_store.list(scope=...)` to return no results when filtering by `tenant_id`/`user_id`, since `_scope_matches` requires exact match for non-None filter fields. Fix both paths to propagate the full scope from `tool_context` (matching the existing pattern in `sessions/session_kv.py:412-417`).
+Four artifact storage paths only set `session_id` on the scope (or no scope at all), omitting `tenant_id`/`user_id`. This causes `artifact_store.list(scope=...)` to return no results when filtering by `tenant_id`/`user_id`, since `_scope_matches` requires exact match for non-None filter fields. Fix all paths to propagate the full scope from `tool_context` (matching the existing pattern in `sessions/session_kv.py:412-417`).
+
+**Paths already correct (no changes needed):**
+- `penguiflow/sessions/session_kv.py:412-417` — reference pattern, sets all 4 fields from `tool_context`
+- `penguiflow/artifacts.py:261-278` — `ScopedArtifacts` constructor sets all 4 fields
+- `penguiflow/tools/node.py` (8 call sites) — all run inside `ToolNode` methods which only execute in the planner context, where `ctx._artifacts` is the `_EventEmittingArtifactStoreProxy`; fix **0a** corrects `_resolve_scope` to inject the full scope for these calls
+- `penguiflow/tools/resources.py:244,270` — `ResourceCache` receives `ctx._artifacts` (the proxy in planner context); full scope provided after fix **0a**
+- `penguiflow/state/in_memory.py:75` — `scope_filter` is only a store partitioning key; actual artifact scope passes through from callers
 
 **0a. File:** `penguiflow/planner/artifact_handling.py` — modify `_resolve_scope` (line 47-57)
 
@@ -18,6 +25,7 @@ def _resolve_scope(self, scope: ArtifactScope | None) -> ArtifactScope | None:
     """Inject session_id from trajectory if scope is missing."""
     if scope is not None:
         return scope
+    # Get session_id from trajectory's tool_context for proper session scoping
     tool_ctx = self._trajectory.tool_context
     if tool_ctx and isinstance(tool_ctx, dict):
         session_id = tool_ctx.get("session_id")
@@ -59,7 +67,7 @@ async def _extract_artifacts_from_observation(
 ) -> list[dict[str, Any]]:
 ```
 
-Inside the function, **delete line 192** (`scope = ArtifactScope(session_id=session_id) if session_id else None`). The inner `_store` function will now resolve `scope` via closure capture from the outer function's `scope` parameter — no changes to `_store`'s signature needed. The resulting `_store` body should be:
+Inside the function, **replace line 192** (`scope = ArtifactScope(session_id=session_id) if session_id else None`) with the comment `# `scope` is now captured from the outer function's parameter (no local override)`. The inner `_store` function will now resolve `scope` via closure capture from the outer function's `scope` parameter — no changes to `_store`'s signature needed. The resulting `_store` body should be (note the comment on the former line 192 is prescriptive — add it to the code):
 
 ```python
 async def _store(
@@ -124,6 +132,107 @@ if isinstance(payload, Mapping):
 
 `ArtifactScope` is already imported at line 22 — no import change needed.
 
+**0c. File:** `penguiflow/planner/payload_builders.py` — modify `_clamp_observation` (line 119) and its wrapper in `react.py`
+
+`_clamp_observation` stores oversized observations as artifacts via `artifact_store.put_text()` (line 152) but passes **no `scope` at all**. The `artifact_store` here is the raw `ReactPlanner._artifact_store` (not the `_EventEmittingArtifactStoreProxy` which has `_resolve_scope`). Fix by threading scope through from the active trajectory.
+
+Add a `scope: ArtifactScope | None = None` parameter to `_clamp_observation`:
+```python
+async def _clamp_observation(
+    *,
+    observation: dict[str, Any],
+    spec_name: str,
+    trajectory_step: int,
+    config: ObservationGuardrailConfig,
+    artifact_store: ArtifactStore,
+    artifact_registry: ArtifactRegistry,
+    active_trajectory: Trajectory | None,
+    emit_event: Callable[[PlannerEvent], None],
+    time_source: Callable[[], float],
+    scope: ArtifactScope | None = None,
+) -> tuple[dict[str, Any], bool]:
+```
+
+Pass `scope` to the `put_text` call (line 152):
+```python
+ref = await artifact_store.put_text(
+    serialized,
+    namespace=f"observation.{spec_name}",
+    scope=scope,
+)
+```
+
+Add `ArtifactScope` import at the top of `payload_builders.py`:
+```python
+from ..artifacts import ArtifactScope
+```
+
+**File:** `penguiflow/planner/react.py` — modify `_clamp_observation` wrapper (line 1090) to build and pass the scope:
+```python
+async def _clamp_observation(
+    self,
+    observation: dict[str, Any],
+    spec_name: str,
+    trajectory_step: int,
+) -> tuple[dict[str, Any], bool]:
+    scope: ArtifactScope | None = None
+    traj = self._active_trajectory
+    if traj is not None:
+        tool_ctx = traj.tool_context
+        if tool_ctx and isinstance(tool_ctx, dict):
+            session_id = tool_ctx.get("session_id")
+            if session_id:
+                scope = ArtifactScope(
+                    session_id=str(session_id),
+                    tenant_id=tool_ctx.get("tenant_id"),
+                    user_id=tool_ctx.get("user_id"),
+                    trace_id=tool_ctx.get("trace_id"),
+                )
+    return await _clamp_observation_impl(
+        observation=observation,
+        spec_name=spec_name,
+        trajectory_step=trajectory_step,
+        config=self._observation_guardrail,
+        artifact_store=self._artifact_store,
+        artifact_registry=self._artifact_registry,
+        active_trajectory=self._active_trajectory,
+        emit_event=self._emit_event,
+        time_source=self._time_source,
+        scope=scope,
+    )
+```
+
+Add `ArtifactScope` to the existing import from `..artifacts` (already imported at line 13: `from ..artifacts import ArtifactStore` — extend to `from ..artifacts import ArtifactScope, ArtifactStore`).
+
+**0d. File:** `penguiflow/cli/playground.py` — modify resource reading endpoint (line 2067-2119) to propagate `tenant_id`/`user_id`
+
+The `GET /resources/{namespace}/{uri}` endpoint creates `ArtifactScope(session_id=resolved_session)` without `tenant_id`/`user_id`. Add query parameters and propagate them.
+
+Add `tenant_id` and `user_id` query params to the endpoint signature:
+```python
+@app.get("/resources/{namespace}/{uri:path}")
+async def read_resource(
+    namespace: str,
+    uri: str,
+    session_id: str | None = None,
+    tenant_id: str | None = None,
+    user_id: str | None = None,
+    x_session_id: str | None = Header(None, alias="X-Session-ID"),
+) -> Mapping[str, Any]:
+```
+
+Update the `ArtifactScope` construction (line 2118) to include them:
+```python
+scoped_store = _ScopedArtifactStore(
+    artifact_store,
+    ArtifactScope(
+        session_id=resolved_session,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    ),
+)
+```
+
 ### 1. Backend: Add `GET /artifacts` list endpoint
 
 **File:** `penguiflow/cli/playground.py` — insert before line 1919 (before `GET /artifacts/{artifact_id}` to avoid path parameter collision)
@@ -142,7 +251,8 @@ async def list_artifacts(
 - Resolve session_id: `resolved_session = session_id or x_session_id` (matches existing `get_artifact`/`get_artifact_meta` endpoints). If `resolved_session` is `None`, return `[]`
 - **Import `ArtifactScope` locally** inside the function body: `from penguiflow.artifacts import ArtifactScope` (follows existing pattern at line 2114 — top-level imports use lazy loading for optional deps)
 - Builds `ArtifactScope(session_id=resolved_session, tenant_id=tenant_id, user_id=user_id)` from the resolved params
-- Calls `artifact_store.list(scope=scope)` on the discovered store **inside a `try/except Exception`** — on any `Exception`, log a warning and return `[]` (best-effort: hydration failures must not break the playground; use `except Exception` to preserve `SystemExit`/`KeyboardInterrupt`)
+- Calls `artifact_store.list(scope=scope)` on the discovered store **inside a `try/except Exception`** — on any `Exception`, log a warning via the module-level `logger` and return `[]` (best-effort: hydration failures must not break the playground; use `except Exception` to preserve `SystemExit`/`KeyboardInterrupt`)
+- **Logger:** `playground.py` has `import logging` (line 9) but no module-level logger. Add `logger = logging.getLogger(__name__)` near the top of the file (after imports) and use `logger.warning(...)` for the catch block
 - Returns `[ref.model_dump(exclude={"scope"}) for ref in refs]` — exclude `scope` to avoid leaking scoping metadata to the client
 
 ### 2. Frontend: Add `listArtifacts()` API function
@@ -157,8 +267,8 @@ export async function listArtifacts(
 ): Promise<ArtifactRef[] | null>
 ```
 
-- Uses `new URL()` + `url.searchParams.set()` to build the query string (matches `listTasks` pattern at line 237, not raw string interpolation)
-- Conditionally sets `tenant_id` and `user_id` params only when provided
+- Uses `new URL()` + `url.searchParams.set()` to build the query string (matches `listTasks` pattern at line 236, not raw string interpolation)
+- Conditionally sets `tenant_id` and `user_id` params only when truthy — use `if (tenantId)` / `if (userId)` so empty strings are omitted (e.g., if user clears the setup fields)
 - Uses `fetchWithErrorHandling<ArtifactRef[]>()` which returns `Result<ArtifactRef[], ApiError>` — unwrap the `Result`: return `result.data` on `result.ok`, return `null` on `!result.ok` (matches `listTasks` convention)
 - Returns `null` on failure (consistent with `listTasks` convention in this file)
 
@@ -208,17 +318,101 @@ Handled naturally:
 - **SSE first, hydration later:** `hydrate` skips existing keys — SSE version preserved
 - No duplicates possible since Map keys are artifact IDs
 
+## Scope coverage note
+
+All **internal** penguiflow artifact storage paths are covered by fixes 0a–0d. Specifically: the 8 `ctx._artifacts` call sites in `tools/node.py` only execute inside `ToolNode` methods (planner context, through the proxy fixed in 0a); the tool_jobs post-execution extraction is fixed in 0b; and `SessionKVFacade` already builds full scope independently.
+
+End users should always use the public `ctx.artifacts` API (`ScopedArtifacts`), which injects full scope automatically. The private `ctx._artifacts` property exposes the raw store without scope injection — using it directly is outside the recommended flow and scope correctness is the caller's responsibility.
+
 ## Tests
 
 ### Upstream scope tests
 
-**File:** `tests/test_artifacts.py` — add to existing file
+**File:** `tests/test_artifact_handling.py` — **create new file** (does not exist yet). `_resolve_scope` is a private method of `_EventEmittingArtifactStoreProxy` in `penguiflow/planner/artifact_handling.py`. Import from `penguiflow.planner.artifact_handling import _EventEmittingArtifactStoreProxy`. Instantiate with a mock `Trajectory` (whose `tool_context` is a dict), a `NoOpArtifactStore` or `InMemoryArtifactStore`, a no-op event emitter `Callable[[PlannerEvent], None]`, and a mock `ArtifactRegistry` (`MagicMock(spec=ArtifactRegistry)`). Use this scaffold:
+
+```python
+"""Tests for penguiflow.planner.artifact_handling — scope propagation."""
+
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
+from penguiflow.artifacts import ArtifactScope, NoOpArtifactStore
+from penguiflow.planner.artifact_handling import _EventEmittingArtifactStoreProxy
+from penguiflow.planner.artifact_registry import ArtifactRegistry
+from penguiflow.planner.models import PlannerEvent
+from penguiflow.planner.trajectory import Trajectory
+
+
+def _noop_emit(event: PlannerEvent) -> None:
+    pass
+
+
+def _make_proxy(tool_context: dict[str, Any]) -> _EventEmittingArtifactStoreProxy:
+    traj = MagicMock(spec=Trajectory)
+    traj.tool_context = tool_context
+    registry = MagicMock(spec=ArtifactRegistry)
+    return _EventEmittingArtifactStoreProxy(
+        store=NoOpArtifactStore(),
+        trajectory=traj,
+        emit_event=_noop_emit,
+        artifact_registry=registry,
+    )
+```
 
 1. **`_resolve_scope` includes tenant_id/user_id/trace_id** → when trajectory's `tool_context` has `session_id`, `tenant_id`, `user_id`, and `trace_id`, the returned `ArtifactScope` contains all four fields
 
 **File:** `tests/test_tool_jobs.py` — add to existing file
 
 2. **`_extract_artifacts_from_observation` receives full scope** → import the private function directly via `from penguiflow.sessions.tool_jobs import _extract_artifacts_from_observation`. When called with a scope containing `session_id`, `tenant_id`, `user_id`, and `trace_id`, verify via `artifact_store.get_ref()` that stored artifacts have matching scope fields (inspect the store directly, not just the returned dicts)
+
+**File:** `tests/test_payload_builders.py` — **create new file** (does not exist yet). Use this scaffold:
+
+```python
+"""Tests for penguiflow.planner.payload_builders."""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
+from penguiflow.artifacts import ArtifactScope, InMemoryArtifactStore
+from penguiflow.planner.artifact_registry import ArtifactRegistry
+from penguiflow.planner.models import PlannerEvent
+from penguiflow.planner.payload_builders import _clamp_observation, ObservationGuardrailConfig
+
+
+def _make_config(*, auto_artifact_threshold: int = 100) -> ObservationGuardrailConfig:
+    """Create an ObservationGuardrailConfig with a low threshold for testing."""
+    return ObservationGuardrailConfig(auto_artifact_threshold=auto_artifact_threshold)
+
+
+def _noop_emit(event: PlannerEvent) -> None:
+    pass
+
+
+def _make_registry() -> ArtifactRegistry:
+    """Create a mock ArtifactRegistry for testing."""
+    return MagicMock(spec=ArtifactRegistry)
+```
+
+Call `_clamp_observation` with:
+- `artifact_store=InMemoryArtifactStore()`
+- `artifact_registry=_make_registry()`
+- `active_trajectory=None` (no trajectory needed for scope tests — scope is passed directly)
+- `emit_event=_noop_emit`
+- `time_source=time.monotonic`
+- `scope=ArtifactScope(...)` (the parameter under test)
+
+3. **`_clamp_observation` stores artifacts with full scope** → call `_clamp_observation` with an `InMemoryArtifactStore`, a large observation exceeding `auto_artifact_threshold`, and a scope with all four fields. Verify via `artifact_store.list()` that the stored artifact has the correct scope fields.
+
+4. **`_clamp_observation` stores artifacts with no scope when None** → call `_clamp_observation` with `scope=None` and verify it doesn't crash (backwards-compatible, scope is optional with default `None`).
 
 ### Backend endpoint tests (`tests/cli/test_playground_endpoints.py` — add to existing `TestArtifactEndpoints` class)
 
@@ -247,9 +441,10 @@ Test scenarios for the `hydrate()` method:
 
 ## Verification
 
-1. `uv run pytest tests/test_artifacts.py -k "resolve_scope"` — upstream scope fix (artifact_handling)
+1. `uv run pytest tests/test_artifact_handling.py -k "resolve_scope"` — upstream scope fix (artifact_handling)
 2. `uv run pytest tests/test_tool_jobs.py -k "extract_artifacts"` — upstream scope fix (tool_jobs)
-3. `uv run pytest tests/cli/ -k "test_list_artifacts"` — new backend endpoint tests
-4. `cd penguiflow/cli/playground_ui && npm test` — new frontend store tests
-5. `uv run ruff check . && uv run mypy` — lint/types pass
-6. Manual: start playground, produce artifacts, refresh browser → artifacts panel should show pre-existing artifacts immediately
+3. `uv run pytest tests/test_payload_builders.py -k "clamp_observation"` — upstream scope fix (payload_builders)
+4. `uv run pytest tests/cli/ -k "test_list_artifacts"` — new backend endpoint tests
+5. `cd penguiflow/cli/playground_ui && npm test` — new frontend store tests
+6. `uv run ruff check . && uv run mypy` — lint/types pass
+7. Manual: start playground, produce artifacts, refresh browser → artifacts panel should show pre-existing artifacts immediately
