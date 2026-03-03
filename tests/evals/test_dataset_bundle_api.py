@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from penguiflow.evals.api import TraceSelector, export_dataset
-from penguiflow.planner import Trajectory
+from penguiflow.planner import PlannerAction, Trajectory, TrajectoryStep
 from penguiflow.state import InMemoryStateStore
 from penguiflow.state.models import StoredEvent
 
@@ -42,6 +42,12 @@ async def test_export_dataset_selects_by_all_tags(tmp_path: Path) -> None:
             llm_context={"tenant_id": "tenant-a"},
             tool_context={"request_id": "r-1"},
             metadata={"tags": ["dataset:v1", "split:val"]},
+            steps=[
+                TrajectoryStep(
+                    action=PlannerAction(next_node="na_turn", args={"query": "Question val"}),
+                    observation={"action_required": "clarification_required"},
+                )
+            ],
         ),
     )
     await store.save_trajectory(
@@ -68,6 +74,11 @@ async def test_export_dataset_selects_by_all_tags(tmp_path: Path) -> None:
     assert rows[0]["split"] == "val"
     assert rows[0]["question"] == "Question val"
     assert rows[0]["gold_trace_features"] is None
+    assert isinstance(rows[0]["gold_trace"]["trajectory_full"]["steps"], list)
+    assert (
+        rows[0]["gold_trace"]["trajectory_full"]["steps"][0]["observation"]["action_required"]
+        == "clarification_required"
+    )
 
 
 @pytest.mark.asyncio

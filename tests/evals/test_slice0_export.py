@@ -5,7 +5,7 @@ import json
 import pytest
 
 from penguiflow.evals.export import export_trace_dataset
-from penguiflow.planner import PlannerEvent, Trajectory
+from penguiflow.planner import PlannerAction, PlannerEvent, Trajectory, TrajectoryStep
 from penguiflow.state.in_memory import InMemoryStateStore
 from penguiflow.state.models import StoredEvent
 
@@ -78,6 +78,16 @@ async def test_export_prefers_trajectory_then_planner_events_and_writes_manifest
             llm_context={"tenant_id": "acme", "conversation_memory": {"summary": "prior"}},
             tool_context={"request_id": "req-123", "session_id": session_id},
             metadata={"tags": ["dataset:eval", "split:val"]},
+            steps=[
+                TrajectoryStep(
+                    action=PlannerAction(next_node="na_turn", args={"query": "Route this query"}),
+                    observation={"action_required": "clarification_required"},
+                ),
+                TrajectoryStep(
+                    action=PlannerAction(next_node="final_response", args={"answer": "Need clarification"}),
+                    observation={"action_required": "clarification_required", "workflow_complete": False},
+                ),
+            ],
         ),
     )
 
@@ -96,6 +106,9 @@ async def test_export_prefers_trajectory_then_planner_events_and_writes_manifest
     assert row["inputs"]["llm_context"]["tenant_id"] == "acme"
     assert row["inputs"]["tool_context"]["request_id"] == "req-123"
     assert row["provenance"]["state_store"]["source_priority"] == "trajectory"
+    assert isinstance(row.get("trajectory_full", {}).get("steps"), list)
+    assert row["trajectory_full"]["steps"][-1]["observation"]["action_required"] == "clarification_required"
+    assert "trajectory_full" in row["redaction"]["fields_included"]
 
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["counts"]["total"] == 1

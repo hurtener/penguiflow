@@ -59,9 +59,17 @@ def _build_trace_example(
     redaction_profile: str,
     source_priority: str,
 ) -> dict[str, Any]:
+    """Build portable trace export row with maximal trajectory detail.
+
+    Why: downstream metric design and offline debugging need access to step-level
+    observations/actions whenever the state store can provide a trajectory.
+    """
+
     tags: list[str] = []
     if trajectory is not None and isinstance(trajectory.metadata.get("tags"), list):
         tags = [str(tag) for tag in trajectory.metadata["tags"]]
+
+    trajectory_full = trajectory.serialise() if trajectory is not None else None
 
     return {
         "schema_version": "TraceExampleV1",
@@ -83,6 +91,7 @@ def _build_trace_example(
             "tags": tags,
             "split": _infer_split_from_tags(tags),
         },
+        "trajectory_full": trajectory_full,
         "events": {
             "flow_events": [
                 {
@@ -103,6 +112,12 @@ def _build_trace_example(
                 "events.flow_events",
                 "inputs.llm_context",
                 "inputs.tool_context",
+                "trajectory.metadata",
+                "trajectory.summary",
+                "trajectory.tags",
+                "trajectory.split",
+                "trajectory.steps",
+                "trajectory_full",
             ],
             "fields_omitted": [],
         },
