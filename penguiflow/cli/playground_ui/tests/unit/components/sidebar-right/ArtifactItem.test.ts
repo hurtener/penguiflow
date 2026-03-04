@@ -16,6 +16,7 @@ describe('ArtifactItem component', () => {
     size_bytes: 1024,
     filename: 'report.pdf',
     sha256: null,
+    namespace: null,
     source: { tool: 'pdf_generator' }
   };
 

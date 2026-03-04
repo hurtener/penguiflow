@@ -1,5 +1,5 @@
 import { safeParse } from '$lib/utils';
-import { listTasks } from './api';
+import { listTasks, listArtifacts } from './api';
 import type { AppStores } from '$lib/stores';
 import type { NotificationLevel } from '$lib/stores/ui/notifications.svelte';
 import type { BackgroundTaskInfo } from '$lib/stores/features/tasks.svelte';
@@ -7,7 +7,7 @@ import type { ArtifactChunkPayload, ArtifactRef, ArtifactStoredEvent, StateUpdat
 
 type SessionStreamStores = Pick<
   AppStores,
-  'tasksStore' | 'notificationsStore' | 'chatStore' | 'artifactsStore' | 'interactionsStore'
+  'tasksStore' | 'notificationsStore' | 'chatStore' | 'artifactsStore' | 'interactionsStore' | 'setupStore'
 >;
 
 /**
@@ -99,6 +99,12 @@ class SessionStreamManager {
     listTasks(sessionId).then(tasks => {
       if (tasks) {
         this.stores.tasksStore.setTasks(tasks);
+      }
+    });
+    const { tenantId, userId } = this.stores.setupStore;
+    listArtifacts(sessionId, tenantId, userId).then(refs => {
+      if (refs && refs.length > 0) {
+        this.stores.artifactsStore.hydrate(refs);
       }
     });
     const url = new URL('/session/stream', window.location.origin);
@@ -302,6 +308,7 @@ function toArtifactRef(stored: ArtifactStoredEvent): ArtifactRef {
     size_bytes: stored.size_bytes ?? null,
     filename: stored.filename ?? null,
     sha256: null,
+    namespace: getString(stored.source?.namespace) ?? null,
     source: stored.source ?? {}
   };
 }

@@ -26,6 +26,7 @@ from .types import (
 )
 
 logger = logging.getLogger("penguiflow.llm.protocol")
+_REASONING_OFF_VALUES = frozenset({"off", "none", "false", "0", "disable", "disabled", "no"})
 
 
 def _normalize_json_schema(schema: Any) -> dict[str, Any]:
@@ -68,6 +69,23 @@ def _requested_mode(response_format: Mapping[str, Any] | None) -> StructuredMode
     if mode == "json_object":
         return "json_object"
     return "text"
+
+
+def _is_openrouter_xai_route(model: str) -> bool:
+    route = model.lower().strip()
+    if route.startswith("openrouter/"):
+        route = route.removeprefix("openrouter/")
+    provider = route.split("/", 1)[0] if route else ""
+    return provider in {"x-ai", "xai"}
+
+
+def _reasoning_enabled_from_effort(reasoning_effort: str | None) -> bool:
+    if reasoning_effort is None:
+        return True
+    effort = str(reasoning_effort).strip().lower()
+    if not effort:
+        return True
+    return effort not in _REASONING_OFF_VALUES
 
 
 def _prepare_messages_for_provider(
@@ -595,6 +613,14 @@ class NativeLLMAdapter:
         extra: dict[str, Any] | None = None
         if policy.inject_reasoning_effort and self._reasoning_effort is not None:
             extra = {"reasoning_effort": self._reasoning_effort}
+        if (
+            policy.inject_reasoning_effort
+            and self._provider.provider_name == "openrouter"
+            and _is_openrouter_xai_route(self._provider.model)
+        ):
+            if extra is None:
+                extra = {}
+            extra["reasoning_enabled"] = _reasoning_enabled_from_effort(self._reasoning_effort)
         if self._provider.provider_name == "nim" and requested_mode in {"json_schema", "json_object"}:
             logger.debug(
                 "nim_structured_request_mode",

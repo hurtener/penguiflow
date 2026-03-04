@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from penguiflow import Message as FlowMessage
 from penguiflow import Node, NodePolicy, create
+from penguiflow.artifacts import NoOpArtifactStore, ScopedArtifacts
 from penguiflow.planner import ReactPlanner
 from penguiflow_a2a import A2AAgentToolset, A2AConfig, A2AService, create_a2a_http_app
 from penguiflow_a2a.models import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
@@ -182,8 +183,18 @@ class _FakeCtx:
         return dict(self._tool_context)
 
     @property
+    def _artifacts(self) -> Any:  # pragma: no cover - not used
+        return NoOpArtifactStore()
+
+    @property
     def artifacts(self) -> Any:  # pragma: no cover - not used
-        return None
+        return ScopedArtifacts(
+            NoOpArtifactStore(),
+            tenant_id=None,
+            user_id=None,
+            session_id=None,
+            trace_id=None,
+        )
 
     async def pause(self, reason: str, payload: Mapping[str, Any] | None = None) -> Any:  # pragma: no cover
         del reason, payload
