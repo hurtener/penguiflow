@@ -143,10 +143,7 @@ def extract_app_metadata(tool: Any) -> AppMetadata | None:
         camera=perms_data.get("camera") is not None,
         microphone=perms_data.get("microphone") is not None,
         geolocation=perms_data.get("geolocation") is not None,
-        clipboard_write=(
-            perms_data.get("clipboardWrite") is not None
-            or perms_data.get("clipboard_write") is not None
-        ),
+        clipboard_write=(perms_data.get("clipboardWrite") is not None or perms_data.get("clipboard_write") is not None),
     )
 
     return AppMetadata(

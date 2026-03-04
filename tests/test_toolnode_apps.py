@@ -8,8 +8,7 @@ This module tests:
 - App HTML fetching and result enrichment
 """
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -175,12 +174,14 @@ def test_extract_app_ui_dict_no_resource_uri():
 
 def test_extract_app_ui_with_resource_uri():
     """Should extract AppMetadata when ui dict has resourceUri."""
-    tool = MockTool(meta={
-        "ui": {
-            "resourceUri": "ui://test-server/view.html",
-            "visibility": ["app", "model"],
+    tool = MockTool(
+        meta={
+            "ui": {
+                "resourceUri": "ui://test-server/view.html",
+                "visibility": ["app", "model"],
+            }
         }
-    })
+    )
     result = extract_app_metadata(tool)
     assert result is not None
     assert result.resource_uri == "ui://test-server/view.html"
@@ -189,15 +190,17 @@ def test_extract_app_ui_with_resource_uri():
 
 def test_extract_app_ui_with_csp():
     """Should parse CSP from ui metadata."""
-    tool = MockTool(meta={
-        "ui": {
-            "resourceUri": "ui://test/view.html",
-            "csp": {
-                "connectDomains": ["https://api.example.com"],
-                "resourceDomains": ["https://cdn.example.com"],
+    tool = MockTool(
+        meta={
+            "ui": {
+                "resourceUri": "ui://test/view.html",
+                "csp": {
+                    "connectDomains": ["https://api.example.com"],
+                    "resourceDomains": ["https://cdn.example.com"],
+                },
             }
         }
-    })
+    )
     result = extract_app_metadata(tool)
     assert result is not None
     assert result.csp.connect_domains == ["https://api.example.com"]
@@ -206,15 +209,17 @@ def test_extract_app_ui_with_csp():
 
 def test_extract_app_ui_with_permissions():
     """Should parse permissions from ui metadata."""
-    tool = MockTool(meta={
-        "ui": {
-            "resourceUri": "ui://test/view.html",
-            "permissions": {
-                "camera": {},
-                "clipboardWrite": {},
+    tool = MockTool(
+        meta={
+            "ui": {
+                "resourceUri": "ui://test/view.html",
+                "permissions": {
+                    "camera": {},
+                    "clipboardWrite": {},
+                },
             }
         }
-    })
+    )
     result = extract_app_metadata(tool)
     assert result is not None
     assert result.permissions.camera is True
@@ -224,18 +229,20 @@ def test_extract_app_ui_with_permissions():
 
 def test_extract_app_snake_case_keys():
     """Should handle snake_case keys as well as camelCase."""
-    tool = MockTool(meta={
-        "ui": {
-            "resource_uri": "ui://test/view.html",
-            "csp": {
-                "connect_domains": ["https://api.example.com"],
-            },
-            "permissions": {
-                "clipboard_write": {},
-            },
-            "prefers_border": True,
+    tool = MockTool(
+        meta={
+            "ui": {
+                "resource_uri": "ui://test/view.html",
+                "csp": {
+                    "connect_domains": ["https://api.example.com"],
+                },
+                "permissions": {
+                    "clipboard_write": {},
+                },
+                "prefers_border": True,
+            }
         }
-    })
+    )
     result = extract_app_metadata(tool)
     assert result is not None
     assert result.resource_uri == "ui://test/view.html"
@@ -272,9 +279,13 @@ def test_convert_tools_detects_app_metadata(registry):
 
     tools = [
         MockMCPTool("regular_tool", "No app"),
-        MockMCPTool("app_tool", "Has app", meta={
-            "ui": {"resourceUri": "ui://test/view.html"},
-        }),
+        MockMCPTool(
+            "app_tool",
+            "Has app",
+            meta={
+                "ui": {"resourceUri": "ui://test/view.html"},
+            },
+        ),
     ]
 
     specs = node._convert_mcp_tools(tools)

@@ -18,25 +18,10 @@ from pydantic import BaseModel, Field
 __all__ = [
     "PromptArgumentInfo",
     "PromptInfo",
-    "PromptsConfig",
+    "serialize_prompt_messages",
 ]
 
 logger = logging.getLogger(__name__)
-
-
-# -----------------------------------------------------------------------------
-# Configuration
-# -----------------------------------------------------------------------------
-
-
-class PromptsConfig(BaseModel):
-    """Configuration for MCP prompts discovery and tool generation."""
-
-    enabled: bool = Field(default=True, description="Auto-discover prompts during connect")
-    generate_tools: bool = Field(
-        default=True,
-        description="Create {ns}.prompts_list / prompts_get tools",
-    )
 
 
 # -----------------------------------------------------------------------------

@@ -39,6 +39,7 @@ from penguiflow.planner.context import ToolContext
 from penguiflow.registry import ModelRegistry
 
 from .adapters import adapt_exception
+from .apps import UI_MIME_TYPE, AppMetadata, extract_app_metadata
 from .config import (
     AuthType,
     ExternalToolConfig,
@@ -46,7 +47,6 @@ from .config import (
     TransportType,
     UtcpMode,
 )
-from .apps import AppMetadata, UI_MIME_TYPE, extract_app_metadata
 from .errors import ToolAuthError, ToolConnectionError, ToolNodeError
 from .prompts import (
     PromptArgumentInfo,
@@ -97,7 +97,8 @@ class ToolNode:
     _prompts_supported: bool = field(default=False, repr=False)
 
     # MCP Apps support
-    _app_metadata: dict[str, AppMetadata] = field(default_factory=dict, repr=False)  # namespaced tool name -> AppMetadata
+    # namespaced tool name -> AppMetadata
+    _app_metadata: dict[str, AppMetadata] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
@@ -303,6 +304,29 @@ class ToolNode:
             resource_tools = self._generate_resource_tools()
             self._tools.extend(resource_tools)
 
+    @staticmethod
+    def _parse_prompt_info(p: Any) -> PromptInfo:
+        """Parse a single MCP prompt object into PromptInfo."""
+        d = isinstance(p, dict)
+        name = getattr(p, "name", p.get("name", "") if d else "")
+        desc = getattr(p, "description", p.get("description") if d else None)
+        raw_args = getattr(p, "arguments", None) or (p.get("arguments") if d else None) or []
+        arguments = []
+        for a in raw_args:
+            ad = isinstance(a, dict)
+            arguments.append(
+                PromptArgumentInfo(
+                    name=getattr(a, "name", a.get("name", "") if ad else ""),
+                    description=getattr(
+                        a,
+                        "description",
+                        a.get("description") if ad else None,
+                    ),
+                    required=bool(getattr(a, "required", a.get("required", False) if ad else False)),
+                )
+            )
+        return PromptInfo(name=name, description=desc, arguments=arguments)
+
     async def _discover_mcp_prompts(self) -> None:
         """Discover MCP prompts.
 
@@ -316,21 +340,7 @@ class ToolNode:
 
         try:
             prompts = await self._mcp_client.list_prompts()
-            self._prompts = [
-                PromptInfo(
-                    name=getattr(p, "name", p.get("name", "") if isinstance(p, dict) else ""),
-                    description=getattr(p, "description", p.get("description") if isinstance(p, dict) else None),
-                    arguments=[
-                        PromptArgumentInfo(
-                            name=getattr(a, "name", a.get("name", "") if isinstance(a, dict) else ""),
-                            description=getattr(a, "description", a.get("description") if isinstance(a, dict) else None),
-                            required=getattr(a, "required", a.get("required", False) if isinstance(a, dict) else False) or False,
-                        )
-                        for a in (getattr(p, "arguments", None) or (p.get("arguments") if isinstance(p, dict) else None) or [])
-                    ],
-                )
-                for p in (prompts if isinstance(prompts, list) else [])
-            ]
+            self._prompts = [self._parse_prompt_info(p) for p in (prompts if isinstance(prompts, list) else [])]
             self._prompts_supported = True
             logger.debug(
                 "Discovered %d MCP prompts for '%s'",
@@ -463,7 +473,9 @@ class ToolNode:
                 app_meta = self._app_metadata.get(tool_name)
                 if app_meta is not None:
                     transformed = await self._enrich_with_app_html(
-                        transformed, app_meta, ctx,
+                        transformed,
+                        app_meta,
+                        ctx,
                     )
 
             # Wrap result to match the output model schema: {"result": <data>}
@@ -2144,21 +2156,7 @@ class ToolNode:
         if refresh and self._mcp_client is not None:
             try:
                 prompts = await self._mcp_client.list_prompts()
-                self._prompts = [
-                    PromptInfo(
-                        name=getattr(p, "name", p.get("name", "") if isinstance(p, dict) else ""),
-                        description=getattr(p, "description", p.get("description") if isinstance(p, dict) else None),
-                        arguments=[
-                            PromptArgumentInfo(
-                                name=getattr(a, "name", a.get("name", "") if isinstance(a, dict) else ""),
-                                description=getattr(a, "description", a.get("description") if isinstance(a, dict) else None),
-                                required=getattr(a, "required", a.get("required", False) if isinstance(a, dict) else False) or False,
-                            )
-                            for a in (getattr(p, "arguments", None) or (p.get("arguments") if isinstance(p, dict) else None) or [])
-                        ],
-                    )
-                    for p in (prompts if isinstance(prompts, list) else [])
-                ]
+                self._prompts = [self._parse_prompt_info(p) for p in (prompts if isinstance(prompts, list) else [])]
             except Exception as e:
                 logger.warning(f"Failed to refresh prompts: {e}")
 
@@ -2189,9 +2187,7 @@ class ToolNode:
 
         try:
             result = await self._mcp_client.get_prompt(name, arguments)
-            messages = serialize_prompt_messages(
-                getattr(result, "messages", [])
-            )
+            messages = serialize_prompt_messages(getattr(result, "messages", []))
             description = getattr(result, "description", None)
             return {"messages": messages, "description": description}
         except Exception as e:

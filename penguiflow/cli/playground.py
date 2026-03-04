@@ -2239,12 +2239,30 @@ def create_playground_app(
                 ),
             )
 
-        from penguiflow.planner.context import ToolContext
+        class MinimalToolCtx:
+            def __init__(self, artifacts: Any, tool_ctx: dict[str, Any]):
+                self._artifacts_store = artifacts
+                self._tool_context = tool_ctx
+                self._llm_context: dict[str, Any] = {}
+                self._meta: dict[str, Any] = {}
 
-        ctx = ToolContext(
-            tool_context={"session_id": resolved_session, "user_id": user_id},
-            artifacts=scoped_store,
-        )
+            @property
+            def tool_context(self) -> dict[str, Any]:
+                return self._tool_context
+
+            @property
+            def llm_context(self) -> dict[str, Any]:
+                return self._llm_context
+
+            @property
+            def meta(self) -> dict[str, Any]:
+                return self._meta
+
+            @property
+            def _artifacts(self) -> Any:
+                return self._artifacts_store
+
+        ctx = MinimalToolCtx(scoped_store, {"session_id": resolved_session, "user_id": user_id})
 
         try:
             result = await tool_node.call(namespaced_name, tool_args, ctx)

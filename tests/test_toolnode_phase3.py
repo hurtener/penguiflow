@@ -8,18 +8,17 @@ This module tests:
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from penguiflow.artifacts import InMemoryArtifactStore, ScopedArtifacts
 from penguiflow.registry import ModelRegistry
-from penguiflow.tools.config import ExternalToolConfig, TransportType
+from penguiflow.tools.config import ExternalToolConfig, PromptsConfig, TransportType
 from penguiflow.tools.node import ToolNode
 from penguiflow.tools.prompts import (
     PromptArgumentInfo,
     PromptInfo,
-    PromptsConfig,
     serialize_prompt_messages,
 )
 
@@ -289,23 +288,27 @@ async def test_discover_prompts_success(registry, artifact_store):
 
     # Set up mock MCP client
     mock_client = AsyncMock()
-    mock_client.list_tools = AsyncMock(return_value=[
-        MockMCPTool("search", "Search tool"),
-    ])
-    mock_client.list_prompts = AsyncMock(return_value=[
-        MockMCPPrompt(
-            "summarize",
-            "Summarize text",
-            [MockMCPPromptArg("text", "The text", True)],
-        ),
-        MockMCPPrompt("greet", "Generate greeting"),
-    ])
+    mock_client.list_tools = AsyncMock(
+        return_value=[
+            MockMCPTool("search", "Search tool"),
+        ]
+    )
+    mock_client.list_prompts = AsyncMock(
+        return_value=[
+            MockMCPPrompt(
+                "summarize",
+                "Summarize text",
+                [MockMCPPromptArg("text", "The text", True)],
+            ),
+            MockMCPPrompt("greet", "Generate greeting"),
+        ]
+    )
     mock_client.list_resources = AsyncMock(return_value=[])
     mock_client.list_resource_templates = AsyncMock(return_value=[])
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
 
-    with patch("penguiflow.tools.node.MCPClient", return_value=mock_client) if False else _patch_mcp_connect(node, mock_client):
+    with _patch_mcp_connect(node, mock_client):
         pass
 
     # Simulate connect
@@ -438,9 +441,11 @@ async def test_list_prompts_refresh(registry):
     node = ToolNode(config=config, registry=registry)
 
     mock_client = AsyncMock()
-    mock_client.list_prompts = AsyncMock(return_value=[
-        MockMCPPrompt("new_prompt", "New prompt"),
-    ])
+    mock_client.list_prompts = AsyncMock(
+        return_value=[
+            MockMCPPrompt("new_prompt", "New prompt"),
+        ]
+    )
 
     node._mcp_client = mock_client
     node._prompts_supported = True
