@@ -166,6 +166,12 @@ class ArtifactExtractionConfig(BaseModel):
         default_factory=ResourceHandlingConfig,
     )
 
+    # MCP typed content blocks (Layer 2)
+    handle_mcp_typed_content: bool = Field(
+        default=True,
+        description="Extract EmbeddedResource/blob typed content blocks",
+    )
+
     # Per-tool field configuration (Layer 4)
     tool_fields: dict[str, list[ArtifactFieldConfig]] = Field(
         default_factory=dict,

@@ -1025,7 +1025,8 @@ class ToolNode:
         result = await self._handle_resource_links(result, ctx)
 
         # L2: MCP typed content blocks
-        result = await self._transform_mcp_content_blocks(result, ctx)
+        if config.handle_mcp_typed_content:
+            result = await self._transform_mcp_content_blocks(result, ctx)
 
         # L3: Heuristic binary detection
         if config.binary_detection.enabled:
@@ -1052,59 +1053,113 @@ class ToolNode:
         Returns:
             Result with configured fields replaced by ArtifactRefs
         """
+        if isinstance(result, list):
+            transformed: list[Any] = []
+            for item in result:
+                if isinstance(item, (dict, list)):
+                    transformed.append(await self._apply_field_extraction(item, field_configs, ctx))
+                else:
+                    transformed.append(item)
+            return transformed
+
         if not isinstance(result, dict):
             return result
 
         for field_config in field_configs:
             path = field_config.field_path
-            # Simple dot notation path traversal
             parts = path.split(".")
-            current = result
-            parent = None
-            last_key = None
+            targets = self._resolve_field_targets(result, parts)
+            # Common wrapper pattern from some MCP servers: {"result": {...}}
+            if not targets and isinstance(result.get("result"), (dict, list)):
+                targets = self._resolve_field_targets(result["result"], parts)
 
-            for part in parts:
-                if not isinstance(current, dict) or part not in current:
-                    break
-                parent = current
-                last_key = part
-                current = current[part]
-            else:
-                # Found the field - extract as artifact
-                if parent is not None and last_key is not None:
-                    value = parent[last_key]
-                    if isinstance(value, str) and len(value) > 100:
-                        # Decode and store
-                        try:
-                            if field_config.content_type in ("pdf", "image", "binary"):
-                                data = base64.b64decode(value)
-                            else:
-                                data = value.encode("utf-8")
+            for parent, key in targets:
+                if isinstance(parent, dict):
+                    if not isinstance(key, str):
+                        continue
+                    value = parent[key]
+                elif isinstance(parent, list):
+                    if not isinstance(key, int):
+                        continue
+                    value = parent[key]
+                else:
+                    continue
 
-                            mime = field_config.mime_type
-                            if mime is None:
-                                mime = self._infer_mime_type(field_config.content_type)
+                if isinstance(value, str) and len(value) > 100:
+                    try:
+                        if field_config.content_type in ("pdf", "image", "binary"):
+                            data = base64.b64decode(value)
+                        else:
+                            data = value.encode("utf-8")
 
-                            ref = await ctx._artifacts.put_bytes(
-                                data,
-                                mime_type=mime,
-                                namespace=self.config.name,
-                            )
+                        mime = field_config.mime_type
+                        if mime is None:
+                            mime = self._infer_mime_type(field_config.content_type)
 
-                            # Replace with summary and reference
-                            summary = field_config.summary_template.format(
-                                content_type=field_config.content_type,
-                                size=len(data),
-                                artifact_id=ref.id,
-                            )
-                            parent[last_key] = {
-                                "artifact": ref.model_dump(),
-                                "summary": summary,
-                            }
-                        except Exception as e:
-                            logger.debug(f"Field extraction failed for {path}: {e}")
+                        ref = await ctx._artifacts.put_bytes(
+                            data,
+                            mime_type=mime,
+                            namespace=self.config.name,
+                        )
+
+                        summary = field_config.summary_template.format(
+                            content_type=field_config.content_type,
+                            size=len(data),
+                            artifact_id=ref.id,
+                        )
+                        replacement = {
+                            "artifact": ref.model_dump(),
+                            "summary": summary,
+                        }
+                        if isinstance(parent, dict) and isinstance(key, str):
+                            parent[key] = replacement
+                        elif isinstance(parent, list) and isinstance(key, int):
+                            parent[key] = replacement
+                    except Exception as e:
+                        logger.debug(f"Field extraction failed for {path}: {e}")
 
         return result
+
+    def _resolve_field_targets(
+        self,
+        root: Any,
+        parts: list[str],
+    ) -> list[tuple[dict[str, Any] | list[Any], str | int]]:
+        """Resolve container/key targets for a dot-path across dict/list shapes."""
+        if not parts:
+            return []
+        return self._resolve_field_targets_recursive(root, parts)
+
+    def _resolve_field_targets_recursive(
+        self,
+        current: Any,
+        parts: list[str],
+    ) -> list[tuple[dict[str, Any] | list[Any], str | int]]:
+        part = parts[0]
+        rest = parts[1:]
+        targets: list[tuple[dict[str, Any] | list[Any], str | int]] = []
+
+        if isinstance(current, dict):
+            if part not in current:
+                return targets
+            if not rest:
+                return [(current, part)]
+            return self._resolve_field_targets_recursive(current[part], rest)
+
+        if isinstance(current, list):
+            if part.isdigit():
+                idx = int(part)
+                if idx < 0 or idx >= len(current):
+                    return targets
+                if not rest:
+                    return [(current, idx)]
+                return self._resolve_field_targets_recursive(current[idx], rest)
+
+            # For list roots, apply the same path to each element (content-block lists)
+            for item in current:
+                targets.extend(self._resolve_field_targets_recursive(item, parts))
+
+        return targets
 
     async def _handle_resource_links(self, result: Any, ctx: ToolContext) -> Any:
         """Handle MCP resource_link content blocks.
@@ -1749,13 +1804,18 @@ class ToolNode:
         """Process resource contents into artifact or inline text."""
         import base64
 
-        # Extract content from various formats
+        # Extract content from supported response shapes:
+        # - {"contents": [...]}
+        # - [content_item, ...]
+        # - content_item
         if isinstance(contents, dict):
             resource_data = contents.get("contents", [contents])
             if isinstance(resource_data, list) and resource_data:
                 content_item = resource_data[0]
             else:
                 content_item = resource_data
+        elif isinstance(contents, list):
+            content_item = contents[0] if contents else {}
         else:
             content_item = contents
 
