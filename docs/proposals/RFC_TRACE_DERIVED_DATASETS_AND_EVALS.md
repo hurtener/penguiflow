@@ -50,21 +50,21 @@ PenguiFlow should make “quality” a first-class, trace-derived workflow.
 
 Implemented user-facing workflow:
 
-- `penguiflow eval run --spec ...` (collect traces -> export dataset bundle -> evaluate)
-- `penguiflow eval evaluate --spec ...` (rerun eval on existing `bundle/dataset.jsonl`)
+- `penguiflow eval collect --spec ...` (minimal dataset export: `dataset.jsonl` + `manifest.json`)
+- `penguiflow eval evaluate --spec ...` (rerun eval on existing `dataset.jsonl`)
 
 Implemented library API surface:
 
 - `collect_traces(...)`
 - `export_dataset(...)`
-- `run_eval(...)`
 - `evaluate_dataset(...)`
 
 Known current behavior:
 
-- baseline is implicit; candidates must be non-empty and unique
+- baseline is implicit; candidates may be empty (baseline-only mode)
 - context-stability hashing supports default `ignore_keys`
-- export currently includes `inputs.llm_context` and `inputs.tool_context` for optimization fairness
+- eval execution is in-memory by default with no workspace artifacts
+- optional single JSON report file is supported via `report_path`
 
 ---
 
@@ -214,7 +214,8 @@ Design constraints:
 
 - MUST tolerate missing capabilities: exporter may produce partial rows.
 - MUST remain “row-small”: large payloads MUST be truncated or externalized.
-- MUST be safe-by-default: sensitive contexts and tool outputs excluded unless explicitly requested.
+- MUST export maximal available trajectory evidence by default for offline metric/debug workflows.
+- MUST keep explicit redaction/provenance metadata so operators can audit what was included.
 
 #### Canonical Shape (conceptual)
 
@@ -242,8 +243,19 @@ Design constraints:
   "trajectory": {
     "summary": null,
     "metadata": {},
-    "steps": [],
+    "steps": 0,
     "background_results": {}
+  },
+
+  "trajectory_full": {
+    "query": "User query",
+    "llm_context": {},
+    "tool_context": {},
+    "steps": [],
+    "summary": null,
+    "metadata": {},
+    "artifacts": {},
+    "sources": []
   },
 
   "events": {
@@ -287,6 +299,7 @@ Design constraints:
 - `schema_version`
 - `trace_id`
 - `inputs.llm_context` and `inputs.tool_context` MUST be available in at least one exporter profile (`poc_full_context`) for context-stable optimization runs.
+- `trajectory_full` SHOULD be included whenever trajectory capability is available, including step-level records under `trajectory_full.steps`.
 - `outputs.status` (even if `unknown`)
 - `redaction.profile`
 - `provenance`
@@ -845,7 +858,8 @@ CLI additions (optional early, not primary):
 
 - `penguiflow eval export …`
 - `penguiflow eval analyze …`
-- `penguiflow eval run …`
+- `penguiflow eval collect …`
+- `penguiflow eval evaluate …`
 - `penguiflow eval evaluate …`
 
 ---

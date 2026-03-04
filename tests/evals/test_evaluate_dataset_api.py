@@ -17,7 +17,6 @@ async def test_evaluate_dataset_runs_sweep_and_holdout(tmp_path: Path) -> None:
             "split": "val",
             "question": "Q1",
             "answer": "A1",
-            "gold_trace_features": None,
             "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
         },
         {
@@ -25,7 +24,6 @@ async def test_evaluate_dataset_runs_sweep_and_holdout(tmp_path: Path) -> None:
             "split": "test",
             "question": "Q2",
             "answer": "A2",
-            "gold_trace_features": None,
             "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
         },
     ]
@@ -65,7 +63,6 @@ async def test_evaluate_dataset_baseline_only_skips_duplicate_holdout_run(tmp_pa
             "split": "val",
             "question": "Q1",
             "answer": "A1",
-            "gold_trace_features": None,
             "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
         },
         {
@@ -73,7 +70,6 @@ async def test_evaluate_dataset_baseline_only_skips_duplicate_holdout_run(tmp_pa
             "split": "test",
             "question": "Q2",
             "answer": "A2",
-            "gold_trace_features": None,
             "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
         },
     ]
@@ -112,7 +108,6 @@ async def test_evaluate_dataset_writes_single_report_when_requested(tmp_path: Pa
             "split": "val",
             "question": "Q1",
             "answer": "A1",
-            "gold_trace_features": None,
             "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
         },
         {
@@ -120,7 +115,6 @@ async def test_evaluate_dataset_writes_single_report_when_requested(tmp_path: Pa
             "split": "test",
             "question": "Q2",
             "answer": "A2",
-            "gold_trace_features": None,
             "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
         },
     ]

@@ -27,15 +27,12 @@ def _write_view_rows(
             continue
         query_id = str(query.get("query_id"))
         trace_id = query_trace_map.get(query_id)
-        custom_features = query.get("gold_trace_features")
-        policy = dict(custom_features) if isinstance(custom_features, dict) else None
         rows.append(
             {
                 "example_id": query_id,
                 "split": split,
                 "question": query.get("text"),
                 "answer": query.get("answer"),
-                "gold_trace_features": policy,
                 "__pf.trace_id": trace_id,
                 "gold_trace": trace_rows_by_id.get(trace_id) if isinstance(trace_id, str) else None,
             }

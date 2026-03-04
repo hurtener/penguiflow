@@ -436,7 +436,7 @@ class InMemoryStateStore:
             ordered = list(reversed(self._trace_order))
             if limit > 0:
                 ordered = ordered[:limit]
-            refs = []
+            refs: list[TraceRef] = []
             for trace_id in ordered:
                 session_and_trajectory = self._trajectories.get(trace_id)
                 if session_and_trajectory is None:

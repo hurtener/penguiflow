@@ -19,9 +19,16 @@ This MVP architecture inherits normative contracts from the RFC and narrows them
 ## Implemented Commands (Current)
 
 ```bash
-uv run penguiflow eval run --spec examples/planner_enterprise_agent_v2/datasets/eval_v1/eval.spec.json
+uv run penguiflow eval collect --spec path/to/collect.spec.json
 uv run penguiflow eval evaluate --spec path/to/evaluate.spec.json
 ```
+
+Current default behavior note:
+
+- `eval evaluate`: in-memory execution with text summary output
+- no default workspace artifact emission for dataset evaluation
+- optional single JSON report file via `report_path`
+- `eval collect`: minimal dataset export (`dataset.jsonl` + `manifest.json`)
 
 ## Objectives
 
@@ -30,62 +37,19 @@ uv run penguiflow eval evaluate --spec path/to/evaluate.spec.json
 - Prove patch-point optimization improves validation metrics.
 - Prove winner is deployable as a single `PatchBundleV1` artifact.
 
-## Key Clarifications From Real PoC Runs
+## Key Clarifications
 
-- A plain `question`/`answer` view is not sufficient for policy metrics; we need policy-aware gold fields.
-- The useful pattern is: keep full raw trace in `trace.jsonl`, carry unfiltered `gold_trace` in `view.*.jsonl`, and let the metric extract only what it needs from `gold_trace` and `pred_trace`.
-- For policy optimization, the metric signal must come from trajectory/tool behavior, not only answer text.
-- Current `planner_enterprise_agent_v2` val prompts can saturate policy score; add harder route-confusable prompts to keep optimization signal.
-
-## Latest Fresh-Run Findings (Policy Metric)
-
-Note: this policy metric is workload-owned (`examples/planner_enterprise_agent_v2/evals/metrics.py`),
-loaded by import path. It is intentionally not part of `penguiflow.evals` core.
-
-Reference artifact set (current CLI workflow):
-
-- `examples/planner_enterprise_agent_v2/artifacts/eval/run-local`
-
-Observed check-level summary:
-
-- Validation (`baseline` and `candidate_1`) is saturated at `1.0` for all checks.
-- Test baseline shows weak routing discipline:
-  - `route_policy_pass=0.0`
-  - `workflow_order_pass=0.0`
-  - `triage_first=0.5`
-  - `allowed_tools_only=0.5`
-- Test winner improves routing/order/triage but not tool allowlist adherence:
-  - `route_policy_pass=0.5`
-  - `workflow_order_pass=0.5`
-  - `triage_first=1.0`
-  - `allowed_tools_only=0.5` (current bottleneck)
-
-Implication for next benchmark revision:
-
-- Keep current deterministic checks, but expand test prompts to stress route ambiguity.
-- Add targeted prompts and constraints for `allowed_tools_only`, since this is currently the limiting check.
-
-Latest completed enterprise PoC run (`examples/planner_enterprise_agent_v2/artifacts/eval/run-local`):
-
-- `report.test.json`: `baseline_score=0.8333`, `winner_score=0.8889`, `winner_id=route-discipline-v1`, `passed=true`
-- `best.patchbundle.json` emitted successfully
-
-Additional confirmation from context-stable rerun:
-
-- `report.harness.json` now includes:
-  - `context_match_rate`
-  - `context_stability_pass`
-  - `context_comparable_count`
-- Current stored run reports `context_stability_pass=false` in modes because older runs hashed ephemeral fields.
-- Harness now supports extensible `ignore_keys` defaults (`trace_id`, `session_id`, `__pf_patch_bundle`, `__pf_*`) for context fairness.
+- Policy-quality metrics should rely on execution behavior, not only final answer text.
+- Pinned datasets are required for meaningful evaluation and comparison over time.
+- Default runtime behavior remains minimal: collect writes dataset artifacts, evaluate runs in memory.
+- Richer optimizer and artifact workflows are future phases in this proposal, not current usage.
 
 ## Terminology (Avoid Confusion)
 
 - `trace.jsonl` contains raw trace evidence (`trajectory`, planner events, flow events). This is the canonical source.
 - `gold_trace` in `view.*.jsonl` carries the unfiltered raw trace row used as gold/reference.
-- `gold_trace_features` in `view.*.jsonl` is optional and can be precomputed, but the canonical behavior is that metric can derive needed features directly from `gold_trace`.
 - `__pf.trace_id` links a view row back to the full raw trace in `trace.jsonl`.
-- Canonical naming for MVP: `gold_trace` and optional `gold_trace_features` only.
+- Canonical naming for MVP: `gold_trace`.
 
 ## Context Stability Requirements (Critical)
 
@@ -128,7 +92,7 @@ Runner behavior:
 For PenguiFlow, MVP should follow the same pattern:
 
 - model inputs: only fields the planner should see (for example `question`),
-- gold/reference fields: `gold_trace` (and optional `gold_trace_features`), optional labels, and provenance fields,
+- gold/reference fields: `gold_trace`, optional labels, and provenance fields,
 - runtime evidence: `pred_trace` captured from execution for deterministic scoring.
 
 This means `gold_trace` is not a parallel dataset; it is a non-input gold field in the same example row, equivalent to how `answer` is a non-input label in standard DSPy usage.
@@ -204,7 +168,7 @@ Generalization to other examples is follow-up after this MVP slice is green.
 
 - Define and persist `DatasetViewV1` config in manifest.
 - Export `view.jsonl` with provenance linkage to trace rows.
-- Add policy-aware view rows (`gold_trace_features`) and explicit input selection (`input_fields`).
+- Add policy-aware view rows and explicit input selection (`input_fields`).
 - Add configurable linearization units:
   - `trace` (full-run example),
   - `react_step` (decision-step examples),
@@ -326,16 +290,14 @@ Required content:
 - `queries[]` with `query_id`, `text`, `split`
 - `created_at`
 
-### `eval.spec.json`
+### `collect.spec.json`
 
-Objective: define one reproducible collect+export+evaluate workflow contract.
+Objective: define reproducible trace collection and dataset export.
 
 Required content:
 
 - `project_root`
 - `query_suite_path`
-- `candidates_path`
-- `metric_spec`
 - `session_id`
 - `dataset_tag`
 - `output_dir`
@@ -345,7 +307,25 @@ Optional content:
 - `agent_package`
 - `env_files`
 - `state_store_spec`
+
+### `evaluate.spec.json`
+
+Objective: define reproducible evaluation over a pinned dataset.
+
+Required content:
+
+- `dataset_path`
+- `candidates_path`
+- `metric_spec`
+- `output_dir`
+
+Optional content:
+
+- `project_root`
+- `agent_package`
 - `run_one_spec`
+- `env_files`
+- `report_path`
 
 ### `trace.jsonl` (`TraceExampleV1`)
 
@@ -363,7 +343,12 @@ Required row content (minimum):
 
 Recommended row content:
 
-- `session_id`, `query`, `trajectory`, `events`, `derived`, `artifacts`
+- `session_id`, `query`, `trajectory`, `trajectory_full`, `events`, `derived`, `artifacts`
+
+Important implementation note:
+
+- `trajectory.steps` is a summary count.
+- Step-level records for offline metric introspection live under `trajectory_full.steps`.
 
 ### `manifest.json`
 
@@ -387,7 +372,7 @@ Objective: flat signature-shaped rows for eval/optimization.
 Required row content:
 
 - mapped signature fields
-- non-input gold/reference fields required by metric (`gold_trace`, optionally `gold_trace_features`)
+- non-input gold/reference fields required by metric (`gold_trace`)
 - `__pf.trace_id`
 - `__pf.session_id` (when known)
 - `__pf.schema_version`
@@ -395,6 +380,7 @@ Required row content:
 Guideline:
 
 - `gold_trace` must include `inputs.llm_context` and `inputs.tool_context` so reruns can preserve context while varying only patch points.
+- `gold_trace.trajectory_full.steps` should be treated as the canonical source for step-dependent metrics in bundle/offline evaluation.
 
 Optional row content for linearized views:
 
@@ -509,7 +495,7 @@ Same metric function must run unchanged in PenguiFlow harness and optional DSPy/
 
 For policy optimization, the default metric should be deterministic and trajectory-aware:
 
-- input: `gold_trace` from dataset row (optionally `gold_trace_features` when precomputed),
+- input: `gold_trace` from dataset row,
 - evidence: `pred_trace` (steps/events),
 - output: aggregate score + check-level feedback.
 
@@ -608,17 +594,11 @@ Prove that we can improve planner quality with a minimal loop in days, not weeks
 ### Required outputs
 
 - `query_suite.json` (10-15 fixed prompts with `val` and `test` splits)
-- `eval.spec.json` (or equivalent runtime config)
-- `trace_ids.generated.txt` (pipeline artifact)
-- `trace.jsonl`
-- `bundle/dataset.jsonl`
-- `view.val.jsonl`
-- `view.test.jsonl`
-- `report.analyze.json`
-- `report.harness.json`
-- `report.candidates.json`
-- `report.test.json`
-- `best.patchbundle.json`
+- `collect.spec.json`
+- `evaluate.spec.json`
+- `dataset.jsonl`
+- `manifest.json`
+- optional single report JSON via `report_path`
 
 ### Deferred from Slice 0
 

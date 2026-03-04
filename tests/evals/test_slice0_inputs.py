@@ -13,7 +13,7 @@ def test_loaders_validate_splits_and_dedupe_trace_ids(tmp_path) -> None:
         json.dumps(
             {
                 "suite_id": "suite-1",
-                "workload": "planner_enterprise_agent_v2",
+                "workload": "demo_workload",
                 "queries": [
                     {"query_id": "q1", "text": "alpha", "split": "val"},
                     {"query_id": "q2", "text": "beta", "split": "test"},
@@ -36,7 +36,7 @@ def test_loaders_validate_splits_and_dedupe_trace_ids(tmp_path) -> None:
         json.dumps(
             {
                 "suite_id": "suite-2",
-                "workload": "planner_enterprise_agent_v2",
+                "workload": "demo_workload",
                 "queries": [{"query_id": "q3", "text": "gamma", "split": "train"}],
             }
         ),

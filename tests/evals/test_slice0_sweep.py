@@ -52,14 +52,14 @@ async def test_run_manual_sweep_selects_best_candidate_and_writes_patchbundle(tm
         run_one=run_one,
         metric=metric,
         candidates=candidates,
-        workload="examples.planner_enterprise_agent_v2",
+        workload="demo_workload",
     )
 
     assert result["winner_id"] == "c2"
     bundle = json.loads((tmp_path / "best.patchbundle.json").read_text(encoding="utf-8"))
     assert bundle["schema_version"] == "PatchBundleV1"
     assert bundle["patches"]["planner.system_prompt_extra"] == "good"
-    assert bundle["provenance"]["workload"] == "examples.planner_enterprise_agent_v2"
+    assert bundle["provenance"]["workload"] == "demo_workload"
     report = json.loads((tmp_path / "report.candidates.json").read_text(encoding="utf-8"))
     assert report["winner"]["id"] == "c2"
     assert report["candidates"][0]["id"] == "c2"
@@ -93,7 +93,7 @@ async def test_run_manual_sweep_accepts_baseline_only_mode(tmp_path) -> None:
         run_one=run_one,
         metric=metric,
         candidates=[],
-        workload="examples.media_planner",
+        workload="demo_workload",
     )
 
     assert result["winner_id"] == "baseline"

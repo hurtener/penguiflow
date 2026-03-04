@@ -96,7 +96,7 @@ async def test_export_prefers_trajectory_then_planner_events_and_writes_manifest
         trace_ids=[trace_id],
         output_dir=tmp_path,
         session_id=session_id,
-        workload="examples.planner_enterprise_agent_v2",
+        workload="demo_workload",
     )
 
     row = json.loads((tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()[0])
@@ -112,6 +112,6 @@ async def test_export_prefers_trajectory_then_planner_events_and_writes_manifest
 
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["counts"]["total"] == 1
-    assert manifest["workload"] == "examples.planner_enterprise_agent_v2"
+    assert manifest["workload"] == "demo_workload"
     assert manifest["source"]["source_priority"] == ["trajectory", "planner_events", "history"]
     assert manifest["redaction_policy"] == "internal_safe"

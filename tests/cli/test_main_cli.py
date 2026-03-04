@@ -191,130 +191,19 @@ class TestGenerateCommand:
 
 
 class TestEvalCommand:
-    def test_run_requires_spec_file(self) -> None:
+    def test_run_command_is_not_available(self) -> None:
         runner = CliRunner()
-        result = runner.invoke(app, ["eval", "run"])
+        result = runner.invoke(app, ["eval", "run", "--spec", "removed.spec.json"])
         assert result.exit_code != 0
+        assert "No such command 'run'" in result.output
 
-    def test_run_invokes_api_and_prints_text_summary(self, tmp_path: Path) -> None:
+    def test_eval_help_lists_collect_and_evaluate_only(self) -> None:
         runner = CliRunner()
-        spec_file = tmp_path / "eval.spec.json"
-        spec_file.write_text(
-            """
-{
-  "project_root": ".",
-  "query_suite_path": "query_suite.json",
-  "candidates_path": "candidates.json",
-  "metric_spec": "demo.metric:metric",
-  "output_dir": "artifacts/eval/run-local",
-  "report_path": "reports/run.json",
-  "session_id": "session-1",
-  "dataset_tag": "dataset:demo",
-  "agent_package": "demo_pkg"
-}
-""".strip(),
-            encoding="utf-8",
-        )
-        with patch("penguiflow.evals.api.run_eval") as mock_run_eval:
-            mock_run_eval.return_value = {"winner_id": "baseline"}
-            result = runner.invoke(app, ["eval", "run", "--spec", str(spec_file)])
-
+        result = runner.invoke(app, ["eval", "--help"])
         assert result.exit_code == 0
-        assert "winner_id: baseline" in result.output
-        assert mock_run_eval.call_args.kwargs["agent_package"] == "demo_pkg"
-        assert mock_run_eval.call_args.kwargs["report_path"] == Path("reports/run.json").resolve()
-
-    def test_run_loads_env_files_from_spec(self, tmp_path: Path, monkeypatch) -> None:
-        runner = CliRunner()
-        monkeypatch.chdir(tmp_path)
-        env_file = tmp_path / "credentials.env"
-        env_key = "PENGUIFLOW_EVAL_TEST_SECRET"
-        env_file.write_text(f"{env_key}=loaded_from_file\n", encoding="utf-8")
-        spec_file = tmp_path / "eval.spec.json"
-        spec_file.write_text(
-            f"""
-{{
-  "project_root": ".",
-  "query_suite_path": "query_suite.json",
-  "candidates_path": "candidates.json",
-  "metric_spec": "demo.metric:metric",
-  "output_dir": "artifacts/eval/run-local",
-  "session_id": "session-1",
-  "dataset_tag": "dataset:demo",
-  "env_files": ["{env_file.name}"]
-}}
-""".strip(),
-            encoding="utf-8",
-        )
-        os.environ.pop(env_key, None)
-        with patch("penguiflow.evals.api.run_eval") as mock_run_eval:
-            mock_run_eval.return_value = {"winner_id": "baseline"}
-            result = runner.invoke(app, ["eval", "run", "--spec", str(spec_file)])
-
-        assert result.exit_code == 0
-        assert os.environ.get(env_key) == "loaded_from_file"
-
-    def test_run_uses_api_spec_loader(self, tmp_path: Path) -> None:
-        runner = CliRunner()
-        spec_file = tmp_path / "eval.spec.json"
-        spec_file.write_text("{}", encoding="utf-8")
-        with patch("penguiflow.evals.api.load_eval_run_spec") as mock_load_spec:
-            mock_spec = MagicMock()
-            mock_spec.project_root = Path(".")
-            mock_spec.query_suite_path = Path("query_suite.json")
-            mock_spec.candidates_path = Path("candidates.json")
-            mock_spec.metric_spec = "demo.metric:metric"
-            mock_spec.output_dir = Path("artifacts/eval/run-local")
-            mock_spec.session_id = "session-1"
-            mock_spec.dataset_tag = "dataset:demo"
-            mock_spec.agent_package = None
-            mock_spec.state_store_spec = None
-            mock_spec.run_one_spec = None
-            mock_spec.env_files = ()
-            mock_load_spec.return_value = mock_spec
-            with patch("penguiflow.evals.api.run_eval") as mock_run_eval:
-                mock_run_eval.return_value = {"winner_id": "baseline"}
-                result = runner.invoke(app, ["eval", "run", "--spec", str(spec_file)])
-
-        assert result.exit_code == 0
-        assert mock_load_spec.called
-        assert "winner_id: baseline" in result.output
-
-    def test_run_resolves_cli_env_files_relative_to_project_root(self, tmp_path: Path, monkeypatch) -> None:
-        runner = CliRunner()
-        monkeypatch.chdir(tmp_path)
-        project_root = tmp_path / "project"
-        project_root.mkdir(parents=True)
-        env_file = project_root / "cli.env"
-        env_key = "PENGUIFLOW_EVAL_TEST_CLI_BASE"
-        env_file.write_text(f"{env_key}=loaded_from_cli\n", encoding="utf-8")
-
-        spec_file = tmp_path / "eval.spec.json"
-        spec_file.write_text(
-            json.dumps(
-                {
-                    "project_root": "project",
-                    "query_suite_path": "query_suite.json",
-                    "candidates_path": "candidates.json",
-                    "metric_spec": "demo.metric:metric",
-                    "output_dir": "artifacts/eval/run-local",
-                    "session_id": "session-1",
-                    "dataset_tag": "dataset:demo",
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        os.environ.pop(env_key, None)
-        with patch("penguiflow.evals.api.run_eval") as mock_run_eval:
-            mock_run_eval.return_value = {"winner_id": "baseline"}
-            result = runner.invoke(
-                app,
-                ["eval", "run", "--spec", str(spec_file), "--env-file", "cli.env"],
-            )
-
-        assert result.exit_code == 0
-        assert os.environ.get(env_key) == "loaded_from_cli"
+        assert "collect" in result.output
+        assert "evaluate" in result.output
+        assert "run" not in result.output
 
     def test_collect_nested_spec_uses_cwd_project_root_for_env_file(self, tmp_path: Path, monkeypatch) -> None:
         runner = CliRunner()
@@ -349,7 +238,7 @@ class TestEvalCommand:
 
     def test_evaluate_invokes_api_with_dataset(self, tmp_path: Path) -> None:
         runner = CliRunner()
-        spec_file = tmp_path / "eval.spec.json"
+        spec_file = tmp_path / "evaluate.spec.json"
         spec_file.write_text(
             """
 {

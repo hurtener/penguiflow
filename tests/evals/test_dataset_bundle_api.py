@@ -73,7 +73,7 @@ async def test_export_dataset_selects_by_all_tags(tmp_path: Path) -> None:
     assert len(rows) == 1
     assert rows[0]["split"] == "val"
     assert rows[0]["question"] == "Question val"
-    assert rows[0]["gold_trace_features"] is None
+    assert set(rows[0]) == {"example_id", "split", "question", "gold_trace"}
     assert isinstance(rows[0]["gold_trace"]["trajectory_full"]["steps"], list)
     assert (
         rows[0]["gold_trace"]["trajectory_full"]["steps"][0]["observation"]["action_required"]

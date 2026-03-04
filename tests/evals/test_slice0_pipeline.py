@@ -17,7 +17,7 @@ async def test_run_eval_workflow_produces_required_outputs_and_passes_holdout(tm
         json.dumps(
             {
                 "suite_id": "eval-suite",
-                "workload": "planner_enterprise_agent_v2",
+                "workload": "demo_workload",
                 "queries": [
                     {"query_id": "q-val", "text": "Question val", "answer": "A", "split": "val"},
                     {"query_id": "q-test", "text": "Question test", "answer": "B", "split": "test"},
@@ -116,8 +116,6 @@ async def test_run_eval_workflow_produces_required_outputs_and_passes_holdout(tm
     assert holdout["winner_score"] >= holdout["baseline_score"]
 
     view_row = json.loads((tmp_path / "view.val.jsonl").read_text(encoding="utf-8").splitlines()[0])
-    assert "gold_trace_features" in view_row
-    assert view_row["gold_trace_features"] is None
     assert "gold_policy" not in view_row
     assert "gold_trace" in view_row
     assert view_row["gold_trace"]["trace_id"] == view_row["__pf.trace_id"]

@@ -54,14 +54,15 @@ uv run penguiflow tools list
 uv run penguiflow tools connect github --discover
 ```
 
-### Workflow D: run eval recipe (collect -> export -> evaluate)
+### Workflow D: eval workflow (collect -> review -> evaluate)
 
 ```bash
-uv run penguiflow eval run --spec examples/my_agent/datasets/eval_v1/eval.spec.json
+uv run penguiflow eval collect --spec examples/my_agent/datasets/eval_v1/collect.spec.json
+# review datasets / define metric
 uv run penguiflow eval evaluate --spec examples/my_agent/datasets/eval_v1/evaluate.spec.json
 ```
 
-For full eval spec fields and artifact layout, see **[`penguiflow eval`](eval-command.md)**.
+For full eval spec fields and output contract, see **[`penguiflow eval`](eval-command.md)**.
 
 ## Failure modes & recovery
 

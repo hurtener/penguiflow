@@ -16,52 +16,10 @@ from penguiflow.planner import PlannerFinish, PlannerPause, Trajectory
 from penguiflow.state import InMemoryStateStore
 
 from .export import collect_trace_rows
-from .inputs import load_query_suite, load_trace_ids
+from .inputs import load_query_suite
 
 MetricFn = Callable[[object, object, object | None, str | None, object | None], float | dict[str, object]]
 RunOneFn = Callable[[dict[str, Any], dict[str, Any] | None], Any]
-
-
-@dataclass(frozen=True, slots=True)
-class EvalSpec:
-    """Declarative config for reproducible eval runs.
-
-    Why: projects should be able to commit a compact, reviewable recipe that
-    points to their metric/hooks and input files, while generating exports and
-    reports locally on demand.
-    """
-
-    project_root: Path
-    state_store_spec: str
-    run_one_spec: str
-    metric_spec: str
-    query_suite_path: Path
-    trace_ids_path: Path
-    candidates_path: Path
-    output_dir: Path
-    session_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class EvalRunSpec:
-    """Declarative config for collect->export->evaluate CLI/API runs.
-
-    Why: the CLI and library entrypoints should share one parsing contract to
-    prevent drift across required fields, defaults, and path resolution.
-    """
-
-    project_root: Path
-    query_suite_path: Path
-    candidates_path: Path
-    metric_spec: str
-    output_dir: Path
-    session_id: str
-    dataset_tag: str
-    report_path: Path | None = None
-    env_files: tuple[Path, ...] = ()
-    agent_package: str | None = None
-    state_store_spec: str | None = None
-    run_one_spec: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +150,7 @@ def wrap_metric(metric: Callable[..., Any]) -> MetricFn:
         }
         if has_var_args:
             raw = metric(gold, pred, trace, pred_name, pred_trace)
-            return raw  # type: ignore[return-value]
+            return raw
 
         positional: list[object | None] = []
         kwargs: dict[str, object | None] = {}
@@ -215,7 +173,7 @@ def wrap_metric(metric: Callable[..., Any]) -> MetricFn:
                 kwargs.setdefault(key, value)
 
         raw = metric(*positional, **kwargs)
-        return raw  # type: ignore[return-value]
+        return raw
 
     return _wrapped
 
@@ -319,7 +277,6 @@ async def export_dataset(
                 "split": str(row.get("trajectory", {}).get("split") or "unknown"),
                 "question": str(row.get("query") or ""),
                 "gold_trace": row,
-                "gold_trace_features": None,
             }
         )
     dataset_path = Path(output_dir) / "dataset.jsonl"
@@ -678,6 +635,7 @@ async def _build_project_runner(*, project_root: str | Path, state_store: Any, a
     discovery = _discover_agent_with_package(project_root, agent_package)
     config = discovery.config_factory() if discovery.config_factory else None
 
+    runner: _EvalPlannerWrapper | _EvalOrchestratorWrapper
     if discovery.kind == "planner":
         planner_output = _call_builder(discovery.target, config, state_store=state_store)
         planner = planner_output.planner if hasattr(planner_output, "planner") else planner_output
@@ -890,157 +848,6 @@ async def _build_discovered_run_one(
     return _run_one
 
 
-def _build_dataset_rows_from_query_suite(
-    *,
-    query_rows: Sequence[Mapping[str, Any]],
-    trace_ids: Sequence[str],
-    trace_rows_by_id: Mapping[str, Mapping[str, Any]],
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for index, query_row in enumerate(query_rows):
-        trace_id = str(trace_ids[index]) if index < len(trace_ids) else ""
-        trace_row = dict(trace_rows_by_id.get(trace_id, {})) if trace_id else {}
-        split_raw = query_row.get("split")
-        split = (
-            str(split_raw) if split_raw is not None else str(trace_row.get("trajectory", {}).get("split", "unknown"))
-        )
-        query_id = query_row.get("query_id")
-        example_id = str(query_id) if query_id is not None else (trace_id or f"example-{index + 1}")
-        features_raw = query_row.get("gold_trace_features")
-        features = dict(features_raw) if isinstance(features_raw, Mapping) else None
-        rows.append(
-            {
-                "example_id": example_id,
-                "split": split,
-                "question": query_row.get("text") or query_row.get("query"),
-                "answer": query_row.get("answer"),
-                "gold_trace_features": features,
-                "gold_trace": trace_row if trace_row else None,
-            }
-        )
-    return rows
-
-
-async def run_eval(
-    *,
-    project_root: str | Path,
-    query_suite_path: str | Path,
-    candidates_path: str | Path,
-    metric_spec: str,
-    output_dir: str | Path,
-    session_id: str,
-    dataset_tag: str,
-    state_store_spec: str | None = None,
-    run_one_spec: str | None = None,
-    agent_package: str | None = None,
-    report_path: str | Path | None = None,
-) -> dict[str, Any]:
-    """Run full eval flow from query suite in a single call.
-
-    Why: API consumers should be able to run a PoC end-to-end with one command
-    while still reusing stable low-level helpers under the hood.
-    """
-
-    ensure_project_on_sys_path(project_root)
-    del output_dir
-
-    if state_store_spec is not None:
-        state_store_factory = resolve_callable(state_store_spec)
-        state_store = await _maybe_await(state_store_factory())
-    else:
-        state_store = InMemoryStateStore()
-
-    suite = load_query_suite(query_suite_path)
-    query_rows = suite.get("queries", [])
-    if not isinstance(query_rows, list) or not query_rows:
-        raise ValueError("query_suite must contain at least one query")
-
-    query_cases: list[str | Mapping[str, Any]] = []
-    for row in query_rows:
-        if not isinstance(row, Mapping):
-            raise ValueError("query rows must be JSON objects")
-        query_text = str(row.get("text") or row.get("query") or "").strip()
-        if not query_text:
-            raise ValueError("query_suite contains empty query text")
-        tags = [str(dataset_tag)]
-        query_id = row.get("query_id")
-        if query_id is not None:
-            tags.append(f"query_id:{query_id}")
-        split_value = row.get("split")
-        split = str(split_value) if split_value is not None else None
-        query_cases.append(
-            {
-                "query": query_text,
-                "split": split,
-                "tags": tags,
-            }
-        )
-
-    collect_result = await collect_traces(
-        project_root=project_root,
-        state_store=state_store,
-        session_id=session_id,
-        queries=query_cases,
-        agent_package=agent_package,
-    )
-    trace_ids = [str(trace_id) for trace_id in collect_result.get("trace_ids", [])]
-    if not trace_ids:
-        raise ValueError("trace collection produced no trace ids")
-
-    metric = wrap_metric(resolve_callable(metric_spec))
-    candidates = load_candidates(candidates_path)
-    if run_one_spec is not None:
-        run_one = resolve_callable(run_one_spec)
-    else:
-        run_one = await _build_discovered_run_one(
-            project_root=project_root,
-            state_store=state_store,
-            prediction_session_id=f"{session_id}-pred",
-            agent_package=agent_package,
-        )
-
-    collected_rows = await collect_trace_rows(
-        state_store=state_store,
-        trace_ids=trace_ids,
-        session_id=session_id,
-        workload=agent_package,
-    )
-    trace_rows = list(collected_rows.get("rows", []))
-    trace_rows_by_id = {
-        str(row.get("trace_id")): row
-        for row in trace_rows
-        if isinstance(row, Mapping) and row.get("trace_id") is not None
-    }
-    dataset_rows = _build_dataset_rows_from_query_suite(
-        query_rows=query_rows,
-        trace_ids=trace_ids,
-        trace_rows_by_id=trace_rows_by_id,
-    )
-    try:
-        val_rows, test_rows = _split_dataset_payload_rows(dataset_rows)
-    except ValueError as exc:
-        if "at least one test example" not in str(exc):
-            raise
-        val_rows = [dict(row) for row in dataset_rows if str(row.get("split", "unknown")) == "val"]
-        if not val_rows:
-            raise
-        test_rows = list(val_rows)
-
-    summary = await _evaluate_dataset_rows(
-        val_rows=val_rows,
-        test_rows=test_rows,
-        run_one=run_one,
-        metric=metric,
-        candidates=candidates,
-        workload=agent_package,
-        report_path=report_path,
-    )
-    return {
-        **summary,
-        "collect_trace_count": len(trace_ids),
-    }
-
-
 async def collect_and_export_traces(
     *,
     project_root: str | Path,
@@ -1205,107 +1012,11 @@ def load_candidates(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
-def load_eval_spec(path: str | Path) -> EvalSpec:
-    """Load an eval spec file and resolve all relative paths.
-
-    Why: spec files are the contract between reusable eval API and project code,
-    so path normalization must be deterministic across local runs and CI.
-    """
-
-    spec_path = Path(path).resolve()
-    payload = json.loads(spec_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("eval spec must be a JSON object")
-
-    required = [
-        "project_root",
-        "state_store_spec",
-        "run_one_spec",
-        "metric_spec",
-        "query_suite_path",
-        "trace_ids_path",
-        "candidates_path",
-        "output_dir",
-    ]
-    missing = [key for key in required if key not in payload]
-    if missing:
-        raise ValueError(f"eval spec is missing required keys: {', '.join(sorted(missing))}")
-
-    project_root = _resolve_project_root(payload=payload, spec_path=spec_path, required=True)
-    assert project_root is not None
-    base_dir = _resolution_base(project_root=project_root, spec_path=spec_path)
-    return EvalSpec(
-        project_root=project_root,
-        state_store_spec=str(payload["state_store_spec"]),
-        run_one_spec=str(payload["run_one_spec"]),
-        metric_spec=str(payload["metric_spec"]),
-        query_suite_path=_resolve_against(base_dir, str(payload["query_suite_path"])),
-        trace_ids_path=_resolve_against(base_dir, str(payload["trace_ids_path"])),
-        candidates_path=_resolve_against(base_dir, str(payload["candidates_path"])),
-        output_dir=_resolve_against(base_dir, str(payload["output_dir"])),
-        session_id=str(payload["session_id"]) if payload.get("session_id") is not None else None,
-    )
-
-
-def load_eval_run_spec(path: str | Path) -> EvalRunSpec:
-    """Load run-eval spec and resolve relative paths.
-
-    Why: `penguiflow eval run` and programmatic runners should behave exactly
-    the same for spec validation and path handling.
-    """
-
-    spec_path = Path(path).resolve()
-    payload = json.loads(spec_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("eval run spec must be a JSON object")
-
-    required = [
-        "project_root",
-        "query_suite_path",
-        "candidates_path",
-        "metric_spec",
-        "output_dir",
-        "session_id",
-        "dataset_tag",
-    ]
-    missing = [key for key in required if key not in payload]
-    if missing:
-        raise ValueError(f"eval run spec missing required keys: {', '.join(sorted(missing))}")
-
-    project_root = _resolve_project_root(payload=payload, spec_path=spec_path, required=True)
-    assert project_root is not None
-    base_dir = _resolution_base(project_root=project_root, spec_path=spec_path)
-    raw_env_files = payload.get("env_files", [])
-    if raw_env_files is None:
-        raw_env_files = []
-    if not isinstance(raw_env_files, list):
-        raise ValueError("eval run spec field 'env_files' must be a list")
-
-    env_files = tuple(_resolve_against(base_dir, str(item)) for item in raw_env_files)
-
-    return EvalRunSpec(
-        project_root=project_root,
-        query_suite_path=_resolve_against(base_dir, str(payload["query_suite_path"])),
-        candidates_path=_resolve_against(base_dir, str(payload["candidates_path"])),
-        metric_spec=str(payload["metric_spec"]),
-        output_dir=_resolve_against(base_dir, str(payload["output_dir"])),
-        report_path=(
-            _resolve_against(base_dir, str(payload["report_path"])) if payload.get("report_path") is not None else None
-        ),
-        session_id=str(payload["session_id"]),
-        dataset_tag=str(payload["dataset_tag"]),
-        env_files=env_files,
-        agent_package=str(payload["agent_package"]) if payload.get("agent_package") is not None else None,
-        state_store_spec=(str(payload["state_store_spec"]) if payload.get("state_store_spec") is not None else None),
-        run_one_spec=(str(payload["run_one_spec"]) if payload.get("run_one_spec") is not None else None),
-    )
-
-
 def load_eval_collect_spec(path: str | Path) -> EvalCollectSpec:
     """Load collect spec and resolve relative paths.
 
     Collect specs intentionally mirror the env-file and path normalization
-    behavior of eval run/evaluate specs so teams can move between commands
+    behavior of collect/evaluate specs so teams can move between commands
     without changing their secret-loading posture.
     """
 
@@ -1602,12 +1313,12 @@ async def evaluate_dataset_from_spec_file(path: str | Path) -> dict[str, Any]:
     """Evaluate from dataset spec file without requiring trace collection."""
 
     spec = load_eval_dataset_spec(path)
+    if spec.project_root is not None:
+        ensure_project_on_sys_path(spec.project_root)
     metric = wrap_metric(resolve_callable(spec.metric_spec))
     candidates = load_candidates(spec.candidates_path)
 
     if spec.run_one_spec is not None:
-        if spec.project_root is not None:
-            ensure_project_on_sys_path(spec.project_root)
         run_one = resolve_callable(spec.run_one_spec)
     elif spec.project_root is not None:
         state_store = InMemoryStateStore()
@@ -1631,93 +1342,8 @@ async def evaluate_dataset_from_spec_file(path: str | Path) -> dict[str, Any]:
     )
 
 
-async def run_eval_from_specs(
-    *,
-    project_root: str | Path,
-    state_store_spec: str,
-    run_one_spec: str,
-    metric_spec: str,
-    query_suite_path: str | Path,
-    trace_ids_path: str | Path,
-    output_dir: str | Path,
-    candidates: list[dict[str, Any]],
-    session_id: str | None = None,
-) -> dict[str, Any]:
-    """Run eval pipeline using import-path specs for state store, run_one, and metric."""
-
-    ensure_project_on_sys_path(project_root)
-    del output_dir
-    state_store_factory = resolve_callable(state_store_spec)
-    run_one = resolve_callable(run_one_spec)
-    metric = wrap_metric(resolve_callable(metric_spec))
-    state_store = await _maybe_await(state_store_factory())
-    query_suite = load_query_suite(query_suite_path)
-    query_rows_raw = query_suite.get("queries", [])
-    if not isinstance(query_rows_raw, list) or not query_rows_raw:
-        raise ValueError("query_suite must contain at least one query")
-    query_rows: list[Mapping[str, Any]] = []
-    for row in query_rows_raw:
-        if not isinstance(row, Mapping):
-            raise ValueError("query rows must be JSON objects")
-        query_rows.append(row)
-
-    trace_ids = load_trace_ids(trace_ids_path)
-    if not trace_ids:
-        raise ValueError("trace_ids file must contain at least one id")
-
-    collected_rows = await collect_trace_rows(
-        state_store=state_store,
-        trace_ids=trace_ids,
-        session_id=session_id,
-    )
-    trace_rows = list(collected_rows.get("rows", []))
-    trace_rows_by_id = {
-        str(row.get("trace_id")): row
-        for row in trace_rows
-        if isinstance(row, Mapping) and row.get("trace_id") is not None
-    }
-    dataset_rows = _build_dataset_rows_from_query_suite(
-        query_rows=query_rows,
-        trace_ids=trace_ids,
-        trace_rows_by_id=trace_rows_by_id,
-    )
-    val_rows, test_rows = _split_dataset_payload_rows(dataset_rows)
-    return await _evaluate_dataset_rows(
-        val_rows=val_rows,
-        test_rows=test_rows,
-        run_one=run_one,
-        metric=metric,
-        candidates=candidates,
-        workload=None,
-        report_path=None,
-    )
-
-
-async def run_eval_from_spec_file(path: str | Path) -> dict[str, Any]:
-    """Execute eval workflow from a committed recipe file.
-
-    Why: this gives API consumers a one-call entrypoint that mirrors how they
-    operate in examples and production scripts without custom orchestration code.
-    """
-
-    spec = load_eval_spec(path)
-    return await run_eval_from_specs(
-        project_root=spec.project_root,
-        state_store_spec=spec.state_store_spec,
-        run_one_spec=spec.run_one_spec,
-        metric_spec=spec.metric_spec,
-        query_suite_path=spec.query_suite_path,
-        trace_ids_path=spec.trace_ids_path,
-        output_dir=spec.output_dir,
-        candidates=load_candidates(spec.candidates_path),
-        session_id=spec.session_id,
-    )
-
-
 __all__ = [
     "EvalCollectSpec",
-    "EvalSpec",
-    "EvalRunSpec",
     "EvalDatasetSpec",
     "QueryCase",
     "TraceSelector",
@@ -1729,13 +1355,8 @@ __all__ = [
     "export_dataset",
     "load_candidates",
     "load_eval_collect_spec",
-    "load_eval_spec",
-    "load_eval_run_spec",
     "load_eval_dataset_spec",
     "resolve_trace_refs",
     "resolve_callable",
-    "run_eval",
-    "run_eval_from_spec_file",
-    "run_eval_from_specs",
     "wrap_metric",
 ]

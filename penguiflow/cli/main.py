@@ -388,69 +388,6 @@ def _render_eval_summary(result: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-@eval.command("run")
-@click.option(
-    "--spec",
-    "spec_path",
-    required=True,
-    type=click.Path(exists=True, dir_okay=False, path_type=str),
-    help="Path to eval spec JSON file. Relative spec fields resolve from project_root.",
-)
-@click.option(
-    "--env-file",
-    "env_files",
-    multiple=True,
-    type=click.Path(dir_okay=False, path_type=str),
-    help="Optional environment file(s) loaded before evaluation (relative to project_root).",
-)
-def eval_run(spec_path: str, env_files: tuple[str, ...]) -> None:
-    """Run collect->export->evaluate workflow from spec."""
-    import asyncio
-    from pathlib import Path
-
-    from penguiflow.evals.api import load_eval_run_spec, run_eval
-
-    path = Path(spec_path).resolve()
-
-    try:
-        run_spec = load_eval_run_spec(path)
-    except Exception as exc:
-        click.echo(f"✗ {exc}", err=True)
-        sys.exit(1)
-
-    try:
-        _apply_env_files(
-            spec_env_files=run_spec.env_files,
-            cli_env_files=env_files,
-            base_dir=run_spec.project_root,
-        )
-    except Exception as exc:
-        click.echo(f"✗ {exc}", err=True)
-        sys.exit(1)
-
-    try:
-        result = asyncio.run(
-            run_eval(
-                project_root=run_spec.project_root,
-                query_suite_path=run_spec.query_suite_path,
-                candidates_path=run_spec.candidates_path,
-                metric_spec=run_spec.metric_spec,
-                output_dir=run_spec.output_dir,
-                session_id=run_spec.session_id,
-                dataset_tag=run_spec.dataset_tag,
-                agent_package=run_spec.agent_package,
-                state_store_spec=run_spec.state_store_spec,
-                run_one_spec=run_spec.run_one_spec,
-                report_path=run_spec.report_path,
-            )
-        )
-    except Exception as exc:
-        click.echo(f"✗ {exc}", err=True)
-        sys.exit(1)
-
-    click.echo(_render_eval_summary(result))
-
-
 @eval.command("collect")
 @click.option(
     "--spec",
