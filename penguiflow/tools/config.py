@@ -185,6 +185,30 @@ class ArtifactExtractionConfig(BaseModel):
 OutputTransformer = Callable[[str, Any, ToolContext], Any | Awaitable[Any]]
 
 
+class PromptsConfig(BaseModel):
+    """Configuration for MCP prompts discovery and tool generation."""
+
+    enabled: bool = Field(default=True, description="Auto-discover prompts during connect")
+    generate_tools: bool = Field(
+        default=True,
+        description="Create {ns}.prompts_list / prompts_get tools",
+    )
+
+
+class AppsConfig(BaseModel):
+    """Configuration for MCP Apps interactive UI support."""
+
+    enabled: bool = Field(default=True, description="Detect and render MCP Apps")
+    fetch_html_on_call: bool = Field(
+        default=True,
+        description="Auto-fetch ui:// resource after tool execution",
+    )
+    default_sandbox: str = Field(
+        default="allow-scripts allow-forms",
+        description="Default iframe sandbox attribute for MCP Apps",
+    )
+
+
 class ExternalToolConfig(BaseModel):
     """Configuration for an external tool source."""
 
@@ -238,6 +262,18 @@ class ExternalToolConfig(BaseModel):
         description="Configuration for extracting binary/large content as artifacts",
     )
 
+    # MCP Prompts (Phase 3)
+    prompts: PromptsConfig = Field(
+        default_factory=lambda: PromptsConfig(),
+        description="Configuration for MCP prompts discovery and tool generation",
+    )
+
+    # MCP Apps
+    apps: AppsConfig = Field(
+        default_factory=lambda: AppsConfig(),
+        description="Configuration for MCP Apps interactive UI support",
+    )
+
     # Custom output transformer (Layer 5 escape hatch)
     # Note: Not serializable, must be set programmatically
     output_transformer: OutputTransformer | None = Field(
@@ -266,6 +302,7 @@ class ExternalToolConfig(BaseModel):
 
 
 __all__ = [
+    "AppsConfig",
     "ArtifactExtractionConfig",
     "ArtifactFieldConfig",
     "AuthType",
@@ -274,6 +311,7 @@ __all__ = [
     "ExternalToolConfig",
     "McpTransportMode",
     "OutputTransformer",
+    "PromptsConfig",
     "ResourceHandlingConfig",
     "RetryPolicy",
     "TransportType",

@@ -583,6 +583,21 @@ def _binary_component_payload(record: ArtifactRecord, session_id: str | None) ->
     artifact_id = record.artifact_id or record.ref
     url = _artifact_url(artifact_id, session_id or record.scope_session_id)
     mime_type = record.mime_type or ""
+
+    # MCP Apps: interactive UI in sandboxed iframe
+    if mime_type == "text/html;profile=mcp-app":
+        metadata = record.metadata or {}
+        return {
+            "component": "mcp_app",
+            "props": {
+                "artifact_url": url,
+                "csp": metadata.get("csp", {}),
+                "permissions": metadata.get("permissions", {}),
+                "tool_data": metadata.get("tool_data"),
+                "prefers_border": metadata.get("prefers_border", False),
+            },
+        }
+
     if mime_type.startswith("image/"):
         return {
             "component": "image",
