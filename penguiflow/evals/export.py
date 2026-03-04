@@ -261,4 +261,66 @@ async def export_trace_dataset(
     }
 
 
-__all__ = ["export_trace_dataset"]
+async def collect_trace_rows(
+    *,
+    state_store: Any,
+    trace_ids: list[str],
+    session_id: str | None = None,
+    redaction_profile: str = "internal_safe",
+    trace_refs: list[dict[str, str]] | None = None,
+    workload: str | None = None,
+) -> dict[str, Any]:
+    """Collect trace rows and manifest payload without writing files.
+
+    Why: higher-level eval flows can compose minimal artifact behavior by
+    deciding exactly what (if anything) to persist.
+    """
+
+    rows: list[dict[str, Any]] = []
+    normalized_refs = _normalize_trace_refs(trace_ids=trace_ids, trace_refs=trace_refs, session_id=session_id)
+    for ref in normalized_refs:
+        trace_id = str(ref["trace_id"])
+        trace_session_id = ref.get("session_id") or None
+        trajectory: Trajectory | None = None
+        if trace_session_id is not None and hasattr(state_store, "get_trajectory"):
+            trajectory = await state_store.get_trajectory(trace_id, trace_session_id)
+
+        planner_events: list[PlannerEvent] = []
+        if hasattr(state_store, "list_planner_events"):
+            planner_events = list(await state_store.list_planner_events(trace_id))
+
+        history = list(await state_store.load_history(trace_id))
+
+        source_priority = "history"
+        if planner_events:
+            source_priority = "planner_events"
+        if trajectory is not None:
+            source_priority = "trajectory"
+
+        rows.append(
+            _build_trace_example(
+                trace_id=trace_id,
+                trajectory=trajectory,
+                planner_events=planner_events,
+                history=history,
+                redaction_profile=redaction_profile,
+                source_priority=source_priority,
+            )
+        )
+
+    manifest = _build_manifest(
+        rows=rows,
+        trace_ids=[str(ref["trace_id"]) for ref in normalized_refs],
+        session_id=session_id,
+        redaction_profile=redaction_profile,
+        workload=str(workload or "unknown"),
+    )
+    manifest["source"]["trace_refs"] = normalized_refs
+    return {
+        "rows": rows,
+        "manifest": manifest,
+        "trace_count": len(rows),
+    }
+
+
+__all__ = ["collect_trace_rows", "export_trace_dataset"]

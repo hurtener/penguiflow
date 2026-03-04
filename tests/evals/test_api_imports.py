@@ -352,6 +352,7 @@ def test_load_eval_run_spec_resolves_relative_fields_from_project_root(
                 "candidates_path": "datasets/candidates.json",
                 "metric_spec": "demo.metric:metric",
                 "output_dir": "artifacts/eval/run",
+                "report_path": "reports/eval-run.json",
                 "session_id": "session-1",
                 "dataset_tag": "dataset:demo",
                 "env_files": ["env/local.env"],
@@ -367,6 +368,7 @@ def test_load_eval_run_spec_resolves_relative_fields_from_project_root(
     assert spec.query_suite_path == project_root / "datasets/query_suite.json"
     assert spec.candidates_path == project_root / "datasets/candidates.json"
     assert spec.output_dir == project_root / "artifacts/eval/run"
+    assert spec.report_path == project_root / "reports/eval-run.json"
     assert spec.env_files == (project_root / "env/local.env",)
 
 
@@ -417,6 +419,7 @@ def test_load_eval_dataset_spec_resolves_relative_fields_from_project_root_when_
                 "candidates_path": "datasets/candidates.json",
                 "metric_spec": "demo.metric:metric",
                 "output_dir": "artifacts/eval/rerun",
+                "report_path": "reports/eval-dataset.json",
                 "env_files": ["env/evaluate.env"],
             }
         ),
@@ -430,6 +433,7 @@ def test_load_eval_dataset_spec_resolves_relative_fields_from_project_root_when_
     assert spec.dataset_path == project_root / "bundle/dataset.jsonl"
     assert spec.candidates_path == project_root / "datasets/candidates.json"
     assert spec.output_dir == project_root / "artifacts/eval/rerun"
+    assert spec.report_path == project_root / "reports/eval-dataset.json"
     assert spec.env_files == (project_root / "env/evaluate.env",)
 
 

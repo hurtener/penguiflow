@@ -89,13 +89,10 @@ async def test_run_eval_uses_discovered_agent_and_inmemory_store(tmp_path: Path)
     )
 
     assert result["winner_id"] == "candidate-a"
-    generated_trace_ids = Path(result["trace_ids_path"])
-    assert generated_trace_ids.exists()
-    trace_ids = [line.strip() for line in generated_trace_ids.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(trace_ids) == 2
-
-    bundle_dataset_path = Path(result["bundle_dataset_path"])
-    assert bundle_dataset_path.exists()
+    assert result["passed"] is True
+    assert "trace_ids_path" not in result
+    assert "bundle_dataset_path" not in result
+    assert "bundle_manifest_path" not in result
 
 
 @pytest.mark.asyncio
@@ -218,6 +215,7 @@ async def test_collect_and_export_traces_runs_collection_and_exports_traces(tmp_
     )
 
     assert result["trace_count"] == 1
-    assert Path(result["trace_ids_path"]).exists()
-    assert Path(result["trace_path"]).exists()
+    assert Path(result["dataset_path"]).exists()
     assert Path(result["manifest_path"]).exists()
+    assert "trace_ids_path" not in result
+    assert "trace_path" not in result

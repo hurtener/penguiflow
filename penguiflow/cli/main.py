@@ -362,6 +362,32 @@ def _apply_env_files(
                 os.environ[key] = value
 
 
+def _render_eval_summary(result: dict[str, object]) -> str:
+    preferred_order = (
+        "winner_id",
+        "passed",
+        "baseline_score",
+        "winner_score",
+        "collect_trace_count",
+        "trace_count",
+        "dataset_path",
+        "manifest_path",
+        "report_path",
+    )
+    lines: list[str] = []
+    seen: set[str] = set()
+    for key in preferred_order:
+        if key in result:
+            lines.append(f"{key}: {result[key]}")
+            seen.add(key)
+
+    for key in sorted(result.keys()):
+        if key in seen:
+            continue
+        lines.append(f"{key}: {result[key]}")
+    return "\n".join(lines)
+
+
 @eval.command("run")
 @click.option(
     "--spec",
@@ -380,7 +406,6 @@ def _apply_env_files(
 def eval_run(spec_path: str, env_files: tuple[str, ...]) -> None:
     """Run collect->export->evaluate workflow from spec."""
     import asyncio
-    import json
     from pathlib import Path
 
     from penguiflow.evals.api import load_eval_run_spec, run_eval
@@ -416,29 +441,14 @@ def eval_run(spec_path: str, env_files: tuple[str, ...]) -> None:
                 agent_package=run_spec.agent_package,
                 state_store_spec=run_spec.state_store_spec,
                 run_one_spec=run_spec.run_one_spec,
+                report_path=run_spec.report_path,
             )
         )
     except Exception as exc:
         click.echo(f"✗ {exc}", err=True)
         sys.exit(1)
 
-    click.echo(
-        json.dumps(
-            {
-                **result,
-                "resolved_paths": {
-                    "resolution_base": str(run_spec.project_root),
-                    "project_root": str(run_spec.project_root),
-                    "query_suite_path": str(run_spec.query_suite_path),
-                    "candidates_path": str(run_spec.candidates_path),
-                    "output_dir": str(run_spec.output_dir),
-                    "env_files": [str(item) for item in run_spec.env_files],
-                },
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
+    click.echo(_render_eval_summary(result))
 
 
 @eval.command("collect")
@@ -459,7 +469,6 @@ def eval_run(spec_path: str, env_files: tuple[str, ...]) -> None:
 def eval_collect(spec_path: str, env_files: tuple[str, ...]) -> None:
     """Run collect->export workflow from spec (no evaluation)."""
     import asyncio
-    import json
     from pathlib import Path
 
     from penguiflow.evals.api import collect_and_export_traces, load_eval_collect_spec
@@ -498,22 +507,7 @@ def eval_collect(spec_path: str, env_files: tuple[str, ...]) -> None:
         click.echo(f"✗ {exc}", err=True)
         sys.exit(1)
 
-    click.echo(
-        json.dumps(
-            {
-                **result,
-                "resolved_paths": {
-                    "resolution_base": str(collect_spec.project_root),
-                    "project_root": str(collect_spec.project_root),
-                    "query_suite_path": str(collect_spec.query_suite_path),
-                    "output_dir": str(collect_spec.output_dir),
-                    "env_files": [str(item) for item in collect_spec.env_files],
-                },
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
+    click.echo(_render_eval_summary(result))
 
 
 @eval.command("evaluate")
@@ -534,7 +528,6 @@ def eval_collect(spec_path: str, env_files: tuple[str, ...]) -> None:
 def eval_evaluate(spec_path: str, env_files: tuple[str, ...]) -> None:
     """Run evaluation against an existing dataset bundle from spec."""
     import asyncio
-    import json
     from pathlib import Path
 
     from penguiflow.evals.api import evaluate_dataset_from_spec_file, load_eval_dataset_spec
@@ -564,23 +557,7 @@ def eval_evaluate(spec_path: str, env_files: tuple[str, ...]) -> None:
         click.echo(f"✗ {exc}", err=True)
         sys.exit(1)
 
-    click.echo(
-        json.dumps(
-            {
-                **result,
-                "resolved_paths": {
-                    "resolution_base": str(eval_base),
-                    "project_root": str(spec.project_root) if spec.project_root is not None else None,
-                    "dataset_path": str(spec.dataset_path),
-                    "candidates_path": str(spec.candidates_path),
-                    "output_dir": str(spec.output_dir),
-                    "env_files": [str(item) for item in spec.env_files],
-                },
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
+    click.echo(_render_eval_summary(result))
 
 
 @app.command()

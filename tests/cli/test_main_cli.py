@@ -196,7 +196,7 @@ class TestEvalCommand:
         result = runner.invoke(app, ["eval", "run"])
         assert result.exit_code != 0
 
-    def test_run_invokes_api_and_prints_json(self, tmp_path: Path) -> None:
+    def test_run_invokes_api_and_prints_text_summary(self, tmp_path: Path) -> None:
         runner = CliRunner()
         spec_file = tmp_path / "eval.spec.json"
         spec_file.write_text(
@@ -207,6 +207,7 @@ class TestEvalCommand:
   "candidates_path": "candidates.json",
   "metric_spec": "demo.metric:metric",
   "output_dir": "artifacts/eval/run-local",
+  "report_path": "reports/run.json",
   "session_id": "session-1",
   "dataset_tag": "dataset:demo",
   "agent_package": "demo_pkg"
@@ -219,8 +220,9 @@ class TestEvalCommand:
             result = runner.invoke(app, ["eval", "run", "--spec", str(spec_file)])
 
         assert result.exit_code == 0
-        assert '"winner_id": "baseline"' in result.output
+        assert "winner_id: baseline" in result.output
         assert mock_run_eval.call_args.kwargs["agent_package"] == "demo_pkg"
+        assert mock_run_eval.call_args.kwargs["report_path"] == Path("reports/run.json").resolve()
 
     def test_run_loads_env_files_from_spec(self, tmp_path: Path, monkeypatch) -> None:
         runner = CliRunner()
@@ -276,7 +278,7 @@ class TestEvalCommand:
 
         assert result.exit_code == 0
         assert mock_load_spec.called
-        assert '"resolved_paths"' in result.output
+        assert "winner_id: baseline" in result.output
 
     def test_run_resolves_cli_env_files_relative_to_project_root(self, tmp_path: Path, monkeypatch) -> None:
         runner = CliRunner()
@@ -354,7 +356,8 @@ class TestEvalCommand:
   "dataset_path": "dataset.jsonl",
   "candidates_path": "candidates.json",
   "metric_spec": "demo.metric:metric",
-  "output_dir": "artifacts/eval/rerun"
+  "output_dir": "artifacts/eval/rerun",
+  "report_path": "reports/evaluate.json"
 }
 """.strip(),
             encoding="utf-8",
@@ -364,7 +367,7 @@ class TestEvalCommand:
             result = runner.invoke(app, ["eval", "evaluate", "--spec", str(spec_file)])
 
         assert result.exit_code == 0
-        assert '"winner_id": "baseline"' in result.output
+        assert "winner_id: baseline" in result.output
 
     def test_collect_requires_spec_file(self) -> None:
         runner = CliRunner()
@@ -387,10 +390,10 @@ class TestEvalCommand:
             mock_spec.env_files = ()
             mock_load_spec.return_value = mock_spec
             with patch("penguiflow.evals.api.collect_and_export_traces") as mock_collect:
-                mock_collect.return_value = {"trace_count": 1, "trace_path": "trace.jsonl"}
+                mock_collect.return_value = {"trace_count": 1, "dataset_path": "dataset.jsonl"}
                 result = runner.invoke(app, ["eval", "collect", "--spec", str(spec_file)])
 
         assert result.exit_code == 0
-        assert '"trace_count": 1' in result.output
+        assert "trace_count: 1" in result.output
         assert mock_load_spec.called
         assert mock_collect.call_args.kwargs["agent_package"] == "demo_pkg"

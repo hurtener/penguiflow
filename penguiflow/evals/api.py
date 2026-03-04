@@ -15,11 +15,8 @@ from typing import Any
 from penguiflow.planner import PlannerFinish, PlannerPause, Trajectory
 from penguiflow.state import InMemoryStateStore
 
-from .export import export_trace_dataset
-from .inputs import load_query_suite
-from .runner import run_harness_eval
-from .sweep import run_manual_sweep
-from .workflow import run_eval_workflow
+from .export import collect_trace_rows
+from .inputs import load_query_suite, load_trace_ids
 
 MetricFn = Callable[[object, object, object | None, str | None, object | None], float | dict[str, object]]
 RunOneFn = Callable[[dict[str, Any], dict[str, Any] | None], Any]
@@ -60,6 +57,7 @@ class EvalRunSpec:
     output_dir: Path
     session_id: str
     dataset_tag: str
+    report_path: Path | None = None
     env_files: tuple[Path, ...] = ()
     agent_package: str | None = None
     state_store_spec: str | None = None
@@ -74,6 +72,7 @@ class EvalDatasetSpec:
     candidates_path: Path
     metric_spec: str
     output_dir: Path
+    report_path: Path | None = None
     project_root: Path | None = None
     env_files: tuple[Path, ...] = ()
     agent_package: str | None = None
@@ -304,17 +303,14 @@ async def export_dataset(
     if not refs:
         raise ValueError("trace selector resolved no traces")
 
-    export_result = await export_trace_dataset(
+    collected = await collect_trace_rows(
         state_store=state_store,
         trace_ids=[str(ref["trace_id"]) for ref in refs],
         trace_refs=refs,
-        output_dir=output_dir,
         redaction_profile=redaction_profile,
         workload=workload,
     )
-
-    trace_path = Path(str(export_result["trace_path"]))
-    rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = list(collected["rows"])
     dataset_rows: list[dict[str, Any]] = []
     for idx, row in enumerate(rows):
         dataset_rows.append(
@@ -327,14 +323,22 @@ async def export_dataset(
             }
         )
     dataset_path = Path(output_dir) / "dataset.jsonl"
+    dataset_path.parent.mkdir(parents=True, exist_ok=True)
     with dataset_path.open("w", encoding="utf-8") as handle:
         for row in dataset_rows:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
             handle.write("\n")
 
+    manifest_path = Path(output_dir) / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(collected["manifest"], ensure_ascii=False, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+
     return {
-        **export_result,
+        "trace_count": int(collected["trace_count"]),
         "dataset_path": str(dataset_path),
+        "manifest_path": str(manifest_path),
     }
 
 
@@ -886,6 +890,37 @@ async def _build_discovered_run_one(
     return _run_one
 
 
+def _build_dataset_rows_from_query_suite(
+    *,
+    query_rows: Sequence[Mapping[str, Any]],
+    trace_ids: Sequence[str],
+    trace_rows_by_id: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, query_row in enumerate(query_rows):
+        trace_id = str(trace_ids[index]) if index < len(trace_ids) else ""
+        trace_row = dict(trace_rows_by_id.get(trace_id, {})) if trace_id else {}
+        split_raw = query_row.get("split")
+        split = (
+            str(split_raw) if split_raw is not None else str(trace_row.get("trajectory", {}).get("split", "unknown"))
+        )
+        query_id = query_row.get("query_id")
+        example_id = str(query_id) if query_id is not None else (trace_id or f"example-{index + 1}")
+        features_raw = query_row.get("gold_trace_features")
+        features = dict(features_raw) if isinstance(features_raw, Mapping) else None
+        rows.append(
+            {
+                "example_id": example_id,
+                "split": split,
+                "question": query_row.get("text") or query_row.get("query"),
+                "answer": query_row.get("answer"),
+                "gold_trace_features": features,
+                "gold_trace": trace_row if trace_row else None,
+            }
+        )
+    return rows
+
+
 async def run_eval(
     *,
     project_root: str | Path,
@@ -898,6 +933,7 @@ async def run_eval(
     state_store_spec: str | None = None,
     run_one_spec: str | None = None,
     agent_package: str | None = None,
+    report_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run full eval flow from query suite in a single call.
 
@@ -906,8 +942,7 @@ async def run_eval(
     """
 
     ensure_project_on_sys_path(project_root)
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    del output_dir
 
     if state_store_spec is not None:
         state_store_factory = resolve_callable(state_store_spec)
@@ -952,16 +987,6 @@ async def run_eval(
     if not trace_ids:
         raise ValueError("trace collection produced no trace ids")
 
-    trace_ids_path = out_dir / "trace_ids.generated.txt"
-    trace_ids_path.write_text("\n".join(trace_ids) + "\n", encoding="utf-8")
-
-    bundle_result = await export_dataset(
-        state_store=state_store,
-        output_dir=out_dir / "bundle",
-        selector=TraceSelector(include_tags=(str(dataset_tag),)),
-        workload=agent_package,
-    )
-
     metric = wrap_metric(resolve_callable(metric_spec))
     candidates = load_candidates(candidates_path)
     if run_one_spec is not None:
@@ -974,25 +999,45 @@ async def run_eval(
             agent_package=agent_package,
         )
 
-    slice_result = await run_eval_workflow(
+    collected_rows = await collect_trace_rows(
         state_store=state_store,
-        query_suite_path=query_suite_path,
-        trace_ids_path=trace_ids_path,
-        output_dir=out_dir,
-        run_one=run_one,
-        metric=metric,
-        candidates=candidates,
+        trace_ids=trace_ids,
         session_id=session_id,
         workload=agent_package,
     )
+    trace_rows = list(collected_rows.get("rows", []))
+    trace_rows_by_id = {
+        str(row.get("trace_id")): row
+        for row in trace_rows
+        if isinstance(row, Mapping) and row.get("trace_id") is not None
+    }
+    dataset_rows = _build_dataset_rows_from_query_suite(
+        query_rows=query_rows,
+        trace_ids=trace_ids,
+        trace_rows_by_id=trace_rows_by_id,
+    )
+    try:
+        val_rows, test_rows = _split_dataset_payload_rows(dataset_rows)
+    except ValueError as exc:
+        if "at least one test example" not in str(exc):
+            raise
+        val_rows = [dict(row) for row in dataset_rows if str(row.get("split", "unknown")) == "val"]
+        if not val_rows:
+            raise
+        test_rows = list(val_rows)
 
+    summary = await _evaluate_dataset_rows(
+        val_rows=val_rows,
+        test_rows=test_rows,
+        run_one=run_one,
+        metric=metric,
+        candidates=candidates,
+        workload=agent_package,
+        report_path=report_path,
+    )
     return {
-        **slice_result,
-        "trace_ids_path": str(trace_ids_path),
+        **summary,
         "collect_trace_count": len(trace_ids),
-        "bundle_dataset_path": str(bundle_result["dataset_path"]),
-        "bundle_manifest_path": str(bundle_result["manifest_path"]),
-        "bundle_trace_path": str(bundle_result["trace_path"]),
     }
 
 
@@ -1060,21 +1105,16 @@ async def collect_and_export_traces(
     if not trace_ids:
         raise ValueError("trace collection produced no trace ids")
 
-    trace_ids_path = out_dir / "trace_ids.generated.txt"
-    trace_ids_path.write_text("\n".join(trace_ids) + "\n", encoding="utf-8")
-
-    export_result = await export_trace_dataset(
+    export_result = await export_dataset(
         state_store=state_store,
-        trace_ids=trace_ids,
         output_dir=out_dir,
-        session_id=session_id,
+        selector=TraceSelector(include_tags=(str(dataset_tag),)),
         workload=agent_package,
     )
 
     return {
         "trace_count": len(trace_ids),
-        "trace_ids_path": str(trace_ids_path),
-        "trace_path": export_result["trace_path"],
+        "dataset_path": export_result["dataset_path"],
         "manifest_path": export_result["manifest_path"],
         "output_dir": str(out_dir),
     }
@@ -1249,6 +1289,9 @@ def load_eval_run_spec(path: str | Path) -> EvalRunSpec:
         candidates_path=_resolve_against(base_dir, str(payload["candidates_path"])),
         metric_spec=str(payload["metric_spec"]),
         output_dir=_resolve_against(base_dir, str(payload["output_dir"])),
+        report_path=(
+            _resolve_against(base_dir, str(payload["report_path"])) if payload.get("report_path") is not None else None
+        ),
         session_id=str(payload["session_id"]),
         dataset_tag=str(payload["dataset_tag"]),
         env_files=env_files,
@@ -1325,6 +1368,9 @@ def load_eval_dataset_spec(path: str | Path) -> EvalDatasetSpec:
         candidates_path=_resolve_against(base_dir, str(payload["candidates_path"])),
         metric_spec=str(payload["metric_spec"]),
         output_dir=_resolve_against(base_dir, str(payload["output_dir"])),
+        report_path=(
+            _resolve_against(base_dir, str(payload["report_path"])) if payload.get("report_path") is not None else None
+        ),
         project_root=project_root,
         env_files=tuple(_resolve_against(base_dir, str(item)) for item in raw_env_files),
         agent_package=str(payload["agent_package"]) if payload.get("agent_package") is not None else None,
@@ -1332,17 +1378,26 @@ def load_eval_dataset_spec(path: str | Path) -> EvalDatasetSpec:
     )
 
 
-def _mean_score(path: Path) -> float:
-    scores: list[float] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        payload = json.loads(stripped)
-        scores.append(float(payload.get("score", 0.0)))
-    if not scores:
-        return 0.0
-    return sum(scores) / len(scores)
+def _as_score_payload(raw: float | dict[str, object]) -> tuple[float, str | None]:
+    if isinstance(raw, dict):
+        score_raw = raw.get("score", 0.0)
+        score = 0.0
+        if isinstance(score_raw, bool):
+            score = 1.0 if score_raw else 0.0
+        elif isinstance(score_raw, (int, float)):
+            score = float(score_raw)
+        elif isinstance(score_raw, str):
+            try:
+                score = float(score_raw)
+            except ValueError:
+                score = 0.0
+        feedback = raw.get("feedback")
+        return score, str(feedback) if feedback is not None else None
+    if isinstance(raw, bool):
+        return (1.0 if raw else 0.0), None
+    if isinstance(raw, (int, float)):
+        return float(raw), None
+    return 0.0, None
 
 
 def _is_baseline_bundle(bundle: dict[str, Any]) -> bool:
@@ -1356,14 +1411,11 @@ def _is_baseline_bundle(bundle: dict[str, Any]) -> bool:
     return isinstance(patches, dict) and not patches
 
 
-def _split_dataset_rows(dataset_path: Path, output_dir: Path) -> tuple[Path, Path]:
+def _split_dataset_payload_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     val_rows: list[dict[str, Any]] = []
     test_rows: list[dict[str, Any]] = []
-    for line in dataset_path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        row = json.loads(stripped)
+    for item in rows:
+        row = dict(item)
         split = str(row.get("split", "unknown"))
         if split == "val":
             val_rows.append(row)
@@ -1374,18 +1426,146 @@ def _split_dataset_rows(dataset_path: Path, output_dir: Path) -> tuple[Path, Pat
         raise ValueError("dataset must contain at least one val example")
     if not test_rows:
         raise ValueError("dataset must contain at least one test example")
+    return val_rows, test_rows
 
-    val_path = output_dir / "dataset.val.jsonl"
-    test_path = output_dir / "dataset.test.jsonl"
-    with val_path.open("w", encoding="utf-8") as handle:
-        for row in val_rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
-    with test_path.open("w", encoding="utf-8") as handle:
-        for row in test_rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
-    return val_path, test_path
+
+def _split_dataset_rows(dataset_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows: list[dict[str, Any]] = []
+    for line in dataset_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        rows.append(json.loads(stripped))
+    return _split_dataset_payload_rows(rows)
+
+
+def _patch_size(candidate: dict[str, Any]) -> int:
+    patches = candidate.get("patches", {})
+    if isinstance(patches, dict):
+        return len(patches)
+    return 0
+
+
+async def _evaluate_rows_mean(
+    rows: list[dict[str, Any]],
+    *,
+    run_one: Callable[[dict[str, Any], dict[str, Any] | None], Any],
+    metric: Callable[[object, object, object | None, str | None, object | None], float | dict[str, object]],
+    pred_name: str,
+    patch_bundle: dict[str, Any] | None,
+) -> float:
+    scores: list[float] = []
+    for gold in rows:
+        run_output = await _maybe_await(run_one(gold, patch_bundle))
+        pred_trace = None
+        pred = run_output
+        if isinstance(run_output, tuple) and len(run_output) == 2:
+            pred, pred_trace = run_output
+        metric_raw = metric(gold, pred, gold, pred_name, pred_trace)
+        score, _ = _as_score_payload(metric_raw)
+        scores.append(score)
+    if not scores:
+        return 0.0
+    return sum(scores) / len(scores)
+
+
+async def _evaluate_dataset_rows(
+    *,
+    val_rows: list[dict[str, Any]],
+    test_rows: list[dict[str, Any]],
+    run_one: Callable[[dict[str, Any], dict[str, Any] | None], Any],
+    metric: Callable[[object, object, object | None, str | None, object | None], float | dict[str, object]],
+    candidates: list[dict[str, Any]],
+    workload: str | None,
+    report_path: str | Path | None,
+) -> dict[str, Any]:
+    baseline_val_score = await _evaluate_rows_mean(
+        val_rows,
+        run_one=run_one,
+        metric=metric,
+        pred_name="baseline",
+        patch_bundle=None,
+    )
+    rankings: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates):
+        candidate_id = str(candidate.get("id", f"candidate-{index + 1}"))
+        score = await _evaluate_rows_mean(
+            val_rows,
+            run_one=run_one,
+            metric=metric,
+            pred_name=candidate_id,
+            patch_bundle=candidate,
+        )
+        rankings.append(
+            {
+                "id": candidate_id,
+                "score": score,
+                "patch_size": _patch_size(candidate),
+                "patches": dict(candidate.get("patches", {})),
+                "patch_bundle": candidate,
+            }
+        )
+
+    rankings.sort(key=lambda item: (-item["score"], item["patch_size"], item["id"]))
+    winner = (
+        rankings[0]
+        if rankings
+        else {
+            "id": "baseline",
+            "score": baseline_val_score,
+            "patch_size": 0,
+            "patches": {},
+            "patch_bundle": None,
+        }
+    )
+
+    baseline_score = await _evaluate_rows_mean(
+        test_rows,
+        run_one=run_one,
+        metric=metric,
+        pred_name="test_baseline",
+        patch_bundle=None,
+    )
+    if _is_baseline_bundle(winner):
+        winner_score = baseline_score
+    else:
+        winner_score = await _evaluate_rows_mean(
+            test_rows,
+            run_one=run_one,
+            metric=metric,
+            pred_name="test_winner",
+            patch_bundle=winner.get("patch_bundle"),
+        )
+
+    passed = winner_score >= baseline_score
+    summary = {
+        "baseline_score": baseline_score,
+        "winner_score": winner_score,
+        "passed": passed,
+        "winner_id": winner["id"],
+        "workload": str(workload or "unknown"),
+        "counts": {
+            "val": len(val_rows),
+            "test": len(test_rows),
+            "total": len(val_rows) + len(test_rows),
+        },
+        "candidates": [{"id": item["id"], "score": item["score"]} for item in rankings],
+    }
+
+    resolved_report_path: str | None = None
+    if report_path is not None:
+        path = Path(report_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
+        resolved_report_path = str(path)
+
+    if not passed:
+        raise ValueError("holdout regression detected")
+
+    return {
+        **summary,
+        "report_path": resolved_report_path,
+    }
 
 
 async def evaluate_dataset(
@@ -1396,6 +1576,7 @@ async def evaluate_dataset(
     metric: Callable[[object, object, object | None, str | None, object | None], float | dict[str, object]],
     candidates: list[dict[str, Any]],
     workload: str | None = None,
+    report_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Evaluate an existing dataset bundle with sweep + holdout gate.
 
@@ -1403,65 +1584,18 @@ async def evaluate_dataset(
     checks without synthetic patch candidates.
     """
 
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    val_path, test_path = _split_dataset_rows(Path(dataset_path), out_dir)
+    del output_dir
+    val_rows, test_rows = _split_dataset_rows(Path(dataset_path))
     metric_fn = wrap_metric(metric)
-
-    sweep_result = await run_manual_sweep(
-        dataset_path=val_path,
-        output_dir=out_dir,
+    return await _evaluate_dataset_rows(
+        val_rows=val_rows,
+        test_rows=test_rows,
         run_one=run_one,
         metric=metric_fn,
         candidates=candidates,
         workload=workload,
+        report_path=report_path,
     )
-    bundle_path = Path(sweep_result["bundle_path"])
-    winner_bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
-
-    baseline_test = await run_harness_eval(
-        dataset_path=test_path,
-        output_dir=out_dir,
-        run_one=run_one,
-        metric=metric_fn,
-        mode="test_baseline",
-        pred_name="test_baseline",
-        patch_bundle=None,
-    )
-
-    baseline_score = _mean_score(Path(baseline_test["results_path"]))
-    if _is_baseline_bundle(winner_bundle):
-        winner_score = baseline_score
-    else:
-        winner_test = await run_harness_eval(
-            dataset_path=test_path,
-            output_dir=out_dir,
-            run_one=run_one,
-            metric=metric_fn,
-            mode="test_winner",
-            pred_name="test_winner",
-            patch_bundle=winner_bundle,
-        )
-        winner_score = _mean_score(Path(winner_test["results_path"]))
-    passed = winner_score >= baseline_score
-    report_test = {
-        "baseline_score": baseline_score,
-        "winner_score": winner_score,
-        "passed": passed,
-        "winner_id": sweep_result["winner_id"],
-    }
-    report_test_path = out_dir / "report.test.json"
-    report_test_path.write_text(json.dumps(report_test, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
-
-    if not passed:
-        raise ValueError("holdout regression detected")
-
-    return {
-        "winner_id": sweep_result["winner_id"],
-        "report_harness_path": str(out_dir / "report.harness.json"),
-        "report_test_path": str(report_test_path),
-        "bundle_path": str(bundle_path),
-    }
 
 
 async def evaluate_dataset_from_spec_file(path: str | Path) -> dict[str, Any]:
@@ -1493,6 +1627,7 @@ async def evaluate_dataset_from_spec_file(path: str | Path) -> dict[str, Any]:
         metric=metric,
         candidates=candidates,
         workload=spec.agent_package,
+        report_path=spec.report_path,
     )
 
 
@@ -1511,20 +1646,50 @@ async def run_eval_from_specs(
     """Run eval pipeline using import-path specs for state store, run_one, and metric."""
 
     ensure_project_on_sys_path(project_root)
+    del output_dir
     state_store_factory = resolve_callable(state_store_spec)
     run_one = resolve_callable(run_one_spec)
     metric = wrap_metric(resolve_callable(metric_spec))
     state_store = await _maybe_await(state_store_factory())
+    query_suite = load_query_suite(query_suite_path)
+    query_rows_raw = query_suite.get("queries", [])
+    if not isinstance(query_rows_raw, list) or not query_rows_raw:
+        raise ValueError("query_suite must contain at least one query")
+    query_rows: list[Mapping[str, Any]] = []
+    for row in query_rows_raw:
+        if not isinstance(row, Mapping):
+            raise ValueError("query rows must be JSON objects")
+        query_rows.append(row)
 
-    return await run_eval_workflow(
+    trace_ids = load_trace_ids(trace_ids_path)
+    if not trace_ids:
+        raise ValueError("trace_ids file must contain at least one id")
+
+    collected_rows = await collect_trace_rows(
         state_store=state_store,
-        query_suite_path=query_suite_path,
-        trace_ids_path=trace_ids_path,
-        output_dir=output_dir,
+        trace_ids=trace_ids,
+        session_id=session_id,
+    )
+    trace_rows = list(collected_rows.get("rows", []))
+    trace_rows_by_id = {
+        str(row.get("trace_id")): row
+        for row in trace_rows
+        if isinstance(row, Mapping) and row.get("trace_id") is not None
+    }
+    dataset_rows = _build_dataset_rows_from_query_suite(
+        query_rows=query_rows,
+        trace_ids=trace_ids,
+        trace_rows_by_id=trace_rows_by_id,
+    )
+    val_rows, test_rows = _split_dataset_payload_rows(dataset_rows)
+    return await _evaluate_dataset_rows(
+        val_rows=val_rows,
+        test_rows=test_rows,
         run_one=run_one,
         metric=metric,
         candidates=candidates,
-        session_id=session_id,
+        workload=None,
+        report_path=None,
     )
 
 
