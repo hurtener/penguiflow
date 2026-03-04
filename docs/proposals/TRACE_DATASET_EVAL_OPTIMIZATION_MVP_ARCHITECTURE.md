@@ -315,17 +315,18 @@ Objective: define reproducible evaluation over a pinned dataset.
 Required content:
 
 - `dataset_path`
-- `candidates_path`
 - `metric_spec`
 - `output_dir`
 
 Optional content:
 
+- `candidates_path` (omit for baseline-only mode)
 - `project_root`
 - `agent_package`
 - `run_one_spec`
 - `env_files`
 - `report_path`
+- `min_test_score`
 
 ### `trace.jsonl` (`TraceExampleV1`)
 
@@ -624,6 +625,36 @@ Prove that we can improve planner quality with a minimal loop in days, not weeks
 - Failure policy on compatibility mismatch (`warn` vs `fail`).
 - Default history window for `react_step` and `node_fragment` linearization.
 - Whether to persist full `pred_trace` in `predictions.*.jsonl` by default or behind a debug profile.
+
+## Roadmap Follow-ups (Standalone Enhancements)
+
+These enhancements are designed as independent increments after the current
+collect/evaluate MVP path is stable.
+
+1. **Dataset projection contract parity with DSPy examples**
+   - Add explicit `input_fields` in manifest and/or row-level input/label partitioning.
+   - Preserve `gold_trace` as non-input reference evidence.
+
+2. **Spec-level metric failure policy**
+   - Add `on_metric_error: "zero" | "raise"` in `evaluate.spec.json`.
+   - Optional extension: `max_metric_errors` for bounded tolerance.
+
+3. **Strict trajectory semantics for linearized units**
+   - Add `strict_trajectory` option for `react_step` / `node_fragment` exports.
+   - Stop projection at first invalid/missing row when strict mode is enabled.
+
+4. **Canonical/source artifact split**
+   - Keep `trace.jsonl` canonical.
+   - Keep `view.*.jsonl` / `dataset.jsonl` as projection layers with stable
+     `trace_id` links and optional trace embedding.
+
+5. **Context fairness surfaced in evaluate summaries**
+   - Standardize `context_match_rate`, `context_stability_pass`, and
+     `context_comparable_count` across harness and minimal evaluate outputs.
+
+6. **Metric compatibility metadata enforcement**
+   - Persist and validate `metric.id`, `metric.version`, and
+     `metric.requirements` at dataset/report boundaries.
 
 ## Implementation Order
 

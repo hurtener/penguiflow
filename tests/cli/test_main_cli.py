@@ -243,20 +243,21 @@ class TestEvalCommand:
             """
 {
   "dataset_path": "dataset.jsonl",
-  "candidates_path": "candidates.json",
   "metric_spec": "demo.metric:metric",
   "output_dir": "artifacts/eval/rerun",
+  "min_test_score": 0.8,
   "report_path": "reports/evaluate.json"
 }
 """.strip(),
             encoding="utf-8",
         )
         with patch("penguiflow.evals.api.evaluate_dataset_from_spec_file") as mock_eval:
-            mock_eval.return_value = {"winner_id": "baseline"}
+            mock_eval.return_value = {"mode": "baseline", "test_score": 0.9, "passed_threshold": True}
             result = runner.invoke(app, ["eval", "evaluate", "--spec", str(spec_file)])
 
         assert result.exit_code == 0
-        assert "winner_id: baseline" in result.output
+        assert "mode: baseline" in result.output
+        assert "test_score: 0.9" in result.output
 
     def test_collect_requires_spec_file(self) -> None:
         runner = CliRunner()

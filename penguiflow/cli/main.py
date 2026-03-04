@@ -364,7 +364,20 @@ def _apply_env_files(
 
 def _render_eval_summary(result: dict[str, object]) -> str:
     preferred_order = (
+        "mode",
         "winner_id",
+        "passed_holdout_regression",
+        "passed_threshold",
+        "min_test_score",
+        "val_score",
+        "test_score",
+        "val_baseline_score",
+        "val_winner_score",
+        "test_baseline_score",
+        "test_winner_score",
+        "candidates",
+        "counts",
+        "workload",
         "passed",
         "baseline_score",
         "winner_score",

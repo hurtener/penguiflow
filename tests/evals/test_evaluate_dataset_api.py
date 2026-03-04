@@ -45,12 +45,15 @@ async def test_evaluate_dataset_runs_sweep_and_holdout(tmp_path: Path) -> None:
         metric=metric,
         candidates=[
             {"id": "baseline", "patches": {}},
-            {"id": "winner", "patches": {}},
+            {"id": "winner", "patches": {"planner.system_prompt_extra": "good"}},
         ],
     )
 
+    assert result["mode"] == "candidates"
     assert result["winner_id"] == "winner"
-    assert result["passed"] is True
+    assert result["passed_holdout_regression"] is True
+    assert result["test_baseline_score"] == 0.0
+    assert result["test_winner_score"] == 1.0
     assert not (tmp_path / "out").exists()
 
 
@@ -95,7 +98,9 @@ async def test_evaluate_dataset_baseline_only_skips_duplicate_holdout_run(tmp_pa
         candidates=[],
     )
 
-    assert result["winner_id"] == "baseline"
+    assert result["mode"] == "baseline"
+    assert "winner_id" not in result
+    assert result["test_score"] == 1.0
     assert run_one_calls == 2
 
 
@@ -137,7 +142,7 @@ async def test_evaluate_dataset_writes_single_report_when_requested(tmp_path: Pa
         metric=metric,
         candidates=[
             {"id": "baseline", "patches": {}},
-            {"id": "winner", "patches": {}},
+            {"id": "winner", "patches": {"planner.system_prompt_extra": "good"}},
         ],
         report_path=report_path,
     )
@@ -145,5 +150,94 @@ async def test_evaluate_dataset_writes_single_report_when_requested(tmp_path: Pa
     assert report_path.exists()
     assert result["report_path"] == str(report_path)
     payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["mode"] == "candidates"
     assert payload["winner_id"] == "winner"
-    assert payload["passed"] is True
+    assert payload["passed_holdout_regression"] is True
+
+
+@pytest.mark.asyncio
+async def test_evaluate_dataset_baseline_fails_below_min_test_score(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "dataset.jsonl"
+    rows = [
+        {
+            "example_id": "q1",
+            "split": "val",
+            "question": "Q1",
+            "answer": "A1",
+            "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
+        },
+        {
+            "example_id": "q2",
+            "split": "test",
+            "question": "Q2",
+            "answer": "A2",
+            "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
+        },
+    ]
+    dataset_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    async def run_one(gold, patch_bundle=None):
+        del gold, patch_bundle
+        return "wrong"
+
+    def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
+        del trace, pred_name, pred_trace
+        return 1.0 if pred == gold.get("answer") else 0.0
+
+    with pytest.raises(ValueError, match="min_test_score"):
+        await evaluate_dataset(
+            dataset_path=dataset_path,
+            output_dir=tmp_path / "out",
+            run_one=run_one,
+            metric=metric,
+            candidates=[],
+            min_test_score=0.5,
+        )
+
+
+@pytest.mark.asyncio
+async def test_evaluate_dataset_candidate_fails_threshold_even_if_beats_baseline(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "dataset.jsonl"
+    rows = [
+        {
+            "example_id": "q1",
+            "split": "val",
+            "question": "Q1",
+            "answer": "A1",
+            "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
+        },
+        {
+            "example_id": "q2",
+            "split": "test",
+            "question": "Q2",
+            "answer": "A2",
+            "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
+        },
+        {
+            "example_id": "q3",
+            "split": "test",
+            "question": "Q3",
+            "answer": "A3",
+            "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
+        },
+    ]
+    dataset_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    async def run_one(gold, patch_bundle=None):
+        if patch_bundle and patch_bundle.get("id") == "winner" and gold.get("example_id") == "q2":
+            return str(gold.get("answer"))
+        return "wrong"
+
+    def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
+        del trace, pred_name, pred_trace
+        return 1.0 if pred == gold.get("answer") else 0.0
+
+    with pytest.raises(ValueError, match="min_test_score"):
+        await evaluate_dataset(
+            dataset_path=dataset_path,
+            output_dir=tmp_path / "out",
+            run_one=run_one,
+            metric=metric,
+            candidates=[{"id": "winner", "patches": {}}],
+            min_test_score=0.9,
+        )

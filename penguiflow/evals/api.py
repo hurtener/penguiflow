@@ -27,10 +27,11 @@ class EvalDatasetSpec:
     """Declarative config for evaluation runs over an existing dataset bundle."""
 
     dataset_path: Path
-    candidates_path: Path
+    candidates_path: Path | None
     metric_spec: str
     output_dir: Path
     report_path: Path | None = None
+    min_test_score: float | None = None
     project_root: Path | None = None
     env_files: tuple[Path, ...] = ()
     agent_package: str | None = None
@@ -1061,7 +1062,7 @@ def load_eval_dataset_spec(path: str | Path) -> EvalDatasetSpec:
     if not isinstance(payload, dict):
         raise ValueError("eval dataset spec must be a JSON object")
 
-    required = ["dataset_path", "candidates_path", "metric_spec", "output_dir"]
+    required = ["dataset_path", "metric_spec", "output_dir"]
     missing = [key for key in required if key not in payload]
     if missing:
         raise ValueError(f"eval dataset spec missing required keys: {', '.join(sorted(missing))}")
@@ -1074,14 +1075,25 @@ def load_eval_dataset_spec(path: str | Path) -> EvalDatasetSpec:
     if not isinstance(raw_env_files, list):
         raise ValueError("eval dataset spec field 'env_files' must be a list")
 
+    min_test_score = payload.get("min_test_score")
+    if min_test_score is not None:
+        if isinstance(min_test_score, bool) or not isinstance(min_test_score, (int, float)):
+            raise ValueError("eval dataset spec field 'min_test_score' must be numeric when provided")
+        min_test_score = float(min_test_score)
+
     return EvalDatasetSpec(
         dataset_path=_resolve_against(base_dir, str(payload["dataset_path"])),
-        candidates_path=_resolve_against(base_dir, str(payload["candidates_path"])),
+        candidates_path=(
+            _resolve_against(base_dir, str(payload["candidates_path"]))
+            if payload.get("candidates_path") is not None
+            else None
+        ),
         metric_spec=str(payload["metric_spec"]),
         output_dir=_resolve_against(base_dir, str(payload["output_dir"])),
         report_path=(
             _resolve_against(base_dir, str(payload["report_path"])) if payload.get("report_path") is not None else None
         ),
+        min_test_score=min_test_score,
         project_root=project_root,
         env_files=tuple(_resolve_against(base_dir, str(item)) for item in raw_env_files),
         agent_package=str(payload["agent_package"]) if payload.get("agent_package") is not None else None,
@@ -1189,6 +1201,7 @@ async def _evaluate_dataset_rows(
     candidates: list[dict[str, Any]],
     workload: str | None,
     report_path: str | Path | None,
+    min_test_score: float | None,
 ) -> dict[str, Any]:
     baseline_val_score = await _evaluate_rows_mean(
         val_rows,
@@ -1218,17 +1231,7 @@ async def _evaluate_dataset_rows(
         )
 
     rankings.sort(key=lambda item: (-item["score"], item["patch_size"], item["id"]))
-    winner = (
-        rankings[0]
-        if rankings
-        else {
-            "id": "baseline",
-            "score": baseline_val_score,
-            "patch_size": 0,
-            "patches": {},
-            "patch_bundle": None,
-        }
-    )
+    winner = rankings[0] if rankings else {"id": "baseline", "score": baseline_val_score, "patches": {}}
 
     baseline_score = await _evaluate_rows_mean(
         test_rows,
@@ -1248,20 +1251,43 @@ async def _evaluate_dataset_rows(
             patch_bundle=winner.get("patch_bundle"),
         )
 
-    passed = winner_score >= baseline_score
-    summary = {
-        "baseline_score": baseline_score,
-        "winner_score": winner_score,
-        "passed": passed,
-        "winner_id": winner["id"],
-        "workload": str(workload or "unknown"),
-        "counts": {
-            "val": len(val_rows),
-            "test": len(test_rows),
-            "total": len(val_rows) + len(test_rows),
-        },
-        "candidates": [{"id": item["id"], "score": item["score"]} for item in rankings],
+    counts = {
+        "val": len(val_rows),
+        "test": len(test_rows),
+        "total": len(val_rows) + len(test_rows),
     }
+    if rankings:
+        passed_holdout_regression = winner_score >= baseline_score
+        baseline_threshold_ok = min_test_score is None or baseline_score >= min_test_score
+        winner_threshold_ok = min_test_score is None or winner_score >= min_test_score
+        passed_threshold = baseline_threshold_ok and winner_threshold_ok
+        summary: dict[str, Any] = {
+            "mode": "candidates",
+            "winner_id": winner["id"],
+            "val_baseline_score": baseline_val_score,
+            "val_winner_score": winner["score"],
+            "test_baseline_score": baseline_score,
+            "test_winner_score": winner_score,
+            "passed_holdout_regression": passed_holdout_regression,
+            "passed_threshold": passed_threshold,
+            "workload": str(workload or "unknown"),
+            "counts": counts,
+            "candidates": [{"id": item["id"], "score": item["score"]} for item in rankings],
+        }
+        if min_test_score is not None:
+            summary["min_test_score"] = min_test_score
+    else:
+        passed_threshold = min_test_score is None or baseline_score >= min_test_score
+        summary = {
+            "mode": "baseline",
+            "val_score": baseline_val_score,
+            "test_score": baseline_score,
+            "passed_threshold": passed_threshold,
+            "workload": str(workload or "unknown"),
+            "counts": counts,
+        }
+        if min_test_score is not None:
+            summary["min_test_score"] = min_test_score
 
     resolved_report_path: str | None = None
     if report_path is not None:
@@ -1270,8 +1296,10 @@ async def _evaluate_dataset_rows(
         path.write_text(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
         resolved_report_path = str(path)
 
-    if not passed:
+    if rankings and not summary["passed_holdout_regression"]:
         raise ValueError("holdout regression detected")
+    if not summary["passed_threshold"]:
+        raise ValueError("min_test_score threshold not met")
 
     return {
         **summary,
@@ -1288,6 +1316,7 @@ async def evaluate_dataset(
     candidates: list[dict[str, Any]],
     workload: str | None = None,
     report_path: str | Path | None = None,
+    min_test_score: float | None = None,
 ) -> dict[str, Any]:
     """Evaluate an existing dataset bundle with sweep + holdout gate.
 
@@ -1306,6 +1335,7 @@ async def evaluate_dataset(
         candidates=candidates,
         workload=workload,
         report_path=report_path,
+        min_test_score=min_test_score,
     )
 
 
@@ -1316,7 +1346,7 @@ async def evaluate_dataset_from_spec_file(path: str | Path) -> dict[str, Any]:
     if spec.project_root is not None:
         ensure_project_on_sys_path(spec.project_root)
     metric = wrap_metric(resolve_callable(spec.metric_spec))
-    candidates = load_candidates(spec.candidates_path)
+    candidates = load_candidates(spec.candidates_path) if spec.candidates_path is not None else []
 
     if spec.run_one_spec is not None:
         run_one = resolve_callable(spec.run_one_spec)
@@ -1339,6 +1369,7 @@ async def evaluate_dataset_from_spec_file(path: str | Path) -> dict[str, Any]:
         candidates=candidates,
         workload=spec.agent_package,
         report_path=spec.report_path,
+        min_test_score=spec.min_test_score,
     )
 
 

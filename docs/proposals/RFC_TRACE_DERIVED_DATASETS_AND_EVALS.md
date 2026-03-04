@@ -904,6 +904,37 @@ Success criteria:
 - indexed tag lookup capability
 - OpenInference exports as optional adapter
 
+## Standalone Enhancement Backlog (Post-MVP)
+
+These are independent, DSPy-session-inspired improvements that can ship
+incrementally without changing the current collect/evaluate baseline surface.
+
+1. **Explicit dataset projection contract (`with_inputs` parity)**
+   - Add `input_fields` (or explicit `inputs`/`labels`) to dataset rows and manifest.
+   - Keep `gold_trace` as non-input evidence for metrics and auditing.
+
+2. **Metric error policy in specs**
+   - Add `on_metric_error: "zero" | "raise"` to `evaluate.spec.json`.
+   - Optional follow-up: `max_metric_errors` to fail only after repeated issues.
+
+3. **Strict trajectory/prefix mode for linearized views**
+   - Add `strict_trajectory` behavior for step/turn views so invalid later rows do
+     not silently weaken prefix-based training/eval semantics.
+
+4. **Canonical trace vs projection separation**
+   - Keep `trace.jsonl` as canonical evidence.
+   - Keep `view.*.jsonl` / `dataset.jsonl` as lightweight projections with
+     `trace_id` linkage and optional embedded trace payloads.
+
+5. **Context-stability surfaced in minimal evaluate path**
+   - Surface `context_match_rate`, `context_stability_pass`, and
+     `context_comparable_count` in `penguiflow eval evaluate` summaries/reports,
+     not only in harness-mode artifacts.
+
+6. **Metric-dataset compatibility validation**
+   - Persist `metric.id`, `metric.version`, and `metric.requirements` in manifest.
+   - Fail fast when required fields/signals are missing in dataset rows.
+
 ---
 
 ## Open Questions (TODO)

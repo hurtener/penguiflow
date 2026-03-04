@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from penguiflow.cli.generate import run_generate
-from penguiflow.cli.playground import ChatRequest, ChatResponse, create_playground_app, discover_agent
+from penguiflow.cli.playground import ChatRequest, ChatResponse, PlaygroundError, create_playground_app, discover_agent
 from penguiflow.cli.playground_state import InMemoryStateStore
 from penguiflow.cli.playground_wrapper import OrchestratorAgentWrapper, PlannerAgentWrapper
 from penguiflow.planner import PlannerEvent, PlannerFinish, Trajectory
@@ -182,10 +182,7 @@ def test_discovery_prefers_orchestrator(tmp_path: Path) -> None:
     src_dir.mkdir(parents=True)
     (src_dir / "__init__.py").write_text("", encoding="utf-8")
     (src_dir / "config.py").write_text(
-        "class Config:\n"
-        "    @classmethod\n"
-        "    def from_env(cls):\n"
-        "        return cls()\n",
+        "class Config:\n    @classmethod\n    def from_env(cls):\n        return cls()\n",
         encoding="utf-8",
     )
     (src_dir / "planner.py").write_text(
@@ -208,6 +205,21 @@ def test_discovery_prefers_orchestrator(tmp_path: Path) -> None:
     assert discovery.target.__name__ == "StubOrchestrator"
 
 
+def test_discovery_rejects_package_dir_as_project_root(tmp_path: Path) -> None:
+    package_dir = tmp_path / "stub_agent_pkgroot"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    (package_dir / "orchestrator.py").write_text(
+        "class StubOrchestrator:\n"
+        "    async def execute(self, query, *, tenant_id, user_id, session_id):\n"
+        "        return type('R', (), {'answer': query, 'trace_id': 't-id', 'metadata': {}})()\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PlaygroundError, match="Could not discover agent"):
+        discover_agent(package_dir)
+
+
 def test_load_agent_injects_state_store_into_planner_builder(tmp_path: Path) -> None:
     from penguiflow.cli.playground import load_agent
 
@@ -216,10 +228,7 @@ def test_load_agent_injects_state_store_into_planner_builder(tmp_path: Path) -> 
     src_dir.mkdir(parents=True)
     (src_dir / "__init__.py").write_text("", encoding="utf-8")
     (src_dir / "config.py").write_text(
-        "class Config:\n"
-        "    @classmethod\n"
-        "    def from_env(cls):\n"
-        "        return cls()\n",
+        "class Config:\n    @classmethod\n    def from_env(cls):\n        return cls()\n",
         encoding="utf-8",
     )
     (src_dir / "planner.py").write_text(

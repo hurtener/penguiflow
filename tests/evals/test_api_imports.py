@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import penguiflow.evals.api as eval_api
 from penguiflow.evals.api import (
     EvalCollectSpec,
     EvalDatasetSpec,
@@ -33,6 +34,29 @@ def test_ensure_project_on_sys_path_prefers_src(tmp_path, monkeypatch: pytest.Mo
 
     assert Path(__import__("sys").path[0]) == src_dir
     assert __import__("sys").path.count(str(src_dir)) == 1
+
+
+def test_ensure_project_on_sys_path_uses_project_root_for_package_dir(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_root = tmp_path / "demo_pkg"
+    project_root.mkdir(parents=True)
+    (project_root / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr("sys.path", [])
+
+    ensure_project_on_sys_path(project_root)
+
+    assert Path(__import__("sys").path[0]) == project_root
+
+
+def test_candidate_packages_does_not_include_project_root_package_name(tmp_path) -> None:
+    project_root = tmp_path / "demo_pkg"
+    project_root.mkdir(parents=True)
+    (project_root / "__init__.py").write_text("", encoding="utf-8")
+
+    packages = eval_api._candidate_packages(project_root)
+
+    assert packages == []
 
 
 def test_resolve_callable_loads_function_from_project_root(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -236,6 +260,7 @@ def test_load_eval_dataset_spec_resolves_relative_fields_from_project_root_when_
                 "candidates_path": "datasets/candidates.json",
                 "metric_spec": "demo.metric:metric",
                 "output_dir": "artifacts/eval/rerun",
+                "min_test_score": 0.8,
                 "report_path": "reports/eval-dataset.json",
                 "env_files": ["env/evaluate.env"],
             }
@@ -249,6 +274,7 @@ def test_load_eval_dataset_spec_resolves_relative_fields_from_project_root_when_
     assert spec.project_root == project_root
     assert spec.dataset_path == project_root / "bundle/dataset.jsonl"
     assert spec.candidates_path == project_root / "datasets/candidates.json"
+    assert spec.min_test_score == 0.8
     assert spec.output_dir == project_root / "artifacts/eval/rerun"
     assert spec.report_path == project_root / "reports/eval-dataset.json"
     assert spec.env_files == (project_root / "env/evaluate.env",)
@@ -304,6 +330,24 @@ def test_load_eval_dataset_spec_resolves_project_root_from_cwd(tmp_path, monkeyp
     assert spec.project_root == tmp_path
     assert spec.env_files == (tmp_path / ".env",)
     assert spec.dataset_path == tmp_path / "artifacts/eval/native_avails_v1/run-local/bundle/dataset.jsonl"
+
+
+def test_load_eval_dataset_spec_allows_missing_candidates_path(tmp_path) -> None:
+    spec_path = tmp_path / "evaluate.spec.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "dataset_path": "dataset.jsonl",
+                "metric_spec": "demo.metric:metric",
+                "output_dir": "artifacts/eval/rerun",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    spec = load_eval_dataset_spec(spec_path)
+
+    assert spec.candidates_path is None
 
 
 @pytest.mark.asyncio
@@ -404,4 +448,69 @@ async def test_evaluate_dataset_from_spec_file_runs_pipeline(tmp_path, monkeypat
 
     result = await evaluate_dataset_from_spec_file(spec_path)
 
+    assert result["mode"] == "candidates"
     assert result["winner_id"] == "good"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_dataset_from_spec_file_runs_baseline_without_candidates(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_root = tmp_path / "proj"
+    package_dir = project_root / "demo_pkg_baseline"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    (package_dir / "hooks.py").write_text(
+        "async def run_one(gold, patch_bundle=None):\n"
+        "    del patch_bundle\n"
+        "    return str(gold.get('answer', ''))\n"
+        "\n"
+        "def metric(gold, pred):\n"
+        "    return 1.0 if isinstance(gold, dict) and pred == gold.get('answer') else 0.0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sys.path", [])
+
+    inputs_dir = tmp_path / "inputs"
+    inputs_dir.mkdir(parents=True)
+    (inputs_dir / "dataset.jsonl").write_text(
+        json.dumps(
+            {
+                "example_id": "q-val",
+                "split": "val",
+                "question": "Question val",
+                "answer": "A",
+                "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "example_id": "q-test",
+                "split": "test",
+                "question": "Question test",
+                "answer": "B",
+                "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    spec_path = tmp_path / "evaluate.spec.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "project_root": str(project_root),
+                "run_one_spec": "demo_pkg_baseline.hooks:run_one",
+                "metric_spec": "demo_pkg_baseline.hooks:metric",
+                "dataset_path": str(inputs_dir / "dataset.jsonl"),
+                "output_dir": str(tmp_path / "artifacts"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = await evaluate_dataset_from_spec_file(spec_path)
+
+    assert result["mode"] == "baseline"
+    assert "winner_id" not in result

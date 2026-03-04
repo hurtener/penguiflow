@@ -47,11 +47,11 @@ Evaluation is in-memory by default and prints a text summary.
 
 ## Baseline-only mode
 
-Use an empty candidates file (`[]`) when you want to score the current codebase
-without proposing patches yet.
+Baseline-only mode runs when `evaluate.spec.json` omits `candidates_path`.
 
-- winner is reported as `baseline`
-- holdout runs once for baseline and reuses that score as winner score
+- no candidate ranking is computed
+- output reports baseline scores directly (`val_score`, `test_score`)
+- optional threshold gate via `min_test_score`
 
 ## Spec formats
 
@@ -112,7 +112,6 @@ Minimal example:
 Required fields:
 
 - `dataset_path`
-- `candidates_path`
 - `metric_spec`
 - `output_dir`
 
@@ -123,7 +122,9 @@ At least one execution source is required:
 
 Optional fields:
 
+- `candidates_path` (candidate ranking mode; omit for baseline mode)
 - `report_path` (optional single JSON report output)
+- `min_test_score` (threshold gate on test score)
 - `env_files`
 
 Minimal example:
@@ -131,8 +132,8 @@ Minimal example:
 ```json
 {
   "dataset_path": "artifacts/eval/collect-local/dataset.jsonl",
-  "candidates_path": "datasets/eval_v1/candidates.json",
   "metric_spec": "my_agent.evals.metrics:policy_metric",
+  "min_test_score": 0.8,
   "output_dir": "artifacts/eval/rerun",
   "report_path": "reports/eval-dataset.json",
   "project_root": ".",
@@ -155,6 +156,19 @@ Optional report mode (`report_path` in evaluate specs):
 
 - writes exactly one JSON report file
 - no extra eval workspace artifacts
+
+`score` semantics:
+
+- metric returns per-example score (`float` or `{ "score": ... }`)
+- eval aggregates split scores with arithmetic mean
+- baseline mode outputs `val_score` and `test_score`
+- candidate mode outputs `val_baseline_score`, `val_winner_score`, `test_baseline_score`, `test_winner_score`
+
+## Metric design guidance
+
+- Prefer deterministic, trace-aware metrics as your primary CI gate (stable, cheap, reproducible).
+- Use LLM-as-judge metrics as a secondary signal for ambiguous quality checks (tone/helpfulness/nuance).
+- If you use LLM judging, pin model + prompt + temperature and avoid using judge-only scores as the sole regression gate.
 
 ## Environment loading behavior
 
