@@ -79,7 +79,7 @@ def init_react_planner(
     hop_budget: int | None = None,
     time_source: Callable[[], float] | None = None,
     event_callback: Any | None = None,
-    llm_timeout_s: float = 60.0,
+    llm_timeout_s: float = 360.0,
     llm_max_retries: int = 3,
     use_native_reasoning: bool = True,
     reasoning_effort: str | None = None,

@@ -303,7 +303,7 @@ class ReactPlanner:
     event_callback : PlannerEventCallback | None
         Optional callback receiving PlannerEvent instances for observability.
     llm_timeout_s : float
-        Per-LLM-call timeout in seconds. Default: 60.0.
+        Per-LLM-call timeout in seconds. Default: 360.0.
     llm_max_retries : int
         Max retry attempts for transient LLM failures. Default: 3.
     absolute_max_parallel : int
@@ -438,7 +438,7 @@ class ReactPlanner:
         hop_budget: int | None = None,
         time_source: Callable[[], float] | None = None,
         event_callback: PlannerEventCallback | None = None,
-        llm_timeout_s: float = 60.0,
+        llm_timeout_s: float = 360.0,
         llm_max_retries: int = 3,
         use_native_reasoning: bool = True,
         reasoning_effort: str | None = None,

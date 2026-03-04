@@ -65,7 +65,7 @@ class DSPyLLMClient:
         output_schema: type[BaseModel] | None = None,
         temperature: float = 0.0,
         max_retries: int = 3,
-        timeout_s: float = 60.0,
+        timeout_s: float = 360.0,
         max_tokens: int = 4096,
     ) -> None:
         self._llm = llm

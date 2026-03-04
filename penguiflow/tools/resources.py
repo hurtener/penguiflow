@@ -211,7 +211,10 @@ class ResourceCache:
         # Call the read function
         contents = await read_fn(uri)
 
-        # Convert to ResourceContents if needed
+        # Convert to a single content item from supported response shapes:
+        # - {"contents": [...]}
+        # - [content_item, ...]
+        # - content_item
         if isinstance(contents, dict):
             # Handle raw dict response
             resource_data = contents.get("contents", [contents])
@@ -219,6 +222,8 @@ class ResourceCache:
                 content_item = resource_data[0]
             else:
                 content_item = resource_data
+        elif isinstance(contents, list):
+            content_item = contents[0] if contents else {}
         else:
             # Assume it's already a proper object
             content_item = contents
