@@ -15,6 +15,7 @@ See: https://modelcontextprotocol.io/docs/extensions/apps
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -110,18 +111,26 @@ def extract_app_metadata(tool: Any) -> AppMetadata | None:
     meta = getattr(tool, "meta", None)
     if meta is None and isinstance(tool, dict):
         meta = tool.get("_meta") or tool.get("meta")
-    if not isinstance(meta, dict):
+    if not isinstance(meta, Mapping):
         return None
 
-    ui_data = meta.get("ui")
-    if ui_data is None:
-        return None
+    ui_data: dict[str, Any] = {}
 
-    # Simple marker: ui=True means the tool is an app but with no extra config
-    if ui_data is True:
-        return None  # No resource URI to fetch — skip
+    # Legacy nested key support: meta["ui"] = {...}
+    raw_ui = meta.get("ui")
+    if isinstance(raw_ui, Mapping):
+        ui_data.update(dict(raw_ui))
 
-    if not isinstance(ui_data, dict):
+    # Extension-id form support: meta["io.modelcontextprotocol/ui"] = {...}
+    raw_ext = meta.get(UI_EXTENSION_ID)
+    if isinstance(raw_ext, Mapping):
+        ui_data.update(dict(raw_ext))
+
+    # Flat key support used by MCP Apps:
+    # meta["ui/resourceUri"] = "ui://..."
+    ui_data.update(_extract_flat_ui_meta(meta))
+
+    if not ui_data:
         return None
 
     resource_uri = ui_data.get("resourceUri") or ui_data.get("resource_uri")
@@ -130,6 +139,8 @@ def extract_app_metadata(tool: Any) -> AppMetadata | None:
 
     # Parse CSP
     csp_data = ui_data.get("csp", {})
+    if not isinstance(csp_data, Mapping):
+        csp_data = {}
     csp = AppCSP(
         connect_domains=_list_or_empty(csp_data.get("connectDomains") or csp_data.get("connect_domains")),
         resource_domains=_list_or_empty(csp_data.get("resourceDomains") or csp_data.get("resource_domains")),
@@ -139,16 +150,25 @@ def extract_app_metadata(tool: Any) -> AppMetadata | None:
 
     # Parse permissions — MCP Apps uses {} (empty dict) as "present/enabled"
     perms_data = ui_data.get("permissions", {})
+    if not isinstance(perms_data, Mapping):
+        perms_data = {}
     permissions = AppPermissions(
-        camera=perms_data.get("camera") is not None,
-        microphone=perms_data.get("microphone") is not None,
-        geolocation=perms_data.get("geolocation") is not None,
-        clipboard_write=(perms_data.get("clipboardWrite") is not None or perms_data.get("clipboard_write") is not None),
+        camera=_permission_enabled(perms_data.get("camera")),
+        microphone=_permission_enabled(perms_data.get("microphone")),
+        geolocation=_permission_enabled(perms_data.get("geolocation")),
+        clipboard_write=(
+            _permission_enabled(perms_data.get("clipboardWrite"))
+            or _permission_enabled(perms_data.get("clipboard_write"))
+        ),
     )
+
+    visibility = ui_data.get("visibility", ["app", "model"])
+    if not isinstance(visibility, list):
+        visibility = ["app", "model"]
 
     return AppMetadata(
         resource_uri=str(resource_uri),
-        visibility=ui_data.get("visibility", ["app", "model"]),
+        visibility=[str(v) for v in visibility],
         csp=csp,
         permissions=permissions,
         domain=ui_data.get("domain"),
@@ -163,3 +183,45 @@ def _list_or_empty(val: Any) -> list[str]:
     if isinstance(val, list):
         return [str(v) for v in val]
     return []
+
+
+def _extract_flat_ui_meta(meta: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract flat ui/* metadata into the nested ui dict shape."""
+    data: dict[str, Any] = {}
+
+    resource_uri = meta.get("ui/resourceUri") or meta.get("ui/resource_uri")
+    if resource_uri is not None:
+        data["resourceUri"] = resource_uri
+
+    visibility = meta.get("ui/visibility")
+    if visibility is not None:
+        data["visibility"] = visibility
+
+    csp = meta.get("ui/csp")
+    if isinstance(csp, Mapping):
+        data["csp"] = dict(csp)
+
+    permissions = meta.get("ui/permissions")
+    if isinstance(permissions, Mapping):
+        data["permissions"] = dict(permissions)
+
+    domain = meta.get("ui/domain")
+    if domain is not None:
+        data["domain"] = domain
+
+    prefers_border = meta.get("ui/prefersBorder")
+    if prefers_border is None:
+        prefers_border = meta.get("ui/prefers_border")
+    if prefers_border is not None:
+        data["prefersBorder"] = bool(prefers_border)
+
+    return data
+
+
+def _permission_enabled(value: Any) -> bool:
+    """MCP Apps permissions can be bools or marker objects."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    return True

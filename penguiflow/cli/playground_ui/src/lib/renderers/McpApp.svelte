@@ -21,6 +21,10 @@
     csp?: AppCSP;
     permissions?: AppPermissions;
     tool_data?: unknown;
+    namespace?: string;
+    session_id?: string;
+    tenant_id?: string;
+    user_id?: string;
     height?: string;
     prefers_border?: boolean;
     sandbox?: string;
@@ -34,6 +38,10 @@
     csp = {},
     permissions = {},
     tool_data = undefined,
+    namespace = undefined,
+    session_id = undefined,
+    tenant_id = undefined,
+    user_id = undefined,
     height = '500px',
     prefers_border = false,
     sandbox = undefined,
@@ -78,6 +86,7 @@
 
   // Inject the postMessage bridge into the HTML
   function injectBridge(rawHtml: string): string {
+    const cspMeta = buildCSPMeta();
     const bridge = `
 <script>
 (function() {
@@ -100,17 +109,17 @@
       }
 
       // Handle host-initiated methods
-      if (msg.method === 'mcp/tool-result') {
+      if (msg.method === 'tools/result' || msg.method === 'mcp/tool-result') {
         if (typeof window.onMcpToolResult === 'function') {
           window.onMcpToolResult(msg.params);
         }
         // Also dispatch as custom event
         window.dispatchEvent(new CustomEvent('mcp:tool-result', { detail: msg.params }));
       }
-      else if (msg.method === 'mcp/theme') {
+      else if (msg.method === 'ui/theme' || msg.method === 'mcp/theme') {
         window.dispatchEvent(new CustomEvent('mcp:theme', { detail: msg.params }));
       }
-      else if (msg.method === 'mcp/tool-response') {
+      else if (msg.method === 'tools/response' || msg.method === 'mcp/tool-response') {
         window.dispatchEvent(new CustomEvent('mcp:tool-response', { detail: msg.params }));
       }
     } catch(e) { /* ignore malformed messages */ }
@@ -132,11 +141,11 @@
 
   // Convenience methods
   window.mcpCallTool = function(name, args) {
-    return window.mcpRequest('mcp/call-tool', { name: name, arguments: args || {} });
+    return window.mcpRequest('tools/call', { name: name, arguments: args || {} });
   };
 
   window.mcpSendMessage = function(text) {
-    return window.mcpRequest('mcp/send-message', { text: text });
+    return window.mcpRequest('ui/message', { text: text });
   };
 
   window.mcpRequestTheme = function() {
@@ -151,12 +160,45 @@
 
     // Insert bridge before closing </head> or at start of body
     if (rawHtml.includes('</head>')) {
-      return rawHtml.replace('</head>', bridge + '</head>');
+      return rawHtml.replace('</head>', cspMeta + bridge + '</head>');
     }
     if (rawHtml.includes('<body>')) {
-      return rawHtml.replace('<body>', '<body>' + bridge);
+      return rawHtml.replace('<body>', '<body>' + cspMeta + bridge);
     }
-    return bridge + rawHtml;
+    return cspMeta + bridge + rawHtml;
+  }
+
+  async function callToolThroughApi(name: string, args: Record<string, unknown>): Promise<unknown> {
+    if (!namespace) {
+      throw new Error('MCP App namespace is missing');
+    }
+
+    const params = new URLSearchParams();
+    if (session_id) params.set('session_id', session_id);
+    if (tenant_id) params.set('tenant_id', tenant_id);
+    if (user_id) params.set('user_id', user_id);
+    const query = params.toString();
+    const endpoint = `/apps/${encodeURIComponent(namespace)}/call-tool${query ? `?${query}` : ''}`;
+
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        arguments: args ?? {}
+      })
+    });
+
+    if (!resp.ok) {
+      const detail = await resp.text();
+      throw new Error(`Tool call failed (${resp.status}): ${detail}`);
+    }
+
+    const payload = await resp.json();
+    if (payload && typeof payload === 'object' && 'result' in payload) {
+      return (payload as Record<string, unknown>).result;
+    }
+    return payload;
   }
 
   // Handle postMessage from iframe
@@ -167,17 +209,24 @@
       const msg = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
       if (!msg || msg.jsonrpc !== '2.0') return;
 
-      if (msg.method === 'mcp/call-tool' && onToolCall) {
+      if (msg.method === 'tools/call' || msg.method === 'mcp/call-tool') {
         const { name, arguments: args } = msg.params ?? {};
-        onToolCall(name, args ?? {}).then((result) => {
+        if (typeof name !== 'string' || !name) {
+          sendToApp({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: 'Invalid tool name' } });
+          return;
+        }
+        const normalizedArgs =
+          args && typeof args === 'object' && !Array.isArray(args) ? (args as Record<string, unknown>) : {};
+        const handler = onToolCall ?? callToolThroughApi;
+        handler(name, normalizedArgs).then((result) => {
           sendToApp({ jsonrpc: '2.0', id: msg.id, result });
         }).catch((err: Error) => {
           sendToApp({ jsonrpc: '2.0', id: msg.id, error: { code: -1, message: err.message } });
         });
       }
-      else if (msg.method === 'mcp/send-message' && onSendMessage) {
+      else if (msg.method === 'ui/message' || msg.method === 'mcp/send-message') {
         const text = msg.params?.text;
-        if (text) onSendMessage(text);
+        if (text && onSendMessage) onSendMessage(text);
         sendToApp({ jsonrpc: '2.0', id: msg.id, result: { ok: true } });
       }
       else if (msg.method === 'mcp/request-theme') {
@@ -205,7 +254,7 @@
     if (tool_data !== undefined) {
       sendToApp({
         jsonrpc: '2.0',
-        method: 'mcp/tool-result',
+        method: 'tools/result',
         params: tool_data,
       });
     }

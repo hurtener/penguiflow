@@ -469,7 +469,29 @@ def test_handle_prompts_changed(registry):
     node.handle_prompts_changed()
 
     assert node.prompts == []
-    assert node.prompts_supported is False
+    assert node.prompts_supported is True
+    assert node._prompts_stale is True
+
+
+@pytest.mark.asyncio
+async def test_list_prompts_refreshes_when_cache_is_stale(registry):
+    """A prompts/list_changed invalidation should refresh on next access."""
+    config = build_config()
+    node = ToolNode(config=config, registry=registry)
+
+    mock_client = AsyncMock()
+    mock_client.list_prompts = AsyncMock(return_value=[MockMCPPrompt("fresh", "Fresh prompt")])
+
+    node._mcp_client = mock_client
+    node._connected = True
+    node._prompts_supported = True
+    node._prompts = [PromptInfo(name="stale")]
+    node.handle_prompts_changed()
+
+    refreshed = await node.list_prompts()
+    assert len(refreshed) == 1
+    assert refreshed[0].name == "fresh"
+    assert node._prompts_stale is False
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────

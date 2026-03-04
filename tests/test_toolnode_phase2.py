@@ -607,6 +607,34 @@ async def test_toolnode_unsubscribe_resource_not_connected():
     assert result is False
 
 
+@pytest.mark.asyncio
+async def test_toolnode_subscribe_resource_connected_without_client_support():
+    """subscribe_resource should return False when MCP client lacks subscribe APIs."""
+    config = build_config()
+    registry = ModelRegistry()
+    node = ToolNode(config=config, registry=registry)
+    node._connected = True
+    node._resources_supported = True
+    node._mcp_client = object()
+
+    result = await node.subscribe_resource("file:///test.txt")
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_toolnode_unsubscribe_resource_connected_without_client_support():
+    """unsubscribe_resource should return False when MCP client lacks unsubscribe APIs."""
+    config = build_config()
+    registry = ModelRegistry()
+    node = ToolNode(config=config, registry=registry)
+    node._connected = True
+    node._resources_supported = True
+    node._mcp_client = object()
+
+    result = await node.unsubscribe_resource("file:///test.txt")
+    assert result is False
+
+
 def test_toolnode_handle_resource_updated():
     """handle_resource_updated should invalidate cache entry."""
     config = build_config()

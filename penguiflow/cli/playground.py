@@ -2219,7 +2219,12 @@ def create_playground_app(
             raise HTTPException(status_code=404, detail=f"Tool node '{namespace}' not found")
 
         # Build namespaced tool name
-        namespaced_name = f"{namespace}.{tool_name}"
+        if "." in tool_name:
+            if not tool_name.startswith(f"{namespace}."):
+                raise HTTPException(status_code=400, detail="Tool name namespace mismatch")
+            namespaced_name = tool_name
+        else:
+            namespaced_name = f"{namespace}.{tool_name}"
 
         # Create minimal context for tool execution
         resolved_session = session_id or x_session_id or "default"
@@ -2266,6 +2271,8 @@ def create_playground_app(
 
         try:
             result = await tool_node.call(namespaced_name, tool_args, ctx)
+            if isinstance(result, Mapping):
+                return result
             return {"result": result}
         except Exception as exc:
             _LOGGER.warning(f"App tool call failed for {namespaced_name}: {exc}")

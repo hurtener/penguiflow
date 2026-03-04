@@ -95,6 +95,7 @@ class ToolNode:
     # MCP Prompts support (Phase 3)
     _prompts: list[PromptInfo] = field(default_factory=list, repr=False)
     _prompts_supported: bool = field(default=False, repr=False)
+    _prompts_stale: bool = field(default=False, repr=False)
 
     # MCP Apps support
     # namespaced tool name -> AppMetadata
@@ -130,6 +131,10 @@ class ToolNode:
             # Reset discovery caches before connecting
             self._tools = []
             self._tool_name_map.clear()
+            self._app_metadata.clear()
+            self._prompts = []
+            self._prompts_supported = False
+            self._prompts_stale = False
 
             # Resolve auth headers for connection (supports HITL OAuth if ctx provided)
             auth_headers = await self._resolve_connection_auth(ctx)
@@ -336,12 +341,16 @@ class ToolNode:
             return
 
         if not self.config.prompts.enabled:
+            self._prompts = []
+            self._prompts_supported = False
+            self._prompts_stale = False
             return
 
         try:
             prompts = await self._mcp_client.list_prompts()
             self._prompts = [self._parse_prompt_info(p) for p in (prompts if isinstance(prompts, list) else [])]
             self._prompts_supported = True
+            self._prompts_stale = False
             logger.debug(
                 "Discovered %d MCP prompts for '%s'",
                 len(self._prompts),
@@ -355,6 +364,7 @@ class ToolNode:
             )
             self._prompts = []
             self._prompts_supported = False
+            self._prompts_stale = False
 
         # Generate planner tools for prompts if supported
         if self._prompts_supported and self.config.prompts.generate_tools:
@@ -487,6 +497,7 @@ class ToolNode:
         self._connected_loop = None
         self._tools = []
         self._tool_name_map.clear()
+        self._prompts_stale = False
         if self._mcp_client:
             try:
                 await self._mcp_client.__aexit__(None, None, None)
@@ -1807,11 +1818,16 @@ class ToolNode:
         if self._subscription_manager is None:
             return False
 
-        # Capture client for closure (preserves type narrowing)
-        mcp_client = self._mcp_client
+        subscribe_method = getattr(self._mcp_client, "subscribe_resource", None)
+        if not callable(subscribe_method):
+            subscribe_method = getattr(self._mcp_client, "subscribe", None)
+        if not callable(subscribe_method):
+            logger.debug("MCP client for '%s' does not support resource subscriptions", self.config.name)
+            return False
 
+        # Capture client for closure (preserves type narrowing)
         async def subscribe_fn(resource_uri: str) -> None:
-            await mcp_client.subscribe(resource_uri)
+            await subscribe_method(resource_uri)
 
         return await self._subscription_manager.subscribe(uri, subscribe_fn, callback)
 
@@ -1830,11 +1846,16 @@ class ToolNode:
         if self._subscription_manager is None:
             return False
 
-        # Capture client for closure (preserves type narrowing)
-        mcp_client = self._mcp_client
+        unsubscribe_method = getattr(self._mcp_client, "unsubscribe_resource", None)
+        if not callable(unsubscribe_method):
+            unsubscribe_method = getattr(self._mcp_client, "unsubscribe", None)
+        if not callable(unsubscribe_method):
+            logger.debug("MCP client for '%s' does not support resource unsubscriptions", self.config.name)
+            return False
 
+        # Capture client for closure (preserves type narrowing)
         async def unsubscribe_fn(resource_uri: str) -> None:
-            await mcp_client.unsubscribe(resource_uri)
+            await unsubscribe_method(resource_uri)
 
         return await self._subscription_manager.unsubscribe(uri, unsubscribe_fn)
 
@@ -1913,12 +1934,35 @@ class ToolNode:
         if html is None:
             return tool_result
 
+        session_id: str | None = None
+        try:
+            tool_ctx = getattr(ctx, "tool_context", None)
+            if isinstance(tool_ctx, dict):
+                raw_session_id = tool_ctx.get("session_id")
+                if raw_session_id is not None:
+                    session_id = str(raw_session_id)
+        except Exception:
+            session_id = None
+
+        app_meta_payload: dict[str, Any] = {
+            "csp": app_meta.csp.model_dump(),
+            "permissions": app_meta.permissions.model_dump(),
+            "tool_data": tool_result,
+            "resource_uri": app_meta.resource_uri,
+            "prefers_border": app_meta.prefers_border,
+            "namespace": self.config.name,
+            "sandbox": self.config.apps.default_sandbox,
+        }
+        if session_id is not None:
+            app_meta_payload["session_id"] = session_id
+
         # Store HTML as artifact
         try:
             ref = await ctx._artifacts.put_text(
                 html,
                 mime_type=UI_MIME_TYPE,
                 namespace=f"{self.config.name}.app",
+                meta=app_meta_payload,
             )
         except Exception as e:
             logger.warning("Failed to store app HTML artifact: %s", e)
@@ -1927,11 +1971,7 @@ class ToolNode:
         # Attach app metadata to result
         app_payload = {
             "artifact_id": ref.id,
-            "csp": app_meta.csp.model_dump(),
-            "permissions": app_meta.permissions.model_dump(),
-            "tool_data": tool_result,
-            "resource_uri": app_meta.resource_uri,
-            "prefers_border": app_meta.prefers_border,
+            **app_meta_payload,
         }
 
         if isinstance(tool_result, dict):
@@ -2150,13 +2190,19 @@ class ToolNode:
         Returns:
             List of PromptInfo objects (empty if not connected or prompts not supported)
         """
-        if not self._connected or not self._prompts_supported:
+        if not self._connected:
             return self._prompts
 
-        if refresh and self._mcp_client is not None:
+        needs_refresh = refresh or self._prompts_stale
+        if not self._prompts_supported and not needs_refresh:
+            return self._prompts
+
+        if needs_refresh and self._mcp_client is not None:
             try:
                 prompts = await self._mcp_client.list_prompts()
                 self._prompts = [self._parse_prompt_info(p) for p in (prompts if isinstance(prompts, list) else [])]
+                self._prompts_supported = True
+                self._prompts_stale = False
             except Exception as e:
                 logger.warning(f"Failed to refresh prompts: {e}")
 
@@ -2200,7 +2246,7 @@ class ToolNode:
         Clears cached prompts so they are re-discovered on next access.
         """
         self._prompts = []
-        self._prompts_supported = False
+        self._prompts_stale = True
         logger.debug("Prompts cache invalidated for '%s'", self.config.name)
 
     @property

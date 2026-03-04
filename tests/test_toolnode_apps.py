@@ -12,9 +12,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from penguiflow.artifacts import InMemoryArtifactStore, ScopedArtifacts
+from penguiflow.artifacts import ArtifactRef, InMemoryArtifactStore, ScopedArtifacts
+from penguiflow.planner.artifact_registry import ArtifactRegistry
 from penguiflow.registry import ModelRegistry
 from penguiflow.tools.apps import (
+    UI_MIME_TYPE,
     AppCSP,
     AppMetadata,
     AppPermissions,
@@ -259,6 +261,31 @@ def test_extract_app_from_dict():
     assert result.resource_uri == "ui://test/view.html"
 
 
+def test_extract_app_from_flat_ui_keys():
+    """Should parse FastMCP-style flat ui/* metadata keys."""
+    tool = MockTool(meta={"ui/resourceUri": "ui://test/flat.html", "ui/prefersBorder": True})
+    result = extract_app_metadata(tool)
+    assert result is not None
+    assert result.resource_uri == "ui://test/flat.html"
+    assert result.prefers_border is True
+
+
+def test_extract_app_from_extension_id_key():
+    """Should parse extension-id keyed metadata payload."""
+    tool = MockTool(
+        meta={
+            "io.modelcontextprotocol/ui": {
+                "resourceUri": "ui://test/ext.html",
+                "visibility": ["app"],
+            }
+        }
+    )
+    result = extract_app_metadata(tool)
+    assert result is not None
+    assert result.resource_uri == "ui://test/ext.html"
+    assert result.visibility == ["app"]
+
+
 # ─── ToolNode App Detection Tests ────────────────────────────────────────────
 
 
@@ -425,6 +452,7 @@ async def test_enrich_with_app_html(registry, artifact_store):
     )
 
     ctx = DummyCtx(artifact_store)
+    ctx.tool_context["session_id"] = "sess-123"
     original_result = {"data": "tool output"}
 
     enriched = await node._enrich_with_app_html(original_result, app_meta, ctx)
@@ -436,6 +464,13 @@ async def test_enrich_with_app_html(registry, artifact_store):
     assert enriched["__mcp_app__"]["prefers_border"] is True
     assert enriched["__mcp_app__"]["csp"]["connect_domains"] == ["https://api.example.com"]
     assert enriched["__mcp_app__"]["artifact_id"] is not None
+
+    ref = await artifact_store.get_ref(enriched["__mcp_app__"]["artifact_id"])
+    assert ref is not None
+    assert ref.mime_type == UI_MIME_TYPE
+    assert ref.source["namespace"] == "test_server"
+    assert ref.source["session_id"] == "sess-123"
+    assert ref.source["csp"]["connect_domains"] == ["https://api.example.com"]
 
 
 @pytest.mark.asyncio
@@ -485,3 +520,30 @@ def test_get_app_metadata(registry):
 
     assert node.get_app_metadata("test_server.tool1") is not None
     assert node.get_app_metadata("test_server.unknown") is None
+
+
+def test_artifact_registry_preserves_mcp_app_metadata():
+    """MCP App binary records should retain structured renderer metadata."""
+    ref = ArtifactRef(
+        id="art_1",
+        mime_type=UI_MIME_TYPE,
+        source={
+            "csp": {"connect_domains": ["https://api.example.com"]},
+            "permissions": {"camera": True},
+            "tool_data": {"hello": "world"},
+            "prefers_border": True,
+            "namespace": "test_ns",
+            "session_id": "sess-1",
+            "sandbox": "allow-scripts",
+        },
+    )
+    registry = ArtifactRegistry()
+    registry.register_binary_artifact(ref, source_tool="test_ns.tool", step_index=0)
+
+    payload = registry.resolve_ref("art_1", session_id="sess-1")
+    assert payload is not None
+    assert payload["component"] == "mcp_app"
+    assert payload["props"]["namespace"] == "test_ns"
+    assert payload["props"]["session_id"] == "sess-1"
+    assert payload["props"]["sandbox"] == "allow-scripts"
+    assert payload["props"]["csp"]["connect_domains"] == ["https://api.example.com"]
