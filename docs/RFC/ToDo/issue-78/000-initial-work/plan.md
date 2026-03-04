@@ -18,6 +18,19 @@ This change moves both into the planner itself so that any caller benefits from 
 - **Pause:** Trajectories are persisted for both `PlannerFinish` **and** `PlannerPause`.
 - **Event completeness:** Persist **all** planner events (no event-type filtering).
 
+## Implementation order
+
+Implement sections in order: **1 → 2 → 3 → 4+4a → 5 → 6**. Sections 1–3 are independent (planner core changes), Section 4+4a depends on 3 (wrapper cleanup + template fix), Section 5 is docs (independent), and Section 6 (tests) depends on 1–4.
+
+## Implementation notes (verified)
+
+The following decisions were confirmed during plan verification on 2026-03-04:
+
+- **`assert result is not None` after `finally`** (Section 3): No comment needed. If `run_loop()` raises, the exception propagates before the assert is reached — standard Python behavior.
+- **Post-call block replacement** (Section 4): Keep the explanatory comment `# trace_id is already pre-computed and trace_holder already set — nothing needed here` to document why the old 3-line block was removed.
+- **`InMemoryStateStore.save_trajectory` overwrites** (Section 6): Verified — `save_trajectory` uses `self._trajectories[trace_id] = ...` (dict keyed by `trace_id`), so calling it twice with the same `(trace_id, session_id)` overwrites. The `len(traj_after.steps) > len(traj.steps)` assertion in the resume test is valid because the resumed trajectory accumulates steps from both phases.
+- **Edit order for `playground_wrapper.py`** (Section 4): Use string matching (the Edit tool's `old_string` parameter) rather than relying on line numbers, since removals shift subsequent line numbers. Line numbers in the plan are for *locating context*, not for mechanical replacement.
+
 ## Approach
 
 ### A. Trajectory persistence
@@ -48,7 +61,7 @@ Add `_event_buffer: list[PlannerEvent]` to the class-level type annotation decla
     _hop_budget: int | None
 ```
 
-In `_emit_event()` (line 1181), append the event to `self._event_buffer` **at the very beginning of the method body, before the logging block (before line 1184)**. This ensures the event is buffered even if the callback later raises an exception:
+In `_emit_event()` (line 1195), append the event to `self._event_buffer` **at the very beginning of the method body, before the logging block (before line 1198)**. This ensures the event is buffered even if the callback later raises an exception:
 
 ```python
     def _emit_event(self, event: PlannerEvent) -> None:
@@ -61,6 +74,10 @@ In `_emit_event()` (line 1181), append the event to `self._event_buffer` **at th
 ```
 
 ### 2. `penguiflow/planner/react_init.py` — Initialize buffer
+
+**Initialization path note:** `ReactPlanner.__init__()` (react.py line 529) delegates to `_init_react_planner()` internally. Adding the buffer here is sufficient — any planner created via `ReactPlanner(...)` or via direct `init_react_planner()` will have `_event_buffer` initialized. The test scaffolding's `ReactPlanner(llm_client=..., catalog=..., state_store=store)` works because `__init__` accepts `state_store` (line 429) and forwards it.
+
+**Session-forked planners:** `ReactPlanner.__init__` has a session-dispatch mechanism that forks planners per-session using `_init_kwargs`. Forked planners go through `__init__()` → `_init_react_planner()`, so each fork gets its own independent `_event_buffer = []`. This is correct — each forked planner buffers and persists events independently. No additional changes are needed for the forking path.
 
 In the `init_react_planner()` function, add `planner._event_buffer = []` right after `planner._event_callback = event_callback` (line 450):
 
@@ -201,6 +218,8 @@ Key design decisions:
 - Requires `trace_id` (and for trajectories also `session_id`) in `tool_context` — silently skips if missing
 - Named tasks (`name="penguiflow-persist-*"`) for easier debugging in `asyncio.all_tasks()` output
 
+**Retained helpers — DO NOT remove:** The following private helpers in `playground_wrapper.py` are still used after this migration and must NOT be removed: `_combine_callbacks` (used by all wrapper `chat()`/`resume()` methods to merge event callbacks), `_normalise_answer`, `_normalise_metadata`, `_extract_from_dict` (used by wrapper methods to process planner results), `_get_attr` (used by `OrchestratorAgentWrapper`), `_planner_trace_id` (used in `_trace_id_supplier` closures in `OrchestratorAgentWrapper`). Only remove the items explicitly listed in this plan.
+
 ### 4. `penguiflow/cli/playground_wrapper.py` — Remove redundant persistence
 
 **Remove trajectory saves from three locations:**
@@ -265,7 +284,9 @@ to just (after removing `persist()` call):
 # trace_id is already pre-computed and trace_holder already set — nothing needed here
 ```
 
-This ensures the internal `ReactPlanner.run()` / `resume()` receives the correct IDs in `tool_context` and persists under the same trace id the frontend uses. If an orchestrator does not propagate `tool_context` into its internal planner calls, that must be treated as a bug to fix in the orchestrator (otherwise planner-level persistence will be skipped by design).
+This ensures the internal `ReactPlanner.run()` / `resume()` receives the correct IDs in `tool_context` and persists under the same trace id the frontend uses.
+
+**PlannerAgentWrapper already injects `trace_id` + `session_id` (verified):** `PlannerAgentWrapper.chat()` (line ~260) and `PlannerAgentWrapper.resume()` (line ~350) both construct `merged_tool_context` with `"session_id": session_id` and `"trace_id": trace_id` before calling `planner.run()` / `planner.resume()`. No changes are needed for `PlannerAgentWrapper`'s tool_context injection — it already provides the IDs the planner needs for persistence.
 
 **Remove `_build_trajectory()` helper** (lines 174-211). Verified: `_build_trajectory` is only called within `playground_wrapper.py` (lines 308, 406, 586) and its test file (`tests/cli/test_playground_wrapper_helpers.py`). No other callers exist — safe to remove.
 
@@ -309,7 +330,7 @@ Update the `__init__` methods of `PlannerAgentWrapper` (line 226) and `Orchestra
 
 - `PlannerAgentWrapper.__init__` (line 221): Remove `state_store: PlaygroundStateStore | None = None` parameter and `self._state_store = state_store` assignment (line 225).
 - `OrchestratorAgentWrapper.__init__` (line 432): Remove `state_store: PlaygroundStateStore | None = None` parameter and `self._state_store = state_store` assignment (line 438).
-- Remove `has_store=self._state_store is not None` from the log calls at lines ~302-306 (`PlannerAgentWrapper.chat()`, `_LOGGER.info()`), ~397-402 (`PlannerAgentWrapper.resume()`, `_LOGGER.info()`), and ~579-584 (`OrchestratorAgentWrapper.chat()`, `_LOGGER.debug()` — note: this one uses `debug`, not `info`). In each case: remove `, has_store=%s` from the format string and remove the corresponding `self._state_store is not None` argument.
+- Remove `has_store=self._state_store is not None` from the log calls at lines ~302-306 (`PlannerAgentWrapper.chat()`, `_LOGGER.info()`), ~397-402 (`PlannerAgentWrapper.resume()`, `_LOGGER.info()`), and ~579-584 (`OrchestratorAgentWrapper.chat()`, `_LOGGER.debug()` — note: this one uses `debug`, not `info`). In each case: remove `, has_store=%s` from the format string and remove the corresponding `self._state_store is not None` argument. **Rationale:** `self._state_store` no longer exists on the wrapper class — leaving the reference would cause `AttributeError` at runtime. Only the `has_store` portion is removed; the rest of each log statement (trace_id, session_id, metadata_keys, has_steps) stays unchanged.
 - Remove the `PlaygroundStateStore` import (line 24: `from .playground_state import PlaygroundStateStore`). It is now unused: its only references were in `_EventRecorder.__init__` (removed), `PlannerAgentWrapper.__init__` (removed), and `OrchestratorAgentWrapper.__init__` (removed).
 
 **Update all callers of the wrapper constructors:**
@@ -318,6 +339,50 @@ Update the `__init__` methods of `PlannerAgentWrapper` (line 226) and `Orchestra
 - `tests/cli/test_playground_backend.py` (lines 117, 131, 141): Remove `state_store=store` kwarg from wrapper constructor calls.
 - `tests/cli/test_playground_streaming.py` (lines 112, 137): Remove `state_store=store` kwarg from wrapper constructor calls.
 - `tests/cli/test_playground_wrapper_helpers.py` (line 238): Already handled in the test updates section below.
+
+### 4a. `penguiflow/templates/new/react/src/__package_name__/orchestrator.py.jinja` — Fix trace_id propagation
+
+**DEPENDENCY: Section 4a MUST be applied together with Section 4.** Section 4 injects `trace_id` into the wrapper's `tool_ctx`, but the orchestrator template merges `base_tool_context` **last** — overriding the wrapper's `trace_id`. Without the fix below, the planner will still see a freshly generated `trace_id` instead of the frontend's `run_id`, breaking persistence alignment.
+
+The orchestrator template currently generates a fresh `trace_id` unconditionally (line 209 in `execute()`, line 315 in `resume()`):
+
+```python
+trace_id = secrets.token_hex(8)
+```
+
+And then merges it into `base_tool_context` **last**, overriding any `trace_id` the wrapper injected via `tool_context`:
+
+```python
+merged_tool_context = {
+    **self._tool_context_defaults,
+    **(dict(tool_context or {})),    # wrapper's trace_id is here...
+    **base_tool_context,             # ...but gets overridden here
+}
+```
+
+This means the planner never sees the wrapper's `trace_id`, breaking persistence under the frontend's `run_id`.
+
+**Note:** This file is a Jinja template (`orchestrator.py.jinja`), not plain Python. The fix lines below are outside any Jinja conditional blocks (`{% if ... %}`), so they can be applied as regular Python. Be careful not to disturb surrounding Jinja syntax.
+
+**Fix in `execute()` (line 209):** Change from:
+```python
+trace_id = secrets.token_hex(8)
+```
+to:
+```python
+trace_id = (tool_context or {}).get("trace_id") or secrets.token_hex(8)
+```
+
+**Fix in `resume()` (line 315):** Same change:
+```python
+trace_id = (tool_context or {}).get("trace_id") or secrets.token_hex(8)
+```
+
+This ensures: if the wrapper (or any caller) provides a `trace_id` via `tool_context`, the orchestrator respects it. If no `trace_id` is provided, the orchestrator falls back to generating one. The `base_tool_context` still merges last (correct for other keys), but now `trace_id` in `base_tool_context` will be the one from the caller — not a freshly generated one that conflicts.
+
+**Note on `session_id`:** `session_id` is already a first-class parameter of `execute()` and `resume()`, so it doesn't need the same treatment — it's passed directly by the wrapper as a named argument and then included in `base_tool_context`.
+
+**Note on custom orchestrators:** Projects generated from the old template will have the unconditional `secrets.token_hex(8)` pattern. These must be updated manually. Add a note in `REACT_PLANNER_INTEGRATION_GUIDE.md` documenting this requirement (see Section 5).
 
 ### 5. Documentation updates
 
@@ -337,6 +402,7 @@ Update the `__init__` methods of `PlannerAgentWrapper` (line 226) and `Orchestra
 
 **`REACT_PLANNER_INTEGRATION_GUIDE.md`** (at repo root, NOT in `docs/`) (line ~939):
 - Update "If you persist trajectories (e.g., via the Playground state store)" to reflect that the planner now auto-persists trajectories and events when a StateStore is provided.
+- Add a section or note explaining that **orchestrators must propagate the caller's `trace_id` from `tool_context`** into the planner's `run()` / `resume()` call. The recommended pattern: `trace_id = (tool_context or {}).get("trace_id") or secrets.token_hex(8)`. Orchestrators that generate their own `trace_id` unconditionally will break persistence alignment with the frontend.
 
 ### 6. Tests
 
@@ -390,6 +456,9 @@ registry.register("echo", EchoArgs, EchoOut)
 catalog = build_catalog([Node(echo, name="echo")], registry)
 
 # 3. Create a scripted LLM client that returns a finish action
+# See tests/test_tool_background_mode.py:107 (ScriptedClient) for the full
+# complete() signature accepted by the planner: (*, messages, response_format=None,
+# stream=False, on_stream_chunk=None). The **_ shorthand below works equally well.
 class ScriptedClient:
     async def complete(self, *, messages, **_):
         return '{"thought":"done","next_node":null,"args":{"raw_answer":"ok"}}'
@@ -478,6 +547,61 @@ assert traj is not None
 
 Valid pause reasons (from `PlannerPauseReason`): `"approval_required"`, `"await_input"`, `"external_event"`, `"constraints_conflict"`. See `tests/test_react_planner.py` line 1705+ for an existing pause/resume integration test pattern.
 
+**Test scaffolding — how to test `resume()` persistence (full pause→resume flow):**
+
+After `PlannerPause`, call `planner.resume()` with the `resume_token` from `PlannerPause.resume_token`. The `PauseClient` above returns a finish action on the second call, so resume completes with `PlannerFinish`. Then drain and assert:
+
+```python
+from penguiflow.planner import PlannerFinish, PlannerPause
+
+# --- After the pause scaffolding above (planner, store, PauseClient already set up) ---
+
+# Phase 1: Run → PlannerPause
+pause_result = await planner.run("pause please", tool_context={"session_id": "s1", "trace_id": "t1"})
+assert isinstance(pause_result, PlannerPause)
+await _drain_persistence_tasks()
+
+# Assert trajectory persisted on pause
+traj = await store.get_trajectory("t1", "s1")
+assert traj is not None
+
+# Phase 2: Resume → PlannerFinish
+# resume() takes the resume_token from PlannerPause, plus optional user_input.
+# tool_context can be overridden or omitted (resume restores the paused tool_context).
+resume_result = await planner.resume(
+    pause_result.resume_token,
+    user_input="confirmed",
+    tool_context={"session_id": "s1", "trace_id": "t1"},  # re-inject IDs for persistence
+)
+assert isinstance(resume_result, PlannerFinish)
+await _drain_persistence_tasks()
+
+# Assert trajectory updated after resume (live trajectory now includes post-resume steps)
+traj_after = await store.get_trajectory("t1", "s1")
+assert traj_after is not None
+assert len(traj_after.steps) > len(traj.steps)  # resume added more steps
+
+# Assert events persisted for both phases
+events = await store.list_planner_events("t1")
+assert len(events) >= 2  # at least: step_start from run + resume event from resume
+assert any(e.event_type == "resume" for e in events)
+```
+
+**Key detail:** `planner.resume()` accepts `tool_context` as an optional override. If omitted, the paused trajectory's `tool_context` is restored (which already contains `trace_id` and `session_id` from the initial `run()` call). However, explicitly re-passing `tool_context` with the same IDs is safer and mirrors the wrapper's behavior. The resume signature is:
+
+```python
+async def resume(
+    self,
+    token: str,
+    user_input: str | None = None,
+    *,
+    tool_context: Mapping[str, Any] | None = None,
+    memory_key: MemoryKey | None = None,
+    steering: SteeringInbox | None = None,
+    tool_visibility: ToolVisibilityPolicy | None = None,
+) -> PlannerFinish | PlannerPause:
+```
+
 **Test scaffolding — how to test event persistence on `run_loop()` errors:**
 
 Monkeypatch `run_loop` at `penguiflow.planner.react_runtime.run_loop`. The stub must call `planner._emit_event()` before raising so the event buffer is populated:
@@ -485,7 +609,7 @@ Monkeypatch `run_loop` at `penguiflow.planner.react_runtime.run_loop`. The stub 
 ```python
 import asyncio
 
-from penguiflow.planner.models import PlannerEvent
+from penguiflow.planner import PlannerEvent
 import penguiflow.planner.react_runtime as rt_mod
 
 
@@ -559,8 +683,47 @@ The mock `_StreamingPlanner` is NOT a real `ReactPlanner`. After the migration, 
 - **`test_events_endpoint_replays_history`** (lines 134-159): Remove `state_store=store` from `PlannerAgentWrapper(...)` at line 137. Note: `create_playground_app(agent=agent, state_store=store)` at line 138 still needs `state_store`. After the migration, the mock `_StreamingPlanner` does not persist events or trajectories. The current test passes `session_id` to the `/events` endpoint, which triggers a trajectory existence check (`store.get_trajectory(trace_id, session_id)`) — this will return `None` and the endpoint will raise 404 since no trajectory was saved. **Rewrite** the test as follows:
   1. POST to `/chat` to obtain a `trace_id` (this still works — the wrapper calls the mock planner and returns a result).
   2. GET `/events?trace_id=<trace_id>` **without** `session_id` (skips the trajectory existence check at line 1852 of `playground.py`).
-  3. Assert the SSE stream returns 200 and starts with a `"connected"` event containing the `trace_id`.
-  4. Assert no data events are present (no `artifact_chunk`, `step_start`, etc.) since the mock planner does not persist events to the store.
+  3. Assert the SSE stream returns HTTP 200 with `content-type: text/event-stream`.
+  4. Parse SSE frames using the existing `_parse_sse()` helper (test file line 18). The SSE wire format is (see `playground_sse.py:14` `format_sse()`):
+     ```
+     event: <event_name>\n
+     data: <json_payload>\n
+     \n
+     ```
+  5. Assert the **first** parsed event is `("event", {"event": "connected", "trace_id": trace_id, "session_id": ""})`. Note: `session_id` is `""` (empty string) because no `session_id` query param was passed — the endpoint sets `session_payload = session_id or ""` (playground.py line 1863).
+  6. Assert **no further events** are present after the `connected` event (no `artifact_chunk`, `step_start`, etc.) since the mock planner does not persist events to the store and `follow=False` (default).
+  7. Remove the trailing trajectory GET assertion (lines 161-163: `trajectory_response = await client.get(...)`) — the mock planner does not persist trajectories.
+
+  Complete rewritten test:
+
+  ```python
+  @pytest.mark.asyncio
+  async def test_events_endpoint_replays_history() -> None:
+      store = InMemoryStateStore()
+      agent = PlannerAgentWrapper(_StreamingPlanner())
+      app = create_playground_app(agent=agent, state_store=store)
+
+      transport = httpx.ASGITransport(app=app)
+      async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+          chat_response = await client.post("/chat", json={"query": "hello", "session_id": "sess-2"})
+          assert chat_response.status_code == 200
+          trace_id = chat_response.json()["trace_id"]
+
+          # GET /events without session_id — skips trajectory existence check
+          async with client.stream("GET", "/events", params={"trace_id": trace_id}) as stream:
+              lines: list[str] = [line async for line in stream.aiter_lines()]
+
+          events = _parse_sse(lines)
+          assert len(events) >= 1
+          name, payload = events[0]
+          assert name == "event"
+          assert payload["event"] == "connected"
+          assert payload["trace_id"] == trace_id
+          assert payload["session_id"] == ""
+          # No further replay events — mock planner does not persist to store
+          assert len(events) == 1
+  ```
+
   This verifies the endpoint's HTTP contract and SSE framing without relying on wrapper-level persistence. Event replay with real persistence is covered by the new `tests/planner/test_persistence.py`.
 
 ## Exit criteria
