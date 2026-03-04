@@ -12,8 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from penguiflow.cli.playground import discover_agent
-from penguiflow.cli.playground_wrapper import ChatResult, PlannerAgentWrapper, _build_trajectory, _normalise_answer
+from penguiflow.planner import PlannerFinish, PlannerPause, Trajectory
 from penguiflow.state import InMemoryStateStore
 
 from .export import export_trace_dataset
@@ -26,7 +25,7 @@ MetricFn = Callable[[object, object, object | None, str | None, object | None], 
 RunOneFn = Callable[[dict[str, Any], dict[str, Any] | None], Any]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EvalSpec:
     """Declarative config for reproducible eval runs.
 
@@ -46,7 +45,7 @@ class EvalSpec:
     session_id: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EvalRunSpec:
     """Declarative config for collect->export->evaluate CLI/API runs.
 
@@ -67,7 +66,7 @@ class EvalRunSpec:
     run_one_spec: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EvalDatasetSpec:
     """Declarative config for evaluation runs over an existing dataset bundle."""
 
@@ -81,7 +80,7 @@ class EvalDatasetSpec:
     run_one_spec: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EvalCollectSpec:
     """Declarative config for collect->export workflows without evaluation.
 
@@ -100,7 +99,7 @@ class EvalCollectSpec:
     state_store_spec: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TraceSelector:
     """Selector for exporting traces from a StateStore.
 
@@ -113,7 +112,7 @@ class TraceSelector:
     limit: int = 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class QueryCase:
     """Single collection input used for trace generation.
 
@@ -126,6 +125,21 @@ class QueryCase:
     tags: tuple[str, ...] = ()
     llm_context: Mapping[str, Any] | None = None
     tool_context: Mapping[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class ChatResult:
+    """Normalized chat response for eval-local runners.
+
+    Why: eval APIs are stable library surface and cannot depend on CLI wrapper
+    internals. This keeps the minimal response contract local to evals.
+    """
+
+    answer: str | None
+    trace_id: str
+    session_id: str
+    metadata: dict[str, Any] | None = None
+    pause: dict[str, Any] | None = None
 
 
 def ensure_project_on_sys_path(project_root: str | Path) -> None:
@@ -336,6 +350,79 @@ def _normalize_metadata(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _extract_from_dict(data: Mapping[str, Any]) -> str | None:
+    for key in ("raw_answer", "answer", "text", "content", "message", "greeting", "response", "result"):
+        if key in data:
+            value = data[key]
+            return str(value) if value is not None else None
+    return None
+
+
+def _normalise_answer(payload: Any) -> str | None:
+    if payload is None:
+        return None
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, Mapping):
+        if "branches" in payload and isinstance(payload["branches"], list):
+            for branch in payload["branches"]:
+                if isinstance(branch, Mapping) and "observation" in branch:
+                    observation = branch["observation"]
+                    if isinstance(observation, Mapping):
+                        result = _extract_from_dict(observation)
+                        if result is not None:
+                            return result
+                    elif observation is not None:
+                        return str(observation)
+        result = _extract_from_dict(payload)
+        if result is not None:
+            return result
+    for attr in ("raw_answer", "answer", "text", "content", "message", "greeting", "response", "result"):
+        if hasattr(payload, attr):
+            value = getattr(payload, attr)
+            return str(value) if value is not None else None
+    return str(payload)
+
+
+def _build_trajectory(
+    query: str,
+    session_id: str,
+    trace_id: str,
+    metadata: Mapping[str, Any] | None,
+    llm_context: Mapping[str, Any] | None,
+    tool_context: Mapping[str, Any] | None = None,
+) -> Trajectory | None:
+    if metadata is None:
+        return None
+    steps = metadata.get("steps")
+    if not isinstance(steps, list):
+        return None
+
+    actual_llm_context = metadata.get("llm_context") or llm_context or {}
+    actual_tool_context = metadata.get("tool_context") or tool_context or {}
+    payload: dict[str, Any] = {
+        "query": query,
+        "llm_context": dict(actual_llm_context),
+        "tool_context": {
+            **(dict(actual_tool_context)),
+            "session_id": session_id,
+            "trace_id": trace_id,
+        },
+        "steps": steps,
+        "hint_state": {},
+    }
+    trajectory_meta = metadata.get("trajectory_metadata")
+    if isinstance(trajectory_meta, Mapping):
+        payload["metadata"] = dict(trajectory_meta)
+    if "artifacts" in metadata:
+        payload["artifacts"] = metadata["artifacts"]
+    if "sources" in metadata:
+        payload["sources"] = metadata["sources"]
+    if "summary" in metadata and metadata["summary"] is not None:
+        payload["summary"] = metadata["summary"]
+    return Trajectory.from_serialised(payload)
+
+
 def _collect_tags(case: QueryCase) -> list[str]:
     tags = [str(tag) for tag in case.tags]
     if case.split:
@@ -458,6 +545,105 @@ class _EvalOrchestratorWrapper:
         )
 
 
+class _EvalPlannerWrapper:
+    """Adapter for bare planners returned by build_planner()."""
+
+    def __init__(self, planner: Any, *, state_store: Any | None = None) -> None:
+        self._planner = planner
+        self._state_store = state_store
+
+    async def initialize(self) -> None:
+        return None
+
+    async def chat(
+        self,
+        query: str,
+        *,
+        session_id: str,
+        llm_context: Mapping[str, Any] | None = None,
+        tool_context: Mapping[str, Any] | None = None,
+    ) -> ChatResult:
+        llm_context = dict(llm_context or {})
+        trace_id = secrets.token_hex(8)
+        merged_tool_context = {
+            **dict(tool_context or {}),
+            "session_id": session_id,
+            "trace_id": trace_id,
+        }
+        result = await self._planner.run(
+            query=query,
+            llm_context=llm_context,
+            tool_context=merged_tool_context,
+        )
+
+        if isinstance(result, PlannerPause):
+            pause_payload = {
+                "reason": result.reason,
+                "payload": result.payload,
+                "resume_token": result.resume_token,
+            }
+            return ChatResult(
+                answer=None,
+                trace_id=trace_id,
+                session_id=session_id,
+                metadata={"pause": pause_payload},
+                pause=pause_payload,
+            )
+
+        payload = result.payload if isinstance(result, PlannerFinish) else result
+        metadata = _normalize_metadata(getattr(result, "metadata", None))
+        trajectory = _build_trajectory(query, session_id, trace_id, metadata, llm_context, merged_tool_context)
+        if trajectory is not None and self._state_store is not None and hasattr(self._state_store, "save_trajectory"):
+            await self._state_store.save_trajectory(trace_id, session_id, trajectory)
+
+        answer = _normalise_answer(payload)
+        if answer is None and metadata:
+            maybe_thought = metadata.get("thought")
+            answer = str(maybe_thought) if maybe_thought is not None else None
+
+        return ChatResult(
+            answer=answer,
+            trace_id=trace_id,
+            session_id=session_id,
+            metadata=metadata,
+        )
+
+
+def _candidate_packages(project_root: str | Path) -> list[str]:
+    base = Path(project_root).resolve()
+    roots = [base / "src", base]
+    packages: list[str] = []
+    for root in roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        for child in sorted(root.iterdir(), key=lambda item: item.name):
+            if child.is_dir() and (child / "__init__.py").exists() and child.name not in packages:
+                packages.append(child.name)
+    return packages
+
+
+def _discover_agent(project_root: str | Path) -> Any:
+    ensure_project_on_sys_path(project_root)
+    packages = _candidate_packages(project_root)
+    orchestrator_match: Any | None = None
+    planner_match: Any | None = None
+
+    for package in packages:
+        discovered = _discover_agent_with_package(project_root, package, _allow_fallback=False)
+        if discovered is None:
+            continue
+        if discovered.kind == "orchestrator" and orchestrator_match is None:
+            orchestrator_match = discovered
+        if discovered.kind == "planner" and planner_match is None:
+            planner_match = discovered
+        if orchestrator_match is not None:
+            return orchestrator_match
+
+    if planner_match is not None:
+        return planner_match
+    raise ValueError(f"Could not discover agent in {Path(project_root).resolve()}")
+
+
 def _coerce_query_case(value: str | Mapping[str, Any]) -> QueryCase:
     if isinstance(value, str):
         return QueryCase(query=value)
@@ -491,7 +677,7 @@ async def _build_project_runner(*, project_root: str | Path, state_store: Any, a
     if discovery.kind == "planner":
         planner_output = _call_builder(discovery.target, config, state_store=state_store)
         planner = planner_output.planner if hasattr(planner_output, "planner") else planner_output
-        runner: Any = PlannerAgentWrapper(planner, state_store=state_store)
+        runner = _EvalPlannerWrapper(planner, state_store=state_store)
     else:
         orchestrator = _instantiate_orchestrator(discovery.target, config, state_store=state_store)
         runner = _EvalOrchestratorWrapper(orchestrator, state_store=state_store)
@@ -500,9 +686,16 @@ async def _build_project_runner(*, project_root: str | Path, state_store: Any, a
     return runner
 
 
-def _discover_agent_with_package(project_root: str | Path, agent_package: str | None) -> Any:
+def _discover_agent_with_package(
+    project_root: str | Path,
+    agent_package: str | None,
+    *,
+    _allow_fallback: bool = True,
+) -> Any:
     if not agent_package:
-        return discover_agent(Path(project_root))
+        if _allow_fallback:
+            return _discover_agent(project_root)
+        return None
 
     ensure_project_on_sys_path(project_root)
     modules: list[Any] = []

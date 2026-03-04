@@ -21,6 +21,9 @@ class TraceRef(TypedDict):
     filtering by tags globally.
     """
 
+    trace_id: str
+    session_id: str
+
 
 @runtime_checkable
 class StateStore(Protocol):

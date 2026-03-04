@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -46,3 +47,34 @@ async def test_run_analyze_only_writes_metrics_and_aggregate_report(tmp_path) ->
     assert report["tool_failure_rate"] == pytest.approx(0.5)
     assert report["latency_ms"]["p50"] == pytest.approx(200.0)
     assert report["latency_ms"]["p95"] == pytest.approx(300.0)
+
+
+@pytest.mark.asyncio
+async def test_run_analyze_only_offloads_file_io_with_to_thread(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    trace_path = tmp_path / "trace.jsonl"
+    trace_path.write_text(
+        json.dumps(
+            {
+                "trace_id": "t1",
+                "outputs": {"status": "ok"},
+                "trajectory": {"split": "val"},
+                "events": {"flow_events": [], "planner_events": []},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    calls = 0
+    original_to_thread = asyncio.to_thread
+
+    async def _to_thread(func, /, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return await original_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _to_thread)
+
+    await run_analyze_only(trace_path=trace_path, output_dir=tmp_path)
+
+    assert calls > 0

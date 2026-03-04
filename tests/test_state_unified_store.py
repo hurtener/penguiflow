@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import get_type_hints
 
 import pytest
 
@@ -25,6 +26,7 @@ from penguiflow.state.adapters import (
     save_planner_event_compat,
     save_update_compat,
 )
+from penguiflow.state.protocol import TraceRef
 
 
 @pytest.mark.asyncio
@@ -138,6 +140,15 @@ async def test_inmemory_statestore_lists_trace_refs_across_sessions() -> None:
         {"trace_id": "trace-2", "session_id": "session-b"},
         {"trace_id": "trace-1", "session_id": "session-a"},
     ]
+
+
+def test_trace_ref_typeddict_declares_required_keys() -> None:
+    assert TraceRef.__required_keys__ == frozenset({"trace_id", "session_id"})
+
+
+def test_inmemory_list_trace_refs_return_type_matches_protocol() -> None:
+    hints = get_type_hints(InMemoryStateStore.list_trace_refs)
+    assert hints["return"] == list[TraceRef]
 
 
 @pytest.mark.asyncio

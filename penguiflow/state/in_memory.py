@@ -25,6 +25,7 @@ from penguiflow.planner import PlannerEvent, Trajectory
 from penguiflow.steering import sanitize_steering_event
 
 from .models import RemoteBinding, StateUpdate, SteeringEvent, StoredEvent, TaskState
+from .protocol import TraceRef
 
 
 def _fingerprint(value: Any) -> str:
@@ -424,7 +425,7 @@ class InMemoryStateStore:
             return []
         return list(reversed(traces))[:limit]
 
-    async def list_trace_refs(self, limit: int = 0) -> list[dict[str, str]]:
+    async def list_trace_refs(self, limit: int = 0) -> list[TraceRef]:
         """List trace references across sessions in newest-first order.
 
         Why: dataset export by tags often spans multiple sessions. Returning a

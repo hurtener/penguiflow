@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from pathlib import Path
@@ -38,14 +39,33 @@ def _row_metric(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _read_trace_rows(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped:
+            rows.append(json.loads(stripped))
+    return rows
+
+
+def _write_outputs(*, output_dir: Path, metric_rows: list[dict[str, Any]], report: dict[str, Any]) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics_path = output_dir / "metrics.jsonl"
+    with metrics_path.open("w", encoding="utf-8") as handle:
+        for row in metric_rows:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
+            handle.write("\n")
+
+    report_path = output_dir / "report.analyze.json"
+    report_path.write_text(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
+    return metrics_path, report_path
+
+
 async def run_analyze_only(*, trace_path: str | Path, output_dir: str | Path) -> dict[str, Any]:
     """Compute deterministic diagnostics from ``trace.jsonl`` exports."""
 
-    trace_rows: list[dict[str, Any]] = []
-    for line in Path(trace_path).read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if stripped:
-            trace_rows.append(json.loads(stripped))
+    trace_rows = await asyncio.to_thread(_read_trace_rows, Path(trace_path))
 
     metric_rows = [_row_metric(row) for row in trace_rows]
     latencies = [value for row in metric_rows for value in row["latency_values"]]
@@ -62,17 +82,12 @@ async def run_analyze_only(*, trace_path: str | Path, output_dir: str | Path) ->
         "cost_summary": None,
     }
 
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    metrics_path = out_dir / "metrics.jsonl"
-    with metrics_path.open("w", encoding="utf-8") as handle:
-        for row in metric_rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
-
-    report_path = out_dir / "report.analyze.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
+    metrics_path, report_path = await asyncio.to_thread(
+        _write_outputs,
+        output_dir=Path(output_dir),
+        metric_rows=metric_rows,
+        report=report,
+    )
 
     return {
         "trace_count": total,

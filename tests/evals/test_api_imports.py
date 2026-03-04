@@ -9,6 +9,9 @@ from penguiflow.evals.api import (
     EvalCollectSpec,
     EvalDatasetSpec,
     EvalRunSpec,
+    EvalSpec,
+    QueryCase,
+    TraceSelector,
     ensure_project_on_sys_path,
     load_candidates,
     load_eval_collect_spec,
@@ -58,6 +61,18 @@ def test_resolve_callable_loads_function_from_project_root(tmp_path, monkeypatch
 def test_resolve_callable_rejects_invalid_spec() -> None:
     with pytest.raises(ValueError, match="module:callable"):
         resolve_callable("bad-spec")
+
+
+def test_evals_api_does_not_import_cli_modules() -> None:
+    api_path = Path(__file__).resolve().parents[2] / "penguiflow" / "evals" / "api.py"
+    source = api_path.read_text(encoding="utf-8")
+
+    assert "from penguiflow.cli." not in source
+
+
+def test_eval_api_dataclasses_use_slots() -> None:
+    for cls in (EvalSpec, EvalRunSpec, EvalDatasetSpec, EvalCollectSpec, QueryCase, TraceSelector):
+        assert getattr(cls, "__slots__", None) is not None
 
 
 def test_wrap_metric_supports_minimal_signatures() -> None:
