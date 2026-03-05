@@ -174,11 +174,9 @@ cache_config = ResourceCacheConfig(
 
 ```python
 from penguiflow.tools.resources import ResourceCache
-from penguiflow.artifacts import InMemoryArtifactStore
 
-artifact_store = InMemoryArtifactStore()
+# ResourceCache uses ctx.artifacts per-call for scope-correct artifact storage
 cache = ResourceCache(
-    artifact_store=artifact_store,
     namespace="filesystem",
     config=ResourceCacheConfig(max_entries=500),
 )
@@ -187,7 +185,7 @@ cache = ResourceCache(
 result = await cache.get_or_fetch(
     uri="file:///data/large_file.txt",
     read_fn=mcp_client.resources_read,
-    ctx=ctx,
+    ctx=ctx,  # ctx.artifacts is used for artifact storage
 )
 ```
 
@@ -409,15 +407,15 @@ ResourceHandlingConfig(
 ### 3. Integrate with ArtifactStore
 
 ```python
-# Always pair resource cache with artifact store
-from penguiflow.artifacts import InMemoryArtifactStore
 from penguiflow.tools.resources import ResourceCache
 
-artifact_store = InMemoryArtifactStore()
+# ResourceCache uses ctx.artifacts per-call for scope-correct artifact storage
 cache = ResourceCache(
-    artifact_store=artifact_store,
     namespace="myserver",
 )
+# When calling get_or_fetch, pass a Context whose .artifacts facade
+# points to the correct scope (e.g., session or task).
+result = await cache.get_or_fetch(uri=uri, read_fn=read_fn, ctx=ctx)
 ```
 
 ### 4. Handle Missing Support Gracefully

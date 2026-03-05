@@ -546,25 +546,29 @@ class TestTrajectoryEndpoint:
 class TestArtifactEndpoints:
     """Tests for /artifacts endpoints (lines 958-1059)."""
 
-    def test_get_artifact_no_store_returns_501(self, tmp_path: Path) -> None:
-        """Test /artifacts without store returns 501 (lines 969-971)."""
+    def test_get_artifact_no_planner_store_returns_404(self, tmp_path: Path) -> None:
+        """Test /artifacts with no planner artifact store falls back to state store (404 for missing)."""
         wrapper = MockAgentWrapper()
         app = create_playground_app(project_root=tmp_path, agent=wrapper)
         client = TestClient(app, raise_server_exceptions=False)
 
+        # With the state store fallback, _discover_artifact_store() finds the
+        # InMemoryStateStore's artifact store. The artifact "test-id" doesn't
+        # exist, so the endpoint returns 404 (not 501).
         response = client.get("/artifacts/test-id")
-        assert response.status_code == 501
-        assert "Artifact storage not enabled" in response.json()["detail"]
+        assert response.status_code == 404
 
-    def test_get_artifact_meta_no_store_returns_501(self, tmp_path: Path) -> None:
-        """Test /artifacts/{id}/meta without store returns 501 (lines 1026-1027)."""
+    def test_get_artifact_meta_no_planner_store_returns_404(self, tmp_path: Path) -> None:
+        """Test /artifacts/{id}/meta with no planner artifact store falls back to state store, returning 404."""
         wrapper = MockAgentWrapper()
         app = create_playground_app(project_root=tmp_path, agent=wrapper)
         client = TestClient(app, raise_server_exceptions=False)
 
+        # With the state store fallback, _discover_artifact_store() finds the
+        # InMemoryStateStore's artifact store. The artifact "test-id" doesn't
+        # exist, so the endpoint returns 404 (not 501).
         response = client.get("/artifacts/test-id/meta")
-        assert response.status_code == 501
-        assert "Artifact storage not enabled" in response.json()["detail"]
+        assert response.status_code == 404
 
 
 class TestListArtifactsEndpoint:
@@ -717,8 +721,8 @@ class TestDiscoverPlannerFunction:
 class TestDiscoverArtifactStore:
     """Tests for _discover_artifact_store helper (lines 603-623)."""
 
-    def test_discover_returns_none_for_noop_store(self, tmp_path: Path) -> None:
-        """Test _discover_artifact_store returns None for NoOpArtifactStore (line 620)."""
+    def test_discover_skips_noop_planner_store_falls_back_to_state_store(self, tmp_path: Path) -> None:
+        """Test _discover_artifact_store skips NoOpArtifactStore on planner, falls back to state store."""
         from penguiflow.artifacts import NoOpArtifactStore
 
         wrapper = MockAgentWrapper()
@@ -726,11 +730,12 @@ class TestDiscoverArtifactStore:
         wrapper._planner.artifact_store = NoOpArtifactStore()
 
         app = create_playground_app(project_root=tmp_path, agent=wrapper)
-        # The artifact store discovery returns None for NoOp, verified via endpoint behavior
+        # The planner's NoOpArtifactStore is skipped, but the state store
+        # fallback finds the InMemoryStateStore's PlaygroundArtifactStore.
+        # The artifact "test-id" doesn't exist, so 404 is returned (not 501).
         client = TestClient(app, raise_server_exceptions=False)
         response = client.get("/artifacts/test-id")
-        # Should return 501 since NoOp store is treated as disabled
-        assert response.status_code == 501
+        assert response.status_code == 404
 
 
 class TestStateStoreInitialization:

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
-    from penguiflow.artifacts import ArtifactRef, ArtifactStore
+    from penguiflow.artifacts import ArtifactRef
     from penguiflow.planner.context import ToolContext
 
 __all__ = [
@@ -143,18 +143,15 @@ class ResourceCache:
 
     def __init__(
         self,
-        artifact_store: ArtifactStore,
         namespace: str,
         config: ResourceCacheConfig | None = None,
     ) -> None:
         """Initialize the resource cache.
 
         Args:
-            artifact_store: Store for binary/large text content
             namespace: ToolNode namespace for artifact naming
             config: Cache configuration
         """
-        self._artifact_store = artifact_store
         self._namespace = namespace
         self._config = config or ResourceCacheConfig()
         self._entries: dict[str, _CacheEntry] = {}
@@ -185,7 +182,7 @@ class ResourceCache:
             if entry is not None:
                 # Check if artifact still exists
                 if entry.artifact_ref is not None:
-                    if await self._artifact_store.exists(entry.artifact_ref.id):
+                    if await ctx.artifacts.exists(entry.artifact_ref.id):
                         entry.last_accessed = self._time_source()
                         return {"artifact": entry.artifact_ref.model_dump()}
                     # Artifact expired/deleted - refetch
@@ -246,7 +243,7 @@ class ResourceCache:
             # Binary content - always store as artifact
             try:
                 data = base64.b64decode(blob)
-                ref = await self._artifact_store.put_bytes(
+                ref = await ctx.artifacts.upload(
                     data,
                     mime_type=mime_type or "application/octet-stream",
                     namespace=f"{self._namespace}.resource",
@@ -272,7 +269,7 @@ class ResourceCache:
                 return {"text": text}
             else:
                 # Large text - store as artifact
-                ref = await self._artifact_store.put_text(
+                ref = await ctx.artifacts.upload(
                     text,
                     mime_type=mime_type or "text/plain",
                     namespace=f"{self._namespace}.resource",

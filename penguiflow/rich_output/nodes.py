@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Mapping
 from typing import Any
 
 from penguiflow.catalog import tool
 from penguiflow.planner import ToolContext
 from penguiflow.planner.artifact_registry import (
+    _binary_component_name,
+    _binary_summary,
     get_artifact_registry,
     has_artifact_refs,
     resolve_artifact_refs_async,
@@ -30,6 +33,8 @@ from .tools import (
     UISelectOptionArgs,
 )
 from .validate import RichOutputValidationError
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_enabled() -> None:
@@ -103,7 +108,7 @@ async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> Rende
             registry=registry,
             trajectory=getattr(ctx, "_trajectory", None),
             session_id=str(session_id) if session_id is not None else None,
-            artifact_store=getattr(ctx, "_artifacts", None),
+            artifact_store=getattr(ctx, "artifacts", None),
         )
         if not isinstance(props, Mapping):
             raise RuntimeError("artifact_ref resolution returned invalid props")
@@ -175,31 +180,67 @@ async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> Rende
 )
 async def list_artifacts(args: ListArtifactsArgs, ctx: ToolContext) -> ListArtifactsResult:
     _ensure_enabled()
-    registry = get_artifact_registry(ctx)
-    if registry is None:
-        return ListArtifactsResult(artifacts=[])
     # Backward/behavioral compatibility: callers often use kind="tool_artifact"
     # when they really mean "any tool-produced artifact" (including ui_component).
     kind = None if args.kind in {"all", "tool_artifact"} else args.kind
 
-    # Background task results live on the active trajectory (legacy data may still
-    # be stored in llm_context). Those artifacts must be ingested into the in-run
-    # registry so they can be referenced via artifact_ref and resolved later.
-    planner = getattr(ctx, "_planner", None)
-    trajectory = getattr(planner, "_active_trajectory", None)
-    if trajectory is not None:
-        try:
-            registry.ingest_background_results(getattr(trajectory, "background_results", None))
-        except Exception:
-            pass
-    llm_context = getattr(ctx, "llm_context", None)
-    if llm_context is not None:
-        try:
-            registry.ingest_llm_context(llm_context)
-        except Exception:
-            # Never fail listing due to best-effort ingestion.
-            pass
-    items = registry.list_records(kind=kind, source_tool=args.source_tool, limit=args.limit)
+    items: list[dict[str, Any]] = []
+
+    # -- Step 1: Query in-run ArtifactRegistry (if available) --
+    registry = get_artifact_registry(ctx)
+    if registry is not None:
+        planner = getattr(ctx, "_planner", None)
+        trajectory = getattr(planner, "_active_trajectory", None)
+        if trajectory is not None:
+            try:
+                registry.ingest_background_results(getattr(trajectory, "background_results", None))
+            except Exception:
+                pass
+        llm_context = getattr(ctx, "llm_context", None)
+        if llm_context is not None:
+            try:
+                registry.ingest_llm_context(llm_context)
+            except Exception:
+                pass
+        items.extend(registry.list_records(kind=kind, source_tool=args.source_tool))
+
+    # -- Step 2: Query persistent ArtifactStore (appended after registry) --
+    if kind is None or kind == "binary":
+        scoped = getattr(ctx, "artifacts", None)
+        if scoped is not None:
+            try:
+                refs = await scoped.list()
+                # Build set of IDs already in items (from registry) for dedup
+                seen_ids = {item.get("artifact_id") for item in items if item.get("artifact_id")}
+                for ref in refs:
+                    # Persistent store wins dedup: replace registry entry if same ID
+                    if ref.id in seen_ids:
+                        items = [item for item in items if item.get("artifact_id") != ref.id]
+                    source_tool = ref.source.get("tool")
+                    if args.source_tool and source_tool != args.source_tool:
+                        continue
+                    items.append({
+                        "ref": ref.id,
+                        "kind": "binary",
+                        "source_tool": source_tool,
+                        "component": _binary_component_name(ref.mime_type),
+                        "title": ref.filename,
+                        "summary": _binary_summary(ref),
+                        "artifact_id": ref.id,
+                        "mime_type": ref.mime_type,
+                        "size_bytes": ref.size_bytes,
+                        "created_step": None,
+                        "renderable": True,
+                        "metadata": {},
+                    })
+            except Exception as e:
+                logger.debug("Failed to list persistent artifacts: %s", e, exc_info=True)
+
+    # -- Step 3: Apply limit --
+    # Persistent store items come after registry items, so [-limit:] favors them.
+    if args.limit and args.limit > 0:
+        items = items[-args.limit:]
+
     return ListArtifactsResult(artifacts=[ArtifactSummary.model_validate(item) for item in items])
 
 
