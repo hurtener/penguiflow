@@ -93,7 +93,7 @@ def resource_cache(artifact_store):
         ttl_seconds=3600,
         inline_text_if_under_chars=100,
     )
-    return ResourceCache(artifact_store, "test", config)
+    return ResourceCache("test", config)
 
 
 @pytest.fixture
@@ -204,10 +204,28 @@ async def test_cache_get_or_fetch_text_inline(resource_cache, artifact_store):
 
 
 @pytest.mark.asyncio
+async def test_cache_get_or_fetch_text_inline_from_list_response(resource_cache, artifact_store):
+    """List-based read_resource responses should inline text correctly."""
+    ctx = DummyCtx(artifact_store)
+
+    class MockContent:
+        text = "small text"
+        mimeType = "text/plain"
+
+    async def read_fn(uri):
+        return [MockContent()]
+
+    result = await resource_cache.get_or_fetch("file:///test-list.txt", read_fn, ctx)
+
+    assert result == {"text": "small text"}
+    assert resource_cache.size == 1
+
+
+@pytest.mark.asyncio
 async def test_cache_get_or_fetch_text_large(artifact_store):
     """Large text content should be stored as artifact."""
     config = ResourceCacheConfig(inline_text_if_under_chars=10)
-    cache = ResourceCache(artifact_store, "test", config)
+    cache = ResourceCache("test", config)
     ctx = DummyCtx(artifact_store)
 
     large_text = "x" * 100  # Exceeds threshold of 10
@@ -314,7 +332,7 @@ async def test_cache_invalidate_all(resource_cache, artifact_store):
 async def test_cache_eviction(artifact_store):
     """Cache should evict oldest entries when full."""
     config = ResourceCacheConfig(max_entries=3)
-    cache = ResourceCache(artifact_store, "test", config)
+    cache = ResourceCache("test", config)
     ctx = DummyCtx(artifact_store)
 
     async def read_fn(uri):
@@ -347,7 +365,7 @@ async def test_cache_eviction(artifact_store):
 async def test_cache_disabled(artifact_store):
     """Disabled cache should always fetch."""
     config = ResourceCacheConfig(enabled=False)
-    cache = ResourceCache(artifact_store, "test", config)
+    cache = ResourceCache("test", config)
     ctx = DummyCtx(artifact_store)
     call_count = 0
 
@@ -586,6 +604,34 @@ async def test_toolnode_read_resource_not_connected(artifact_store):
 
 
 @pytest.mark.asyncio
+async def test_toolnode_read_resource_list_shape_inline_text(artifact_store):
+    """read_resource should support list-shaped MCP content responses."""
+    config = build_config()
+    registry = ModelRegistry()
+    node = ToolNode(config=config, registry=registry)
+
+    class MockContent:
+        text = "resource text from list"
+        mimeType = "text/plain"
+
+    mock_client = type("MockClient", (), {})()
+
+    async def _read_resource(_uri):
+        return [MockContent()]
+
+    mock_client.read_resource = _read_resource
+
+    node._connected = True
+    node._resources_supported = True
+    node._mcp_client = mock_client
+
+    ctx = DummyCtx(artifact_store)
+    result = await node.read_resource("pengui://docs/overview", ctx, use_cache=False)
+
+    assert result == {"text": "resource text from list"}
+
+
+@pytest.mark.asyncio
 async def test_toolnode_subscribe_resource_not_connected():
     """subscribe_resource when not connected should return False."""
     config = build_config()
@@ -607,16 +653,43 @@ async def test_toolnode_unsubscribe_resource_not_connected():
     assert result is False
 
 
+@pytest.mark.asyncio
+async def test_toolnode_subscribe_resource_connected_without_client_support():
+    """subscribe_resource should return False when MCP client lacks subscribe APIs."""
+    config = build_config()
+    registry = ModelRegistry()
+    node = ToolNode(config=config, registry=registry)
+    node._connected = True
+    node._resources_supported = True
+    node._mcp_client = object()
+
+    result = await node.subscribe_resource("file:///test.txt")
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_toolnode_unsubscribe_resource_connected_without_client_support():
+    """unsubscribe_resource should return False when MCP client lacks unsubscribe APIs."""
+    config = build_config()
+    registry = ModelRegistry()
+    node = ToolNode(config=config, registry=registry)
+    node._connected = True
+    node._resources_supported = True
+    node._mcp_client = object()
+
+    result = await node.unsubscribe_resource("file:///test.txt")
+    assert result is False
+
+
 def test_toolnode_handle_resource_updated():
     """handle_resource_updated should invalidate cache entry."""
     config = build_config()
     registry = ModelRegistry()
-    store = InMemoryArtifactStore()
     node = ToolNode(config=config, registry=registry)
 
     # Set up cache with an entry
     cache_config = ResourceCacheConfig()
-    cache = ResourceCache(store, "test", cache_config)
+    cache = ResourceCache("test", cache_config)
     node._resource_cache = cache
 
     # Manually add a cache entry for testing

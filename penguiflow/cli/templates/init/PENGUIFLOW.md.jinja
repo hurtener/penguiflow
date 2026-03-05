@@ -97,7 +97,7 @@ flows:
         output_type: OutputPayload
         policy:
           validate: both             # in|out|both|none
-          timeout_s: 60.0
+          timeout_s: 360.0
           max_retries: 2
           backoff_base: 1.0
         uses: [parser]               # Dependencies this node uses

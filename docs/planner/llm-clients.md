@@ -67,7 +67,7 @@ See **[Actions & schema](actions-and-schema.md)** for the `PlannerAction` format
 ## Operational defaults
 
 - Prefer `temperature=0.0` and `json_schema_mode=True` for planners.
-- Set `llm_timeout_s` aggressively (default is 60s) and tune `llm_max_retries` for your provider’s reliability.
+- Set `llm_timeout_s` deliberately (default is 360s) and tune `llm_max_retries` for your provider’s reliability.
 - If you run multi-tenant, keep secrets out of `llm_context` (LLM-visible) and place them only in `tool_context`.
 
 ## Failure modes & recovery

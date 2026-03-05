@@ -628,11 +628,11 @@ class TestArtifactEndpoints:
                 assert response.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_get_artifact_not_enabled(
+    async def test_get_artifact_not_found_with_state_store_fallback(
         self,
         state_store: InMemoryStateStore,
     ) -> None:
-        """GET /artifacts/{id} should return 501 when storage is disabled."""
+        """GET /artifacts/{id} should return 404 when planner has no store but state store has one."""
         import tempfile
 
         from httpx import ASGITransport, AsyncClient
@@ -643,8 +643,10 @@ class TestArtifactEndpoints:
             mock_wrapper = MagicMock()
             mock_wrapper.initialize = AsyncMock()
             mock_wrapper.shutdown = AsyncMock()
-            # Explicitly set _planner to None so _discover_artifact_store returns None
+            # Explicitly set _planner to None so the planner path returns None.
             # (MagicMock auto-creates attributes which would bypass the None checks)
+            # The state store fallback finds InMemoryStateStore's artifact store,
+            # so the endpoint returns 404 (not found) instead of 501 (not enabled).
             mock_wrapper._planner = None
             mock_wrapper._orchestrator = None
 
@@ -660,7 +662,7 @@ class TestArtifactEndpoints:
             ) as client:
                 response = await client.get("/artifacts/nonexistent")
 
-                assert response.status_code == 501
+                assert response.status_code == 404
 
 
 # ─── Resource Endpoint Tests ─────────────────────────────────────────────────
@@ -947,6 +949,130 @@ class TestResourceEndpoints:
 
                 assert response.status_code == 500
                 assert "Connection failed" in response.json()["detail"]
+
+
+# ─── MCP Apps Endpoint Tests ──────────────────────────────────────────────────
+
+
+class TestMcpAppsEndpoint:
+    """Tests for /apps/{namespace}/call-tool endpoint."""
+
+    @pytest.fixture
+    def state_store(self) -> InMemoryStateStore:
+        return InMemoryStateStore()
+
+    @pytest.mark.asyncio
+    async def test_app_call_tool_prefixes_namespace_and_returns_single_result_layer(
+        self,
+        state_store: InMemoryStateStore,
+    ) -> None:
+        import tempfile
+
+        from httpx import ASGITransport, AsyncClient
+
+        from penguiflow.cli.playground import create_playground_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mock_tool_node = MagicMock()
+            mock_tool_node.call = AsyncMock(return_value={"result": {"ok": True}})
+
+            mock_wrapper = MagicMock()
+            mock_wrapper.initialize = AsyncMock()
+            mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._tool_nodes = {"test_ns": mock_tool_node}
+
+            app = create_playground_app(
+                project_root=tmpdir,
+                agent=mock_wrapper,
+                state_store=state_store,
+            )
+
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    "/apps/test_ns/call-tool",
+                    params={"session_id": "sess-1"},
+                    json={"name": "echo", "arguments": {"x": 1}},
+                )
+
+                assert response.status_code == 200
+                assert response.json() == {"result": {"ok": True}}
+                mock_tool_node.call.assert_awaited_once()
+                called_tool_name = mock_tool_node.call.await_args.args[0]
+                called_args = mock_tool_node.call.await_args.args[1]
+                assert called_tool_name == "test_ns.echo"
+                assert called_args == {"x": 1}
+
+    @pytest.mark.asyncio
+    async def test_app_call_tool_accepts_already_namespaced_tool_name(
+        self,
+        state_store: InMemoryStateStore,
+    ) -> None:
+        import tempfile
+
+        from httpx import ASGITransport, AsyncClient
+
+        from penguiflow.cli.playground import create_playground_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mock_tool_node = MagicMock()
+            mock_tool_node.call = AsyncMock(return_value={"result": {"ok": True}})
+
+            mock_wrapper = MagicMock()
+            mock_wrapper.initialize = AsyncMock()
+            mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._tool_nodes = {"test_ns": mock_tool_node}
+
+            app = create_playground_app(
+                project_root=tmpdir,
+                agent=mock_wrapper,
+                state_store=state_store,
+            )
+
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    "/apps/test_ns/call-tool",
+                    json={"name": "test_ns.echo", "arguments": {}},
+                )
+
+                assert response.status_code == 200
+                mock_tool_node.call.assert_awaited_once()
+                called_tool_name = mock_tool_node.call.await_args.args[0]
+                assert called_tool_name == "test_ns.echo"
+
+    @pytest.mark.asyncio
+    async def test_app_call_tool_rejects_cross_namespace_tool_name(
+        self,
+        state_store: InMemoryStateStore,
+    ) -> None:
+        import tempfile
+
+        from httpx import ASGITransport, AsyncClient
+
+        from penguiflow.cli.playground import create_playground_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mock_tool_node = MagicMock()
+            mock_tool_node.call = AsyncMock(return_value={"result": {"ok": True}})
+
+            mock_wrapper = MagicMock()
+            mock_wrapper.initialize = AsyncMock()
+            mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._tool_nodes = {"test_ns": mock_tool_node}
+
+            app = create_playground_app(
+                project_root=tmpdir,
+                agent=mock_wrapper,
+                state_store=state_store,
+            )
+
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    "/apps/test_ns/call-tool",
+                    json={"name": "other_ns.echo", "arguments": {}},
+                )
+
+                assert response.status_code == 400
+                assert "namespace mismatch" in response.json()["detail"]
 
 
 # ─── Edge Case Tests ─────────────────────────────────────────────────────────
