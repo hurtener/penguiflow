@@ -19,7 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from penguiflow.artifacts import ArtifactScope, ArtifactStore, NoOpArtifactStore, ScopedArtifacts
+from penguiflow.artifacts import ArtifactStore, NoOpArtifactStore, ScopedArtifacts
 from penguiflow.catalog import NodeSpec
 from penguiflow.planner.context import PlannerPauseReason, ToolContext
 
@@ -167,10 +167,9 @@ async def _extract_artifacts_from_observation(
     node_name: str,
     out_model: type[BaseModel],
     observation: Mapping[str, Any],
-    artifact_store: ArtifactStore,
-    scope: ArtifactScope | None,
+    artifacts: ScopedArtifacts,
 ) -> list[dict[str, Any]]:
-    artifacts: list[dict[str, Any]] = []
+    collected: list[dict[str, Any]] = []
     for field_name, field_info in out_model.model_fields.items():
         extra = field_info.json_schema_extra
         if not isinstance(extra, Mapping) or not extra.get("artifact"):
@@ -189,13 +188,11 @@ async def _extract_artifacts_from_observation(
             _node_name: str = node_name,
         ) -> None:
             serialized = json.dumps(item, ensure_ascii=False)
-            # `scope` is now captured from the outer function's parameter (no local override)
-            ref = await artifact_store.put_text(
+            ref = await artifacts.upload(
                 serialized,
                 mime_type="application/json",
                 filename=f"{_node_name}.{_field_name}.json",
                 namespace=f"tool_artifact.{_node_name}.{_field_name}",
-                scope=scope,
                 meta={
                     "node": _node_name,
                     "field": _field_name,
@@ -217,7 +214,7 @@ async def _extract_artifacts_from_observation(
             }
             if item_index is not None:
                 entry["item_index"] = item_index
-            artifacts.append(entry)
+            collected.append(entry)
 
         if isinstance(value, list):
             for idx, item in enumerate(value):
@@ -226,7 +223,7 @@ async def _extract_artifacts_from_observation(
                 await _store(item, item_index=idx)
         else:
             await _store(value, item_index=None)
-    return artifacts
+    return collected
 
 
 def build_tool_job_pipeline(
@@ -264,6 +261,7 @@ def build_tool_job_pipeline(
             llm_context=snapshot.llm_context or {},
             tool_context={
                 **(snapshot.tool_context or {}),
+                "session_id": snapshot.session_id,
                 "task_id": runtime.state.task_id,
                 "trace_id": trace_id,
                 "_current_tool_name": spec.name,
@@ -277,22 +275,13 @@ def build_tool_job_pipeline(
         result = await spec.node.func(parsed_args, ctx)
         observation: BaseModel = spec.out_model.model_validate(result)
         payload = observation.model_dump(mode="json")
-        session_id = snapshot.session_id if isinstance(snapshot.session_id, str) and snapshot.session_id else None
-        tool_ctx = snapshot.tool_context or {}
-        artifact_scope = ArtifactScope(
-            session_id=session_id,
-            tenant_id=tool_ctx.get("tenant_id"),
-            user_id=tool_ctx.get("user_id"),
-            trace_id=tool_ctx.get("trace_id"),
-        ) if session_id else None
         extracted_artifacts = []
         if isinstance(payload, Mapping):
             extracted_artifacts = await _extract_artifacts_from_observation(
                 node_name=spec.name,
                 out_model=spec.out_model,
                 observation=payload,
-                artifact_store=ctx._artifacts,
-                scope=artifact_scope,
+                artifacts=ctx.artifacts,
             )
         patch = ContextPatch(
             task_id=runtime.state.task_id,

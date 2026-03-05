@@ -271,3 +271,36 @@ uv run mypy penguiflow/tools/resources.py penguiflow/tools/node.py
 # Run relevant tests:
 uv run pytest tests/test_toolnode_phase2.py -v
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-05
+
+### Summary of Changes
+- **`penguiflow/tools/resources.py`**: Removed `artifact_store: ArtifactStore` parameter from `ResourceCache.__init__`, removed `self._artifact_store` assignment, updated docstring. Replaced 3 `self._artifact_store` call sites with `ctx.artifacts`: `self._artifact_store.exists()` -> `ctx.artifacts.exists()` in `get_or_fetch`, and `self._artifact_store.put_bytes()` / `self._artifact_store.put_text()` -> `ctx.artifacts.upload()` in `_fetch_and_store`. Removed `ArtifactStore` from the `TYPE_CHECKING` import (kept `ArtifactRef` which is still used).
+- **`penguiflow/tools/node.py`**: Removed `artifact_store=ctx._artifacts` argument from `ResourceCache` construction (line 1774). This was the last remaining `ctx._artifacts` reference in `node.py`.
+- **`tests/test_toolnode_phase2.py`**: Updated 5 `ResourceCache` constructions to drop the `artifact_store`/`store` first positional argument. Also removed the now-unused `store = InMemoryArtifactStore()` variable in `test_toolnode_handle_resource_updated` to fix a ruff F841 lint error.
+
+### Key Considerations
+- The `ScopedArtifacts.upload()` method accepts both `bytes` and `str` data, so it serves as a unified replacement for both `ArtifactStore.put_bytes()` and `ArtifactStore.put_text()`. The `mime_type` and `namespace` keyword arguments are compatible.
+- The `ScopedArtifacts.exists()` method performs scope checking (returns `False` for artifacts from a different scope), which is stricter than `ArtifactStore.exists()`. This is intentional and correct because `ResourceCache` stores and reads back its own artifacts within the same session, so scope is always consistent.
+- Both `get_or_fetch` and `_fetch_and_store` already receive `ctx: ToolContext` as a parameter, so no signature changes were needed to access `ctx.artifacts`.
+
+### Assumptions
+- The `DummyCtx` in the test file already exposes `ctx.artifacts` as a `ScopedArtifacts` instance (confirmed at lines 62-70), so tests work without further modification.
+- The docstrings/comments in `resources.py` that still mention "ArtifactStore" (module docstring line 7, class docstring lines 134 and 137) are descriptive references, not code dependencies, and were intentionally left as-is since the phase plan did not call for updating them.
+
+### Deviations from Plan
+- Removed the unused `store = InMemoryArtifactStore()` variable in `test_toolnode_handle_resource_updated` (line 688). This variable became unused after removing it from the `ResourceCache` constructor call, and ruff flagged it as an F841 error. The phase plan did not explicitly mention this cleanup, but it was necessary to pass lint checks.
+
+### Potential Risks & Reviewer Attention Points
+- The docstrings in `ResourceCache` class (lines 134-137) still reference "ArtifactStore" in descriptive text. Consider updating these to reference "ScopedArtifacts" or "ctx.artifacts" for accuracy in a follow-up.
+- Verify that no other code paths construct `ResourceCache` outside the three files modified here (confirmed via grep -- no other construction sites exist).
+
+### Files Modified
+- `penguiflow/tools/resources.py` -- Removed `artifact_store` from constructor, replaced 3 `self._artifact_store` usages with `ctx.artifacts`, updated `TYPE_CHECKING` import
+- `penguiflow/tools/node.py` -- Removed `artifact_store=ctx._artifacts` from `ResourceCache` construction
+- `tests/test_toolnode_phase2.py` -- Updated 5 `ResourceCache` constructions, removed 1 unused variable

@@ -224,3 +224,34 @@ uv run mypy penguiflow/tools/node.py
 # Run relevant tests:
 uv run pytest tests/test_toolnode_phase2.py -v
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-05
+
+### Summary of Changes
+- Replaced all 5 occurrences of `ctx._artifacts.put_bytes(` with `ctx.artifacts.upload(` in `penguiflow/tools/node.py` (call sites at lines 1099, 1252, 1278, 1352, 1835)
+- Replaced all 4 occurrences of `ctx._artifacts.put_text(` with `ctx.artifacts.upload(` in `penguiflow/tools/node.py` (call sites at lines 1467, 1502, 1849, 2021)
+- Total: 9 call sites migrated from direct `_artifacts` store access to scoped `artifacts.upload()` API
+
+### Key Considerations
+- The replacement is purely mechanical: `ctx._artifacts.put_bytes(` and `ctx._artifacts.put_text(` both become `ctx.artifacts.upload(`, with all argument lists unchanged. `ScopedArtifacts.upload()` internally dispatches to `put_bytes` or `put_text` based on whether the data argument is `bytes` or `str`, so the behavior is equivalent but now includes automatic scope injection.
+- Used `replace_all` mode to ensure every occurrence was caught in a single pass, eliminating the risk of missing any call site.
+- Deliberately preserved the `artifact_store=ctx._artifacts` reference at line 1774 (inside the `ResourceCache` constructor), as specified by the plan -- that migration is deferred to Phase 004.
+
+### Assumptions
+- Assumed that the `ScopedArtifacts.upload()` method signature is fully compatible with the keyword arguments used at all 9 call sites (`mime_type`, `namespace`, `meta`). This was confirmed by the plan's description and the fact that all tests pass.
+- Assumed the `DummyCtx` in test fixtures already provides a working `ctx.artifacts` (as `ScopedArtifacts`), which the plan states and the test results confirm.
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- The only remaining `ctx._artifacts` reference is at line 1774 (`artifact_store=ctx._artifacts`). Phase 004 must address this; if Phase 004 is skipped, `ResourceCache` would still use the raw store directly (bypassing scoping), which is inconsistent with the rest of the migration.
+- All 2607 tests in the full suite pass, including the 43 ToolNode-specific tests in `test_toolnode_phase2.py`.
+
+### Files Modified
+- `penguiflow/tools/node.py` -- 9 call sites migrated from `ctx._artifacts.put_bytes`/`put_text` to `ctx.artifacts.upload`

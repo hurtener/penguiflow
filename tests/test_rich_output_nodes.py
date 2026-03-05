@@ -438,3 +438,93 @@ async def test_describe_component_returns_component_schema() -> None:
     ctx = DummyContext()
     result = await describe_component(args=SimpleNamespace(name="markdown"), ctx=ctx)  # type: ignore[arg-type]
     assert result.component["name"] == "markdown"
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_persistent_store_fallback() -> None:
+    """Persistent store artifacts are returned even when no in-run registry exists."""
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
+    )
+    ctx = DummyContext()
+    # No registry -- ctx._planner is not set, so get_artifact_registry returns None.
+    ref = await ctx.artifacts.upload(
+        b"binary content",
+        mime_type="application/octet-stream",
+        filename="data.bin",
+        meta={"tool": "web_fetch"},
+    )
+    result = await list_artifacts(ListArtifactsArgs(), ctx)
+    assert len(result.artifacts) == 1
+    artifact = result.artifacts[0]
+    assert artifact.kind == "binary"
+    assert artifact.artifact_id == ref.id
+    assert artifact.renderable is True
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_deduplication_persistent_store_wins() -> None:
+    """When registry and persistent store have the same artifact_id, persistent store wins."""
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["report", "echarts"], max_payload_bytes=5000, max_total_bytes=10000)
+    )
+    ctx = DummyContext()
+    # Upload a binary artifact to the persistent store
+    ref = await ctx.artifacts.upload(
+        b"binary content",
+        mime_type="image/png",
+        filename="chart.png",
+        meta={"tool": "gather_data"},
+    )
+    # Register an artifact in the in-run registry, then manually set its artifact_id
+    # to match the persistent store entry (register_tool_artifact does not accept artifact_id).
+    registry = ArtifactRegistry()
+    record = registry.register_tool_artifact(
+        "gather_data",
+        "chart_artifacts",
+        {"type": "echarts", "config": {}},
+        step_index=0,
+    )
+    record.artifact_id = ref.id
+    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+    result = await list_artifacts(ListArtifactsArgs(), ctx)
+    # The persistent store entry should replace the registry entry with the same artifact_id.
+    matching = [a for a in result.artifacts if a.artifact_id == ref.id]
+    assert len(matching) == 1
+    assert matching[0].kind == "binary"
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_source_tool_filter_persistent_store() -> None:
+    """source_tool filter is applied to persistent store entries."""
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
+    )
+    ctx = DummyContext()
+    await ctx.artifacts.upload(
+        b"binary content",
+        mime_type="application/octet-stream",
+        meta={"tool": "web_fetch"},
+    )
+    # Filter for a different tool -- should exclude the persistent artifact
+    result = await list_artifacts(ListArtifactsArgs(sourceTool="other_tool"), ctx)
+    assert result.artifacts == []
+
+    # Filter for the correct tool -- should include it
+    result = await list_artifacts(ListArtifactsArgs(sourceTool="web_fetch"), ctx)
+    assert len(result.artifacts) == 1
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_ui_component_kind_skips_persistent_store() -> None:
+    """kind='ui_component' skips persistent store (persistent artifacts are 'binary')."""
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["report"], max_payload_bytes=2000, max_total_bytes=2000)
+    )
+    ctx = DummyContext()
+    await ctx.artifacts.upload(
+        b"binary content",
+        mime_type="application/octet-stream",
+    )
+    result = await list_artifacts(ListArtifactsArgs(kind="ui_component"), ctx)
+    assert result.artifacts == []

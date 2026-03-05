@@ -392,3 +392,45 @@ uv run pytest tests/test_tool_jobs.py -v
 # Run full test suite to confirm no regressions:
 uv run pytest
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-05
+
+### Summary of Changes
+
+- **`penguiflow/sessions/tool_jobs.py` (line 22):** Removed `ArtifactScope` from the import statement. The import now reads `from penguiflow.artifacts import ArtifactStore, NoOpArtifactStore, ScopedArtifacts`.
+- **`penguiflow/sessions/tool_jobs.py` (lines 165-171):** Changed `_extract_artifacts_from_observation` signature from `artifact_store: ArtifactStore, scope: ArtifactScope | None` to `artifacts: ScopedArtifacts`.
+- **`penguiflow/sessions/tool_jobs.py` (line 172):** Renamed the local accumulator variable from `artifacts` to `collected` to avoid shadowing the new `artifacts: ScopedArtifacts` parameter. Updated the corresponding `collected.append(entry)` call in `_store` (line 217) and `return collected` (line 226).
+- **`penguiflow/sessions/tool_jobs.py` (lines 190-201):** Replaced `artifact_store.put_text(..., scope=scope)` with `artifacts.upload(...)` (no `scope=` parameter). Removed the stale comment about scope capture.
+- **`penguiflow/sessions/tool_jobs.py` (line 264):** Added `"session_id": snapshot.session_id` to the `tool_context` dict in the `ToolJobContext` constructor call.
+- **`penguiflow/sessions/tool_jobs.py` (lines 278-285):** Replaced the manual `artifact_scope` construction block (8 lines) and old function call with a simplified call passing `artifacts=ctx.artifacts`.
+- **`tests/test_tool_jobs.py` (line 8):** Added `ScopedArtifacts` to the import from `penguiflow.artifacts`.
+- **`tests/test_tool_jobs.py` (lines 104-138):** Updated `test_extract_artifacts_from_observation_propagates_full_scope` to construct a `ScopedArtifacts` instance and pass it via `artifacts=scoped`. The `ArtifactScope` and `store.list(scope=scope)` assertion remain for verifying the scope was correctly propagated to the underlying store.
+
+### Key Considerations
+
+- **Variable shadowing fix:** The original code had a local variable `artifacts: list[dict[str, Any]] = []` inside `_extract_artifacts_from_observation`. When the parameter was renamed from `artifact_store` to `artifacts` (per the plan), this created a name collision where the local list would shadow the `ScopedArtifacts` parameter. The inner `_store` function closure would then try to call `.upload()` on a list, causing an `AttributeError` at runtime. I renamed the local accumulator list to `collected` to resolve this. This is the minimal change needed to avoid the bug while preserving all existing behavior.
+- **Parameter naming consistency:** The new parameter name `artifacts` matches the naming convention used elsewhere in the codebase (e.g., `ctx.artifacts` property returns `ScopedArtifacts`).
+
+### Assumptions
+
+- The `ScopedArtifacts.upload()` method signature (accepting `data`, `mime_type`, `filename`, `namespace`, `meta`) was verified by reading `penguiflow/artifacts.py` to confirm compatibility with the old `ArtifactStore.put_text()` call pattern.
+- The `snapshot.session_id` value injected into `tool_context` may be `None` in cases where no session ID is available. This is acceptable because `ScopedArtifacts.__init__` already handles `None` values for `session_id` (the conditional `str(...)` conversion in `ToolJobContext.__init__` at line 50 guards against this).
+
+### Deviations from Plan
+
+- **Renamed local variable `artifacts` to `collected`:** The plan did not mention this rename because the variable shadowing issue was not anticipated. The original code had `artifacts: list[dict[str, Any]] = []` as the local accumulator, which was fine when the parameter was named `artifact_store`. After renaming the parameter to `artifacts` per the plan, a name collision would occur. I renamed the local to `collected` and updated all references (`collected.append(entry)` and `return collected`) to resolve this. This is a necessary deviation to make the code correct.
+
+### Potential Risks & Reviewer Attention Points
+
+- **Closure capture in `_store`:** The inner `_store` function captures `artifacts` (the `ScopedArtifacts` parameter) from the enclosing scope. Since `collected` is now a separate name, there is no risk of the closure accidentally capturing the wrong variable. However, reviewers should verify that the closure behavior is correct, especially in the loop where `_store` is defined inside a `for` loop over fields (the default parameter trick `_field_name: str = field_name` already handles this correctly).
+- **`session_id` injection ordering:** The `session_id` is placed after `**(snapshot.tool_context or {})` unpacking, which means if `snapshot.tool_context` already contains a `session_id` key, it will be overwritten by `snapshot.session_id`. This is intentional -- the canonical session ID should come from `snapshot.session_id`, not from a potentially stale value in `tool_context`.
+
+### Files Modified
+
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/sessions/tool_jobs.py`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/test_tool_jobs.py`

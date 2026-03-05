@@ -179,3 +179,46 @@ uv run ruff check penguiflow/rich_output/nodes.py
 uv run mypy penguiflow/rich_output/nodes.py
 uv run pytest tests/test_rich_output_nodes.py -v
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-05
+
+### Summary of Changes
+- **`penguiflow/rich_output/nodes.py`**: Added `import logging` (line 7) and `logger = logging.getLogger(__name__)` (line 37) for module-level logging.
+- **`penguiflow/rich_output/nodes.py`**: Added `_binary_component_name` and `_binary_summary` to the import block from `penguiflow.planner.artifact_registry` (lines 14-15).
+- **`penguiflow/rich_output/nodes.py`**: Rewrote the `list_artifacts` function (lines 181-244) to:
+  - Remove the early return when `registry is None`.
+  - Query the in-run `ArtifactRegistry` first (without `limit=` parameter).
+  - Query the persistent `ArtifactStore` via `ctx.artifacts.list()` when `kind` is `None` or `"binary"`.
+  - Deduplicate entries (persistent store wins over registry for same `artifact_id`).
+  - Apply `source_tool` filter on persistent store entries via `ref.source.get("tool")`.
+  - Wrap persistent store query in `try/except Exception` with `logger.debug` on failure.
+  - Apply `limit` on the combined list at the end using `items[-limit:]`.
+
+### Key Considerations
+- The implementation follows the phase file code exactly as specified. The structure mirrors the existing `list_records` approach but extends it with persistent store querying.
+- `registry.list_records()` is now called WITHOUT the `limit=` parameter so that the limit applies to the combined list (registry + persistent store) rather than just registry results. This is a behavioral change from the old code where `limit` was passed directly to `list_records()`.
+- The deduplication loop removes matching registry entries when a persistent store entry with the same `artifact_id` is found, then appends the persistent store entry. This ensures persistent store always wins.
+- The `source_tool` filter on persistent store entries checks `ref.source.get("tool")` which is safe because `ArtifactRef.source` is always at least `{}` (never `None`), verified by examining the `ArtifactRef` Pydantic model.
+
+### Assumptions
+- Phase 000 has already been implemented, establishing the `ctx.artifacts` convention (the `DummyContext` in tests already has an `artifacts` property backed by `ScopedArtifacts`).
+- `ScopedArtifacts.list()` returns `list[ArtifactRef]` (verified from `penguiflow/artifacts.py` line 336-338).
+- The existing test `test_list_artifacts_returns_empty_without_registry` continues to pass because the `DummyContext` uses an `InMemoryArtifactStore` that starts empty -- so both the registry (None) and persistent store (empty) produce no results.
+- New tests for the persistent store merge behavior will be added in Phase 002 as noted in the plan.
+
+### Deviations from Plan
+None. The implementation matches the phase file specification exactly, including the code structure, error handling, deduplication logic, and import changes.
+
+### Potential Risks & Reviewer Attention Points
+- **Cross-module private import**: `_binary_component_name` and `_binary_summary` are private (`_`-prefixed) functions imported from `artifact_registry.py`. This is intentional per the plan since the modules are closely related, but it does create a tighter coupling. If these helpers are ever refactored or renamed in `artifact_registry.py`, `nodes.py` will break.
+- **Deduplication performance**: The deduplication logic uses list comprehension filtering (`items = [item for item in items if ...]`) inside a loop. For very large artifact lists this could be O(n*m), but in practice artifact counts are small enough that this is not a concern.
+- **Behavioral change for `limit`**: The old code passed `limit` directly to `registry.list_records()`. The new code applies `limit` after combining both sources. This means the registry may now return more items than before (up to all of them), with truncation happening at the end. This is the intended behavior per the plan.
+
+### Files Modified
+- `penguiflow/rich_output/nodes.py` (modified)
+- `docs/RFC/ToDo/issue-83/001-missing-artifacts/phases/phase-001.md` (appended implementation notes)

@@ -533,6 +533,8 @@ async def _maybe_hydrate_stored_payload(payload: Any, *, artifact_store: Any | N
         return None
     get_fn = getattr(artifact_store, "get", None)
     if not callable(get_fn):
+        get_fn = getattr(artifact_store, "download", None)
+    if not callable(get_fn):
         return None
     raw = await get_fn(str(ref_dict["id"]))
     if raw is None:
