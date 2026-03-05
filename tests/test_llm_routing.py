@@ -30,6 +30,11 @@ class TestParseModelString:
         assert result.provider == "nim"
         assert result.model_id == "qwen/qwen3.5-397b-a17b"
 
+    def test_nvidia_direct_model_keeps_prefix(self) -> None:
+        result = parse_model_string("nvidia/nemotron-3-nano-30b-a3b")
+        assert result.provider == "nim"
+        assert result.model_id == "nvidia/nemotron-3-nano-30b-a3b"
+
     def test_openai_implied(self) -> None:
         result = parse_model_string("gpt-4o")
         assert result.provider == "openai"
@@ -110,6 +115,9 @@ class TestNormalizeModelId:
 
     def test_bedrock(self) -> None:
         assert normalize_model_id("bedrock/anthropic.claude-3") == "anthropic.claude-3"
+
+    def test_nvidia_direct_model(self) -> None:
+        assert normalize_model_id("nvidia/nemotron-3-nano-30b-a3b") == "nvidia/nemotron-3-nano-30b-a3b"
 
 
 class TestGetProviderForModel:
