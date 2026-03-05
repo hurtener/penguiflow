@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "penguiflow"
-version = "3.0.1"
+version = "3.1.0"
 description = "Async-first orchestration library for multi-agent and data pipelines"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -83,7 +83,7 @@ a2a-client = [
 planner = [
     "litellm>=1.77.3",
     "dspy>=3.0.3",
-    "fastmcp>=2.13.0",
+    "fastmcp>=3.0",
     "utcp>=1.1.0",
     "utcp-http>=1.0.0",
     "tenacity>=9.0.0",

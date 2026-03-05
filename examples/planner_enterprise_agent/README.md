@@ -194,7 +194,7 @@ All configuration is driven by environment variables (see `.env.example`):
 | `LLM_MODEL` | ❌ | `gpt-4o-mini` | Primary LLM model |
 | `LLM_TEMPERATURE` | ❌ | `0.0` | Sampling temperature |
 | `LLM_MAX_RETRIES` | ❌ | `3` | Retry attempts for transient failures |
-| `LLM_TIMEOUT_S` | ❌ | `60.0` | Timeout per LLM call |
+| `LLM_TIMEOUT_S` | ❌ | `360.0` | Timeout per LLM call |
 | `PLANNER_MAX_ITERS` | ❌ | `12` | Max planning iterations |
 | `PLANNER_TOKEN_BUDGET` | ❌ | `8000` | Token budget for compression |
 | `PLANNER_DEADLINE_S` | ❌ | `None` | Wall-clock deadline |

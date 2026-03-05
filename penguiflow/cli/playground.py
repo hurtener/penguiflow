@@ -2172,6 +2172,112 @@ def create_playground_app(
             _LOGGER.warning(f"Resource read failed for {uri}: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    # ── MCP Apps: tool callback endpoint ──────────────────────────────────────
+
+    @app.post("/apps/{namespace}/call-tool")
+    async def app_call_tool(
+        namespace: str,
+        request: Request,
+        session_id: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        x_session_id: str | None = Header(None, alias="X-Session-ID"),
+    ) -> Mapping[str, Any]:
+        """Handle tool call requests from MCP App iframes.
+
+        This endpoint receives tool call requests forwarded from the
+        postMessage bridge in McpApp.svelte, routes them to the appropriate
+        ToolNode, and returns the result back to the frontend.
+        """
+        body = await request.json()
+        tool_name = body.get("name")
+        tool_args = body.get("arguments", {})
+
+        if not tool_name:
+            raise HTTPException(status_code=400, detail="Missing 'name' in request body")
+
+        # Find tool node
+        tool_nodes = getattr(agent_wrapper, "_tool_nodes", None)
+        if tool_nodes is None:
+            planner = getattr(agent_wrapper, "_planner", None)
+            if planner is not None:
+                tool_nodes = getattr(planner, "_tool_nodes", None)
+
+        if tool_nodes is None:
+            raise HTTPException(status_code=500, detail="No tool nodes available")
+
+        tool_node = None
+        if isinstance(tool_nodes, dict):
+            tool_node = tool_nodes.get(namespace)
+        elif isinstance(tool_nodes, list):
+            for tn in tool_nodes:
+                if getattr(tn, "config", None) and getattr(tn.config, "name", None) == namespace:
+                    tool_node = tn
+                    break
+
+        if tool_node is None:
+            raise HTTPException(status_code=404, detail=f"Tool node '{namespace}' not found")
+
+        # Build namespaced tool name
+        if "." in tool_name:
+            if not tool_name.startswith(f"{namespace}."):
+                raise HTTPException(status_code=400, detail="Tool name namespace mismatch")
+            namespaced_name = tool_name
+        else:
+            namespaced_name = f"{namespace}.{tool_name}"
+
+        # Create minimal context for tool execution
+        resolved_session = session_id or x_session_id or "default"
+        artifact_store = _discover_artifact_store()
+        scoped_store: Any
+        if artifact_store is None:
+            scoped_store = _DisabledArtifactStore()
+        else:
+            from penguiflow.artifacts import ArtifactScope
+
+            scoped_store = _ScopedArtifactStore(
+                artifact_store,
+                ArtifactScope(
+                    session_id=resolved_session,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                ),
+            )
+
+        class MinimalToolCtx:
+            def __init__(self, artifacts: Any, tool_ctx: dict[str, Any]):
+                self._artifacts_store = artifacts
+                self._tool_context = tool_ctx
+                self._llm_context: dict[str, Any] = {}
+                self._meta: dict[str, Any] = {}
+
+            @property
+            def tool_context(self) -> dict[str, Any]:
+                return self._tool_context
+
+            @property
+            def llm_context(self) -> dict[str, Any]:
+                return self._llm_context
+
+            @property
+            def meta(self) -> dict[str, Any]:
+                return self._meta
+
+            @property
+            def _artifacts(self) -> Any:
+                return self._artifacts_store
+
+        ctx = MinimalToolCtx(scoped_store, {"session_id": resolved_session, "user_id": user_id})
+
+        try:
+            result = await tool_node.call(namespaced_name, tool_args, ctx)
+            if isinstance(result, Mapping):
+                return result
+            return {"result": result}
+        except Exception as exc:
+            _LOGGER.warning(f"App tool call failed for {namespaced_name}: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     if discovery:
         app.state.discovery = discovery
     app.state.agent_wrapper = agent_wrapper

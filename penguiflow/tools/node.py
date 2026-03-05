@@ -39,6 +39,7 @@ from penguiflow.planner.context import ToolContext
 from penguiflow.registry import ModelRegistry
 
 from .adapters import adapt_exception
+from .apps import UI_MIME_TYPE, AppMetadata, extract_app_metadata
 from .config import (
     AuthType,
     ExternalToolConfig,
@@ -47,6 +48,11 @@ from .config import (
     UtcpMode,
 )
 from .errors import ToolAuthError, ToolConnectionError, ToolNodeError
+from .prompts import (
+    PromptArgumentInfo,
+    PromptInfo,
+    serialize_prompt_messages,
+)
 from .resources import (
     ResourceCache,
     ResourceCacheConfig,
@@ -86,6 +92,15 @@ class ToolNode:
     _resources_supported: bool = field(default=False, repr=False)
     _resource_update_callback: Callable[[str], None] | None = field(default=None, repr=False)
 
+    # MCP Prompts support (Phase 3)
+    _prompts: list[PromptInfo] = field(default_factory=list, repr=False)
+    _prompts_supported: bool = field(default=False, repr=False)
+    _prompts_stale: bool = field(default=False, repr=False)
+
+    # MCP Apps support
+    # namespaced tool name -> AppMetadata
+    _app_metadata: dict[str, AppMetadata] = field(default_factory=dict, repr=False)
+
     def __post_init__(self) -> None:
         self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
         self._connect_lock = asyncio.Lock()
@@ -116,6 +131,10 @@ class ToolNode:
             # Reset discovery caches before connecting
             self._tools = []
             self._tool_name_map.clear()
+            self._app_metadata.clear()
+            self._prompts = []
+            self._prompts_supported = False
+            self._prompts_stale = False
 
             # Resolve auth headers for connection (supports HITL OAuth if ctx provided)
             auth_headers = await self._resolve_connection_auth(ctx)
@@ -216,6 +235,9 @@ class ToolNode:
         # Discover MCP resources (Phase 2)
         await self._discover_mcp_resources()
 
+        # Discover MCP prompts (Phase 3)
+        await self._discover_mcp_prompts()
+
     async def _discover_mcp_resources(self) -> None:
         """Discover MCP resources and templates.
 
@@ -286,6 +308,68 @@ class ToolNode:
         if self._resources_supported:
             resource_tools = self._generate_resource_tools()
             self._tools.extend(resource_tools)
+
+    @staticmethod
+    def _parse_prompt_info(p: Any) -> PromptInfo:
+        """Parse a single MCP prompt object into PromptInfo."""
+        d = isinstance(p, dict)
+        name = getattr(p, "name", p.get("name", "") if d else "")
+        desc = getattr(p, "description", p.get("description") if d else None)
+        raw_args = getattr(p, "arguments", None) or (p.get("arguments") if d else None) or []
+        arguments = []
+        for a in raw_args:
+            ad = isinstance(a, dict)
+            arguments.append(
+                PromptArgumentInfo(
+                    name=getattr(a, "name", a.get("name", "") if ad else ""),
+                    description=getattr(
+                        a,
+                        "description",
+                        a.get("description") if ad else None,
+                    ),
+                    required=bool(getattr(a, "required", a.get("required", False) if ad else False)),
+                )
+            )
+        return PromptInfo(name=name, description=desc, arguments=arguments)
+
+    async def _discover_mcp_prompts(self) -> None:
+        """Discover MCP prompts.
+
+        Best-effort: doesn't fail if server doesn't support prompts.
+        """
+        if self._mcp_client is None:
+            return
+
+        if not self.config.prompts.enabled:
+            self._prompts = []
+            self._prompts_supported = False
+            self._prompts_stale = False
+            return
+
+        try:
+            prompts = await self._mcp_client.list_prompts()
+            self._prompts = [self._parse_prompt_info(p) for p in (prompts if isinstance(prompts, list) else [])]
+            self._prompts_supported = True
+            self._prompts_stale = False
+            logger.debug(
+                "Discovered %d MCP prompts for '%s'",
+                len(self._prompts),
+                self.config.name,
+            )
+        except Exception as e:
+            logger.debug(
+                "MCP prompts not supported by '%s': %s",
+                self.config.name,
+                e,
+            )
+            self._prompts = []
+            self._prompts_supported = False
+            self._prompts_stale = False
+
+        # Generate planner tools for prompts if supported
+        if self._prompts_supported and self.config.prompts.generate_tools:
+            prompt_tools = self._generate_prompt_tools()
+            self._tools.extend(prompt_tools)
 
     def _resolve_mcp_url_transport(
         self,
@@ -393,6 +477,17 @@ class ToolNode:
             result = await self._call_with_retry(original_name, args, auth_headers)
             # Transform output through layered artifact extraction
             transformed = await self._transform_output(original_name, result, ctx)
+
+            # MCP Apps: if tool has an app, fetch the UI resource and package it
+            if self.config.apps.enabled and self.config.apps.fetch_html_on_call:
+                app_meta = self._app_metadata.get(tool_name)
+                if app_meta is not None:
+                    transformed = await self._enrich_with_app_html(
+                        transformed,
+                        app_meta,
+                        ctx,
+                    )
+
             # Wrap result to match the output model schema: {"result": <data>}
             return {"result": transformed}
 
@@ -402,6 +497,7 @@ class ToolNode:
         self._connected_loop = None
         self._tools = []
         self._tool_name_map.clear()
+        self._prompts_stale = False
         if self._mcp_client:
             try:
                 await self._mcp_client.__aexit__(None, None, None)
@@ -675,6 +771,14 @@ class ToolNode:
             if isinstance(self.config.arg_validation, dict):
                 extra["arg_validation"] = dict(self.config.arg_validation)
 
+            # Detect MCP Apps metadata (io.modelcontextprotocol/ui extension)
+            if self.config.apps.enabled:
+                app_meta = extract_app_metadata(tool)
+                if app_meta is not None:
+                    self._app_metadata[namespaced] = app_meta
+                    extra["has_app"] = True
+                    extra["app_metadata"] = app_meta.model_dump()
+
             specs.append(
                 NodeSpec(
                     node=Node(bound_fn, name=namespaced),
@@ -921,7 +1025,8 @@ class ToolNode:
         result = await self._handle_resource_links(result, ctx)
 
         # L2: MCP typed content blocks
-        result = await self._transform_mcp_content_blocks(result, ctx)
+        if config.handle_mcp_typed_content:
+            result = await self._transform_mcp_content_blocks(result, ctx)
 
         # L3: Heuristic binary detection
         if config.binary_detection.enabled:
@@ -948,59 +1053,113 @@ class ToolNode:
         Returns:
             Result with configured fields replaced by ArtifactRefs
         """
+        if isinstance(result, list):
+            transformed: list[Any] = []
+            for item in result:
+                if isinstance(item, (dict, list)):
+                    transformed.append(await self._apply_field_extraction(item, field_configs, ctx))
+                else:
+                    transformed.append(item)
+            return transformed
+
         if not isinstance(result, dict):
             return result
 
         for field_config in field_configs:
             path = field_config.field_path
-            # Simple dot notation path traversal
             parts = path.split(".")
-            current = result
-            parent = None
-            last_key = None
+            targets = self._resolve_field_targets(result, parts)
+            # Common wrapper pattern from some MCP servers: {"result": {...}}
+            if not targets and isinstance(result.get("result"), (dict, list)):
+                targets = self._resolve_field_targets(result["result"], parts)
 
-            for part in parts:
-                if not isinstance(current, dict) or part not in current:
-                    break
-                parent = current
-                last_key = part
-                current = current[part]
-            else:
-                # Found the field - extract as artifact
-                if parent is not None and last_key is not None:
-                    value = parent[last_key]
-                    if isinstance(value, str) and len(value) > 100:
-                        # Decode and store
-                        try:
-                            if field_config.content_type in ("pdf", "image", "binary"):
-                                data = base64.b64decode(value)
-                            else:
-                                data = value.encode("utf-8")
+            for parent, key in targets:
+                if isinstance(parent, dict):
+                    if not isinstance(key, str):
+                        continue
+                    value = parent[key]
+                elif isinstance(parent, list):
+                    if not isinstance(key, int):
+                        continue
+                    value = parent[key]
+                else:
+                    continue
 
-                            mime = field_config.mime_type
-                            if mime is None:
-                                mime = self._infer_mime_type(field_config.content_type)
+                if isinstance(value, str) and len(value) > 100:
+                    try:
+                        if field_config.content_type in ("pdf", "image", "binary"):
+                            data = base64.b64decode(value)
+                        else:
+                            data = value.encode("utf-8")
 
-                            ref = await ctx._artifacts.put_bytes(
-                                data,
-                                mime_type=mime,
-                                namespace=self.config.name,
-                            )
+                        mime = field_config.mime_type
+                        if mime is None:
+                            mime = self._infer_mime_type(field_config.content_type)
 
-                            # Replace with summary and reference
-                            summary = field_config.summary_template.format(
-                                content_type=field_config.content_type,
-                                size=len(data),
-                                artifact_id=ref.id,
-                            )
-                            parent[last_key] = {
-                                "artifact": ref.model_dump(),
-                                "summary": summary,
-                            }
-                        except Exception as e:
-                            logger.debug(f"Field extraction failed for {path}: {e}")
+                        ref = await ctx._artifacts.put_bytes(
+                            data,
+                            mime_type=mime,
+                            namespace=self.config.name,
+                        )
+
+                        summary = field_config.summary_template.format(
+                            content_type=field_config.content_type,
+                            size=len(data),
+                            artifact_id=ref.id,
+                        )
+                        replacement = {
+                            "artifact": ref.model_dump(),
+                            "summary": summary,
+                        }
+                        if isinstance(parent, dict) and isinstance(key, str):
+                            parent[key] = replacement
+                        elif isinstance(parent, list) and isinstance(key, int):
+                            parent[key] = replacement
+                    except Exception as e:
+                        logger.debug(f"Field extraction failed for {path}: {e}")
 
         return result
+
+    def _resolve_field_targets(
+        self,
+        root: Any,
+        parts: list[str],
+    ) -> list[tuple[dict[str, Any] | list[Any], str | int]]:
+        """Resolve container/key targets for a dot-path across dict/list shapes."""
+        if not parts:
+            return []
+        return self._resolve_field_targets_recursive(root, parts)
+
+    def _resolve_field_targets_recursive(
+        self,
+        current: Any,
+        parts: list[str],
+    ) -> list[tuple[dict[str, Any] | list[Any], str | int]]:
+        part = parts[0]
+        rest = parts[1:]
+        targets: list[tuple[dict[str, Any] | list[Any], str | int]] = []
+
+        if isinstance(current, dict):
+            if part not in current:
+                return targets
+            if not rest:
+                return [(current, part)]
+            return self._resolve_field_targets_recursive(current[part], rest)
+
+        if isinstance(current, list):
+            if part.isdigit():
+                idx = int(part)
+                if idx < 0 or idx >= len(current):
+                    return targets
+                if not rest:
+                    return [(current, idx)]
+                return self._resolve_field_targets_recursive(current[idx], rest)
+
+            # For list roots, apply the same path to each element (content-block lists)
+            for item in current:
+                targets.extend(self._resolve_field_targets_recursive(item, parts))
+
+        return targets
 
     async def _handle_resource_links(self, result: Any, ctx: ToolContext) -> Any:
         """Handle MCP resource_link content blocks.
@@ -1645,13 +1804,18 @@ class ToolNode:
         """Process resource contents into artifact or inline text."""
         import base64
 
-        # Extract content from various formats
+        # Extract content from supported response shapes:
+        # - {"contents": [...]}
+        # - [content_item, ...]
+        # - content_item
         if isinstance(contents, dict):
             resource_data = contents.get("contents", [contents])
             if isinstance(resource_data, list) and resource_data:
                 content_item = resource_data[0]
             else:
                 content_item = resource_data
+        elif isinstance(contents, list):
+            content_item = contents[0] if contents else {}
         else:
             content_item = contents
 
@@ -1714,11 +1878,16 @@ class ToolNode:
         if self._subscription_manager is None:
             return False
 
-        # Capture client for closure (preserves type narrowing)
-        mcp_client = self._mcp_client
+        subscribe_method = getattr(self._mcp_client, "subscribe_resource", None)
+        if not callable(subscribe_method):
+            subscribe_method = getattr(self._mcp_client, "subscribe", None)
+        if not callable(subscribe_method):
+            logger.debug("MCP client for '%s' does not support resource subscriptions", self.config.name)
+            return False
 
+        # Capture client for closure (preserves type narrowing)
         async def subscribe_fn(resource_uri: str) -> None:
-            await mcp_client.subscribe(resource_uri)
+            await subscribe_method(resource_uri)
 
         return await self._subscription_manager.subscribe(uri, subscribe_fn, callback)
 
@@ -1737,11 +1906,16 @@ class ToolNode:
         if self._subscription_manager is None:
             return False
 
-        # Capture client for closure (preserves type narrowing)
-        mcp_client = self._mcp_client
+        unsubscribe_method = getattr(self._mcp_client, "unsubscribe_resource", None)
+        if not callable(unsubscribe_method):
+            unsubscribe_method = getattr(self._mcp_client, "unsubscribe", None)
+        if not callable(unsubscribe_method):
+            logger.debug("MCP client for '%s' does not support resource unsubscriptions", self.config.name)
+            return False
 
+        # Capture client for closure (preserves type narrowing)
         async def unsubscribe_fn(resource_uri: str) -> None:
-            await mcp_client.unsubscribe(resource_uri)
+            await unsubscribe_method(resource_uri)
 
         return await self._subscription_manager.unsubscribe(uri, unsubscribe_fn)
 
@@ -1790,6 +1964,360 @@ class ToolNode:
     def resource_templates(self) -> list[ResourceTemplateInfo]:
         """Get cached list of resource templates."""
         return self._resource_templates
+
+    # -------------------------------------------------------------------------
+    # MCP Apps
+    # -------------------------------------------------------------------------
+
+    async def _enrich_with_app_html(
+        self,
+        tool_result: Any,
+        app_meta: AppMetadata,
+        ctx: ToolContext,
+    ) -> Any:
+        """Fetch the UI resource and attach it to the tool result.
+
+        After an app-enabled tool executes, this method fetches the HTML
+        from the ui:// resource and stores it as an artifact. The tool result
+        is enriched with a ``__mcp_app__`` marker so the output pipeline and
+        frontend can detect and render it.
+
+        Args:
+            tool_result: The original transformed tool result
+            app_meta: App metadata from tool discovery
+            ctx: Tool context with artifact store access
+
+        Returns:
+            Enriched result with ``__mcp_app__`` key, or original result on failure
+        """
+        html = await self._fetch_app_html(app_meta.resource_uri)
+        if html is None:
+            return tool_result
+
+        session_id: str | None = None
+        try:
+            tool_ctx = getattr(ctx, "tool_context", None)
+            if isinstance(tool_ctx, dict):
+                raw_session_id = tool_ctx.get("session_id")
+                if raw_session_id is not None:
+                    session_id = str(raw_session_id)
+        except Exception:
+            session_id = None
+
+        app_meta_payload: dict[str, Any] = {
+            "csp": app_meta.csp.model_dump(),
+            "permissions": app_meta.permissions.model_dump(),
+            "tool_data": tool_result,
+            "resource_uri": app_meta.resource_uri,
+            "prefers_border": app_meta.prefers_border,
+            "namespace": self.config.name,
+            "sandbox": self.config.apps.default_sandbox,
+        }
+        if session_id is not None:
+            app_meta_payload["session_id"] = session_id
+
+        # Store HTML as artifact
+        try:
+            ref = await ctx._artifacts.put_text(
+                html,
+                mime_type=UI_MIME_TYPE,
+                namespace=f"{self.config.name}.app",
+                meta=app_meta_payload,
+            )
+        except Exception as e:
+            logger.warning("Failed to store app HTML artifact: %s", e)
+            return tool_result
+
+        # Attach app metadata to result
+        app_payload = {
+            "artifact_id": ref.id,
+            **app_meta_payload,
+        }
+
+        if isinstance(tool_result, dict):
+            enriched = dict(tool_result)
+            enriched["__mcp_app__"] = app_payload
+            return enriched
+
+        return {"value": tool_result, "__mcp_app__": app_payload}
+
+    async def _fetch_app_html(self, uri: str) -> str | None:
+        """Fetch ui:// resource HTML for MCP App rendering.
+
+        Args:
+            uri: Resource URI (typically ui:// scheme)
+
+        Returns:
+            HTML string or None on failure
+        """
+        if self._mcp_client is None:
+            return None
+
+        try:
+            contents = await self._mcp_client.read_resource(uri)
+            return self._extract_text_from_resource(contents)
+        except Exception as e:
+            logger.warning("Failed to fetch app HTML from %s: %s", uri, e)
+            return None
+
+    @staticmethod
+    def _extract_text_from_resource(contents: Any) -> str | None:
+        """Extract text content from resource read result."""
+        # Handle list of content items
+        if isinstance(contents, list):
+            for item in contents:
+                text = getattr(item, "text", None)
+                if text is not None:
+                    return str(text)
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if text is not None:
+                        return str(text)
+            return None
+
+        # Handle single object
+        text = getattr(contents, "text", None)
+        if text is not None:
+            return str(text)
+
+        # Handle dict
+        if isinstance(contents, dict):
+            text = contents.get("text")
+            if text is not None:
+                return str(text)
+            # Try nested contents
+            nested = contents.get("contents", [])
+            if isinstance(nested, list):
+                for item in nested:
+                    if isinstance(item, dict) and "text" in item:
+                        return str(item["text"])
+
+        return None
+
+    def has_app(self, tool_name: str) -> bool:
+        """Check if a tool has MCP App metadata.
+
+        Args:
+            tool_name: Namespaced tool name
+
+        Returns:
+            True if the tool has app metadata
+        """
+        return tool_name in self._app_metadata
+
+    def get_app_metadata(self, tool_name: str) -> AppMetadata | None:
+        """Get MCP App metadata for a tool.
+
+        Args:
+            tool_name: Namespaced tool name
+
+        Returns:
+            AppMetadata or None
+        """
+        return self._app_metadata.get(tool_name)
+
+    @property
+    def app_tools(self) -> dict[str, AppMetadata]:
+        """Get all tools with MCP App metadata."""
+        return dict(self._app_metadata)
+
+    # -------------------------------------------------------------------------
+    # MCP Prompts (Phase 3)
+    # -------------------------------------------------------------------------
+
+    def _generate_prompt_tools(self) -> list[NodeSpec]:
+        """Generate NodeSpecs for MCP prompt operations.
+
+        Creates tools for:
+        - {namespace}.prompts_list: List available prompts
+        - {namespace}.prompts_get: Execute a prompt and return rendered messages
+
+        Returns:
+            List of NodeSpec for prompt tools
+        """
+        specs: list[NodeSpec] = []
+
+        if not self._prompts_supported:
+            return specs
+
+        namespace = self.config.name
+
+        # Create models for prompts_list
+        PromptsListInput = create_model(f"{namespace}_PromptsListInput")
+        PromptsListOutput = create_model(
+            f"{namespace}_PromptsListOutput",
+            prompts=(list[dict[str, Any]], []),
+            count=(int, 0),
+        )
+
+        # Create models for prompts_get
+        PromptsGetInput = create_model(
+            f"{namespace}_PromptsGetInput",
+            name=(str, ...),
+            arguments=(dict[str, str], {}),
+        )
+        PromptsGetOutput = create_model(
+            f"{namespace}_PromptsGetOutput",
+            messages=(list[dict[str, Any]], []),
+            description=(str | None, None),
+        )
+
+        # Register in registry (if not already registered)
+        if not self.registry.has(f"{namespace}.prompts_list"):
+            self.registry.register(
+                f"{namespace}.prompts_list",
+                PromptsListInput,
+                PromptsListOutput,
+            )
+        if not self.registry.has(f"{namespace}.prompts_get"):
+            self.registry.register(
+                f"{namespace}.prompts_get",
+                PromptsGetInput,
+                PromptsGetOutput,
+            )
+
+        # prompts_list tool
+        specs.append(
+            NodeSpec(
+                name=f"{namespace}.prompts_list",
+                desc=f"List available prompts from {namespace}",
+                args_model=PromptsListInput,
+                out_model=PromptsListOutput,
+                node=Node(self._handle_prompts_list, name=f"{namespace}.prompts_list"),
+                tags=["mcp", "prompts", namespace],
+                extra={"source": "mcp", "namespace": namespace, "tool_node": self, "prompt_tool": True},
+            )
+        )
+
+        # prompts_get tool
+        specs.append(
+            NodeSpec(
+                name=f"{namespace}.prompts_get",
+                desc=f"Execute a prompt by name from {namespace} and return rendered messages",
+                args_model=PromptsGetInput,
+                out_model=PromptsGetOutput,
+                node=Node(self._handle_prompts_get, name=f"{namespace}.prompts_get"),
+                tags=["mcp", "prompts", namespace],
+                extra={"source": "mcp", "namespace": namespace, "tool_node": self, "prompt_tool": True},
+            )
+        )
+
+        # Store tool name mappings
+        self._tool_name_map[f"{namespace}.prompts_list"] = "prompts_list"
+        self._tool_name_map[f"{namespace}.prompts_get"] = "prompts_get"
+
+        logger.debug(
+            "Generated %d prompt tools for '%s'",
+            len(specs),
+            namespace,
+        )
+
+        return specs
+
+    async def _handle_prompts_list(
+        self,
+        _args: Any,
+        _ctx: ToolContext,
+    ) -> dict[str, Any]:
+        """Handler for prompts_list tool."""
+        prompts = await self.list_prompts()
+        return {
+            "prompts": [p.model_dump() for p in prompts],
+            "count": len(prompts),
+        }
+
+    async def _handle_prompts_get(
+        self,
+        args: Any,
+        ctx: ToolContext,
+    ) -> dict[str, Any]:
+        """Handler for prompts_get tool."""
+        name = getattr(args, "name", args.get("name") if isinstance(args, dict) else None)
+        if not name:
+            return {"messages": [], "description": "Missing required 'name' parameter"}
+
+        arguments = getattr(args, "arguments", args.get("arguments") if isinstance(args, dict) else None) or {}
+
+        result = await self.get_prompt(name, arguments)
+        return result
+
+    async def list_prompts(self, refresh: bool = False) -> list[PromptInfo]:
+        """List available MCP prompts.
+
+        Args:
+            refresh: Force refresh from server
+
+        Returns:
+            List of PromptInfo objects (empty if not connected or prompts not supported)
+        """
+        if not self._connected:
+            return self._prompts
+
+        needs_refresh = refresh or self._prompts_stale
+        if not self._prompts_supported and not needs_refresh:
+            return self._prompts
+
+        if needs_refresh and self._mcp_client is not None:
+            try:
+                prompts = await self._mcp_client.list_prompts()
+                self._prompts = [self._parse_prompt_info(p) for p in (prompts if isinstance(prompts, list) else [])]
+                self._prompts_supported = True
+                self._prompts_stale = False
+            except Exception as e:
+                logger.warning(f"Failed to refresh prompts: {e}")
+
+        return self._prompts
+
+    async def get_prompt(
+        self,
+        name: str,
+        arguments: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Execute a prompt and return rendered messages.
+
+        Args:
+            name: Prompt name
+            arguments: Optional arguments for the prompt
+
+        Returns:
+            Dict with 'messages' (list of serialized messages) and 'description'
+        """
+        if not self._connected:
+            return {"messages": [], "description": f"ToolNode '{self.config.name}' not connected"}
+
+        if not self._prompts_supported:
+            return {"messages": [], "description": f"Prompts not supported by '{self.config.name}'"}
+
+        if self._mcp_client is None:
+            return {"messages": [], "description": "MCP client not available"}
+
+        try:
+            result = await self._mcp_client.get_prompt(name, arguments)
+            messages = serialize_prompt_messages(getattr(result, "messages", []))
+            description = getattr(result, "description", None)
+            return {"messages": messages, "description": description}
+        except Exception as e:
+            logger.warning(f"Failed to get prompt '{name}': {e}")
+            return {"messages": [], "description": f"Error: {e}"}
+
+    def handle_prompts_changed(self) -> None:
+        """Handle a prompts/list_changed notification from MCP server.
+
+        Clears cached prompts so they are re-discovered on next access.
+        """
+        self._prompts = []
+        self._prompts_stale = True
+        logger.debug("Prompts cache invalidated for '%s'", self.config.name)
+
+    @property
+    def prompts_supported(self) -> bool:
+        """Check if MCP prompts are supported by this tool source."""
+        return self._prompts_supported
+
+    @property
+    def prompts(self) -> list[PromptInfo]:
+        """Get cached list of prompts (call list_prompts for refresh)."""
+        return self._prompts
 
 
 __all__ = ["ToolNode"]

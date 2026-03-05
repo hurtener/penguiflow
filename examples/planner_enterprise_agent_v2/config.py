@@ -96,7 +96,7 @@ class AgentConfig:
             llm_model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
             llm_temperature=float(os.getenv("LLM_TEMPERATURE", "0.0")),
             llm_max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
-            llm_timeout_s=float(os.getenv("LLM_TIMEOUT_S", "60.0")),
+            llm_timeout_s=float(os.getenv("LLM_TIMEOUT_S", "360.0")),
             llm_max_tokens=int(os.getenv("LLM_MAX_TOKENS", "4096")),
             # Planner settings
             planner_max_iters=int(os.getenv("PLANNER_MAX_ITERS", "15")),
