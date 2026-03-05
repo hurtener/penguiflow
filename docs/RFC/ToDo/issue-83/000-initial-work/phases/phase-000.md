@@ -106,3 +106,37 @@ assert 'list' in protocol_methods, 'list must be in protocol'
 print('OK: protocol requires list method')
 "
 ```
+
+---
+
+## Implementation Notes (Post-Implementation)
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-05
+
+### Summary of Changes
+- Added `list` method to `_ScopedArtifactStore` (line 1115 in `penguiflow/cli/playground.py`) that delegates to `self._store.list(scope=scope or self._scope)`.
+- Added `list` method to `_DisabledArtifactStore` (line 1139 in `penguiflow/cli/playground.py`) that returns an empty list `[]`.
+
+### Key Considerations
+- The plan specified using quoted string annotations (`"ArtifactScope | None"`, `"list[ArtifactRef]"`) with local imports for `ArtifactRef` and `ArtifactScope` inside each method body. However, this approach triggers multiple ruff errors in the project's configuration:
+  - `UP037`: ruff's pyupgrade rule requires removing quotes from type annotations (since `from __future__ import annotations` is active at the top of the file, all annotations are already deferred).
+  - `F821`: Once quotes are removed by UP037, the bare names `ArtifactScope` and `ArtifactRef` are undefined at the annotation scope (they are only imported inside the method body, not at class/function scope).
+  - `F401`: The local imports are flagged as unused because they are not referenced in the method body (only in annotations, which are strings under `__future__` annotations).
+- To resolve this, I followed the **existing convention** used by all other methods in both classes: use `Any` for type annotations on the `scope` parameter and return type. This is consistent with `put_bytes`, `put_text`, `get`, `get_ref`, `delete`, and `exists` in both classes, which all use `Any` rather than the specific protocol types.
+- The local imports for `ArtifactRef` and `ArtifactScope` were removed since they are not needed at runtime (the `_ScopedArtifactStore.list` method simply delegates to `self._store.list(...)`, and `_DisabledArtifactStore.list` returns a plain `[]`).
+
+### Assumptions
+- The `Any` type annotations are sufficient for structural compatibility with the `ArtifactStore` protocol. Since these are duck-typed implementations (not explicitly inheriting from `ArtifactStore`), and the `@runtime_checkable` protocol check only verifies method names exist (not their signatures), using `Any` annotations does not affect protocol conformance.
+- The `_DisabledArtifactStore.list` return type uses `list[Any]` instead of bare `Any` to be slightly more precise while still avoiding the import issue. This is a minor improvement over `Any` alone.
+
+### Deviations from Plan
+- **Type annotations changed from specific types to `Any`.** The plan specified `scope: "ArtifactScope | None" = None` and `-> "list[ArtifactRef]"` with local imports. This was changed to `scope: Any | None = None` and `-> Any` / `-> list[Any]` to pass ruff's `UP037`, `F821`, and `F401` checks. The root cause is that `playground.py` uses `from __future__ import annotations`, making quoted forward references redundant and triggering ruff's pyupgrade rule, while the local imports become flagged as unused.
+- **Local imports for `ArtifactRef` and `ArtifactScope` were omitted.** They were not needed since the annotations use `Any` and the method bodies do not reference these types directly.
+
+### Potential Risks & Reviewer Attention Points
+- The type annotations are less precise than the protocol signature. If a future static analysis pass or stricter mypy configuration checks duck-typed protocol conformance at the annotation level, these methods might need updated annotations. For now, this matches the existing convention in both classes and passes all linting/type-checking.
+- The `scope=scope or self._scope` pattern in `_ScopedArtifactStore.list` uses truthiness-based defaulting, which is consistent with all other methods in that class (e.g., `put_bytes`, `put_text`). If `scope` is an empty `ArtifactScope(...)` with all-None fields, it would be truthy and would override `self._scope`. This is the same behavior as the existing methods and is unlikely to be a problem in practice.
+
+### Files Modified
+- `penguiflow/cli/playground.py` -- Added `list` method to both `_ScopedArtifactStore` (line 1115) and `_DisabledArtifactStore` (line 1139).

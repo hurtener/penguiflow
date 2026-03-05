@@ -283,3 +283,52 @@ uv run pytest tests/ -k "playground" -x -q
 # Run the full test suite
 uv run pytest
 ```
+
+---
+
+## Implementation Notes (Post-Implementation)
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-05
+
+### Summary of Changes
+
+- **`tests/cli/test_playground_artifact_discovery.py`** -- Modified the existing file (created by the phase-001 implementer) to align with the phase-002 specification. The file already contained 4 working test cases that exercised the correct behavior. The following changes were made:
+  1. **Renamed class** from `TestDiscoverArtifactStoreFallback` to `TestArtifactDiscoveryFallback` to match the specification.
+  2. **Updated module docstring** to match the specified docstring explaining the closure/indirect-testing approach and the 501/200 semantics.
+  3. **Moved imports to top level** -- `ASGITransport`, `AsyncClient` from `httpx` and `create_playground_app` from `penguiflow.cli.playground` were moved from inside each test method to the module's top-level import section, matching the specification.
+  4. **Updated class docstring** to match: "Verify _discover_artifact_store() falls back to the state store."
+  5. **Updated test docstrings** to match the specification for all 4 tests.
+  6. **Added `del mock_store.save_task / save_event / load_history`** to `test_discover_artifact_store_skips_noop` as specified, preventing `SessionManager` from treating the mock as a real persistence backend.
+
+### Key Considerations
+
+1. **Pre-existing test file.** The phase-001 implementer created this test file as part of their implementation (documented in their phase-001 notes). The file already contained 4 correctly functioning tests. Rather than rewriting from scratch, I modified the existing file to match the phase-002 specification in class name, docstrings, import structure, and the `del mock_store` defensive pattern.
+
+2. **Cosmetic vs functional differences.** The existing test data values (e.g., `b"fallback artifact data"` vs spec's `b"hello from state store"`) were preserved because they are functionally equivalent -- the tests verify the correct bytes are returned, not the specific content. Changing the data values would have no effect on correctness and would create unnecessary diff noise.
+
+3. **Extra assertions preserved.** The existing file has additional assertions beyond what the spec requires (e.g., checking `content-type` and `content-disposition` headers in test 1, checking `ref.id in artifact_ids` in test 4). These provide strictly more coverage than the specification calls for and were kept.
+
+4. **`del mock_store` pattern.** The specification explicitly calls for `del mock_store.save_task; del mock_store.save_event; del mock_store.load_history` in the NoOp test. The original file lacked this. While the test passed without it (likely because `create_playground_app` doesn't exercise those attributes in the code path tested), the `del` calls are a defensive measure per the spec and were added.
+
+### Assumptions
+
+- The phase-001 implementer's test file was a reasonable starting point and did not need to be deleted and recreated. The phase-002 spec says "Create the new test file" but the file already existed with functionally correct tests.
+- The `filename` parameter passed to `put_bytes` (e.g., `filename="fallback.bin"`) is not specified in the phase-002 code but was present in the original file. It was preserved because it does not affect the test logic and provides additional coverage for the artifact storage path.
+- Preserving the existing test data values (slightly different from the "Required Code" section) is acceptable since the exit criteria focus on behavior (status codes, content correctness) not exact byte values.
+
+### Deviations from Plan
+
+- **Test data values differ from "Required Code" section.** The spec uses `b"hello from state store"`, `b"from planner"`, `b"listed artifact"` while the existing (preserved) tests use `b"fallback artifact data"`, `b"planner artifact data"`, `b"listed artifact data"`. These differences are purely cosmetic and do not affect test correctness.
+- **Additional assertions beyond spec.** Tests 1 and 4 have extra assertions (content-type headers, artifact ID in list) beyond what the spec calls for. These were kept as they add value without risk.
+- **Inline `filename` parameter in `put_bytes` calls.** The spec does not include `filename` in its `put_bytes` calls, but the existing tests pass it. This was preserved as it exercises a valid code path.
+
+### Potential Risks & Reviewer Attention Points
+
+1. **The `del mock_store.save_task` pattern in `test_discover_artifact_store_skips_noop`.** While the test passes both with and without these `del` statements, they are a defensive measure against future changes to `create_playground_app` that might exercise the state store's persistence methods during app creation. If `SessionManager`'s initialization changes to call these methods, tests without the `del` statements would produce confusing errors.
+
+2. **Top-level imports of `create_playground_app`.** Moving the import to the top level means the module is imported at test collection time rather than at test execution time. This is the standard pattern per the spec and matches how other test files in the project are structured, but it means any import errors in `playground.py` would prevent collection of all 4 tests rather than failing individually.
+
+### Files Modified
+
+- `tests/cli/test_playground_artifact_discovery.py` -- Modified (class name, docstrings, import structure, `del` statements)
