@@ -5,6 +5,7 @@ Uses the OpenAI SDK against NVIDIA's OpenAI-compatible chat completions API.
 Supported model formats:
 - "nim/qwen/qwen3.5-397b-a17b"
 - "nvidia/qwen/qwen3.5-397b-a17b"
+- "nvidia/nemotron-3-nano-30b-a3b"
 - "qwen/qwen3.5-397b-a17b"
 """
 
@@ -121,7 +122,12 @@ class NIMProvider(OpenAICompatibleProvider):
         if model.startswith("nim/"):
             return model.removeprefix("nim/")
         if model.startswith("nvidia/"):
-            return model.removeprefix("nvidia/")
+            remainder = model.removeprefix("nvidia/")
+            # Treat nvidia/<vendor>/<model> as provider alias (legacy style),
+            # but keep nvidia/<model> intact because NVIDIA's API expects it.
+            if "/" in remainder:
+                return remainder
+            return model
         return model
 
     async def complete(

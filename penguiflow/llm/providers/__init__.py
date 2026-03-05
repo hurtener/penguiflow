@@ -34,7 +34,8 @@ def create_provider(
 
     Model string formats:
     - "openai/gpt-4o" or "gpt-4o" -> OpenAI
-    - "nim/qwen/qwen3.5-397b-a17b" or "nvidia/qwen/qwen3.5-397b-a17b" -> NIM
+    - "nim/qwen/qwen3.5-397b-a17b", "nvidia/qwen/qwen3.5-397b-a17b",
+      or "nvidia/nemotron-3-nano-30b-a3b" -> NIM
     - "anthropic/claude-3-5-sonnet" or "claude-*" -> Anthropic
     - "google/gemini-2.0-flash" or "gemini-*" -> Google
     - "bedrock/anthropic.claude-3-5-sonnet" or "anthropic.*" -> Bedrock
@@ -101,7 +102,11 @@ def create_provider(
     if model.startswith("nim/"):
         return NIMProvider(model.removeprefix("nim/"), api_key=api_key, base_url=base_url, **kwargs)
     if model.startswith("nvidia/"):
-        return NIMProvider(model.removeprefix("nvidia/"), api_key=api_key, base_url=base_url, **kwargs)
+        remainder = model.removeprefix("nvidia/")
+        # Legacy aliases look like nvidia/<vendor>/<model> and should drop the
+        # provider prefix. Single-segment IDs (nvidia/<model>) are model names.
+        normalized = remainder if "/" in remainder else model
+        return NIMProvider(normalized, api_key=api_key, base_url=base_url, **kwargs)
 
     # Default: OpenAI-compatible (requires base_url for non-OpenAI servers)
     return OpenAIProvider(model, api_key=api_key, base_url=base_url, **kwargs)

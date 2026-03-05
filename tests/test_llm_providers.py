@@ -327,6 +327,20 @@ class TestProviderFactory:
             assert provider.model == "qwen/qwen3.5-397b-a17b"
             assert provider.provider_name == "nim"
 
+    def test_create_nim_provider_from_nvidia_direct_model(self) -> None:
+        """Test creating NIM provider with direct nvidia/<model> IDs."""
+        mock_openai = MagicMock()
+        mock_client = MagicMock()
+        mock_openai.AsyncOpenAI.return_value = mock_client
+
+        with patch.dict(sys.modules, {"openai": mock_openai}):
+            from penguiflow.llm.providers import create_provider
+
+            provider = create_provider("nvidia/nemotron-3-nano-30b-a3b", api_key="test-key")
+
+            assert provider.model == "nvidia/nemotron-3-nano-30b-a3b"
+            assert provider.provider_name == "nim"
+
     def test_create_openrouter_provider(self) -> None:
         """Test creating OpenRouter provider."""
         mock_openai = MagicMock()
