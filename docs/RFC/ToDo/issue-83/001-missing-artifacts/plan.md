@@ -234,7 +234,7 @@ def __init__(
 
 Remove `self._artifact_store = artifact_store` from the constructor body (line 157).
 
-Replace the `ArtifactStore` import with `ScopedArtifacts` (line 23: change `from penguiflow.artifacts import ArtifactRef, ArtifactStore` to `from penguiflow.artifacts import ArtifactRef, ScopedArtifacts`).
+Remove `ArtifactStore` from the `TYPE_CHECKING` import (line 23: change `from penguiflow.artifacts import ArtifactRef, ArtifactStore` to `from penguiflow.artifacts import ArtifactRef`). Do NOT add `ScopedArtifacts` — it is never used as a type annotation in this file after the changes (the code uses `ctx.artifacts` directly without type-annotating it).
 
 **`get_or_fetch` and `_fetch_and_store` methods:** These already receive `ctx: ToolContext`. Use `ctx.artifacts` (the `ScopedArtifacts` facade) directly instead of `self._artifact_store`.
 
@@ -270,7 +270,47 @@ Both `get_or_fetch` (line 164) and `_fetch_and_store` (line 200) already receive
 
 **File:** `penguiflow/sessions/tool_jobs.py`
 
-This function currently accepts `artifact_store: ArtifactStore` and `scope: ArtifactScope | None`, and calls `artifact_store.put_text(..., scope=scope)`. The scope is manually constructed at the call site (lines 282-287) from `snapshot.tool_context` — the same values that `ToolJobContext._scoped_artifacts` is constructed with (lines 46-52). So the manual scope construction is redundant when using the facade.
+This function currently accepts `artifact_store: ArtifactStore` and `scope: ArtifactScope | None`, and calls `artifact_store.put_text(..., scope=scope)`. The scope is manually constructed at the call site (lines 282-287) from `snapshot.tool_context`. This manual construction is redundant when using the `ScopedArtifacts` facade, which auto-injects scope.
+
+**Prerequisite: Inject `session_id` into `tool_context` at `ToolJobContext` construction site.**
+
+Currently (line 263-275), `snapshot.session_id` is a separate field on `TaskContextSnapshot` and is NOT automatically included in `snapshot.tool_context`. The `ScopedArtifacts` facade reads `session_id` from `tool_context.get("session_id")`. To ensure `ctx.artifacts` always has a complete scope (with `session_id`), explicitly inject it:
+
+```python
+# tool_jobs.py line 263-275 — ToolJobContext construction
+# Before:
+ctx = ToolJobContext(
+    llm_context=snapshot.llm_context or {},
+    tool_context={
+        **(snapshot.tool_context or {}),
+        "task_id": runtime.state.task_id,
+        "trace_id": trace_id,
+        "_current_tool_name": spec.name,
+        "_current_tool_call_id": tool_call_id,
+    },
+    artifacts=artifacts,
+    state_store=kv_store,
+    checkpoint_publisher=_publish_checkpoint,
+)
+
+# After:
+ctx = ToolJobContext(
+    llm_context=snapshot.llm_context or {},
+    tool_context={
+        **(snapshot.tool_context or {}),
+        "session_id": snapshot.session_id,
+        "task_id": runtime.state.task_id,
+        "trace_id": trace_id,
+        "_current_tool_name": spec.name,
+        "_current_tool_call_id": tool_call_id,
+    },
+    artifacts=artifacts,
+    state_store=kv_store,
+    checkpoint_publisher=_publish_checkpoint,
+)
+```
+
+This ensures `ScopedArtifacts` always gets `session_id` from `tool_context`, matching the old behavior where `snapshot.session_id` was used for scope construction. The `trace_id` in `ctx.artifacts` will be the computed one (line 254-258: `runtime.state.trace_id or runtime.context_snapshot.trace_id or tool_call_id`) rather than the original `snapshot.tool_context.get("trace_id")` — this is intentional and more correct, as it matches the trace_id used by all other operations in the same tool execution context.
 
 ### Changes
 
@@ -318,6 +358,8 @@ ref = await artifacts.upload(
 )
 ```
 
+**Stale comment in `_store` (`tool_jobs.py` line 192):** Remove the comment `# 'scope' is now captured from the outer function's parameter (no local override)` — after this change, `scope` is no longer a parameter. The `_store` inner function now captures `artifacts` (the `ScopedArtifacts` instance) from the enclosing function instead.
+
 **Call site (`tool_jobs.py` lines 280-296):**
 ```python
 # Before:
@@ -350,7 +392,7 @@ if isinstance(payload, Mapping):
     )
 ```
 
-The manual `artifact_scope` construction (lines 280-287) is deleted — `ctx.artifacts` already has the correct scope baked in.
+The manual `artifact_scope` construction (lines 280-287) is deleted — `ctx.artifacts` already has the correct scope baked in (including `session_id`, guaranteed by the prerequisite injection above).
 
 Update imports: `ScopedArtifacts` is already imported on line 22. Remove `ArtifactScope` from the import line — after this fix, it is no longer used anywhere in the file (verified: only used in the deleted function signature at line 171 and the deleted scope construction at lines 282-287). The import line becomes: `from penguiflow.artifacts import ArtifactStore, NoOpArtifactStore, ScopedArtifacts`.
 
@@ -360,7 +402,7 @@ Update imports: `ScopedArtifacts` is already imported on line 22. Remove `Artifa
 - `penguiflow/planner/artifact_registry.py` — `_maybe_hydrate_stored_payload` line 534 (add `.download()` fallback)
 - `penguiflow/tools/node.py` — 9 call sites (`put_bytes`/`put_text` → `upload`) + ResourceCache init (line 1774)
 - `penguiflow/tools/resources.py` — Constructor type, 2 write call sites (`put_bytes`/`put_text` → `upload`)
-- `penguiflow/sessions/tool_jobs.py` — `_extract_artifacts_from_observation` signature + body + call site
+- `penguiflow/sessions/tool_jobs.py` — `_extract_artifacts_from_observation` signature + body + call site + inject `session_id` into `ToolJobContext` tool_context (line 265)
 
 ## Tests
 
@@ -377,6 +419,68 @@ Update imports: `ScopedArtifacts` is already imported on line 22. Remove `Artifa
 ### Existing test to update
 
 - **`test_list_artifacts_returns_empty_without_registry`** (line 272): This test currently asserts that when there's no registry, results are empty. After the fix, the `DummyContext` has a `ScopedArtifacts` backed by an empty `InMemoryArtifactStore`, so the result will still be empty (no artifacts in the store). **No change needed** — the test remains valid as-is because the store is empty.
+
+### Existing tests to update (Fix 4 — `ResourceCache` constructor)
+
+**File:** `tests/test_toolnode_phase2.py`
+
+After removing `artifact_store` from the `ResourceCache` constructor (Fix 4), 5 test constructions will break with `TypeError`. Update each to remove the `artifact_store` argument:
+
+| Line | Before | After |
+|------|--------|-------|
+| 96 | `ResourceCache(artifact_store, "test", config)` | `ResourceCache("test", config)` |
+| 228 | `ResourceCache(artifact_store, "test", config)` | `ResourceCache("test", config)` |
+| 335 | `ResourceCache(artifact_store, "test", config)` | `ResourceCache("test", config)` |
+| 368 | `ResourceCache(artifact_store, "test", config)` | `ResourceCache("test", config)` |
+| 693 | `ResourceCache(store, "test", cache_config)` | `ResourceCache("test", cache_config)` |
+
+The `get_or_fetch` and `_fetch_and_store` methods now use `ctx.artifacts` instead of `self._artifact_store`. The `DummyCtx` in `test_toolnode_phase2.py` already exposes `ctx.artifacts` as `ScopedArtifacts`, so test calls to `cache.get_or_fetch(uri, read_fn, ctx)` will work without further changes.
+
+### Existing tests to update (Fix 5 — `_extract_artifacts_from_observation` signature)
+
+**File:** `tests/test_tool_jobs.py`
+
+**`test_extract_artifacts_from_observation_propagates_full_scope`** (line 104-132): This test calls `_extract_artifacts_from_observation` directly with the old signature (`artifact_store=store, scope=scope`). After the signature change to `artifacts: ScopedArtifacts`, this test **will break**.
+
+Update the test to construct a `ScopedArtifacts` instance and pass it via the new `artifacts=` parameter:
+
+```python
+# Before:
+store = InMemoryArtifactStore()
+scope = ArtifactScope(
+    session_id="sess-1",
+    tenant_id="tenant-1",
+    user_id="user-1",
+    trace_id="trace-1",
+)
+result = await _extract_artifacts_from_observation(
+    node_name="test_node",
+    out_model=ArtifactOut,
+    observation=observation,
+    artifact_store=store,
+    scope=scope,
+)
+
+# After:
+store = InMemoryArtifactStore()
+scoped = ScopedArtifacts(
+    store,
+    tenant_id="tenant-1",
+    user_id="user-1",
+    session_id="sess-1",
+    trace_id="trace-1",
+)
+result = await _extract_artifacts_from_observation(
+    node_name="test_node",
+    out_model=ArtifactOut,
+    observation=observation,
+    artifacts=scoped,
+)
+```
+
+The scope verification assertions (`ref.scope.session_id == "sess-1"`, etc.) remain valid — `ScopedArtifacts.upload()` injects the scope into the underlying store, so `store.list(scope=...)` still returns refs with the correct scope fields.
+
+Update imports: add `ScopedArtifacts` to the import from `penguiflow.artifacts` (line 8). `ArtifactScope` is still needed for the `store.list(scope=scope)` assertion, so keep it.
 
 ### Existing tests to verify still pass (Fix 3-5)
 
