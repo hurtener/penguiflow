@@ -92,3 +92,35 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run ruff check pengu
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run mypy
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run pytest tests/test_react_planner.py -x -q
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-05
+
+### Summary of Changes
+- **`penguiflow/planner/react.py`**: Added `_event_buffer: list[PlannerEvent]` type annotation in the class-level annotation block of `ReactPlanner`, positioned between `_event_callback` and `_hop_budget` (line 350).
+- **`penguiflow/planner/react.py`**: Added `self._event_buffer.append(event)` as the first statement in the `_emit_event()` method body (line 1198), before the logging block.
+- **`penguiflow/planner/react_init.py`**: Added `planner._event_buffer = []` initialization in `init_react_planner()` (line 451), immediately after `planner._event_callback = event_callback`.
+
+### Key Considerations
+- All three changes are minimal and surgical, touching only the exact lines specified in the plan.
+- The `self._event_buffer.append(event)` call is placed before both logging and callback invocation, ensuring that every event is captured in the buffer regardless of whether the callback raises an exception. This matches the plan's stated intent.
+- `PlannerEvent` was already imported in `react.py` (used in the `_emit_event` method signature and other type annotations), so no new imports were needed.
+
+### Assumptions
+- The `_event_buffer` field does not need a default value in the class body annotation block (it follows the same pattern as other fields like `_event_callback`, `_hop_budget`, etc., which are annotated in the class body but initialized in `init_react_planner()`).
+- Session-forked planners that go through `init_react_planner()` will each get their own independent empty list, so no shallow-copy concerns exist.
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- The buffer grows without bound during a planner run. The phase file notes that flushing/clearing is deferred to Phase 1. If a planner run emits a very large number of events before Phase 1 is implemented, memory usage could increase. This is acknowledged in the plan and is by design.
+- Any code path that creates a `ReactPlanner` without going through `init_react_planner()` would lack `_event_buffer` initialization and would raise `AttributeError` on the first `_emit_event()` call. The type annotation in the class body will help catch this statically, and the plan notes that all creation paths go through `init_react_planner()`.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/planner/react.py` (modified)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/planner/react_init.py` (modified)

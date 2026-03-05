@@ -190,3 +190,52 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run mypy
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run pytest tests/cli/test_playground_wrapper_helpers.py::test_orchestrator_wrapper_forwards_tool_context_when_supported -x -v
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run pytest tests/cli/test_playground_wrapper_helpers.py::test_orchestrator_agent_wrapper_initialize_and_chat_pause -x -v
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-05
+
+### Summary of Changes
+
+- **`penguiflow/cli/playground_wrapper.py` -- `OrchestratorAgentWrapper.chat()`:**
+  - Added `trace_id = trace_id_hint or secrets.token_hex(8)` computation before `tool_ctx` construction.
+  - Injected `"session_id": session_id` and `"trace_id": trace_id` into `tool_ctx` dict, placed after the caller's `tool_context` spread so they take precedence.
+  - Changed `trace_holder` initialization from `{"id": trace_id_hint}` to `{"id": trace_id}`.
+  - Replaced the post-call 3-line fallback chain (`trace_id = trace_id_hint or _get_attr(...) ...` / `trace_holder["id"] = trace_id`) with a single explanatory comment.
+
+- **`penguiflow/cli/playground_wrapper.py` -- `OrchestratorAgentWrapper.resume()`:**
+  - Applied the identical pattern: pre-computed `trace_id`, injected `session_id` and `trace_id` into `tool_ctx`, initialized `trace_holder` with `trace_id`, replaced post-call fallback chain with comment.
+
+- **`penguiflow/templates/new/react/src/__package_name__/orchestrator.py.jinja`:**
+  - In `execute()`: changed `trace_id = secrets.token_hex(8)` to `trace_id = (tool_context or {}).get("trace_id") or secrets.token_hex(8)`.
+  - In `resume()`: same change.
+
+### Key Considerations
+
+- The `_trace_id_supplier` closure and `_planner_trace_id` helper were intentionally preserved. They are still used by the SSE streaming path during execution to supply the trace ID to event callbacks before the orchestrator call returns.
+- The `session_id` and `trace_id` are placed last in the `tool_ctx` dict spread, meaning they override any values from `self._tool_context_defaults` or caller-provided `tool_context`. This is intentional: the wrapper is the authoritative source for these values.
+- In the template, the `base_tool_context` dict is spread last in `merged_tool_context`, so its `trace_id` key would normally override the one from `tool_context`. However, since `base_tool_context` now derives `trace_id` from `tool_context` (or generates a fresh one), the value is consistent throughout.
+
+### Assumptions
+
+- The `persist()` calls referenced in the plan were already removed by Phase 2. This was confirmed -- no `persist` references exist in the current `playground_wrapper.py`.
+- The `_build_trajectory` function and `state_store` parameter referenced in the test file (`test_playground_wrapper_helpers.py`) are from a prior code state and were removed by earlier phases. The test file has not yet been updated for these removals. This is a pre-existing issue, not introduced by Phase 3.
+- The `llm_context` parameter was not mentioned for injection into `tool_ctx` in the phase plan, so it was not added. Only `session_id` and `trace_id` are injected.
+
+### Deviations from Plan
+
+None. All five tasks were implemented exactly as specified.
+
+### Potential Risks & Reviewer Attention Points
+
+- **Pre-existing test failures:** The verification commands referencing `test_playground_wrapper_helpers.py` cannot run because that test file imports `_build_trajectory` (removed in earlier phases) and constructs `_EventRecorder` with a `state_store` argument (also removed). These tests will need to be updated in a later phase. The failures are confirmed to be pre-existing (all tests passed on HEAD before the working tree modifications from phases 0-2).
+- **Template merge order:** In the template's `merged_tool_context`, `base_tool_context` is spread last, which means it still overrides caller-provided `tool_context` for keys like `tenant_id`, `user_id`, etc. This is the existing behavior and was not changed. The only change is that `trace_id` in `base_tool_context` now respects the caller-provided value via `(tool_context or {}).get("trace_id")`.
+- **Existing orchestrator projects:** Projects generated from the old template will still have the unconditional `secrets.token_hex(8)` pattern. As noted in the phase file, a documentation note about this is planned for Phase 4.
+
+### Files Modified
+
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_wrapper.py` -- modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/templates/new/react/src/__package_name__/orchestrator.py.jinja` -- modified

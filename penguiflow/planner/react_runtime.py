@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -873,6 +874,74 @@ def _maybe_activate_tool(
     return True
 
 
+async def _persist_trajectory(planner: Any, trajectory: Trajectory) -> None:
+    """Save trajectory to StateStore if available. Designed to run as a background task."""
+    try:
+        store = getattr(planner, "_state_store", None)
+        if store is None:
+            return
+        saver = getattr(store, "save_trajectory", None)
+        if saver is None:
+            return
+        ctx = trajectory.tool_context or {}
+        trace_id = ctx.get("trace_id")
+        session_id = ctx.get("session_id")
+        if not trace_id or not session_id:
+            return
+        await saver(trace_id, session_id, trajectory)
+    except Exception:
+        logger.warning("Background trajectory persistence failed", exc_info=True)
+
+
+async def _persist_events(events: list[PlannerEvent], planner: Any, trace_id: str) -> None:
+    """Flush planner events to StateStore. Designed to run as a background task.
+
+    Receives an already-snapshot list of events (buffer was cleared by the caller
+    before spawning this task) so there is no shared-state concern.
+    """
+    try:
+        store = getattr(planner, "_state_store", None)
+        if store is None:
+            return
+        saver = getattr(store, "save_planner_event", None)
+        if saver is None:
+            return
+        for event in events:
+            await saver(trace_id, event)
+    except Exception:
+        logger.warning("Background planner-event persistence failed", exc_info=True)
+
+
+def _fire_persistence_tasks(planner: Any, trajectory: Trajectory, result: Any | None) -> None:
+    """Spawn fire-and-forget background tasks for trajectory + event persistence.
+
+    This is synchronous and returns immediately -- no awaiting.
+    """
+    loop = asyncio.get_running_loop()
+    ctx = trajectory.tool_context or {}
+    trace_id = ctx.get("trace_id")
+    session_id = ctx.get("session_id")
+
+    # Trajectory -- on PlannerFinish and PlannerPause
+    if isinstance(result, (PlannerFinish, PlannerPause)) and trace_id and session_id:
+        loop.create_task(
+            _persist_trajectory(planner, trajectory),
+            name="penguiflow-persist-trajectory",
+        )
+
+    # Events -- on any exit path (finish/pause/error/cancel)
+    buf = getattr(planner, "_event_buffer", None)
+    if buf and trace_id:
+        events = list(buf)  # snapshot
+        buf.clear()          # clear immediately so planner can reuse
+        loop.create_task(
+            _persist_events(events, planner, trace_id),
+            name="penguiflow-persist-events",
+        )
+    elif buf:
+        buf.clear()  # no trace_id -> discard, but still clear to avoid unbounded growth
+
+
 async def run(
     planner: Any,
     query: str,
@@ -919,6 +988,7 @@ async def run(
     error_recovery_cfg = getattr(planner, "_error_recovery_config", None)
     previous_active = getattr(planner, "_active_tool_names", None)
     _init_tool_activation_state(planner, trajectory, normalised_tool_context or {}, resume=False)
+    result: PlannerFinish | PlannerPause | None = None
     try:
         base_specs: Sequence[NodeSpec] = list(
             getattr(planner, "_execution_specs", None) or getattr(planner, "_specs", None) or []
@@ -942,6 +1012,8 @@ async def run(
             result = await run_loop(planner, trajectory, tracker=None, error_recovery_config=error_recovery_cfg)
     finally:
         planner._active_tool_names = previous_active
+        _fire_persistence_tasks(planner, trajectory, result)
+    assert result is not None
     await planner._maybe_record_memory_turn(query, result, trajectory, resolved_key)
     return result
 
@@ -1005,6 +1077,7 @@ async def resume(
     error_recovery_cfg = getattr(planner, "_error_recovery_config", None)
     previous_active = getattr(planner, "_active_tool_names", None)
     _init_tool_activation_state(planner, trajectory, trajectory.tool_context or {}, resume=True)
+    result: PlannerFinish | PlannerPause | None = None
     try:
         base_specs: Sequence[NodeSpec] = list(
             getattr(planner, "_execution_specs", None) or getattr(planner, "_specs", None) or []
@@ -1028,6 +1101,8 @@ async def resume(
             result = await run_loop(planner, trajectory, tracker=tracker, error_recovery_config=error_recovery_cfg)
     finally:
         planner._active_tool_names = previous_active
+        _fire_persistence_tasks(planner, trajectory, result)
+    assert result is not None
     await planner._maybe_record_memory_turn(trajectory.query, result, trajectory, resolved_key)
     return result
 

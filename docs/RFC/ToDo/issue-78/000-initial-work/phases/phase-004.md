@@ -66,3 +66,48 @@ Update five documentation files to reflect that trajectory and event persistence
 ```bash
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv pip install -e ".[dev,docs]" && uv run mkdocs build --strict
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-05
+
+### Summary of Changes
+
+- **`docs/spec/STATESTORE_IMPLEMENTATION_SPEC.md`**: Updated section 10 (Trajectory Persistence) to change the location from `penguiflow/cli/playground.py` to `penguiflow/planner/react_runtime.py` and added a note about fire-and-forget background task persistence. Updated section 11 (Planner Event Persistence) to add a `Location (integration)` field pointing to `react_runtime.py` and a note about event buffering and flushing behavior.
+- **`docs/tools/statestore.md`**: Added blockquote notes under "Planner event storage" and "Sessions/tasks/steering/trajectories" sections documenting automatic persistence by the `ReactPlanner`.
+- **`docs/architecture/planning_orchestration/reactplanner_core.md`**: Added automatic persistence bullet point to section "2. Trajectory Management". Updated the "Planning Loop Flow" diagram to show the `finally` block spawning background persistence tasks before `_maybe_record_memory_turn`.
+- **`docs/PLAYGROUND_BACKEND_CONTRACTS.md`**: Added a blockquote after the `session_id`/`trace_id` injection explanation noting that these IDs now drive planner-level persistence and that orchestrators must propagate them.
+- **`REACT_PLANNER_INTEGRATION_GUIDE.md`**: Updated the inline trajectory persistence note (previously referencing "Playground state store") to reflect auto-persistence. Added new section 15 ("Automatic Persistence & trace_id Propagation") with subsections on what the planner persists and orchestrator `trace_id` propagation requirements. Updated the Table of Contents to include the new section.
+
+### Key Considerations
+
+- Used blockquote (`>`) formatting for the added notes in the spec and tools docs to visually distinguish them as important callouts, consistent with how other notes are formatted in those files.
+- The new section in the integration guide was numbered 15 to follow the existing numbering convention (sections 1-14).
+- The flow diagram update in `reactplanner_core.md` was kept minimal -- changed "Loop Back or Return Result" to show the persistence and memory recording steps that happen after the loop ends, matching the actual code flow in `react_runtime.py`.
+
+### Assumptions
+
+- The phrase "fire-and-forget" accurately describes the background task behavior based on reading `_fire_persistence_tasks` in `react_runtime.py`, which uses `loop.create_task()` without awaiting.
+- The persistence happens in the `finally` block of both `run_planner()` and `resume_planner()` functions, covering all exit paths including errors and cancellations.
+- The `trace_id` and `session_id` are extracted from `trajectory.tool_context` by the persistence functions.
+
+### Deviations from Plan
+
+None. All five steps were implemented as specified.
+
+### Potential Risks & Reviewer Attention Points
+
+- The `REACT_PLANNER_INTEGRATION_GUIDE.md` is described as "source of truth" for wiring `ReactPlanner`. The new section 15 should be reviewed to ensure the `trace_id` propagation pattern matches the actual orchestrator template code in `penguiflow/cli/templates/`.
+- The INFO messages from `mkdocs build` about pages not in the nav configuration (MEMORY_GUIDE.md, MIGRATION_V24.md, etc.) are pre-existing and unrelated to this phase.
+
+### Files Modified
+
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/spec/STATESTORE_IMPLEMENTATION_SPEC.md`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/tools/statestore.md`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/architecture/planning_orchestration/reactplanner_core.md`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/PLAYGROUND_BACKEND_CONTRACTS.md`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/REACT_PLANNER_INTEGRATION_GUIDE.md`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-78/000-initial-work/phases/phase-004.md` (this file -- implementation notes appended)

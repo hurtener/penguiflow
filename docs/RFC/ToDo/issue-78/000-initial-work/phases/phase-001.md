@@ -216,3 +216,39 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run ruff check pengu
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run mypy
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run pytest tests/test_react_planner.py -x -q
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-05
+
+### Summary of Changes
+- **`penguiflow/planner/react_runtime.py`:**
+  - Added `import asyncio` at line 5, before `import hashlib`, maintaining alphabetical ordering.
+  - Added three new module-level functions (`_persist_trajectory`, `_persist_events`, `_fire_persistence_tasks`) between lines 877-942, immediately before the `run()` function definition.
+  - Modified `run()` (now starting at line 945): added `result: PlannerFinish | PlannerPause | None = None` before the `try` block, added `_fire_persistence_tasks(planner, trajectory, result)` as the last line in the `finally` block, and added `assert result is not None` immediately after the `finally` block.
+  - Modified `resume()` (now starting at line 1021): applied the identical pattern -- `result` initialization before `try`, `_fire_persistence_tasks` call in `finally`, and `assert result is not None` after `finally`.
+
+### Key Considerations
+- The code was inserted character-for-character as specified in the phase file's "Required Code" section. No stylistic or structural deviations were needed.
+- The `# NEW` inline comments shown in the phase file's code snippets were part of the illustrative markup in the plan and were not included in the actual implementation, as they are not present in the standalone "Required Code" blocks and would add noise to production code.
+- All existing imports were verified to already cover the types used by the new helpers (`PlannerEvent`, `PlannerFinish`, `PlannerPause`, `Trajectory`, `Any`), so only `import asyncio` was added.
+
+### Assumptions
+- The `_event_buffer` attribute referenced in `_fire_persistence_tasks` is assumed to exist on the planner object when persistence is active (as noted in the plan: "Depends on Phase 0"). Existing tests pass without it because `getattr(planner, "_event_buffer", None)` returns `None` gracefully.
+- The `_state_store` attribute and its `save_trajectory`/`save_planner_event` methods are duck-typed via `getattr`, consistent with existing patterns in the codebase. No protocol or ABC enforcement is applied here.
+- The `session_id` variable in `_fire_persistence_tasks` is extracted but only used in the trajectory persistence guard condition (alongside `trace_id`). It is not used for event persistence, which only requires `trace_id`.
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- **Fire-and-forget tasks and test cleanup:** The `loop.create_task()` calls create background tasks that may still be running when tests complete. Current tests pass because no test planner has `_state_store` or `_event_buffer` attributes set, so no tasks are actually spawned. Future tests that set these attributes should ensure background tasks are awaited or the event loop is properly cleaned up to avoid `RuntimeWarning: coroutine was never awaited` warnings.
+- **`assert result is not None`:** This assert is unreachable on exception paths (the exception re-raises from `finally` before reaching it), but if future refactoring adds exception handling inside the `try` block that swallows exceptions without setting `result`, this assert will fire. This is intentional -- it acts as a safety net.
+- **No new tests added:** The phase file did not call for new tests, and the existing test suite validates that the changes do not break current behavior. Dedicated tests for the persistence helpers would be appropriate in a follow-up phase once `_state_store` and `_event_buffer` infrastructure is testable.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/planner/react_runtime.py` -- added import, three helper functions, and modified `run()`/`resume()` with persistence wiring.
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-78/000-initial-work/phases/phase-001.md` -- appended this implementation notes section.

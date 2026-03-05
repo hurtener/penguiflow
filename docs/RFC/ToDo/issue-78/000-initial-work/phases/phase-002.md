@@ -190,3 +190,54 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run mypy
 # Those are fixed in Phase 6. Run targeted tests that don't use state_store on wrappers:
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run pytest tests/cli/test_playground_wrapper_helpers.py::test_combine_callbacks tests/cli/test_playground_wrapper_helpers.py::test_normalise_metadata tests/cli/test_playground_wrapper_helpers.py::test_normalise_answer tests/cli/test_playground_wrapper_helpers.py::test_extract_from_dict -x -q
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-05
+
+### Summary of Changes
+- **`penguiflow/cli/playground_wrapper.py`:**
+  - Replaced the entire `_EventRecorder` class: removed `__init__` (no more `self._state_store` or `self._buffer`), removed `persist()` method, simplified `callback()` to return `None` when `event_consumer is None` (no longer checks `state_store`).
+  - Removed the `_build_trajectory()` helper function entirely (lines 174-211 in original).
+  - Removed `Trajectory` from the `penguiflow.planner` import block.
+  - Removed `from .playground_state import PlaygroundStateStore` import.
+  - Kept `from dataclasses import dataclass` (used by `@dataclass` on `ChatResult`).
+  - `PlannerAgentWrapper.__init__`: removed `state_store` parameter, removed `self._state_store` assignment, changed `_EventRecorder(state_store)` to `_EventRecorder()`.
+  - `PlannerAgentWrapper.chat()`: removed `await self._event_recorder.persist(trace_id)`, removed `has_store=%s` and `self._state_store is not None` from log statement, removed trajectory build+save block and associated warning log.
+  - `PlannerAgentWrapper.resume()`: same removals as `chat()` -- persist call, has_store from log, trajectory build+save block.
+  - `OrchestratorAgentWrapper.__init__`: removed `state_store` parameter, removed `self._state_store` assignment, changed `_EventRecorder(state_store)` to `_EventRecorder()`.
+  - `OrchestratorAgentWrapper.chat()`: removed `await self._event_recorder.persist(trace_id)`, removed `has_store=%s` and `self._state_store is not None` from log statement, removed trajectory build+save block and associated warning log.
+  - `OrchestratorAgentWrapper.resume()`: removed `await self._event_recorder.persist(trace_id)`.
+  - Removed unused local variable `ctx = dict(llm_context or {})` in `OrchestratorAgentWrapper.chat()` (was only used by the now-removed `_build_trajectory` call).
+  - All six retained helpers (`_combine_callbacks`, `_normalise_answer`, `_normalise_metadata`, `_extract_from_dict`, `_get_attr`, `_planner_trace_id`) are untouched.
+
+- **`penguiflow/cli/playground.py`:**
+  - Removed `state_store=state_store,` from `OrchestratorAgentWrapper(orchestrator, ...)` constructor call (line 786 original).
+  - Removed `state_store=state_store,` from `PlannerAgentWrapper(planner, ...)` constructor call (line 793 original).
+  - Preserved `state_store=state_store` in `_call_orchestrator_builder` and `_call_builder` calls (these are NOT wrapper constructors).
+
+### Key Considerations
+- The `_EventRecorder` simplification changes behavior: previously, when `event_consumer` was `None` but `state_store` was set, a callback was still created to buffer events for later persistence. Now, the callback returns `None` when `event_consumer is None`, relying on the planner's internal persistence (Phase 0-1 prerequisite).
+- The `ctx` variable in `OrchestratorAgentWrapper.chat()` became unused after removing `_build_trajectory` and was flagged by ruff (F841). It was removed to satisfy the zero-ruff-errors exit criterion, even though the phase file did not explicitly mention it. This is a necessary consequence of removing `_build_trajectory`.
+
+### Assumptions
+- Phase 0 and Phase 1 have been implemented, so the planner already handles trajectory persistence and event persistence internally. This is critical since the wrapper no longer performs either.
+- The test file `tests/cli/test_playground_wrapper_helpers.py` imports `_build_trajectory` at the module level and will fail to collect until Phase 6 fixes it. This is expected per the phase file's note.
+- No other files in the codebase (beyond `playground.py` and the test file) reference the removed `state_store` parameter on the wrapper constructors.
+
+### Deviations from Plan
+- **Removed unused `ctx` variable:** The plan did not mention removing `ctx = dict(llm_context or {})` from `OrchestratorAgentWrapper.chat()`, but this variable was only used by `_build_trajectory`. After removing that function, `ctx` became unused and ruff flagged it (F841). Removing it was necessary to meet the exit criterion of zero ruff errors.
+- **Task 7 `dataclass` import:** The phase file's task list (line 13) says to remove `dataclass`, but the detailed Step 7 and Implementation Notes sections both correctly note it must be kept because `ChatResult` uses `@dataclass`. The task list item was contradicted by the detailed instructions. I followed the detailed instructions and kept the import.
+
+### Potential Risks & Reviewer Attention Points
+- **Test breakage:** The test file `tests/cli/test_playground_wrapper_helpers.py` will fail to import due to the removed `_build_trajectory`. This is acknowledged in the phase file as being fixed in Phase 6. Any CI run before Phase 6 will show test failures.
+- **Behavioral change in `_EventRecorder.callback()`:** The old implementation returned a buffering closure even without an `event_consumer` (if `state_store` was set). The new implementation returns `None` when `event_consumer is None`. This is correct only if the planner already handles its own event persistence (Phase 0-1 prerequisite).
+- **`OrchestratorAgentWrapper.chat()` no longer uses `llm_context`:** With `ctx` removed, the `llm_context` parameter is received but not used in the method body. It is still part of the method signature (required by the `AgentWrapper` protocol). This is not a bug -- the protocol requires it and other wrappers or future implementations may use it.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_wrapper.py` (modified)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground.py` (modified)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-78/000-initial-work/phases/phase-002.md` (appended implementation notes)

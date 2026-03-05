@@ -351,3 +351,42 @@ async def test_events_persisted_on_run_loop_error(monkeypatch: pytest.MonkeyPatc
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run ruff check tests/planner/test_persistence.py
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run pytest tests/planner/test_persistence.py -v
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-05
+
+### Summary of Changes
+- Created `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/planner/` directory
+- Created `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/planner/__init__.py` as an empty file
+- Created `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/planner/test_persistence.py` with all 9 test cases specified in the plan
+- All 9 tests pass, ruff reports zero errors
+
+### Key Considerations
+- **Import ordering**: The phase plan placed `import penguiflow.planner.react_runtime as rt_mod` after the `from penguiflow...` imports. Ruff's isort rule (I001) requires bare `import` statements to precede `from ... import` statements within the same first-party group. Moved the bare import before the `from` imports. Additionally, ruff required only a single blank line between the import block and the first code section (the plan had two blank lines). Reduced to one blank line.
+- **`ReactPlanner` constructor**: Confirmed that `ReactPlanner.__init__` accepts `state_store` directly as a keyword argument. No need for `init_react_planner` or manual `planner._state_store` assignment.
+- **`_drain_persistence_tasks()`**: Implemented exactly as specified -- gathers all `asyncio.Task` objects whose names start with `"penguiflow-persist"`, matching the named tasks (`penguiflow-persist-trajectory` and `penguiflow-persist-events`) created in the react_runtime `_fire_persistence_tasks` function.
+
+### Assumptions
+- The persistence infrastructure from Phases 0-1 is already in place and functioning (confirmed by inspecting `penguiflow/planner/react_runtime.py` which contains `_persist_trajectory`, `_persist_events`, and `_fire_persistence_tasks` with the expected named task pattern).
+- The warning log messages "Background trajectory persistence failed" and "Background planner-event persistence failed" are emitted by the existing `_persist_trajectory` and `_persist_events` helper functions when exceptions occur. This was confirmed in the codebase.
+
+### Deviations from Plan
+1. **`PauseClient` scripted responses**: The plan's `PauseClient` returned a finish action (`next_node: null`) on call 2 (after resume). However, a finish action does NOT append a `TrajectoryStep` to the trajectory -- it returns a `PlannerFinish` directly. This meant `len(traj_after.steps) > len(traj.steps)` would fail (both equal 1). To fix this, `PauseClient` was modified to return an `echo` tool call on call 2 (which adds a step to the trajectory), and then finish on call 3. Correspondingly:
+   - The `_make_pause_planner` function now also registers the `echo` tool (both in the registry and catalog) so the planner can route to it.
+   - `max_iters` was increased from 3 to 4 to accommodate the additional tool call after resume.
+   - The `PauseClient` docstring was updated to reflect the new 3-call sequence.
+2. **Import order and blank lines**: Adjusted to satisfy ruff's isort rule (see Key Considerations above). This is a formatting-only deviation from the literal code in the plan.
+
+### Potential Risks & Reviewer Attention Points
+- The `_drain_persistence_tasks` helper relies on the naming convention of background tasks (`"penguiflow-persist*"`). If this naming convention changes in the runtime, these tests would silently stop draining and could produce flaky failures.
+- The `test_resume_persists_trajectory_and_events` test depends on the `echo` tool call after resume producing a new `TrajectoryStep`. If the planner's step-counting semantics change (e.g., finish actions start creating steps), the test would still pass but the deviation from the plan's original design would become unnecessary.
+- The tests do not verify the exact number of events or trajectory steps beyond minimum bounds, which makes them resilient to changes in event emission patterns but less strict as regression tests.
+
+### Files Modified
+- **Created**: `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/planner/__init__.py` (empty)
+- **Created**: `/Users/martin.alonso/Documents/lg/repos/penguiflow/tests/planner/test_persistence.py` (9 test cases)
+- **Modified**: `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-78/000-initial-work/phases/phase-005.md` (appended implementation notes)
