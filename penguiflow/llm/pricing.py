@@ -12,8 +12,28 @@ from .types import Cost, Usage
 logger = logging.getLogger("penguiflow.llm.pricing")
 
 # Pricing per 1K tokens: (input_price, output_price) in USD
-# Updated January 2026
+# Updated March 2026
+# OpenRouter prices sourced from https://openrouter.ai/api/v1/models on 2026-03-03.
 PRICING: dict[str, tuple[float, float]] = {
+    # OpenAI - GPT-5.x Series (OpenRouter/OpenAI catalog, March 2026)
+    "gpt-5": (0.00125, 0.01),  # $1.25/$10 per 1M tokens
+    "gpt-5-chat": (0.00125, 0.01),  # $1.25/$10 per 1M tokens
+    "gpt-5-pro": (0.015, 0.12),  # $15/$120 per 1M tokens
+    "gpt-5-mini": (0.00025, 0.002),  # $0.25/$2 per 1M tokens
+    "gpt-5-nano": (0.00005, 0.0004),  # $0.05/$0.40 per 1M tokens
+    "gpt-5-image": (0.01, 0.01),  # $10/$10 per 1M tokens
+    "gpt-5-image-mini": (0.0025, 0.002),  # $2.50/$2 per 1M tokens
+    "gpt-5-codex": (0.00125, 0.01),  # $1.25/$10 per 1M tokens
+    "gpt-5.1": (0.00125, 0.01),  # $1.25/$10 per 1M tokens
+    "gpt-5.1-chat": (0.00125, 0.01),  # $1.25/$10 per 1M tokens
+    "gpt-5.1-codex": (0.00125, 0.01),  # $1.25/$10 per 1M tokens
+    "gpt-5.1-codex-max": (0.00125, 0.01),  # $1.25/$10 per 1M tokens
+    "gpt-5.1-codex-mini": (0.00025, 0.002),  # $0.25/$2 per 1M tokens
+    "gpt-5.2": (0.00175, 0.014),  # $1.75/$14 per 1M tokens
+    "gpt-5.2-chat": (0.00175, 0.014),  # $1.75/$14 per 1M tokens
+    "gpt-5.2-codex": (0.00175, 0.014),  # $1.75/$14 per 1M tokens
+    "gpt-5.2-pro": (0.021, 0.168),  # $21/$168 per 1M tokens
+    "gpt-5.3-codex": (0.00175, 0.014),  # $1.75/$14 per 1M tokens
     # OpenAI - GPT Series
     "gpt-4o": (0.0025, 0.01),  # $2.50/$10.00 per 1M tokens
     "gpt-4o-mini": (0.00015, 0.0006),  # $0.15/$0.60 per 1M tokens
@@ -37,6 +57,9 @@ PRICING: dict[str, tuple[float, float]] = {
     "claude-opus-4-5": (0.005, 0.025),  # $5/$25 per 1M tokens
     "claude-sonnet-4-5": (0.003, 0.015),  # $3/$15 per 1M tokens
     "claude-haiku-4-5": (0.001, 0.005),  # $1/$5 per 1M tokens
+    # Anthropic - Claude 4.6 Series
+    "claude-opus-4-6": (0.005, 0.025),  # $5/$25 per 1M tokens
+    "claude-sonnet-4-6": (0.003, 0.015),  # $3/$15 per 1M tokens
     # Anthropic - Claude 4 Series
     "claude-opus-4": (0.015, 0.075),  # $15/$75 per 1M tokens
     "claude-opus-4-1": (0.015, 0.075),  # $15/$75 per 1M tokens
@@ -57,6 +80,14 @@ PRICING: dict[str, tuple[float, float]] = {
     "gemini-2.0-flash-lite": (0.000075, 0.0003),  # $0.075/$0.30 per 1M tokens
     "gemini-2.0-flash-exp": (0.0, 0.0),  # Experimental/Free tier
     "gemini-2.0-flash-thinking": (0.0, 0.0),  # Experimental/Free tier
+    # Google - Gemini 3.x Series (OpenRouter catalog, March 2026)
+    "gemini-3-flash-preview": (0.0005, 0.003),  # $0.50/$3 per 1M tokens
+    "gemini-3-pro-preview": (0.002, 0.012),  # $2/$12 per 1M tokens
+    "gemini-3-pro-image-preview": (0.002, 0.012),  # $2/$12 per 1M tokens
+    "gemini-3.1-flash-image-preview": (0.00025, 0.0015),  # $0.25/$1.50 per 1M tokens
+    "gemini-3.1-flash-lite-preview": (0.00025, 0.0015),  # $0.25/$1.50 per 1M tokens
+    "gemini-3.1-pro-preview": (0.002, 0.012),  # $2/$12 per 1M tokens
+    "gemini-3.1-pro-preview-customtools": (0.002, 0.012),  # $2/$12 per 1M tokens
     # Google - Gemini 1.5 Series (Legacy)
     "gemini-1.5-pro": (0.00125, 0.005),  # $1.25/$5 per 1M tokens
     "gemini-1.5-flash": (0.000075, 0.0003),  # $0.075/$0.30 per 1M tokens
@@ -66,6 +97,8 @@ PRICING: dict[str, tuple[float, float]] = {
     "anthropic.claude-opus-4-5": (0.005, 0.025),
     "anthropic.claude-sonnet-4-5": (0.003, 0.015),
     "anthropic.claude-haiku-4-5": (0.001, 0.005),
+    "anthropic.claude-opus-4-6": (0.005, 0.025),
+    "anthropic.claude-sonnet-4-6": (0.003, 0.015),
     "anthropic.claude-opus-4": (0.015, 0.075),
     "anthropic.claude-sonnet-4": (0.003, 0.015),
     "anthropic.claude-3-5-sonnet": (0.003, 0.015),
@@ -89,7 +122,10 @@ PRICING: dict[str, tuple[float, float]] = {
     "databricks-mixtral-8x7b-instruct": (0.0005, 0.001),
     "databricks-claude-3-5-sonnet": (0.003, 0.015),
     "databricks-claude-sonnet-4": (0.003, 0.015),
+    "databricks-claude-sonnet-4-5": (0.003, 0.015),
+    "databricks-claude-sonnet-4-6": (0.003, 0.015),
     "databricks-claude-opus-4-5": (0.005, 0.025),
+    "databricks-claude-opus-4-6": (0.005, 0.025),
     "databricks-claude-haiku-4-5": (0.001, 0.005),
     # DeepSeek
     "deepseek-r1": (0.00056, 0.00168),  # $0.56/$1.68 per 1M tokens
@@ -108,6 +144,22 @@ PRICING: dict[str, tuple[float, float]] = {
     # OpenRouter - Cohere
     "cohere/command-r-plus": (0.003, 0.015),
     "cohere/command-r": (0.0005, 0.0015),
+    # OpenRouter - xAI Grok (March 2026)
+    "x-ai/grok-3": (0.003, 0.015),  # $3/$15 per 1M tokens
+    "x-ai/grok-3-beta": (0.003, 0.015),  # $3/$15 per 1M tokens
+    "x-ai/grok-3-mini": (0.0003, 0.0005),  # $0.30/$0.50 per 1M tokens
+    "x-ai/grok-3-mini-beta": (0.0003, 0.0005),  # $0.30/$0.50 per 1M tokens
+    "x-ai/grok-4": (0.003, 0.015),  # $3/$15 per 1M tokens
+    "x-ai/grok-4-fast": (0.0002, 0.0005),  # $0.20/$0.50 per 1M tokens
+    "x-ai/grok-4.1-fast": (0.0002, 0.0005),  # $0.20/$0.50 per 1M tokens
+    "x-ai/grok-code-fast-1": (0.0002, 0.0015),  # $0.20/$1.50 per 1M tokens
+    # OpenRouter - Qwen 3.5 family (March 2026)
+    "qwen/qwen3.5-122b-a10b": (0.0003, 0.0024),  # $0.30/$2.40 per 1M tokens
+    "qwen/qwen3.5-27b": (0.00027, 0.00216),  # $0.27/$2.16 per 1M tokens
+    "qwen/qwen3.5-35b-a3b": (0.000225, 0.0018),  # $0.225/$1.80 per 1M tokens
+    "qwen/qwen3.5-397b-a17b": (0.00055, 0.0035),  # $0.55/$3.50 per 1M tokens
+    "qwen/qwen3.5-flash-02-23": (0.0001, 0.0004),  # $0.10/$0.40 per 1M tokens
+    "qwen/qwen3.5-plus-02-15": (0.0004, 0.0024),  # $0.40/$2.40 per 1M tokens
 }
 
 

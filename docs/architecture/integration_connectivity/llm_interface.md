@@ -377,7 +377,7 @@ LLM Request
 - `system_prompt_extra`: Additional system instructions and constraints
 
 ### 2. Response Handling
-- `llm_timeout_s`: Timeout for LLM calls (default: 60.0s)
+- `llm_timeout_s`: Timeout for LLM calls (default: 360.0s)
 - `llm_max_retries`: Maximum retry attempts (default: 3)
 - `stream_final_response`: Enable streaming for final responses
 - `use_native_reasoning`: Enable native reasoning for capable models

@@ -149,6 +149,9 @@ async def execute_tool_call(
     ctx = _PlannerContext(planner, trajectory)
     if tool_context_update and isinstance(ctx.tool_context, MutableMapping):
         ctx.tool_context.update(dict(tool_context_update))
+    if isinstance(ctx.tool_context, MutableMapping):
+        ctx.tool_context["_current_tool_name"] = spec.name
+        ctx.tool_context["_current_tool_call_id"] = tool_call_id
 
     # Prevent "render_component" loops where the model re-renders the exact same UI payload in
     # the next step because it can't infer success from a minimal {"ok": true} observation.

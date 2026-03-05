@@ -4,6 +4,7 @@ import {
   createChatStore,
   createInteractionsStore,
   createNotificationsStore,
+  createSetupStore,
   createTasksStore
 } from '$lib/stores';
 import { createSessionStreamManager } from '$lib/services/session-stream';
@@ -24,12 +25,14 @@ describe('sessionStreamManager', () => {
     const chatStore = createChatStore();
     const artifactsStore = createArtifactsStore();
     const interactionsStore = createInteractionsStore();
+    const setupStore = createSetupStore();
     const manager = createSessionStreamManager({
       tasksStore,
       notificationsStore,
       chatStore,
       artifactsStore,
-      interactionsStore
+      interactionsStore,
+      setupStore
     });
 
     manager.start('session-1');

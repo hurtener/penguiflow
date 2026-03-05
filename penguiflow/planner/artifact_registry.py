@@ -335,7 +335,7 @@ class ArtifactRegistry:
             title=ref.filename,
             summary=_binary_summary(ref),
             component=_binary_component_name(ref.mime_type),
-            metadata=_compact_metadata(ref.source),
+            metadata=_binary_metadata(ref),
         )
         self._records.append(record)
         self._records_by_ref[record.ref] = record
@@ -583,6 +583,24 @@ def _binary_component_payload(record: ArtifactRecord, session_id: str | None) ->
     artifact_id = record.artifact_id or record.ref
     url = _artifact_url(artifact_id, session_id or record.scope_session_id)
     mime_type = record.mime_type or ""
+
+    # MCP Apps: interactive UI in sandboxed iframe
+    if mime_type == "text/html;profile=mcp-app":
+        metadata = record.metadata or {}
+        return {
+            "component": "mcp_app",
+            "props": {
+                "artifact_url": url,
+                "csp": metadata.get("csp", {}),
+                "permissions": metadata.get("permissions", {}),
+                "tool_data": metadata.get("tool_data"),
+                "prefers_border": metadata.get("prefers_border", False),
+                "namespace": metadata.get("namespace"),
+                "session_id": metadata.get("session_id", session_id or record.scope_session_id),
+                "sandbox": metadata.get("sandbox"),
+            },
+        }
+
     if mime_type.startswith("image/"):
         return {
             "component": "image",
@@ -713,6 +731,32 @@ def _compact_metadata(meta: Mapping[str, Any], *, max_items: int = 8) -> dict[st
         if _is_scalar(value):
             compact[key] = _compact_text(value) if isinstance(value, str) else value
     return compact
+
+
+def _binary_metadata(ref: ArtifactRef) -> dict[str, Any]:
+    """Metadata extraction for binary artifacts.
+
+    Most binaries keep compact scalar metadata to reduce trajectory size.
+    MCP App HTML artifacts preserve specific structured fields required by
+    the frontend renderer.
+    """
+    source = ref.source if isinstance(ref.source, Mapping) else {}
+    metadata = _compact_metadata(source)
+
+    if ref.mime_type == "text/html;profile=mcp-app":
+        for key in ("csp", "permissions", "tool_data", "prefers_border", "namespace", "session_id", "sandbox"):
+            if key not in source:
+                continue
+            metadata[key] = _json_safe_copy(source[key])
+
+    return metadata
+
+
+def _json_safe_copy(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    except Exception:
+        return value
 
 
 def _compact_text(value: str, max_len: int = 120) -> str:

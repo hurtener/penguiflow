@@ -181,6 +181,22 @@ class PlaygroundArtifactStore:
                 return False
         return await store.exists(artifact_id)
 
+    async def list(self, *, scope: ArtifactScope | None = None) -> list[ArtifactRef]:
+        """List artifacts, optionally filtered by scope."""
+        if scope is not None and scope.session_id is not None:
+            async with self._lock:
+                store = self._stores.get(scope.session_id)
+            if store is None:
+                return []
+            return await store.list(scope=scope)
+        # No session filter -- snapshot all stores, iterate outside lock
+        async with self._lock:
+            stores = list(self._stores.values())
+        results: list[ArtifactRef] = []
+        for store in stores:
+            results.extend(await store.list(scope=scope))
+        return results
+
     def clear_session(self, session_id: str) -> None:
         store = self._stores.pop(session_id, None)
         if store is not None:

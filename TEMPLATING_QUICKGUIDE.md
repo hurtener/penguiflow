@@ -2088,6 +2088,8 @@ planner:
 - Playground UI shows artifacts in the sidebar
 - REST endpoint `/artifacts/{id}` serves binary content
 
+> **Developer API:** Tool developers access artifacts via `ctx.artifacts` -- a `ScopedArtifacts` facade that provides `upload()`/`download()`/`list()` with automatic scope injection. The raw `ArtifactStore` (`ctx._artifacts`) is used internally by the ToolNode extraction pipeline and playground.
+
 **Generated config fields:**
 ```python
 # In config.py

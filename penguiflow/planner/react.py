@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ValidationError
 
-from ..artifacts import ArtifactStore
+from ..artifacts import ArtifactScope, ArtifactStore
 from ..catalog import NodeSpec, build_catalog
 from ..node import Node
 from ..registry import ModelRegistry
@@ -303,7 +303,7 @@ class ReactPlanner:
     event_callback : PlannerEventCallback | None
         Optional callback receiving PlannerEvent instances for observability.
     llm_timeout_s : float
-        Per-LLM-call timeout in seconds. Default: 60.0.
+        Per-LLM-call timeout in seconds. Default: 360.0.
     llm_max_retries : int
         Max retry attempts for transient LLM failures. Default: 3.
     absolute_max_parallel : int
@@ -438,7 +438,7 @@ class ReactPlanner:
         hop_budget: int | None = None,
         time_source: Callable[[], float] | None = None,
         event_callback: PlannerEventCallback | None = None,
-        llm_timeout_s: float = 60.0,
+        llm_timeout_s: float = 360.0,
         llm_max_retries: int = 3,
         use_native_reasoning: bool = True,
         reasoning_effort: str | None = None,
@@ -1093,6 +1093,19 @@ class ReactPlanner:
         spec_name: str,
         trajectory_step: int,
     ) -> tuple[dict[str, Any], bool]:
+        scope: ArtifactScope | None = None
+        traj = self._active_trajectory
+        if traj is not None:
+            tool_ctx = traj.tool_context
+            if tool_ctx and isinstance(tool_ctx, dict):
+                session_id = tool_ctx.get("session_id")
+                if session_id:
+                    scope = ArtifactScope(
+                        session_id=str(session_id),
+                        tenant_id=tool_ctx.get("tenant_id"),
+                        user_id=tool_ctx.get("user_id"),
+                        trace_id=tool_ctx.get("trace_id"),
+                    )
         return await _clamp_observation_impl(
             observation=observation,
             spec_name=spec_name,
@@ -1103,6 +1116,7 @@ class ReactPlanner:
             active_trajectory=self._active_trajectory,
             emit_event=self._emit_event,
             time_source=self._time_source,
+            scope=scope,
         )
 
     def _truncate_observation_preserving_structure(

@@ -541,7 +541,7 @@ class _LiteLLMJSONClient:
         temperature: float,
         json_schema_mode: bool,
         max_retries: int = 3,
-        timeout_s: float = 60.0,
+        timeout_s: float = 360.0,
         streaming_enabled: bool = False,
         use_native_reasoning: bool = True,
         reasoning_effort: str | None = None,

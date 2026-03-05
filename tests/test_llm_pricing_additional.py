@@ -18,3 +18,27 @@ def test_get_pricing_prefix_match_with_normalization() -> None:
 def test_get_pricing_prefix_match_with_provider_prefix_and_normalization() -> None:
     # Also cover the branch that normalizes the stripped name inside the prefix loop.
     assert get_pricing("anthropic/claude-sonnet-4.5-2026-01-01") == (0.003, 0.015)
+
+
+def test_get_pricing_openrouter_xai_grok_4_1_fast() -> None:
+    assert get_pricing("openrouter/x-ai/grok-4.1-fast") == (0.0002, 0.0005)
+
+
+def test_get_pricing_openrouter_qwen3_5_397b() -> None:
+    assert get_pricing("openrouter/qwen/qwen3.5-397b-a17b") == (0.00055, 0.0035)
+
+
+def test_get_pricing_openai_gpt_5_2_codex() -> None:
+    assert get_pricing("openai/gpt-5.2-codex") == (0.00175, 0.014)
+
+
+def test_get_pricing_openai_gpt_5_1_codex_mini() -> None:
+    assert get_pricing("openai/gpt-5.1-codex-mini") == (0.00025, 0.002)
+
+
+def test_get_pricing_google_gemini_3_1_pro_preview() -> None:
+    assert get_pricing("google/gemini-3.1-pro-preview") == (0.002, 0.012)
+
+
+def test_get_pricing_claude_sonnet_4_6() -> None:
+    assert get_pricing("anthropic/claude-sonnet-4.6") == (0.003, 0.015)

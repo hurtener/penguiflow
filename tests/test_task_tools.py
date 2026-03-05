@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from penguiflow.artifacts import NoOpArtifactStore, ScopedArtifacts
 from penguiflow.sessions.models import TaskStatus, TaskType
 from penguiflow.sessions.task_service import TaskDetails, TaskService, TaskSpawnResult, TaskSummary
 from penguiflow.sessions.task_tools import SUBAGENT_FLAG_KEY, TASK_SERVICE_KEY, build_task_tool_specs
@@ -24,8 +25,18 @@ class DummyContext:
         return {}
 
     @property
-    def artifacts(self):
+    def _artifacts(self):
         raise RuntimeError("not_used")
+
+    @property
+    def artifacts(self):
+        return ScopedArtifacts(
+            NoOpArtifactStore(),
+            tenant_id=None,
+            user_id=None,
+            session_id=None,
+            trace_id=None,
+        )
 
     async def pause(self, reason, payload=None):  # type: ignore[no-untyped-def]
         raise RuntimeError("not_used")

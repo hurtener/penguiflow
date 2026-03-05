@@ -76,6 +76,7 @@ ref = ArtifactRef(
     size_bytes=1048576,             # 1MB
     filename="report.pdf",          # Suggested download name
     sha256="abc123...",             # Content hash for integrity
+    namespace="tableau",            # Artifact grouping
     scope=ArtifactScope(            # Access control metadata
         session_id="sess_123",
         user_id="user_456",
@@ -261,7 +262,7 @@ charts = result.artifacts.get("gather_data_from_genie", {}).get("chart_artifacts
 
 ## Storing Binary Content via ToolContext
 
-Tools can store binary/large text via the `ToolContext.artifacts` API:
+Tools store binary/large text via `ctx.artifacts` -- a `ScopedArtifacts` facade that automatically injects tenant/user/session/trace scope on writes and enforces it on reads. This is the **porcelain** API for tool and agent developers; penguiflow internals use `ctx._artifacts` (the raw `ArtifactStore`) instead.
 
 ```python
 from penguiflow.planner.context import ToolContext
@@ -271,7 +272,7 @@ async def my_tool(ctx: ToolContext, url: str) -> dict:
     pdf_bytes = await download_pdf(url)
 
     # Store in artifact store
-    ref = await ctx.artifacts.put_bytes(
+    ref = await ctx.artifacts.upload(
         pdf_bytes,
         mime_type="application/pdf",
         filename="report.pdf",
@@ -761,6 +762,7 @@ class S3ArtifactStore:
             size_bytes=len(data),
             filename=filename,
             sha256=hashlib.sha256(data).hexdigest(),
+            namespace=namespace,
             scope=scope,
             source=dict(meta or {}),
         )
@@ -826,7 +828,7 @@ Check `ttl_seconds` in your retention config. Artifacts accessed within TTL are 
 | **Field Marker** | `json_schema_extra={"artifact": True}` | Declare artifact fields |
 | **Redaction** | `_redact_artifacts()` in `llm.py` | Remove artifacts from LLM context |
 | **Collection** | `_ArtifactCollector` | Gather artifacts for lateral passing |
-| **Binary Storage** | `ctx.artifacts.put_bytes()` | Store binary out-of-band |
+| **Binary Storage** | `ctx._artifacts.put_bytes()` | Store binary out-of-band (internal) |
 | **Size Guardrail** | `_clamp_observation()` | Final safety net for large observations |
 | **Registry** | `ArtifactRegistry` | Track artifacts for UI rendering |
 | **Event Emission** | `_EventEmittingArtifactStoreProxy` | Real-time UI updates |

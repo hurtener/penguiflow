@@ -173,6 +173,16 @@ class PlannerEventProjector:
                 )
             ]
 
+        if event_type in {"kv_init", "kv_set", "kv_patch", "kv_delete"}:
+            # Durable session KV facade emits these as checkpoint-like updates.
+            return [
+                self._update(
+                    UpdateType.CHECKPOINT,
+                    dict(extra),
+                    step_index=step_index,
+                )
+            ]
+
         if event_type == "error":
             return [
                 self._update(

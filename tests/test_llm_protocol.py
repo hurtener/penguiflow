@@ -868,6 +868,62 @@ class TestNativeLLMAdapterBuildRequest:
             assert request.extra is not None
             assert request.extra["reasoning_effort"] == "high"
 
+    def test_build_request_openrouter_xai_injects_reasoning_enabled(self) -> None:
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.model = "x-ai/grok-4.1-fast"
+            mock_provider.provider_name = "openrouter"
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter(
+                "openrouter/x-ai/grok-4.1-fast",
+                use_native_reasoning=True,
+            )
+            messages = [LLMMessage(role="user", parts=[TextPart(text="Think")])]
+
+            request = adapter._build_request(messages, None)
+
+            assert request.extra is not None
+            assert request.extra["reasoning_enabled"] is True
+            assert "reasoning_effort" not in request.extra
+
+    def test_build_request_openrouter_xai_reasoning_effort_off_sets_disabled(self) -> None:
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.model = "x-ai/grok-4.1-fast"
+            mock_provider.provider_name = "openrouter"
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter(
+                "openrouter/x-ai/grok-4.1-fast",
+                use_native_reasoning=True,
+                reasoning_effort="off",
+            )
+            messages = [LLMMessage(role="user", parts=[TextPart(text="Think")])]
+
+            request = adapter._build_request(messages, None)
+
+            assert request.extra is not None
+            assert request.extra["reasoning_enabled"] is False
+            assert request.extra["reasoning_effort"] == "off"
+
+    def test_build_request_openrouter_non_xai_does_not_inject_reasoning_enabled(self) -> None:
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.model = "anthropic/claude-sonnet-4.5"
+            mock_provider.provider_name = "openrouter"
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter(
+                "openrouter/anthropic/claude-sonnet-4.5",
+                use_native_reasoning=True,
+            )
+            messages = [LLMMessage(role="user", parts=[TextPart(text="Think")])]
+
+            request = adapter._build_request(messages, None)
+
+            assert request.extra is None
+
     def test_build_request_no_reasoning_when_disabled(self) -> None:
         """Test request building omits reasoning when disabled."""
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:

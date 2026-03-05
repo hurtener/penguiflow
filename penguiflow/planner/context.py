@@ -6,7 +6,7 @@ from _collections_abc import Awaitable, Mapping, MutableMapping
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
-    from penguiflow.artifacts import ArtifactStore
+    from penguiflow.artifacts import ArtifactStore, ScopedArtifacts
 
 try:
     # Optional import to help tools that share signatures with flow Context
@@ -20,6 +20,51 @@ PlannerPauseReason = Literal[
     "external_event",
     "constraints_conflict",
 ]
+
+KVScope = Literal["session", "task"]
+
+
+class SessionKV(Protocol):
+    async def get(self, key: str, *, scope: KVScope = "session", namespace: str | None = None) -> Any | None: ...
+
+    async def set(
+        self,
+        key: str,
+        value: Any,
+        *,
+        scope: KVScope = "session",
+        namespace: str | None = None,
+        emit_update: bool = True,
+    ) -> Any: ...
+
+    async def patch(
+        self,
+        key: str,
+        patch: Mapping[str, Any],
+        *,
+        scope: KVScope = "session",
+        namespace: str | None = None,
+        emit_update: bool = True,
+    ) -> Any: ...
+
+    async def get_or_init(
+        self,
+        key: str,
+        default: Any,
+        *,
+        scope: KVScope = "session",
+        namespace: str | None = None,
+        emit_update: bool = True,
+    ) -> Any: ...
+
+    async def delete(
+        self,
+        key: str,
+        *,
+        scope: KVScope = "session",
+        namespace: str | None = None,
+        emit_update: bool = True,
+    ) -> bool: ...
 
 
 class ToolContext(Protocol):
@@ -38,19 +83,29 @@ class ToolContext(Protocol):
         """Combined context. Deprecated: prefer llm_context/tool_context."""
 
     @property
-    def artifacts(self) -> ArtifactStore:
-        """Binary/large-text artifact storage.
+    def _artifacts(self) -> ArtifactStore:
+        """Raw artifact store for framework-internal use."""
 
-        Use this to store binary content (PDFs, images) or large text
-        out-of-band, keeping only compact ArtifactRef in LLM context.
+    @property
+    def artifacts(self) -> ScopedArtifacts:
+        """Scoped artifact facade for tool developers.
 
         Example:
-            ref = await ctx.artifacts.put_bytes(
+            ref = await ctx.artifacts.upload(
                 pdf_bytes,
                 mime_type="application/pdf",
                 filename="report.pdf",
             )
             return {"artifact": ref, "summary": "Downloaded PDF"}
+        """
+
+    @property
+    def kv(self) -> SessionKV:
+        """Durable session key/value facade.
+
+        Backed by the configured StateStore's optional memory persistence.
+        Default scope is session-scoped with no TTL. Task scope is opt-in and
+        uses a fixed TTL of 3600 seconds.
         """
 
     def pause(

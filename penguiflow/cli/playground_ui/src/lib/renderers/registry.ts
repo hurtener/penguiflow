@@ -46,7 +46,8 @@ export const rendererRegistry: Record<string, RendererEntry> = {
   image: { load: () => import('./Image.svelte'), validateProps: validateDefault },
   html: { load: () => import('./Html.svelte'), validateProps: validateDefault },
   video: { load: () => import('./Video.svelte'), validateProps: validateDefault },
-  embed: { load: () => import('./Embed.svelte'), validateProps: validateDefault }
+  embed: { load: () => import('./Embed.svelte'), validateProps: validateDefault },
+  mcp_app: { load: () => import('./McpApp.svelte'), validateProps: validateDefault }
 };
 
 export type RendererName = keyof typeof rendererRegistry;

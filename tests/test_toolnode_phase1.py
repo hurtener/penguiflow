@@ -1,11 +1,12 @@
 import asyncio
 import base64
 import time
+from copy import deepcopy
 
 import pytest
 from pydantic import create_model
 
-from penguiflow.artifacts import InMemoryArtifactStore
+from penguiflow.artifacts import InMemoryArtifactStore, ScopedArtifacts
 from penguiflow.registry import ModelRegistry
 from penguiflow.tools.auth import InMemoryTokenStore, OAuthManager, OAuthProviderConfig
 from penguiflow.tools.config import (
@@ -40,7 +41,7 @@ class DummyCtx:
         self._llm_context: dict[str, str] = {}
         self._meta: dict[str, str] = {}
         self.paused_payload = None
-        self._artifacts = artifact_store or InMemoryArtifactStore()
+        self._artifacts_store = artifact_store or InMemoryArtifactStore()
 
     @property
     def llm_context(self):
@@ -55,8 +56,18 @@ class DummyCtx:
         return self._tool_context
 
     @property
+    def _artifacts(self):
+        return self._artifacts_store
+
+    @property
     def artifacts(self):
-        return self._artifacts
+        return ScopedArtifacts(
+            self._artifacts_store,
+            tenant_id=None,
+            user_id=None,
+            session_id=None,
+            trace_id=None,
+        )
 
     async def pause(self, reason, payload=None):  # pragma: no cover - not used in Phase 1 tests
         self.paused_payload = {"reason": reason, "payload": payload}
@@ -612,6 +623,102 @@ class TestFieldExtraction:
         # Other fields preserved
         assert transformed["data"]["metadata"] == "keep this"
 
+    @pytest.mark.asyncio
+    async def test_field_extraction_only_for_configured_tools(self):
+        """Configured tool_fields should apply only to matching tool names."""
+        registry = ModelRegistry()
+        blob = base64.b64encode(b"PK\x03\x04" + b"x" * 256).decode("utf-8")
+
+        field_config = ArtifactFieldConfig(
+            field_path="resource.blob",
+            content_type="binary",
+            mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        )
+        config = build_config(
+            artifact_extraction=ArtifactExtractionConfig(
+                max_inline_size=100_000,
+                binary_detection=BinaryDetectionConfig(enabled=False),
+                handle_mcp_typed_content=False,
+                tool_fields={"github.export_pptx": [field_config]},
+            )
+        )
+        node = ToolNode(config=config, registry=registry)
+        node._connected = True
+
+        ctx = DummyCtx()
+        result = {"resource": {"blob": blob, "mimeType": "application/octet-stream"}}
+
+        transformed_target = await node._transform_output("export_pptx", deepcopy(result), ctx)
+        transformed_other = await node._transform_output("list_templates", deepcopy(result), ctx)
+
+        assert "artifact" in transformed_target["resource"]["blob"]
+        assert isinstance(transformed_other["resource"], dict)
+        assert "blob" in transformed_other["resource"]
+        assert "artifact" not in transformed_other["resource"]["blob"]
+
+    @pytest.mark.asyncio
+    async def test_field_extraction_handles_list_content_blocks(self):
+        """Configured extraction should work when result is a list of content blocks."""
+        registry = ModelRegistry()
+        blob = base64.b64encode(b"%PDF-1.7\n" + b"x" * 512).decode("utf-8")
+
+        field_config = ArtifactFieldConfig(
+            field_path="resource.blob",
+            content_type="pdf",
+            mime_type="application/pdf",
+        )
+        config = build_config(
+            artifact_extraction=ArtifactExtractionConfig(
+                max_inline_size=200,
+                binary_detection=BinaryDetectionConfig(enabled=False),
+                handle_mcp_typed_content=False,
+                tool_fields={"github.export_pdf": [field_config]},
+            )
+        )
+        node = ToolNode(config=config, registry=registry)
+        node._connected = True
+
+        ctx = DummyCtx()
+        result = [
+            {"type": "text", "text": "ok"},
+            {"type": "resource", "resource": {"blob": blob, "mimeType": "application/pdf"}},
+        ]
+
+        transformed = await node._transform_output("export_pdf", deepcopy(result), ctx)
+
+        assert "artifact" in transformed[1]["resource"]["blob"]
+        assert transformed[1]["resource"]["blob"]["artifact"]["mime_type"] == "application/pdf"
+
+    @pytest.mark.asyncio
+    async def test_field_extraction_handles_wrapped_result_payload(self):
+        """Configured extraction should also work for {'result': ...} payload wrappers."""
+        registry = ModelRegistry()
+        blob = base64.b64encode(b"%PDF-1.7\n" + b"x" * 512).decode("utf-8")
+
+        field_config = ArtifactFieldConfig(
+            field_path="resource.blob",
+            content_type="pdf",
+            mime_type="application/pdf",
+        )
+        config = build_config(
+            artifact_extraction=ArtifactExtractionConfig(
+                max_inline_size=200,
+                binary_detection=BinaryDetectionConfig(enabled=False),
+                handle_mcp_typed_content=False,
+                tool_fields={"github.export_pdf": [field_config]},
+            )
+        )
+        node = ToolNode(config=config, registry=registry)
+        node._connected = True
+
+        ctx = DummyCtx()
+        result = {"result": {"resource": {"blob": blob, "mimeType": "application/pdf"}}}
+
+        transformed = await node._transform_output("export_pdf", deepcopy(result), ctx)
+
+        assert "artifact" in transformed["result"]["resource"]["blob"]
+        assert transformed["result"]["resource"]["blob"]["artifact"]["mime_type"] == "application/pdf"
+
 
 class TestBinaryDetectionConfig:
     """Tests for binary detection configuration."""
@@ -649,12 +756,18 @@ class TestArtifactExtractionConfig:
         assert config.max_inline_size == 10_000
         assert config.auto_artifact_large_content is True
         assert config.binary_detection.enabled is True
+        assert config.handle_mcp_typed_content is True
 
     def test_custom_size_limits(self):
         """Test custom size limit configuration."""
         config = ArtifactExtractionConfig(max_inline_size=5000)
 
         assert config.max_inline_size == 5000
+
+    def test_disable_typed_content_handling(self):
+        """MCP typed-content handling can be disabled via config."""
+        config = ArtifactExtractionConfig(handle_mcp_typed_content=False)
+        assert config.handle_mcp_typed_content is False
 
     def test_tool_fields_configuration(self):
         """Test per-tool field configuration."""

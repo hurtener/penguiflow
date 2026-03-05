@@ -86,15 +86,18 @@ nav:
   - Planner (ReactPlanner):
       - Overview: planner/overview.md
       - Configuration: planner/configuration.md
+      - Tool discovery & filtering: planner/tool-discovery-and-filtering.md
       - Actions & schema: planner/actions-and-schema.md
       - Tool design: planner/tool-design.md
       - Guardrails: planner/guardrails.md
       - Parallel & joins: planner/parallel-and-joins.md
       - Tooling: planner/tooling.md
+      - Rich output: planner/rich-output.md
       - Pause/resume (HITL): planner/pause-resume-hitl.md
       - Memory: planner/memory.md
       - Steering: planner/steering.md
       - Background tasks: planner/background-tasks.md
+      - Skills: planner/skills.md
       - LLM clients: planner/llm-clients.md
       - Native LLM layer: planner/native-llm.md
       - Observability: planner/observability.md
@@ -105,6 +108,8 @@ nav:
       - MCP resources: tools/mcp-resources.md
       - Artifacts & resources: tools/artifacts-and-resources.md
       - State store: tools/statestore.md
+      - Common tools:
+          - Web (Brave): common-tools/web.md
   - Deployment:
       - Overview: deployment/overview.md
       - Worker integration: deployment/worker-integration.md
