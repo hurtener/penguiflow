@@ -97,3 +97,43 @@ grep -A3 "merged_tool_context = {" penguiflow/templates/new/{react,minimal,enter
 grep -B1 "base_tool_context," penguiflow/templates/new/{react,minimal,enterprise,analyst,wayfinder,parallel,rag_server}/src/__package_name__/orchestrator.py.jinja | grep "tool_context or {}" | wc -l
 # Expected: 0 (meaning base_tool_context never appears AFTER tool_context)
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-06
+
+### Summary of Changes
+- Swapped the order of `**(dict(tool_context or {})),` and `**base_tool_context,` in all 14 `merged_tool_context = {` blocks across 7 planner template files (2 blocks per file: one in `execute()`, one in `resume()`).
+- The fix was applied identically to: `react`, `minimal`, `enterprise`, `analyst`, `wayfinder`, `parallel`, `rag_server`.
+- The `flow` and `controller` templates were confirmed to not contain any `merged_tool_context` blocks and were left unmodified.
+
+### Key Considerations
+- Since all 14 blocks had an identical 5-line pattern, a `replace_all` edit strategy was used on each file, which cleanly swapped both occurrences (execute + resume) in a single operation per file.
+- The indentation was preserved exactly (8 spaces for the assignment, 12 spaces for each dict entry) by replacing the full 5-line block rather than individual lines.
+- Before editing, every block was read and confirmed to match the expected buggy pattern (tool_context spread before base_tool_context).
+
+### Assumptions
+- The phase file's line numbers were treated as approximate guides. The actual matching was done by content pattern rather than line number, which proved correct (all line numbers matched the plan exactly).
+- The `flow` and `controller` templates do not need this fix because they do not contain `merged_tool_context` blocks at all (confirmed via grep).
+- Phase 000 changes (trace_id pre-resolution) are assumed to already be in place on this branch, as indicated by the `phase-000.md` file appearing in the git diff.
+
+### Deviations from Plan
+None. The implementation followed the plan exactly as specified.
+
+### Potential Risks & Reviewer Attention Points
+- These are Jinja template files (`.py.jinja`), not directly executed Python. The syntax correctness cannot be fully validated by ruff/mypy/pytest since they are template source files. However, the edit is a pure line swap with no structural changes, so the risk of introducing syntax errors is minimal.
+- The full CI suite (ruff, mypy, pytest with 84.5% coverage threshold) was run and all checks passed (2617 tests passed, 85.08% coverage).
+- The merge priority is now correctly: `_tool_context_defaults` (lowest, set first) < `base_tool_context` (middle, overwrites defaults) < caller `tool_context` (highest, overwrites everything). This means caller-provided values like `tenant_id`, `user_id`, `session_id`, `trace_id`, etc. will no longer be silently overwritten by the orchestrator's internal `base_tool_context`.
+
+### Files Modified
+- `penguiflow/templates/new/react/src/__package_name__/orchestrator.py.jinja`
+- `penguiflow/templates/new/minimal/src/__package_name__/orchestrator.py.jinja`
+- `penguiflow/templates/new/enterprise/src/__package_name__/orchestrator.py.jinja`
+- `penguiflow/templates/new/analyst/src/__package_name__/orchestrator.py.jinja`
+- `penguiflow/templates/new/wayfinder/src/__package_name__/orchestrator.py.jinja`
+- `penguiflow/templates/new/parallel/src/__package_name__/orchestrator.py.jinja`
+- `penguiflow/templates/new/rag_server/src/__package_name__/orchestrator.py.jinja`
+- `docs/RFC/ToDo/issue-78/001-playground-bug/phases/phase-001.md` (this file, implementation notes appended)

@@ -80,3 +80,44 @@ grep -A3 "merged_tool_context = {" penguiflow/templates/new/{react,minimal,enter
 # 7. No blocks with old broken order (expect 0)
 grep -B1 "base_tool_context," penguiflow/templates/new/{react,minimal,enterprise,analyst,wayfinder,parallel,rag_server}/src/__package_name__/orchestrator.py.jinja | grep "tool_context or {}" | wc -l
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-06
+
+### Summary of Changes
+No code changes were made. This phase was purely a verification and validation step. All 7 verification commands from the phase file were executed and all 7 exit criteria were confirmed as passing.
+
+### Verification Results
+
+| # | Check | Command | Expected | Actual | Status |
+|---|-------|---------|----------|--------|--------|
+| 1 | Ruff lint | `uv run ruff check .` | Zero errors | "All checks passed!" | PASS |
+| 2 | Full test suite | `uv run pytest` | All tests pass | 2617 passed, 7 skipped, 0 failures (24.82s) | PASS |
+| 3 | No unconditional trace_id in planner templates | `grep ... \| grep -v "tool_context"` | 0 lines | 0 lines (exit code 1 = no match) | PASS |
+| 4 | Correct trace_id pattern count | `grep -c '(tool_context or {}).get("trace_id")...'` | 2 per template | react:2, minimal:2, enterprise:2, analyst:2, wayfinder:2, parallel:2, rag_server:2 (14 total) | PASS |
+| 5 | flow/controller untouched | `grep -rn "trace_id = secrets.token_hex" ...{flow,controller}...` | 2 unconditional matches | flow:96 and controller:84, both unconditional | PASS |
+| 6 | Merge order correct | `grep -A3 "merged_tool_context = {" ...` | `base_tool_context` before `tool_context` in all 14 blocks | All 14 blocks show: `_tool_context_defaults` -> `base_tool_context` -> `tool_context` | PASS |
+| 7 | No old broken order | `grep -B1 "base_tool_context," ... \| grep "tool_context or {}" \| wc -l` | 0 | 0 | PASS |
+
+### Key Considerations
+- The brace expansion syntax `{react,minimal,...}` used in the phase file's grep commands does not expand when piped through certain shell contexts. The commands were re-run using explicit `bash -c '...'` invocations to ensure proper brace expansion for checks 3 and 7. The non-piped grep commands (checks 4, 5, 6) expanded correctly without needing `bash -c`.
+- The 7 skipped tests in the pytest run are pre-existing (not related to these changes) -- they appear in `tests/cli/` and correspond to tests that require optional dependencies or environment conditions.
+- The 147 warnings are all pre-existing deprecation warnings (FastAPI `on_event`, Pydantic serialization, hypothesis) unrelated to the template changes.
+
+### Assumptions
+- The test suite's 2617 passing tests provide sufficient regression coverage for the template changes, even though the modified `.py.jinja` files are code generators rather than directly executed Python.
+- The 7 skipped tests are expected/known skips and do not represent regressions.
+
+### Deviations from Plan
+None. All verification commands were executed as specified. The only procedural change was wrapping two piped grep commands in `bash -c '...'` to ensure correct brace expansion, which does not affect the verification logic or results.
+
+### Potential Risks & Reviewer Attention Points
+- The `build/lib/` directory (noted in Phase 000's implementation notes) still contains stale copies of the template files with the old buggy patterns. This is expected -- they will be refreshed on the next package build -- but reviewers should be aware.
+- All verification is static (grep pattern matching on template files). There is no runtime integration test that instantiates a project from each template and exercises the `execute()`/`resume()` methods with a caller-provided `trace_id`. Such a test would provide stronger assurance but is outside the scope of this bug fix.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-78/001-playground-bug/phases/phase-002.md` (this file, implementation notes appended)

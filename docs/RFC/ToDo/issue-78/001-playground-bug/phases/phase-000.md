@@ -68,3 +68,53 @@ grep -c '(tool_context or {}).get("trace_id") or secrets.token_hex(8)' penguiflo
 # Expected: 2 matches (1 in flow, 1 in controller) -- both unconditional, as intended
 grep -rn "trace_id = secrets.token_hex" penguiflow/templates/new/{flow,controller}/src/__package_name__/orchestrator.py.jinja
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-06
+
+### Summary of Changes
+- **minimal template** (`penguiflow/templates/new/minimal/src/__package_name__/orchestrator.py.jinja`): Replaced unconditional `trace_id = secrets.token_hex(8)` with caller-aware fallback at lines 327 (`execute()`) and 435 (`resume()`).
+- **enterprise template** (`penguiflow/templates/new/enterprise/src/__package_name__/orchestrator.py.jinja`): Same replacement at lines 215 (`execute()`) and 322 (`resume()`).
+- **analyst template** (`penguiflow/templates/new/analyst/src/__package_name__/orchestrator.py.jinja`): Same replacement at lines 213 (`execute()`) and 320 (`resume()`).
+- **wayfinder template** (`penguiflow/templates/new/wayfinder/src/__package_name__/orchestrator.py.jinja`): Same replacement at lines 213 (`execute()`) and 320 (`resume()`).
+- **parallel template** (`penguiflow/templates/new/parallel/src/__package_name__/orchestrator.py.jinja`): Same replacement at lines 213 (`execute()`) and 319 (`resume()`).
+- **rag_server template** (`penguiflow/templates/new/rag_server/src/__package_name__/orchestrator.py.jinja`): Same replacement at lines 213 (`execute()`) and 320 (`resume()`).
+
+Each occurrence was changed from:
+```python
+        trace_id = secrets.token_hex(8)
+```
+to:
+```python
+        trace_id = (tool_context or {}).get("trace_id") or secrets.token_hex(8)
+```
+
+### Key Considerations
+- Used `replace_all` per file since the old string `        trace_id = secrets.token_hex(8)` (with 8-space indent) appeared exactly twice in each file (once in `execute()`, once in `resume()`), making batch replacement safe and precise.
+- The 8-space indentation was preserved exactly, matching the surrounding method body code.
+- The `or` chain `(tool_context or {}).get("trace_id") or secrets.token_hex(8)` handles three cases: (1) `tool_context` is `None` -- falls through to generate a new ID; (2) `tool_context` exists but has no `trace_id` key -- falls through; (3) `tool_context` has a `trace_id` with a truthy value -- reuses it. This matches the pattern already established in the `react` template.
+
+### Assumptions
+- The `tool_context` parameter is available in scope at both `execute()` and `resume()` call sites in all 6 templates. This was confirmed by the existing `react` template which already uses the identical pattern.
+- The `build/lib/` copies of the templates are stale build artifacts and were intentionally not modified. They will be updated on the next package build.
+- No changes to tests were needed because these are Jinja template files (code generators), not runtime Python. The existing test suite (2617 tests) passes cleanly.
+
+### Deviations from Plan
+None. All 12 edits were applied exactly as specified in the phase file.
+
+### Potential Risks & Reviewer Attention Points
+- **`build/lib/` directory**: The `build/lib/penguiflow/templates/` directory contains stale copies of these same template files that still have the old unconditional `trace_id` assignment. These will be overwritten on the next `pip install -e .` or package build, but reviewers should be aware they exist.
+- **Empty-string trace_id**: The `or` operator means an empty string `""` passed as `trace_id` will also fall back to generating a new one. This is the intended behavior per the phase file's implementation notes ("both `None` and empty-string trace_ids fall back"), and matches the `react` template.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/templates/new/minimal/src/__package_name__/orchestrator.py.jinja`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/templates/new/enterprise/src/__package_name__/orchestrator.py.jinja`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/templates/new/analyst/src/__package_name__/orchestrator.py.jinja`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/templates/new/wayfinder/src/__package_name__/orchestrator.py.jinja`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/templates/new/parallel/src/__package_name__/orchestrator.py.jinja`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/templates/new/rag_server/src/__package_name__/orchestrator.py.jinja`
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-78/001-playground-bug/phases/phase-000.md` (this file, implementation notes appended)
