@@ -259,3 +259,42 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_
 # Run the full test suite
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui && npm run test -- --run 2>&1 | tail -30
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-06
+
+### Summary of Changes
+- Created `penguiflow/cli/playground_ui/tests/unit/services/event-stream.test.ts` with 6 test cases inside a `describe('EventStreamManager')` block.
+- Test 1: "connects successfully on first attempt" -- verifies single EventSource instantiation and no close on successful connect.
+- Test 2: "retries on pre-connect error" -- verifies close of failed connection and creation of a second EventSource after timer advance.
+- Test 3: "stops retrying after max attempts" -- verifies exactly 3 instances (1 initial + 2 retries) when `retries=2`.
+- Test 4: "does not retry on post-connect error" -- verifies no retry after the `connected` event has been received.
+- Test 5: "cancels pending retry when start() is called again" -- verifies stale retry timer is cleared and new connection uses the new traceId.
+- Test 6: "cancels pending retry when close() is called" -- verifies explicit close prevents the scheduled retry from firing.
+
+### Key Considerations
+- **Constructor mock approach:** The plan specified `vi.fn(() => {...})` as the `EventSource` constructor mock. However, `vi.fn()` creates an arrow function internally, which cannot be used with `new` (throws "is not a constructor"). The implementation uses a proper `class FakeEventSource` definition instead, with a separate `constructorSpy` (`vi.fn()`) called inside the constructor to track invocations and capture URL arguments.
+- **Closure correctness for `_emit` and `_triggerError`:** The plan's `createMockEventSource()` factory uses a plain object literal where `_triggerError` references `mock.onerror` via closure. This works when the mock object IS the EventSource instance. However, if the mock were copied via `Object.assign` into a `new`-constructed object, the closures would reference the original object (whose `onerror` stays `null`), not the constructed one. Using a class avoids this entirely because `_emit` and `_triggerError` use `this`, which correctly refers to the constructed instance.
+- **`createMockStores()`** is identical to the plan -- minimal stubs sufficient for retry-focused tests.
+- **Fake timers** are used exactly as specified, with `vi.useFakeTimers()` in `beforeEach` and `vi.useRealTimers()` in `afterEach`.
+
+### Assumptions
+- The `EventStreamManager.close()` method in the production code calls `this.eventSource.close()` before nulling out the reference. This means the mock's `close` spy is called by the manager's internal `close()`, which is separate from test-level assertions on the mock.
+- The global test setup (`tests/setup.ts`) stubs `globalThis.EventSource` with its own `MockEventSource`. The test's `beforeEach` overrides this with the local class mock, and `vi.restoreAllMocks()` in `afterEach` handles cleanup. Since the setup runs before each test file and `beforeEach` runs before each test, the override order is correct.
+- `window.location.origin` defaults to `http://localhost:3000` or similar in jsdom, so `new URL('/events', window.location.origin)` works without explicit mocking.
+
+### Deviations from Plan
+- **Mock infrastructure restructured:** Instead of a standalone `createMockEventSource()` factory function with `vi.fn()` as the constructor, the implementation uses an inline `class FakeEventSource` in `beforeEach` with a `constructorSpy` for call tracking. This was necessary because `vi.fn()` cannot be used as a constructor with `new`. The `MockEventSource` interface is retained for type safety on `mockInstances`.
+- **`constructorSpy` instead of `EventSource` spy:** The plan's test code references `expect(EventSource).toHaveBeenCalledTimes(1)` and `(EventSource as ...).mock.calls[1][0]`. Since the class itself is not a `vi.fn()`, these were changed to use `constructorSpy.toHaveBeenCalledTimes(1)` and `constructorSpy.mock.calls[1][0]` respectively. The semantic intent (verifying constructor call count and URL arguments) is preserved.
+
+### Potential Risks & Reviewer Attention Points
+- The `vi.restoreAllMocks()` in `afterEach` may not restore the original `globalThis.EventSource` that was set in the global setup file (`tests/setup.ts`). Since each test in `beforeEach` re-assigns `globalThis.EventSource` anyway, this is not an issue for this test file. However, if test ordering matters across files, verify that the global setup's `EventSource` stub is re-applied. Vitest re-runs setup files per test file by default, so this should be fine.
+- The `_listeners` property on `FakeEventSource` is `private`, which means tests cannot directly inspect registered listeners. This is intentional -- tests only use `_emit` and `_triggerError` to exercise the manager's behavior indirectly.
+
+### Files Modified
+- **Created:** `penguiflow/cli/playground_ui/tests/unit/services/event-stream.test.ts`
+- **Modified:** `docs/RFC/ToDo/issue-78/002-trajectory-playground-issue/phases/phase-003.md` (appended implementation notes)

@@ -204,3 +204,42 @@ grep -A2 "clearTimeout" /Users/martin.alonso/Documents/lg/repos/penguiflow/pengu
 # Run existing tests to confirm no regressions
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui && npm run test -- --run 2>&1 | tail -20
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-06
+
+### Summary of Changes
+- Refactored the `EventStreamManager` class in `event-stream.ts` to add retry-on-connection-failure with linear backoff:
+  - Added `private retryTimer: ReturnType<typeof setTimeout> | null = null` property.
+  - Changed `start()` signature to accept optional `retries = 3` and `delayMs = 500` parameters.
+  - Extracted connection logic from `start()` into a new `private _connect(traceId, sessionId, attempt, retries, delayMs)` method.
+  - Added `let connected = false` flag inside `_connect()` that gets set to `true` when the server's `"connected"` event is received.
+  - Replaced the simple `onerror = () => this.close()` with a retry-aware handler that retries only for pre-connect failures (`!connected && attempt < retries`) using linear backoff (`delayMs * (attempt + 1)`).
+  - Updated `close()` to clear any pending `retryTimer` before closing the EventSource.
+
+### Key Considerations
+- The implementation follows the phase file exactly, using the "Required Code" block as the canonical reference for the class replacement.
+- The `connected` flag is intentionally scoped as a local variable inside `_connect()` rather than a class property. This ensures each connection attempt gets its own flag, which is semantically correct since a retry creates an entirely new EventSource connection.
+- The `retryTimer` is a class property (not local) so that both `close()` and `start()` can cancel pending retries from outside the `_connect()` scope.
+- The `close()` method clears the retry timer BEFORE closing the EventSource to prevent a race condition where the EventSource is nullified but a pending setTimeout callback still fires.
+
+### Assumptions
+- The server sends a `"connected"` event as the first SSE frame, as documented in the phase file (referencing `playground.py:1877-1880`). This is the signal that distinguishes a successful connection from a connection failure.
+- The pre-existing `tsc` error (`Cannot find type definition file for 'node'`) is an environment/dependency issue unrelated to these changes. No errors were found specific to `event-stream.ts`.
+- Existing call sites in `App.svelte` that call `eventStreamManager.start(traceId, sessionId)` with only two arguments will continue to work because `retries` and `delayMs` have default values.
+
+### Deviations from Plan
+None. The implementation matches the Required Code block and all Detailed Steps exactly.
+
+### Potential Risks & Reviewer Attention Points
+- The `onerror` handler calls `this.close()` which clears `this.retryTimer`. Then it immediately sets a new `this.retryTimer`. This works correctly because `close()` clears the timer first, and the new timer is set after. However, be aware that `close()` also nullifies `this.eventSource`, so the retry callback in `_connect` creates a fresh EventSource.
+- If `close()` is called externally during a pending retry (e.g., user navigates away), the retry timer is properly cleared, preventing orphaned connections. This was verified by inspecting the `close()` logic.
+- There are no dedicated tests for the retry behavior in the test suite (no `event-stream.test.ts` file exists). Adding unit tests for the retry logic would improve confidence. This could be addressed in a follow-up phase.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui/src/lib/services/event-stream.ts` (modified: replaced `EventStreamManager` class with retry-aware version)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-78/002-trajectory-playground-issue/phases/phase-002.md` (modified: appended implementation notes)

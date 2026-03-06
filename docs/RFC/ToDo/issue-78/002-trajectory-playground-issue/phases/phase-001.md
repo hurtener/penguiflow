@@ -137,3 +137,38 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_
 # Verify all 7 fetchTrajectory tests pass (3 existing + 4 new)
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui && npm run test -- --run tests/unit/services/api.test.ts 2>&1 | grep -c "fetchTrajectory"
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-06
+
+### Summary of Changes
+- Added 4 new test cases to the `describe('fetchTrajectory')` block in `penguiflow/cli/playground_ui/tests/unit/services/api.test.ts`:
+  1. `returns data on first attempt without retrying` -- verifies fetch called once, no console.error, correct data returned.
+  2. `returns data after exactly 1 retry on 404` -- verifies fetch called twice (first 404, second 200), no console.error, correct data returned.
+  3. `returns null after exhausting all retries on persistent 404` -- verifies fetch called 4 times (1 initial + 3 retries), console.error called once, null returned.
+  4. `returns null immediately on non-404 error without retrying` -- verifies fetch called once (no retry on 500), console.error called once, null returned.
+
+### Key Considerations
+- The tests were inserted after the existing "returns null on error" test (line 199 in original) and before the closing of the `describe('fetchTrajectory')` block, preserving the structure.
+- All new tests pass `delayMs = 0` as the 4th argument to `fetchTrajectory` to avoid real `setTimeout` delays, as recommended by the phase file.
+- The `console.error` spy is created and restored within each test to avoid cross-test interference, especially since `vi.resetAllMocks()` in `beforeEach` handles the fetch mock but not manually created spies.
+- The mock responses for error cases include `status` and `statusText` fields because `fetchWithErrorHandling` reads `response.status` to set `ApiError.statusCode`, which the retry logic in `fetchTrajectory` checks against `404`.
+
+### Assumptions
+- The code exactly matches what was specified in the phase file's "Required Code" section, as it was well-defined and correct for the implementation.
+- The existing 3 tests in the `fetchTrajectory` block continue to work unchanged because `retries` and `delayMs` have default values in the function signature.
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- The stderr output during test runs shows `console.error` messages from the production code (e.g., "trajectory fetch failed"). This is expected behavior -- the tests that assert `console.error` was called are verifying this exact output. The tests that assert `console.error` was NOT called confirm the retry path stays silent until final failure.
+- The existing "returns null on error" test (line 193) uses `{ ok: false }` without a `status` field, so `statusCode` is `undefined`. Since `undefined !== 404`, the retry logic treats this as a non-404 error and does not retry. This is consistent behavior.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui/tests/unit/services/api.test.ts` (modified -- added 4 test cases)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-78/002-trajectory-playground-issue/phases/phase-001.md` (modified -- appended implementation notes)

@@ -82,3 +82,34 @@ grep -n "for (let attempt" /Users/martin.alonso/Documents/lg/repos/penguiflow/pe
 # Run existing tests to confirm no regressions
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui && npm run test -- --run tests/unit/services/api.test.ts 2>&1 | tail -20
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-06
+
+### Summary of Changes
+- **`penguiflow/cli/playground_ui/src/lib/services/api.ts`**: Replaced the `fetchTrajectory` function (lines 136-148) with a retry-on-404 version that accepts optional `retries` (default 3) and `delayMs` (default 500) parameters, implements a for-loop with linear backoff that only retries on 404 responses, and logs errors only on the final failure.
+
+### Key Considerations
+- The implementation exactly matches the code specified in the phase file's "Required Code" section. No deviations were needed since the plan was precise and complete.
+- The existing `fetchWithErrorHandling` function already populates `ApiError.statusCode` from `response.status`, so no changes were needed to the error handling infrastructure.
+- The URL is extracted to a `const` before the loop to avoid reconstructing the same string on each attempt.
+- The `for` loop uses `attempt <= retries` (not `< retries`), meaning with the default `retries = 3` there are 4 total attempts (1 initial + 3 retries), consistent with the plan's description and the worst-case timing of 500 + 1000 + 1500 = 3000ms (3 delay periods between 4 attempts).
+
+### Assumptions
+- The existing test "returns null on error" (line 193 in `api.test.ts`) mocks `fetch` returning `{ ok: false }` without a `status` property. This results in `ApiError.statusCode` being `undefined`, which is `!== 404`, so the function returns `null` immediately without retrying. This is correct behavior and the test continues to pass.
+- No new tests were added for the retry behavior because the phase file did not call for them and the existing 32 tests all pass. Adding retry-specific tests (e.g., verifying 404 retries, verifying non-404 immediate failure, verifying delay timing) would be valuable but is outside the scope of this phase.
+
+### Deviations from Plan
+None.
+
+### Potential Risks & Reviewer Attention Points
+- The existing test for error behavior (`returns null on error`) passes because the mock lacks a `status` property, making `statusCode` be `undefined`. If that test were updated to mock a 404 status, it would trigger retry behavior and potentially cause test timing issues due to the `setTimeout` delays. Future test updates should pass `retries = 0` or use `vi.useFakeTimers()` to avoid slow tests.
+- The `npx tsc --noEmit` verification command fails with a pre-existing `TS2688: Cannot find type definition file for 'node'` error unrelated to this change. TypeScript correctness was verified instead via `npx svelte-check`, which reported 0 errors.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui/src/lib/services/api.ts` (modified)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-78/002-trajectory-playground-issue/phases/phase-000.md` (appended implementation notes)

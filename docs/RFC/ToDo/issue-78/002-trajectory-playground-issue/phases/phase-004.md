@@ -50,3 +50,43 @@ ls -la /Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playgro
 # Verify the built bundle contains retry-related code (search for attempt pattern)
 grep -r "attempt" /Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_ui/dist/assets/*.js 2>/dev/null | head -5 || echo "Check dist manually"
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-03-06
+
+### Summary of Changes
+- **Step 1 -- Full test suite:** Ran `npm run test -- --run` from `penguiflow/cli/playground_ui`. All 394 tests across 33 test files passed, including the 4 `fetchTrajectory` retry tests (from phase-001) and the 6 `EventStreamManager` retry tests (from phase-003). Exit code 0.
+- **Step 2 -- Dependency install and build:** Ran `npm install` (no new dependencies needed, all already present). Ran `npm run build` which invoked `vite build` and completed successfully in 11.44s, regenerating the entire `dist/` directory with 159 asset files.
+- **Step 3 -- Dist directory verification:** Confirmed the `dist/` directory exists with files timestamped Mar 6 15:01 (current build time). Verified the main bundle (`dist/assets/index-O5eR_8h9.js`) contains retry logic patterns from both source files:
+  - `api.ts` retry logic: `.statusCode!==404` pattern (1 occurrence)
+  - `event-stream.ts` retry logic: `retryTimer` pattern (1 occurrence) and `_connect` pattern (1 occurrence)
+- The build regenerated all JS chunks with new content hashes (old files like `index-DH_8uZM6.js` replaced by `index-O5eR_8h9.js`), confirming the dist reflects the updated source code.
+
+### Key Considerations
+- The build produces Svelte compiler warnings about `state_referenced_locally` in `McpApp.svelte` (lines 53-55). These are pre-existing warnings unrelated to the retry logic changes and do not affect the build output.
+- Vite's chunk size warning for `Plotly-QqLAS5Vh.js` (4.6MB) is also pre-existing and not related to this phase's changes.
+- The `npm run test` script in `package.json` is defined as `vitest run`, so `npm run test -- --run` effectively passes `--run` twice. This is harmless -- vitest ignores the redundant flag -- but the canonical way to run tests non-interactively here is just `npm run test`.
+
+### Assumptions
+- The dist files are intended to be committed to the repository, as stated in the phase file. This phase only regenerated them; the actual `git add` and `git commit` are left to the user or a subsequent step, as the phase explicitly says "This phase modifies no source files -- it only regenerates build artifacts."
+- The `node_modules` directory was already populated from previous phases. `npm install` confirmed all dependencies were up to date.
+- The vite build configuration in `vite.config.js` was not modified; the standard `vite build` command was used as-is.
+
+### Deviations from Plan
+None. All three steps (test, build, verify) were executed exactly as specified. All four exit criteria are satisfied.
+
+### Potential Risks & Reviewer Attention Points
+- **Dist file hashes changed:** The rebuild produced entirely new content hashes for all JS chunks (e.g., `index-DH_8uZM6.js` became `index-O5eR_8h9.js`). This is expected because even minor source changes cause Vite to regenerate different hashes. However, this means a large number of files will appear in the git diff (68 files: old hash files deleted, new hash files added). This is normal for Vite builds.
+- **Old dist files still tracked by git:** The old files (e.g., `dist/assets/index-DH_8uZM6.js`) show as "deleted" in `git status` while the new files show as "untracked." When staging for commit, both the deletions and the new files need to be included (e.g., using `git add dist/`).
+- **CSS files unchanged:** The CSS assets in `dist/assets/` retained their original filenames and content hashes, which is expected since no CSS was modified in the retry-logic phases.
+
+### Files Modified
+- **Regenerated:** `penguiflow/cli/playground_ui/dist/` -- entire directory rebuilt by `vite build`. Key files:
+  - `dist/index.html` (updated asset references)
+  - `dist/assets/index-O5eR_8h9.js` (main bundle, contains retry logic from both `api.ts` and `event-stream.ts`)
+  - ~60 other JS chunk files with new content hashes
+- **Modified:** `docs/RFC/ToDo/issue-78/002-trajectory-playground-issue/phases/phase-004.md` (appended implementation notes)
