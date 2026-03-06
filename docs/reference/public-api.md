@@ -23,8 +23,18 @@ from penguiflow import PenguiFlow, Context, NodePolicy, ReactPlanner
 - Sessions: `StreamingSession`, `SessionManager`
 - Tools: `tool`, `build_catalog`, `ToolLoadingMode`
 
+## Eval namespace
+
+`penguiflow.evals` is a supported workflow surface for trace-derived evaluation.
+
+- Primary APIs: `collect_traces()`, `collect_and_export_traces()`, `export_dataset()`, `evaluate_dataset()`
+- Spec loaders: `load_eval_collect_spec()`, `load_eval_dataset_spec()`
+- CLI parity: these power `penguiflow eval collect` and `penguiflow eval evaluate`
+
+Why: keeping eval orchestration in one namespace lets projects provide only
+metric/run hooks while reusing stable collection/export/sweep primitives.
+
 ## Version source of truth
 
 - Package version: `penguiflow.__version__`
 - Packaging metadata: `pyproject.toml`
-
