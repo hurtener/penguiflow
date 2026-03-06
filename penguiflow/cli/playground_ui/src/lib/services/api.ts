@@ -135,16 +135,21 @@ export async function generateProject(
  */
 export async function fetchTrajectory(
   traceId: string,
-  sessionId: string
+  sessionId: string,
+  retries = 3,
+  delayMs = 500
 ): Promise<TrajectoryPayload | null> {
-  const result = await fetchWithErrorHandling<TrajectoryPayload>(
-    `${BASE_URL}/trajectory/${traceId}?session_id=${encodeURIComponent(sessionId)}`
-  );
-  if (!result.ok) {
-    console.error('trajectory fetch failed', result.error);
-    return null;
+  const url = `${BASE_URL}/trajectory/${traceId}?session_id=${encodeURIComponent(sessionId)}`;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const result = await fetchWithErrorHandling<TrajectoryPayload>(url);
+    if (result.ok) return result.data;
+    if (result.error.statusCode !== 404 || attempt === retries) {
+      console.error('trajectory fetch failed', result.error);
+      return null;
+    }
+    await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
   }
-  return result.data;
+  return null;
 }
 
 /**

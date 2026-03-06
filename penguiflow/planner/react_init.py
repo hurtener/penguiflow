@@ -448,6 +448,7 @@ def init_react_planner(
     planner._hop_budget = hop_budget
     planner._time_source = time_source or time.monotonic
     planner._event_callback = event_callback
+    planner._event_buffer = []
     planner._absolute_max_parallel = absolute_max_parallel
     planner._use_native_reasoning = use_native_reasoning
     planner._reasoning_effort = reasoning_effort

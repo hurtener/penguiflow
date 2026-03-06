@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -10,7 +9,6 @@ import pytest
 from penguiflow.cli.playground_wrapper import (
     OrchestratorAgentWrapper,
     PlannerAgentWrapper,
-    _build_trajectory,
     _combine_callbacks,
     _EventRecorder,
     _extract_from_dict,
@@ -20,18 +18,6 @@ from penguiflow.cli.playground_wrapper import (
     _planner_trace_id,
 )
 from penguiflow.planner import PlannerEvent, PlannerFinish, PlannerPause
-
-
-@dataclass
-class DummyStore:
-    saved: list[tuple[str, PlannerEvent]]
-    trajectories: list[tuple[str, str, Any]]
-
-    async def save_planner_event(self, trace_id: str, event: PlannerEvent) -> None:
-        self.saved.append((trace_id, event))
-
-    async def save_trajectory(self, trace_id: str, session_id: str, trajectory: Any) -> None:
-        self.trajectories.append((trace_id, session_id, trajectory))
 
 
 class DummyPlanner:
@@ -109,16 +95,15 @@ class DummyPayload:
 
 
 def test_event_recorder_callback_none_when_unused() -> None:
-    recorder = _EventRecorder(None)
+    recorder = _EventRecorder()
     assert recorder.callback() is None
+    # Positive path: returns a callback when event_consumer is provided
+    assert _EventRecorder().callback(event_consumer=lambda *_: None) is not None
 
 
-@pytest.mark.asyncio
-async def test_event_recorder_buffers_and_persists() -> None:
-    store = DummyStore(saved=[], trajectories=[])
-    recorder = _EventRecorder(store)
+def test_event_recorder_forwards_to_consumer() -> None:
     seen: list[tuple[PlannerEvent, str | None]] = []
-
+    recorder = _EventRecorder()
     callback = recorder.callback(
         trace_id_supplier=lambda: "trace-1",
         event_consumer=lambda event, trace_id: seen.append((event, trace_id)),
@@ -127,26 +112,7 @@ async def test_event_recorder_buffers_and_persists() -> None:
 
     event = make_event()
     callback(event)
-    assert recorder._buffer == [event]
     assert seen == [(event, "trace-1")]
-
-    await recorder.persist("trace-1")
-    assert recorder._buffer == []
-    assert store.saved == [("trace-1", event)]
-
-
-@pytest.mark.asyncio
-async def test_event_recorder_clears_buffer_without_store() -> None:
-    recorder = _EventRecorder(None)
-    callback = recorder.callback(event_consumer=lambda *_: None)
-    assert callback is not None
-
-    event = make_event("finish")
-    callback(event)
-    assert recorder._buffer == [event]
-
-    await recorder.persist("trace-1")
-    assert recorder._buffer == []
 
 
 def test_combine_callbacks() -> None:
@@ -189,35 +155,6 @@ def test_normalise_answer() -> None:
     assert _normalise_answer(42) == "42"
 
 
-def test_build_trajectory() -> None:
-    metadata: dict[str, Any] = {
-        "steps": [{"action": {"thought": "plan", "next_node": "finish"}}],
-        "trajectory_metadata": {"source": "unit-test"},
-        "artifacts": {"artifact-1": {"mime_type": "text/plain"}},
-        "sources": [{"name": "demo"}],
-        "summary": {"goals": ["q"], "facts": {}, "pending": []},
-    }
-    traj = _build_trajectory(
-        query="Q",
-        session_id="session-1",
-        trace_id="trace-1",
-        metadata=metadata,
-        llm_context={"foo": "bar"},
-        tool_context={"tenant": "demo"},
-    )
-    assert traj is not None
-    assert traj.query == "Q"
-    assert traj.tool_context is not None
-    assert traj.tool_context["session_id"] == "session-1"
-    assert traj.tool_context["trace_id"] == "trace-1"
-    assert traj.metadata["source"] == "unit-test"
-    assert traj.artifacts["artifact-1"]["mime_type"] == "text/plain"
-    assert traj.sources[0]["name"] == "demo"
-
-    assert _build_trajectory("Q", "session-1", "trace-1", None, {}) is None
-    assert _build_trajectory("Q", "session-1", "trace-1", {"steps": "nope"}, {}) is None
-
-
 @pytest.mark.asyncio
 async def test_planner_agent_wrapper_pause_and_finish() -> None:
     pause = PlannerPause(reason="await_input", payload={"field": "value"}, resume_token="resume-1")
@@ -234,11 +171,9 @@ async def test_planner_agent_wrapper_pause_and_finish() -> None:
             "thought": "fallback",
         },
     )
-    store = DummyStore(saved=[], trajectories=[])
-    wrapper = PlannerAgentWrapper(DummyPlanner(run_result=finish), state_store=store)
+    wrapper = PlannerAgentWrapper(DummyPlanner(run_result=finish))
     result = await wrapper.chat("hi", session_id="session-1", trace_id_hint="trace-2")
     assert result.answer == "fallback"
-    assert store.trajectories[0][0] == "trace-2"
 
     finish_no_steps = PlannerFinish(reason="answer_complete", payload="ok", metadata={"foo": "bar"})
     wrapper = PlannerAgentWrapper(DummyPlanner(run_result=finish_no_steps))
@@ -262,7 +197,6 @@ async def test_planner_agent_wrapper_resume_finish() -> None:
     wrapper = PlannerAgentWrapper(DummyPlanner(run_result=pause, resume_result=pause))
     paused = await wrapper.resume("resume-2", session_id="session-1")
     assert paused.pause is not None
-
 
 
 def test_get_attr_and_trace_id_helpers() -> None:

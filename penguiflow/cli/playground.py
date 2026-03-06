@@ -783,14 +783,12 @@ def load_agent(
         )
         wrapper: AgentWrapper = OrchestratorAgentWrapper(
             orchestrator,
-            state_store=state_store,
         )
     else:
         builder_output = _call_builder(result.target, config, state_store=state_store)
         planner = _unwrap_planner(builder_output)
         wrapper = PlannerAgentWrapper(
             planner,
-            state_store=state_store,
         )
 
     return wrapper, result

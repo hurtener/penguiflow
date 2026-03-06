@@ -197,6 +197,69 @@ describe('api service', () => {
 
       expect(result).toBeNull();
     });
+
+    it('returns data on first attempt without retrying', async () => {
+      const errorSpy = vi.spyOn(console, 'error');
+      const mockData = { steps: [{ action: { next_node: 'n1' } }] };
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockData)
+      });
+
+      const result = await fetchTrajectory('trace-1', 'session-1', 3, 0);
+
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(result).toEqual(mockData);
+      errorSpy.mockRestore();
+    });
+
+    it('returns data after exactly 1 retry on 404', async () => {
+      const errorSpy = vi.spyOn(console, 'error');
+      const mockData = { steps: [{ action: { next_node: 'n1' } }] };
+
+      globalThis.fetch = vi.fn()
+        .mockResolvedValueOnce({ ok: false, status: 404, statusText: 'Not Found' })
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(mockData) });
+
+      const result = await fetchTrajectory('trace-1', 'session-1', 3, 0);
+
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(result).toEqual(mockData);
+      errorSpy.mockRestore();
+    });
+
+    it('returns null after exhausting all retries on persistent 404', async () => {
+      const errorSpy = vi.spyOn(console, 'error');
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false, status: 404, statusText: 'Not Found'
+      });
+
+      const result = await fetchTrajectory('trace-1', 'session-1', 3, 0);
+
+      expect(fetch).toHaveBeenCalledTimes(4);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(result).toBeNull();
+      errorSpy.mockRestore();
+    });
+
+    it('returns null immediately on non-404 error without retrying', async () => {
+      const errorSpy = vi.spyOn(console, 'error');
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false, status: 500, statusText: 'Internal Server Error'
+      });
+
+      const result = await fetchTrajectory('trace-1', 'session-1', 3, 0);
+
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(result).toBeNull();
+      errorSpy.mockRestore();
+    });
   });
 
   describe('extractFilename', () => {

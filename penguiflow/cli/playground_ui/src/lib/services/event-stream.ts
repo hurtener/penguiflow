@@ -13,25 +13,41 @@ type EventStreamStores = Pick<
 class EventStreamManager {
   constructor(private stores: EventStreamStores) {}
   private eventSource: EventSource | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * Start following events for a trace
    */
-  start(traceId: string, sessionId: string): void {
+  start(traceId: string, sessionId: string, retries = 3, delayMs = 500): void {
     this.close();
+    this._connect(traceId, sessionId, 0, retries, delayMs);
+  }
 
+  private _connect(
+    traceId: string,
+    sessionId: string,
+    attempt: number,
+    retries: number,
+    delayMs: number
+  ): void {
     const url = new URL('/events', window.location.origin);
     url.searchParams.set('trace_id', traceId);
     url.searchParams.set('session_id', sessionId);
     url.searchParams.set('follow', 'true');
 
     this.eventSource = new EventSource(url.toString());
+    let connected = false;
 
     const listener = (evt: MessageEvent) => {
       const data = safeParse(evt.data);
       if (!data) return;
 
       const incomingEvent = (evt.type as string) || (data.event as string) || '';
+
+      // Mark connected on first server frame
+      if (!connected && data.event === 'connected') {
+        connected = true;
+      }
 
       // Check if we should process this event
       if (!this.stores.eventsStore.shouldProcess(incomingEvent)) return;
@@ -68,13 +84,25 @@ class EventStreamManager {
     });
 
     this.eventSource.onmessage = listener;
-    this.eventSource.onerror = () => this.close();
+    this.eventSource.onerror = () => {
+      this.close();
+      if (!connected && attempt < retries) {
+        this.retryTimer = setTimeout(
+          () => this._connect(traceId, sessionId, attempt + 1, retries, delayMs),
+          delayMs * (attempt + 1)
+        );
+      }
+    };
   }
 
   /**
    * Close the EventSource connection
    */
   close(): void {
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
     if (this.eventSource) {
       this.eventSource.close();
       this.eventSource = null;

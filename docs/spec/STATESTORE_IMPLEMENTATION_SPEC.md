@@ -804,7 +804,9 @@ async def list_steering(
 
 **Purpose:** Persist planner trajectories for replay, debugging, and UI inspection.
 
-**Location (integration):** `penguiflow/cli/playground.py`
+**Location (integration):** `penguiflow/planner/react_runtime.py`
+
+> **Note:** The `ReactPlanner` now persists trajectories directly after `run()` / `resume()` returns (`PlannerFinish` or `PlannerPause`), as fire-and-forget background tasks. The playground wrapper no longer handles trajectory persistence.
 
 **Contracts:**
 - `get_trajectory()` MUST return `None` when not found or when session_id does not match.
@@ -820,6 +822,10 @@ async def list_traces(self, session_id: str, limit: int = 50) -> list[str]: ...
 ### 11. Planner Event Persistence (`save_planner_event`, `list_planner_events`)
 
 **Purpose:** Persist structured planner/tool execution events for UI streaming and auditing.
+
+**Location (integration):** `penguiflow/planner/react_runtime.py`
+
+> **Note:** Planner events are now persisted by the `ReactPlanner` itself. Events are buffered during execution and flushed as a fire-and-forget background task in the `finally` block on every exit path (finish, pause, error, cancellation). The playground wrapper no longer handles event persistence.
 
 **Contract:**
 - Planner events are append-only.
