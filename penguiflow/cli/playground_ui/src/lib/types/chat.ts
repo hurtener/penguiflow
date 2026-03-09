@@ -24,6 +24,20 @@ export type ChatMessage = {
   artifacts?: ArtifactRef[];
 };
 
+export type SessionMessage = {
+  id: string;
+  role: 'user' | 'agent';
+  text: string;
+  ts: number;
+  task_id: string;
+  trace_id?: string | null;
+};
+
+export type SessionMessagesResponse = {
+  session_id: string;
+  messages: SessionMessage[];
+};
+
 export type PlannerEventPayload = {
   id: string;
   event: string;

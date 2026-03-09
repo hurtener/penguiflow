@@ -7,6 +7,7 @@
     loadMeta,
     loadSpec,
     loadComponentRegistry,
+    loadSessionMessages,
     fetchTrajectory,
     createChatStreamManager,
     createEventStreamManager,
@@ -37,6 +38,10 @@
     setupStore,
     componentRegistryStore,
     interactionsStore,
+    eventsStore,
+    tasksStore,
+    artifactsStore,
+    notificationsStore,
   } = stores;
   const chatStreamManager = createChatStreamManager(stores);
   const eventStreamManager = createEventStreamManager(stores);
@@ -49,6 +54,8 @@
 
   // Responsive breakpoint detection
   let isMobile = $state(false);
+  // Keep this non-reactive; writing a $state token inside $effect causes a feedback loop.
+  let sessionHydrationToken = 0;
 
   const checkMobile = () => {
     isMobile = window.innerWidth <= 1200;
@@ -81,11 +88,35 @@
     };
   });
 
+  function resetSessionUiState() {
+    chatStreamManager.close();
+    eventStreamManager.close();
+    chatStore.clear();
+    trajectoryStore.clear();
+    eventsStore.clear();
+    interactionsStore.clear();
+    tasksStore.clear();
+    artifactsStore.clear();
+    notificationsStore.clear();
+    sessionStore.activeTraceId = null;
+    sessionStore.isSending = false;
+  }
+
   $effect(() => {
     const sessionId = sessionStore.sessionId;
-    if (sessionId) {
-      sessionStreamManager.start(sessionId);
-    }
+    if (!sessionId) return;
+    const token = ++sessionHydrationToken;
+    resetSessionUiState();
+    sessionStreamManager.start(sessionId);
+    void (async () => {
+      const messages = await loadSessionMessages(sessionId, 10);
+      if (token !== sessionHydrationToken || sessionStore.sessionId !== sessionId) {
+        return;
+      }
+      if (messages) {
+        chatStore.setMessages(messages);
+      }
+    })();
   });
 
   const initializeApp = async () => {
@@ -122,6 +153,7 @@
     }
     const { toolContext, llmContext } = contexts;
 
+    sessionStore.touchSession(sessionStore.sessionId);
     sessionStore.isSending = true;
     trajectoryStore.clearArtifacts();
     interactionsStore.clearPendingInteraction();
@@ -177,6 +209,7 @@
     }
     const { toolContext } = contexts;
 
+    sessionStore.touchSession(sessionStore.sessionId);
     sessionStore.isSending = true;
     trajectoryStore.clearArtifacts();
     interactionsStore.clearPendingInteraction();

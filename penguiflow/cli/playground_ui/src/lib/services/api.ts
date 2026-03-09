@@ -5,7 +5,9 @@ import type {
   TrajectoryPayload,
   ArtifactRef,
   ComponentRegistryPayload,
-  TaskState
+  TaskState,
+  ChatMessage,
+  SessionMessagesResponse
 } from '$lib/types';
 import type { Result } from '$lib/utils/result';
 
@@ -150,6 +152,32 @@ export async function fetchTrajectory(
     await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
   }
   return null;
+}
+
+/**
+ * Load chat messages reconstructed from completed foreground tasks for a session.
+ */
+export async function loadSessionMessages(
+  sessionId: string,
+  limit = 10
+): Promise<ChatMessage[] | null> {
+  const url = new URL(`${BASE_URL}/sessions/${encodeURIComponent(sessionId)}/messages`, window.location.origin);
+  url.searchParams.set('limit', String(limit));
+  const result = await fetchWithErrorHandling<SessionMessagesResponse>(url.toString());
+  if (!result.ok) {
+    console.error('session messages fetch failed', result.error);
+    return null;
+  }
+  return result.data.messages.map((item) => ({
+    id: item.id,
+    role: item.role,
+    text: item.text,
+    ts: item.ts,
+    traceId: item.trace_id ?? undefined,
+    isStreaming: item.role === 'agent' ? false : undefined,
+    isThinking: item.role === 'agent' ? false : undefined,
+    answerStreamDone: item.role === 'agent' ? true : undefined,
+  }));
 }
 
 /**

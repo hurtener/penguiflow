@@ -9,6 +9,7 @@ test.describe('Setup', () => {
 
   test('displays all setup fields', async ({ page }) => {
     await expect(page.getByText('Session ID')).toBeVisible();
+    await expect(page.getByText('Recent Sessions')).toBeVisible();
     await expect(page.getByText('Tenant ID')).toBeVisible();
     await expect(page.getByText('User ID')).toBeVisible();
     await expect(page.getByText('Tool Context (JSON)')).toBeVisible();
@@ -21,23 +22,16 @@ test.describe('Setup', () => {
   });
 
   test('can edit tenant id', async ({ page }) => {
-    // Find the Tenant ID input (second input field)
-    const inputs = page.locator('.setup-input');
-    const tenantInput = inputs.nth(1); // Session ID is first, Tenant ID is second
-    
+    const tenantInput = page.getByTestId('tenant-id-input');
     await tenantInput.clear();
     await tenantInput.fill('my-custom-tenant');
-    
     await expect(tenantInput).toHaveValue('my-custom-tenant');
   });
 
   test('can edit user id', async ({ page }) => {
-    const inputs = page.locator('.setup-input');
-    const userInput = inputs.nth(2); // User ID is third
-    
+    const userInput = page.getByTestId('user-id-input');
     await userInput.clear();
     await userInput.fill('test-user-123');
-    
     await expect(userInput).toHaveValue('test-user-123');
   });
 
@@ -47,13 +41,9 @@ test.describe('Setup', () => {
   });
 
   test('New button generates new session', async ({ page }) => {
-    const inputs = page.locator('.setup-input');
-    const sessionInput = inputs.first();
-    
+    const sessionInput = page.getByTestId('session-id-input');
     const originalValue = await sessionInput.inputValue();
-    
     await page.getByRole('button', { name: 'New' }).click();
-    
     const newValue = await sessionInput.inputValue();
     expect(newValue).not.toBe(originalValue);
   });
