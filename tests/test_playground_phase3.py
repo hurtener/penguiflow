@@ -9,6 +9,7 @@ This module tests:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -1038,6 +1039,164 @@ class TestMcpAppsEndpoint:
                 assert called_tool_name == "test_ns.echo"
 
     @pytest.mark.asyncio
+    async def test_app_call_tool_resolves_tool_node_from_orchestrator_planner(
+        self,
+        state_store: InMemoryStateStore,
+    ) -> None:
+        import tempfile
+
+        from httpx import ASGITransport, AsyncClient
+
+        from penguiflow.cli.playground import create_playground_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mock_tool_node = MagicMock()
+            mock_tool_node.call = AsyncMock(return_value={"result": {"ok": True}})
+
+            mock_planner = MagicMock()
+            mock_planner._tool_nodes = {"test_ns": mock_tool_node}
+
+            mock_orchestrator = MagicMock()
+            mock_orchestrator._planner = mock_planner
+
+            mock_wrapper = MagicMock()
+            mock_wrapper.initialize = AsyncMock()
+            mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._tool_nodes = None
+            mock_wrapper._planner = None
+            mock_wrapper._orchestrator = mock_orchestrator
+
+            app = create_playground_app(
+                project_root=tmpdir,
+                agent=mock_wrapper,
+                state_store=state_store,
+            )
+
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    "/apps/test_ns/call-tool",
+                    params={"session_id": "sess-1"},
+                    json={"name": "get_editor_state", "arguments": {"deck_id": "deck-1"}},
+                )
+
+                assert response.status_code == 200
+                assert response.json() == {"result": {"ok": True}}
+                mock_tool_node.call.assert_awaited_once()
+                assert mock_tool_node.call.await_args.args[0] == "test_ns.get_editor_state"
+
+    @pytest.mark.asyncio
+    async def test_app_call_tool_uses_planner_specs_and_sticky_session_registry(
+        self,
+        state_store: InMemoryStateStore,
+    ) -> None:
+        import tempfile
+
+        from httpx import ASGITransport, AsyncClient
+
+        from penguiflow.cli.playground import create_playground_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mock_tool_node = MagicMock()
+            mock_tool_node.call = AsyncMock(return_value={"result": {"ok": True}})
+
+            mock_spec = SimpleNamespace(extra={"namespace": "test_ns", "tool_node": mock_tool_node})
+
+            mock_planner = MagicMock()
+            mock_planner._tool_nodes = None
+            mock_planner._specs = [mock_spec]
+
+            mock_wrapper = MagicMock()
+            mock_wrapper.initialize = AsyncMock()
+            mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._tool_nodes = None
+            mock_wrapper._planner = mock_planner
+
+            app = create_playground_app(
+                project_root=tmpdir,
+                agent=mock_wrapper,
+                state_store=state_store,
+            )
+
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                first = await client.post(
+                    "/apps/test_ns/call-tool",
+                    params={"session_id": "sess-sticky"},
+                    json={"name": "get_editor_state", "arguments": {"deck_id": "deck-1"}},
+                )
+
+                assert first.status_code == 200
+
+                # Simulate the live planner handle no longer being discoverable after the turn.
+                mock_wrapper._planner = None
+                mock_planner._specs = []
+
+                second = await client.post(
+                    "/apps/test_ns/call-tool",
+                    params={"session_id": "sess-sticky"},
+                    json={"name": "get_editor_state", "arguments": {"deck_id": "deck-1"}},
+                )
+
+                assert second.status_code == 200
+                assert mock_tool_node.call.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_app_call_tool_clears_sticky_session_registry_on_session_delete(
+        self,
+        state_store: InMemoryStateStore,
+    ) -> None:
+        import tempfile
+
+        from httpx import ASGITransport, AsyncClient
+
+        from penguiflow.cli.playground import create_playground_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mock_tool_node = MagicMock()
+            mock_tool_node.call = AsyncMock(return_value={"result": {"ok": True}})
+
+            mock_spec = SimpleNamespace(extra={"namespace": "test_ns", "tool_node": mock_tool_node})
+
+            mock_planner = MagicMock()
+            mock_planner._tool_nodes = None
+            mock_planner._specs = [mock_spec]
+
+            mock_wrapper = MagicMock()
+            mock_wrapper.initialize = AsyncMock()
+            mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._tool_nodes = None
+            mock_wrapper._planner = mock_planner
+
+            app = create_playground_app(
+                project_root=tmpdir,
+                agent=mock_wrapper,
+                state_store=state_store,
+            )
+
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                first = await client.post(
+                    "/apps/test_ns/call-tool",
+                    params={"session_id": "sess-clear"},
+                    json={"name": "get_editor_state", "arguments": {"deck_id": "deck-1"}},
+                )
+
+                assert first.status_code == 200
+
+                delete_response = await client.delete("/sessions/sess-clear")
+                assert delete_response.status_code == 200
+
+                mock_wrapper._planner = None
+                mock_planner._specs = []
+
+                second = await client.post(
+                    "/apps/test_ns/call-tool",
+                    params={"session_id": "sess-clear"},
+                    json={"name": "get_editor_state", "arguments": {"deck_id": "deck-1"}},
+                )
+
+                assert second.status_code == 500
+                assert second.json()["detail"] == "No tool nodes available"
+
+    @pytest.mark.asyncio
     async def test_app_call_tool_rejects_cross_namespace_tool_name(
         self,
         state_store: InMemoryStateStore,
@@ -1071,6 +1230,123 @@ class TestMcpAppsEndpoint:
 
                 assert response.status_code == 400
                 assert "namespace mismatch" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_app_call_tool_uses_raw_mcp_proxy_when_available(
+        self,
+        state_store: InMemoryStateStore,
+    ) -> None:
+        import tempfile
+
+        from httpx import ASGITransport, AsyncClient
+
+        from penguiflow.cli.playground import create_playground_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_client = MagicMock()
+            raw_client.call_tool_mcp = AsyncMock(
+                return_value=SimpleNamespace(
+                    isError=False,
+                    content=[],
+                    structuredContent={"ok": True},
+                    model_dump=lambda mode="json", exclude_none=True: {
+                        "isError": False,
+                        "content": [],
+                        "structuredContent": {"ok": True},
+                    },
+                )
+            )
+
+            mock_tool_node = MagicMock()
+            mock_tool_node._connected = True
+            mock_tool_node._connected_loop = None
+            mock_tool_node._mcp_client = raw_client
+            mock_tool_node.call = AsyncMock()
+
+            mock_wrapper = MagicMock()
+            mock_wrapper.initialize = AsyncMock()
+            mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._tool_nodes = {"test_ns": mock_tool_node}
+
+            app = create_playground_app(
+                project_root=tmpdir,
+                agent=mock_wrapper,
+                state_store=state_store,
+            )
+
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    "/apps/test_ns/call-tool",
+                    json={"name": "echo", "arguments": {"x": 1}},
+                )
+
+                assert response.status_code == 200
+                assert response.json()["structuredContent"] == {"ok": True}
+                raw_client.call_tool_mcp.assert_awaited_once_with("echo", {"x": 1})
+                mock_tool_node.call.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_app_read_resource_returns_raw_contents(
+        self,
+        state_store: InMemoryStateStore,
+    ) -> None:
+        import tempfile
+
+        from httpx import ASGITransport, AsyncClient
+
+        from penguiflow.cli.playground import create_playground_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_client = MagicMock()
+            raw_client.read_resource = AsyncMock(
+                return_value=[
+                    SimpleNamespace(
+                        uri="ui://deck-editor/index.html",
+                        mimeType="text/html;profile=mcp-app",
+                        text="<html></html>",
+                        model_dump=lambda mode="json", exclude_none=True: {
+                            "uri": "ui://deck-editor/index.html",
+                            "mimeType": "text/html;profile=mcp-app",
+                            "text": "<html></html>",
+                        },
+                    )
+                ]
+            )
+
+            mock_tool_node = MagicMock()
+            mock_tool_node._connected = True
+            mock_tool_node._connected_loop = None
+            mock_tool_node._mcp_client = raw_client
+            mock_tool_node.resources_supported = True
+
+            mock_wrapper = MagicMock()
+            mock_wrapper.initialize = AsyncMock()
+            mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._tool_nodes = {"test_ns": mock_tool_node}
+
+            app = create_playground_app(
+                project_root=tmpdir,
+                agent=mock_wrapper,
+                state_store=state_store,
+            )
+
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    "/apps/test_ns/read-resource",
+                    json={"uri": "ui://deck-editor/index.html"},
+                )
+
+                assert response.status_code == 200
+                assert response.json() == {
+                    "contents": [
+                        {
+                            "uri": "ui://deck-editor/index.html",
+                            "mimeType": "text/html;profile=mcp-app",
+                            "text": "<html></html>",
+                        }
+                    ]
+                }
+                raw_client.read_resource.assert_awaited_once_with("ui://deck-editor/index.html")
 
 
 # ─── Edge Case Tests ─────────────────────────────────────────────────────────

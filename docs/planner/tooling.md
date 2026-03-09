@@ -49,6 +49,8 @@ For planner-level filtering and tool discovery (`tool_search`, `tool_get`, defer
 - Call `await tool_node.connect()` at service startup (or warm it on first request) and reuse the same ToolNode across sessions.
 - Use `tool_filter` (or equivalent) to expose only a safe subset of tools to the LLM.
 - Set `ExternalToolConfig.max_concurrency` conservatively for external APIs (3–5 is a typical starting point).
+- If you expose MCP Apps, keep the `ToolNode` reachable after the initial tool call. The HTML artifact is only the view; the host still needs a live backend route for `tools/call`, `tools/list`, `resources/list`, and `resources/read`.
+- For web/playground hosts, the recommended lookup key is `session_id + namespace`. If you emit an app artifact and then drop the `ToolNode`/MCP client handle, the app will load but fail on its first follow-up action.
 - Prefer bounded outputs:
   - small tool outputs are returned inline,
   - large/binary content should become artifacts (see Tools docs).

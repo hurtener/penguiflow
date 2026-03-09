@@ -594,6 +594,7 @@ def _binary_component_payload(record: ArtifactRecord, session_id: str | None) ->
                 "csp": metadata.get("csp", {}),
                 "permissions": metadata.get("permissions", {}),
                 "tool_data": metadata.get("tool_data"),
+                "tool_input": metadata.get("tool_input"),
                 "prefers_border": metadata.get("prefers_border", False),
                 "namespace": metadata.get("namespace"),
                 "session_id": metadata.get("session_id", session_id or record.scope_session_id),
@@ -744,7 +745,16 @@ def _binary_metadata(ref: ArtifactRef) -> dict[str, Any]:
     metadata = _compact_metadata(source)
 
     if ref.mime_type == "text/html;profile=mcp-app":
-        for key in ("csp", "permissions", "tool_data", "prefers_border", "namespace", "session_id", "sandbox"):
+        for key in (
+            "csp",
+            "permissions",
+            "tool_data",
+            "tool_input",
+            "prefers_border",
+            "namespace",
+            "session_id",
+            "sandbox",
+        ):
             if key not in source:
                 continue
             metadata[key] = _json_safe_copy(source[key])

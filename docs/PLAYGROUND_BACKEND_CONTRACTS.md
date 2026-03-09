@@ -35,6 +35,28 @@ The Playground can run either:
 
 The wrapper layer normalizes both into the same `AgentWrapper` interface.
 
+### Embedded MCP Apps runtime contract
+
+MCP Apps are not passive artifacts. The stored `text/html;profile=mcp-app` artifact is only the iframe payload; the app still needs backend access to the live `ToolNode` / MCP client for follow-up calls such as:
+
+- `tools/call`
+- `tools/list`
+- `resources/list`
+- `resources/read`
+
+Playground keeps those `ToolNode` handles in a session-scoped registry keyed by `session_id + namespace`. Resolution order is:
+
+1. sticky session registry
+2. live wrapper/planner `_tool_nodes`
+3. planner spec metadata (`NodeSpec.extra["tool_node"]`, `NodeSpec.extra["namespace"]`)
+
+Implications for adopters:
+
+- If you build a custom host for MCP Apps, persist app-capable `ToolNode`s beyond the original planner turn.
+- Do not assume the HTML artifact alone is enough.
+- If the runtime can no longer resolve the `ToolNode`, the app will load and then fail on its first backend action.
+- Clearing the Playground session (`DELETE /sessions/{session_id}`) also clears the sticky MCP app registry for that session.
+
 ---
 
 ## Discovery Contract
