@@ -64,7 +64,7 @@ export function createSessionStore(): SessionStore {
     touchSession(normalized);
   }
 
-  touchSession(sessionId);
+  touchSession();
 
   return {
     get sessionId() { return sessionId; },
