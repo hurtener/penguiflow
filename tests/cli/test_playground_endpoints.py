@@ -787,6 +787,64 @@ class TestAGUIEndpoint:
 
 
 class TestSessionEndpoints:
+    def test_session_messages_returns_recent_limited_chat_history(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        session_id = "history-session"
+        for idx in range(6):
+            response = client.post("/chat", json={"query": f"prompt-{idx + 1}", "session_id": session_id})
+            assert response.status_code == 200
+
+        history = client.get(f"/sessions/{session_id}/messages", params={"limit": 10})
+        assert history.status_code == 200
+        payload = history.json()
+        assert payload["session_id"] == session_id
+        assert len(payload["messages"]) == 10
+        assert payload["messages"][0]["text"] == "prompt-2"
+        assert payload["messages"][-1]["role"] == "agent"
+
+    def test_session_messages_ignores_failed_foreground_tasks(self, tmp_path: Path) -> None:
+        class _MixedOutcomeWrapper(MockAgentWrapper):
+            async def chat(  # type: ignore[override]
+                self,
+                query: str,
+                *,
+                session_id: str,
+                llm_context: dict[str, Any] | None = None,
+                tool_context: dict[str, Any] | None = None,
+                event_consumer: Any = None,
+                trace_id_hint: str | None = None,
+                steering: Any = None,
+            ) -> ChatResult:
+                del session_id, llm_context, tool_context, event_consumer, trace_id_hint, steering
+                if query == "fail":
+                    raise RuntimeError("forced failure")
+                return ChatResult(
+                    trace_id="trace-success",
+                    session_id="mixed-session",
+                    answer=f"echo:{query}",
+                    metadata=None,
+                    pause=None,
+                )
+
+        wrapper = _MixedOutcomeWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper)
+        client = TestClient(app, raise_server_exceptions=False)
+        session_id = "mixed-session"
+
+        ok = client.post("/chat", json={"query": "ok", "session_id": session_id})
+        assert ok.status_code == 200
+
+        failed = client.post("/chat", json={"query": "fail", "session_id": session_id})
+        assert failed.status_code == 500
+
+        history = client.get(f"/sessions/{session_id}/messages")
+        assert history.status_code == 200
+        payload = history.json()
+        assert [item["text"] for item in payload["messages"]] == ["ok", "echo:ok"]
+
     def test_session_info(self, tmp_path: Path) -> None:
         wrapper = MockAgentWrapper()
         app = create_playground_app(project_root=tmp_path, agent=wrapper)

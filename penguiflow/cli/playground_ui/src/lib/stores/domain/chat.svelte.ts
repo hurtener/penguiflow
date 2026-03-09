@@ -8,6 +8,7 @@ export interface ChatStore {
   readonly messages: ChatMessage[];
   input: string;
   readonly isEmpty: boolean;
+  setMessages(items: ChatMessage[]): void;
   addUserMessage(text: string): ChatMessage;
   addAgentMessage(): ChatMessage;
   findMessage(id: string): ChatMessage | undefined;
@@ -26,6 +27,22 @@ export function createChatStore(): ChatStore {
     set input(v: string) { input = v; },
 
     get isEmpty() { return messages.length === 0; },
+
+    setMessages(items: ChatMessage[]): void {
+      messages = items.map(item => {
+        if (item.role !== 'agent') {
+          return { ...item };
+        }
+        return {
+          ...item,
+          isStreaming: item.isStreaming ?? false,
+          isThinking: item.isThinking ?? false,
+          answerStreamDone: item.answerStreamDone ?? true,
+          revisionStreamActive: item.revisionStreamActive ?? false,
+          answerActionSeq: item.answerActionSeq ?? ANSWER_GATE_SENTINEL,
+        };
+      });
+    },
 
     addUserMessage(text: string): ChatMessage {
       const msg: ChatMessage = {

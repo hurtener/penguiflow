@@ -141,6 +141,9 @@ dmypy.json
 
 # Ruff stuff:
 .ruff_cache/
+.npm_cache/
+penguiflow/cli/playground_ui/.npm_cache/
+/package-lock.json
 
 # PyPI configuration file
 .pypirc

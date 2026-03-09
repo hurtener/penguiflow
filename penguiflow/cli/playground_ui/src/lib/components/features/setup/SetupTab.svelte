@@ -47,6 +47,24 @@
   const trajectoryStore = getTrajectoryStore();
   const eventsStore = getEventsStore();
   const interactionsStore = getInteractionsStore();
+  let sessionDraft = $state(sessionStore.sessionId);
+
+  $effect(() => {
+    sessionDraft = sessionStore.sessionId;
+  });
+
+  const loadSession = () => {
+    const next = sessionDraft.trim();
+    if (!next) return;
+    sessionStore.switchSession(next);
+  };
+
+  const switchRecentSession = (event: Event) => {
+    const target = event.currentTarget as HTMLSelectElement;
+    const next = target.value.trim();
+    if (!next) return;
+    sessionStore.switchSession(next);
+  };
 
   setAGUIContext(previewStore);
 </script>
@@ -55,7 +73,18 @@
   <div class="setup-grid">
     <SetupField label="Session ID" hint="Used to scope short-term memory and trajectory lookups.">
       <div class="row gap">
-        <input class="setup-input" bind:value={sessionStore.sessionId} />
+        <input
+          data-testid="session-id-input"
+          class="setup-input"
+          bind:value={sessionDraft}
+          onkeydown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              loadSession();
+            }
+          }}
+        />
+        <button class="ghost-btn small" onclick={loadSession}>Load</button>
         <button
           class="ghost-btn small"
           onclick={() => {
@@ -70,12 +99,28 @@
       </div>
     </SetupField>
 
+    <SetupField
+      label="Recent Sessions"
+      hint="Stored locally as an LRU list and used for quick switching."
+    >
+      <select
+        data-testid="recent-sessions-select"
+        class="setup-input"
+        value={sessionStore.sessionId}
+        onchange={switchRecentSession}
+      >
+        {#each sessionStore.recentSessionIds as sessionId}
+          <option value={sessionId}>{sessionId}</option>
+        {/each}
+      </select>
+    </SetupField>
+
     <SetupField label="Tenant ID">
-      <input class="setup-input" bind:value={setupStore.tenantId} />
+      <input data-testid="tenant-id-input" class="setup-input" bind:value={setupStore.tenantId} />
     </SetupField>
 
     <SetupField label="User ID">
-      <input class="setup-input" bind:value={setupStore.userId} />
+      <input data-testid="user-id-input" class="setup-input" bind:value={setupStore.userId} />
     </SetupField>
 
     <SetupField
