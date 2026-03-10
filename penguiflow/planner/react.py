@@ -347,6 +347,7 @@ class ReactPlanner:
     _cost_tracker: _CostTracker
     _deadline_s: float | None
     _event_callback: PlannerEventCallback | None
+    _event_buffer: list[PlannerEvent]
     _hop_budget: int | None
     _llm_context_hooks: list[LLMContextHook]
     _json_schema_mode: bool
@@ -1194,6 +1195,8 @@ class ReactPlanner:
 
     def _emit_event(self, event: PlannerEvent) -> None:
         """Emit a planner event for observability."""
+        self._event_buffer.append(event)
+
         # Log the event (strip reserved logging keys to avoid collisions)
         payload = event.to_payload()
         for reserved in ("args", "msg", "levelname", "levelno", "exc_info"):

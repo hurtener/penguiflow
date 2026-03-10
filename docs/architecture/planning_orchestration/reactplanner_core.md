@@ -27,6 +27,7 @@ The ReactPlanner is the central orchestrator of the Penguiflow system, implement
   - Handle trajectory serialization and compression
   - Support trajectory summarization for long-running sessions
   - Provide history for context window management
+  - Automatic persistence: the `ReactPlanner` persists the live `Trajectory` object to the StateStore (if available) on `PlannerFinish` and `PlannerPause`. This is fire-and-forget -- persistence failures are logged but never propagate to the caller.
 
 ### 3. PlannerAction & Models
 - **Location**: `penguiflow/planner/models.py`
@@ -320,7 +321,14 @@ Constraint Checking
     ↓
 Iteration Decision (continue or finish)
     ↓
-Loop Back or Return Result
+Loop Back or run_loop() Returns
+    ↓
+[finally] Spawn Background Persistence Tasks
+  (trajectory + buffered events → StateStore)
+    ↓
+_maybe_record_memory_turn
+    ↓
+Return Result
 ```
 
 ### 2. Tool Execution Flow

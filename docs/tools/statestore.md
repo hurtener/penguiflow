@@ -63,6 +63,8 @@ Planner event storage:
 - `save_planner_event(trace_id: str, event: PlannerEvent) -> None`
 - `list_planner_events(trace_id: str) -> list[PlannerEvent]`
 
+> Planner events are automatically persisted by the `ReactPlanner` when a StateStore with `save_planner_event` capability is provided. Events are buffered during execution and flushed as a fire-and-forget background task on every exit path (finish, pause, error, cancel).
+
 Artifacts:
 
 - expose `artifact_store` or implement `ArtifactStore` (including the `list` method) so the planner can discover it (`discover_artifact_store`). Tool developers access artifacts via `ctx.artifacts` (a `ScopedArtifacts` facade); the raw `ArtifactStore` is plumbing.
@@ -70,6 +72,8 @@ Artifacts:
 Sessions/tasks/steering/trajectories:
 
 - see `penguiflow.state.protocol.SupportsTasks`, `SupportsSteering`, `SupportsTrajectories`
+
+> Trajectories are automatically persisted by the `ReactPlanner` when a StateStore with `save_trajectory` capability is provided. Persistence happens on both `PlannerFinish` and `PlannerPause` as a fire-and-forget background task.
 
 ## Operational defaults
 

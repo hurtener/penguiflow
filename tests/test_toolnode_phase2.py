@@ -93,7 +93,7 @@ def resource_cache(artifact_store):
         ttl_seconds=3600,
         inline_text_if_under_chars=100,
     )
-    return ResourceCache(artifact_store, "test", config)
+    return ResourceCache("test", config)
 
 
 @pytest.fixture
@@ -225,7 +225,7 @@ async def test_cache_get_or_fetch_text_inline_from_list_response(resource_cache,
 async def test_cache_get_or_fetch_text_large(artifact_store):
     """Large text content should be stored as artifact."""
     config = ResourceCacheConfig(inline_text_if_under_chars=10)
-    cache = ResourceCache(artifact_store, "test", config)
+    cache = ResourceCache("test", config)
     ctx = DummyCtx(artifact_store)
 
     large_text = "x" * 100  # Exceeds threshold of 10
@@ -332,7 +332,7 @@ async def test_cache_invalidate_all(resource_cache, artifact_store):
 async def test_cache_eviction(artifact_store):
     """Cache should evict oldest entries when full."""
     config = ResourceCacheConfig(max_entries=3)
-    cache = ResourceCache(artifact_store, "test", config)
+    cache = ResourceCache("test", config)
     ctx = DummyCtx(artifact_store)
 
     async def read_fn(uri):
@@ -365,7 +365,7 @@ async def test_cache_eviction(artifact_store):
 async def test_cache_disabled(artifact_store):
     """Disabled cache should always fetch."""
     config = ResourceCacheConfig(enabled=False)
-    cache = ResourceCache(artifact_store, "test", config)
+    cache = ResourceCache("test", config)
     ctx = DummyCtx(artifact_store)
     call_count = 0
 
@@ -685,12 +685,11 @@ def test_toolnode_handle_resource_updated():
     """handle_resource_updated should invalidate cache entry."""
     config = build_config()
     registry = ModelRegistry()
-    store = InMemoryArtifactStore()
     node = ToolNode(config=config, registry=registry)
 
     # Set up cache with an entry
     cache_config = ResourceCacheConfig()
-    cache = ResourceCache(store, "test", cache_config)
+    cache = ResourceCache("test", cache_config)
     node._resource_cache = cache
 
     # Manually add a cache entry for testing

@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from pydantic import BaseModel, Field
 
-from penguiflow.artifacts import ArtifactScope, InMemoryArtifactStore
+from penguiflow.artifacts import ArtifactScope, InMemoryArtifactStore, ScopedArtifacts
 from penguiflow.catalog import build_catalog, tool
 from penguiflow.node import Node
 from penguiflow.registry import ModelRegistry
@@ -110,14 +110,20 @@ async def test_extract_artifacts_from_observation_propagates_full_scope() -> Non
         user_id="user-1",
         trace_id="trace-1",
     )
+    scoped = ScopedArtifacts(
+        store,
+        tenant_id="tenant-1",
+        user_id="user-1",
+        session_id="sess-1",
+        trace_id="trace-1",
+    )
     observation = {"report": "some report data"}
 
     result = await _extract_artifacts_from_observation(
         node_name="test_node",
         out_model=ArtifactOut,
         observation=observation,
-        artifact_store=store,
-        scope=scope,
+        artifacts=scoped,
     )
 
     assert len(result) == 1

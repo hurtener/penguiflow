@@ -78,9 +78,11 @@ class TestNIMProviderInit:
 
             provider_nim = NIMProvider("nim/qwen/qwen3.5-397b-a17b", api_key="x")
             provider_nvidia = NIMProvider("nvidia/qwen/qwen3.5-397b-a17b", api_key="x")
+            provider_nvidia_direct = NIMProvider("nvidia/nemotron-3-nano-30b-a3b", api_key="x")
 
             assert provider_nim.model == "qwen/qwen3.5-397b-a17b"
             assert provider_nvidia.model == "qwen/qwen3.5-397b-a17b"
+            assert provider_nvidia_direct.model == "nvidia/nemotron-3-nano-30b-a3b"
 
 
 class TestNIMProviderBuildParams:

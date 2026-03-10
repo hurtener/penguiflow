@@ -113,6 +113,8 @@ The wrapper always injects:
 
 into `tool_context` for traceability and STM keying.
 
+> **Planner persistence:** These IDs are used by the `ReactPlanner` for automatic trajectory and event persistence -- the playground wrapper no longer saves these itself. Orchestrators must propagate this `tool_context` (including `session_id` and `trace_id`) into their internal `ReactPlanner` calls so that persistence uses the frontend `run_id` (`trace_id_hint`) as the source of truth.
+
 ---
 
 ## HTTP API

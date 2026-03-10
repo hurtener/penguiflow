@@ -85,7 +85,11 @@ def parse_model_string(model: str) -> ParsedModel:
         elif provider_prefix == "nim":
             return ParsedModel(provider="nim", model_id=model_id, original=original)
         elif provider_prefix == "nvidia":
-            return ParsedModel(provider="nim", model_id=model_id, original=original)
+            # Legacy alias style: nvidia/<vendor>/<model> -> <vendor>/<model>.
+            # Direct NVIDIA model IDs: nvidia/<model> should keep the prefix.
+            if "/" in model_id:
+                return ParsedModel(provider="nim", model_id=model_id, original=original)
+            return ParsedModel(provider="nim", model_id=f"nvidia/{model_id}", original=original)
         elif provider_prefix == "anthropic":
             return ParsedModel(provider="anthropic", model_id=model_id, original=original)
         elif provider_prefix == "google":
