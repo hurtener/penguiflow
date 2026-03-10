@@ -86,6 +86,7 @@
       );
 
       if (accepted) {
+        sessionStore.touchSession(sessionStore.sessionId);
         // Clear input on successful steering
         chatStore.clearInput();
       }

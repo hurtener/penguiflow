@@ -5,6 +5,7 @@ import {
   validateSpec,
   generateProject,
   fetchTrajectory,
+  loadSessionMessages,
   extractFilename,
   downloadArtifact,
   getArtifactMeta
@@ -259,6 +260,47 @@ describe('api service', () => {
       expect(errorSpy).toHaveBeenCalledTimes(1);
       expect(result).toBeNull();
       errorSpy.mockRestore();
+    });
+  });
+
+  describe('loadSessionMessages', () => {
+    it('fetches and maps session messages', async () => {
+      const mockData = {
+        session_id: 'sess-1',
+        messages: [
+          { id: 't1:user', role: 'user', text: 'hello', ts: 1000, task_id: 't1', trace_id: 'tr1' },
+          { id: 't1:agent', role: 'agent', text: 'world', ts: 1010, task_id: 't1', trace_id: 'tr1' }
+        ]
+      };
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockData)
+      });
+
+      const result = await loadSessionMessages('sess-1', 10);
+
+      const calledUrl = (globalThis.fetch as unknown as { mock: { calls: Array<[string]> } }).mock.calls[0][0];
+      expect(calledUrl).toContain('/sessions/sess-1/messages?limit=10');
+      expect(result).toEqual([
+        { id: 't1:user', role: 'user', text: 'hello', ts: 1000, traceId: 'tr1' },
+        {
+          id: 't1:agent',
+          role: 'agent',
+          text: 'world',
+          ts: 1010,
+          traceId: 'tr1',
+          isStreaming: false,
+          isThinking: false,
+          answerStreamDone: true
+        }
+      ]);
+    });
+
+    it('returns null on API failure', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: false });
+      const result = await loadSessionMessages('sess-1');
+      expect(result).toBeNull();
     });
   });
 

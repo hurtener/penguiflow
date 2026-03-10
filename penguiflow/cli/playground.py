@@ -9,13 +9,14 @@ import json
 import logging
 import secrets
 import sys
+import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -180,6 +181,20 @@ class TaskStateResponse(BaseModel):
     background_tasks: list[dict[str, Any]]
 
 
+class SessionMessage(BaseModel):
+    id: str
+    role: Literal["user", "agent"]
+    text: str
+    ts: int
+    task_id: str
+    trace_id: str | None = None
+
+
+class SessionMessagesResponse(BaseModel):
+    session_id: str
+    messages: list[SessionMessage] = Field(default_factory=list)
+
+
 class SessionContextUpdate(BaseModel):
     llm_context: dict[str, Any] | None = None
     tool_context: dict[str, Any] | None = None
@@ -257,6 +272,15 @@ def _format_resume_input(input: AguiResumeRequest) -> str | None:
         return json.dumps(payload, ensure_ascii=False)
     except TypeError:
         return str(payload)
+
+
+def _to_epoch_ms(value: Any) -> int:
+    if hasattr(value, "timestamp"):
+        try:
+            return int(value.timestamp() * 1000)
+        except Exception:
+            pass
+    return int(time.time() * 1000)
 
 
 def _discover_spec_path(project_root: Path) -> Path | None:
@@ -1593,6 +1617,49 @@ def create_playground_app(
             context_version=session.context_version,
             context_hash=session.context_hash,
         )
+
+    @app.get("/sessions/{session_id}/messages", response_model=SessionMessagesResponse)
+    async def session_messages(
+        session_id: str,
+        limit: int = Query(default=10, ge=1, le=200),
+    ) -> SessionMessagesResponse:
+        session = await _get_session(session_id)
+        tasks = await session.list_tasks(status=TaskStatus.COMPLETE)
+        foreground_tasks = [task for task in tasks if task.task_type == TaskType.FOREGROUND]
+        foreground_tasks.sort(key=lambda task: (task.updated_at, task.created_at))
+
+        messages: list[SessionMessage] = []
+        for task in foreground_tasks:
+            user_text = task.description or task.context_snapshot.query
+            if isinstance(user_text, str) and user_text:
+                messages.append(
+                    SessionMessage(
+                        id=f"{task.task_id}:user",
+                        role="user",
+                        text=user_text,
+                        ts=_to_epoch_ms(task.created_at),
+                        task_id=task.task_id,
+                        trace_id=task.trace_id,
+                    )
+                )
+
+            answer_text = _normalise_answer(task.result)
+            if isinstance(answer_text, str) and answer_text:
+                messages.append(
+                    SessionMessage(
+                        id=f"{task.task_id}:agent",
+                        role="agent",
+                        text=answer_text,
+                        ts=_to_epoch_ms(task.updated_at),
+                        task_id=task.task_id,
+                        trace_id=task.trace_id,
+                    )
+                )
+
+        if len(messages) > limit:
+            messages = messages[-limit:]
+
+        return SessionMessagesResponse(session_id=session_id, messages=messages)
 
     @app.get("/session/{session_id}/task-state", response_model=TaskStateResponse)
     async def get_task_state(session_id: str) -> TaskStateResponse:
