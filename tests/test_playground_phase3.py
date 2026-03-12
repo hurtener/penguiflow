@@ -9,6 +9,7 @@ This module tests:
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1349,6 +1350,128 @@ class TestMcpAppsEndpoint:
                     ]
                 }
                 raw_client.read_resource.assert_awaited_once_with("ui://deck-editor/index.html")
+
+    @pytest.mark.asyncio
+    async def test_app_read_resource_preserves_wrapped_contents_payload(
+        self,
+        state_store: InMemoryStateStore,
+    ) -> None:
+        import tempfile
+
+        from httpx import ASGITransport, AsyncClient
+
+        from penguiflow.cli.playground import create_playground_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_client = MagicMock()
+            raw_client.read_resource = AsyncMock(
+                return_value={
+                    "contents": [
+                        {
+                            "uri": "pengui://docs/overview",
+                            "mimeType": "text/plain",
+                            "text": "overview",
+                        }
+                    ]
+                }
+            )
+
+            mock_tool_node = MagicMock()
+            mock_tool_node._connected = True
+            mock_tool_node._connected_loop = None
+            mock_tool_node._mcp_client = raw_client
+            mock_tool_node.resources_supported = True
+
+            mock_wrapper = MagicMock()
+            mock_wrapper.initialize = AsyncMock()
+            mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._tool_nodes = {"test_ns": mock_tool_node}
+
+            app = create_playground_app(
+                project_root=tmpdir,
+                agent=mock_wrapper,
+                state_store=state_store,
+            )
+
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    "/apps/test_ns/read-resource",
+                    json={"uri": "pengui://docs/overview"},
+                )
+
+                assert response.status_code == 200
+                assert response.json() == {
+                    "contents": [
+                        {
+                            "uri": "pengui://docs/overview",
+                            "mimeType": "text/plain",
+                            "text": "overview",
+                        }
+                    ]
+                }
+                raw_client.read_resource.assert_awaited_once_with("pengui://docs/overview")
+
+    @pytest.mark.asyncio
+    async def test_app_call_tool_reconnects_on_any_event_loop_mismatch(
+        self,
+        state_store: InMemoryStateStore,
+    ) -> None:
+        import tempfile
+
+        from httpx import ASGITransport, AsyncClient
+
+        from penguiflow.cli.playground import create_playground_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reconnected_client = MagicMock()
+            reconnected_client.call_tool_mcp = AsyncMock(
+                return_value=SimpleNamespace(
+                    isError=False,
+                    content=[],
+                    structuredContent={"ok": True},
+                    model_dump=lambda mode="json", exclude_none=True: {
+                        "isError": False,
+                        "content": [],
+                        "structuredContent": {"ok": True},
+                    },
+                )
+            )
+
+            mock_tool_node = MagicMock()
+            mock_tool_node._connected = True
+            mock_tool_node._connected_loop = object()
+            mock_tool_node._mcp_client = reconnected_client
+            mock_tool_node.call = AsyncMock()
+
+            async def _force_reconnect() -> None:
+                mock_tool_node._connected = True
+                mock_tool_node._connected_loop = asyncio.get_running_loop()
+                mock_tool_node._mcp_client = reconnected_client
+
+            mock_tool_node._force_reconnect = AsyncMock(side_effect=_force_reconnect)
+
+            mock_wrapper = MagicMock()
+            mock_wrapper.initialize = AsyncMock()
+            mock_wrapper.shutdown = AsyncMock()
+            mock_wrapper._tool_nodes = {"test_ns": mock_tool_node}
+
+            app = create_playground_app(
+                project_root=tmpdir,
+                agent=mock_wrapper,
+                state_store=state_store,
+            )
+
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    "/apps/test_ns/call-tool",
+                    json={"name": "echo", "arguments": {"x": 1}},
+                )
+
+                assert response.status_code == 200
+                assert response.json()["structuredContent"] == {"ok": True}
+                mock_tool_node._force_reconnect.assert_awaited_once()
+                reconnected_client.call_tool_mcp.assert_awaited_once_with("echo", {"x": 1})
+                mock_tool_node.call.assert_not_called()
 
 
 # ─── Edge Case Tests ─────────────────────────────────────────────────────────

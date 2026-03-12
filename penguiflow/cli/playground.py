@@ -1327,7 +1327,7 @@ def create_playground_app(
         current_loop = asyncio.get_running_loop()
         connected_loop = getattr(tool_node, "_connected_loop", None)
         if not getattr(tool_node, "_connected", False) or (
-            isinstance(connected_loop, type(current_loop)) and connected_loop is not current_loop
+            connected_loop is not None and connected_loop is not current_loop
         ):
             force_reconnect = getattr(tool_node, "_force_reconnect", None)
             if callable(force_reconnect):
@@ -2446,7 +2446,10 @@ def create_playground_app(
             if not callable(read_resource_fn) or not inspect.iscoroutinefunction(read_resource_fn):
                 raise HTTPException(status_code=400, detail=f"Tool node '{namespace}' is not connected")
             contents = await read_resource_fn(str(uri))
-            return {"contents": _jsonify_for_api(contents)}
+            payload = _jsonify_for_api(contents)
+            if isinstance(payload, Mapping) and "contents" in payload:
+                return payload
+            return {"contents": payload}
         except HTTPException:
             raise
         except Exception as exc:
