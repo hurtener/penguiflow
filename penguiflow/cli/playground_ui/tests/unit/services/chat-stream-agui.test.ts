@@ -153,4 +153,42 @@ describe('chatStreamManager (AG-UI)', () => {
     expect(artifact?.mime_type).toBe('application/octet-stream');
     expect(artifact?.size_bytes).toBe(0);
   });
+
+  it('renders MCP app payloads from tool results', () => {
+    runAgentMock.mockReturnValueOnce({
+      subscribe: ({ next, complete }: { next: (e: BaseEvent) => void; complete: () => void }) => {
+        next({
+          type: 'TOOL_CALL_RESULT',
+          toolCallId: 'call-1',
+          content: JSON.stringify({
+            result: {
+              value: 'Opening editor',
+              __mcp_app__: {
+                artifact_id: 'pengui_slides_app_123',
+                csp: {},
+                permissions: {},
+                tool_data: 'Opening editor',
+                tool_input: { deck_id: 'deck-1' },
+                namespace: 'pengui_slides',
+                session_id: 'session-1',
+                sandbox: 'allow-scripts allow-forms',
+                prefers_border: false
+              }
+            }
+          })
+        } as BaseEvent);
+        complete();
+        return { unsubscribe: vi.fn() };
+      }
+    });
+
+    chatStore.addUserMessage('Open editor');
+    chatStreamManager.start('Open editor', 'session-1', {}, {}, { onDone: () => {}, onError: () => {} }, 'agui');
+
+    expect(interactionsStore.artifacts.length).toBe(1);
+    expect(interactionsStore.artifacts[0]?.component).toBe('mcp_app');
+    expect(interactionsStore.artifacts[0]?.id).toBe('pengui_slides_app_123:call-1');
+    expect(interactionsStore.artifacts[0]?.props.namespace).toBe('pengui_slides');
+    expect(interactionsStore.artifacts[0]?.props.artifact_url).toBe('/artifacts/pengui_slides_app_123');
+  });
 });

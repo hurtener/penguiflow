@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 __all__ = [
     "AppCSP",
     "AppMetadata",
+    "UI_COMPAT_EXTENSION_IDS",
     "AppPermissions",
     "UI_EXTENSION_ID",
     "UI_MIME_TYPE",
@@ -33,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 # Extension constants
 UI_EXTENSION_ID = "io.modelcontextprotocol/ui"
+UI_COMPAT_EXTENSION_IDS = (
+    UI_EXTENSION_ID,
+    "io.modelcontextprotocol/apps",
+)
 UI_MIME_TYPE = "text/html;profile=mcp-app"
 
 
@@ -122,9 +127,11 @@ def extract_app_metadata(tool: Any) -> AppMetadata | None:
         ui_data.update(dict(raw_ui))
 
     # Extension-id form support: meta["io.modelcontextprotocol/ui"] = {...}
-    raw_ext = meta.get(UI_EXTENSION_ID)
-    if isinstance(raw_ext, Mapping):
-        ui_data.update(dict(raw_ext))
+    # Some servers still use the older apps extension identifier.
+    for extension_id in UI_COMPAT_EXTENSION_IDS:
+        raw_ext = meta.get(extension_id)
+        if isinstance(raw_ext, Mapping):
+            ui_data.update(dict(raw_ext))
 
     # Flat key support used by MCP Apps:
     # meta["ui/resourceUri"] = "ui://..."

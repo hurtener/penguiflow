@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import time
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
@@ -33,6 +34,7 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+_INVALID_NAMESPACE_CHARS_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
 
 # -----------------------------------------------------------------------------
@@ -417,8 +419,21 @@ def _generate_artifact_id(
     Format: {namespace}_{sha256[:12]} or art_{sha256[:12]}
     """
     content_hash = hashlib.sha256(data).hexdigest()[:12]
-    prefix = namespace or "art"
+    prefix = sanitize_artifact_namespace(namespace) or "art"
     return f"{prefix}_{content_hash}"
+
+
+def sanitize_artifact_namespace(namespace: str | None) -> str | None:
+    """Normalize namespaces for stores that restrict artifact ID characters.
+
+    Artifact metadata can still preserve the original logical namespace; this
+    helper is specifically for ID prefixes / backend payloads that only accept
+    alphanumerics, underscores, and hyphens.
+    """
+    if namespace is None:
+        return None
+    sanitized = _INVALID_NAMESPACE_CHARS_RE.sub("_", namespace).strip("_-")
+    return sanitized or None
 
 
 def _scope_matches(artifact_scope: ArtifactScope | None, filter_scope: ArtifactScope) -> bool:

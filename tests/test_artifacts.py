@@ -16,6 +16,7 @@ from penguiflow.artifacts import (
     ScopedArtifacts,
     _scope_matches,
     discover_artifact_store,
+    sanitize_artifact_namespace,
 )
 from penguiflow.state.in_memory import PlaygroundArtifactStore
 
@@ -106,6 +107,22 @@ class TestArtifactRetentionConfig:
         assert config.ttl_seconds == 7200
         assert config.max_artifact_bytes == 10 * 1024 * 1024
         assert config.cleanup_strategy == "fifo"
+
+
+class TestArtifactNamespaceSanitization:
+    """Tests for artifact namespace normalization."""
+
+    def test_sanitize_artifact_namespace_allows_supported_chars(self) -> None:
+        assert sanitize_artifact_namespace("pengui_slides-app_01") == "pengui_slides-app_01"
+
+    def test_sanitize_artifact_namespace_replaces_dots(self) -> None:
+        assert (
+            sanitize_artifact_namespace("observation.pengui_slides.get_design_soul")
+            == "observation_pengui_slides_get_design_soul"
+        )
+
+    def test_sanitize_artifact_namespace_returns_none_when_empty(self) -> None:
+        assert sanitize_artifact_namespace("...") is None
 
 
 class TestNoOpArtifactStore:
@@ -335,6 +352,17 @@ class TestInMemoryArtifactStore:
 
         assert ref.id.startswith("tableau_")
         assert ref.namespace == "tableau"
+
+    @pytest.mark.asyncio
+    async def test_dotted_namespace_is_sanitized_in_id_only(self) -> None:
+        """Dotted namespaces should produce backend-safe IDs without losing metadata."""
+        store = InMemoryArtifactStore()
+        raw_namespace = "observation.pengui_slides.get_design_soul"
+
+        ref = await store.put_bytes(b"data", namespace=raw_namespace)
+
+        assert ref.id.startswith("observation_pengui_slides_get_design_soul_")
+        assert ref.namespace == raw_namespace
 
     @pytest.mark.asyncio
     async def test_scope_assignment(self) -> None:

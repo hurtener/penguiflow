@@ -210,7 +210,7 @@ class AppsConfig(BaseModel):
         description="Auto-fetch ui:// resource after tool execution",
     )
     default_sandbox: str = Field(
-        default="allow-scripts allow-forms",
+        default="allow-scripts allow-forms allow-same-origin",
         description="Default iframe sandbox attribute for MCP Apps",
     )
 
