@@ -39,6 +39,7 @@ This guide is the **source of truth** for wiring `ReactPlanner` into a productio
 12. [Troubleshooting](#12-troubleshooting)
 13. [Quick Reference](#13-quick-reference)
 14. [Artifact Store](#14-artifact-store)
+15. [Automatic Persistence & trace_id Propagation](#15-automatic-persistence--trace_id-propagation)
 
 ---
 
@@ -940,9 +941,11 @@ if isinstance(result, PlannerFinish):
     print(result.metadata["consecutive_arg_failures"])
 ```
 
-If you persist trajectories (e.g., via the Playground state store), detailed
-invalid-response entries are attached under `trajectory.metadata.invalid_responses`
-with the same sanitised fields. This avoids storing raw LLM text by default.
+The planner auto-persists trajectories and events when a StateStore is provided.
+The caller only needs to ensure `trace_id` and `session_id` are present in
+`tool_context`. Detailed invalid-response entries are attached under
+`trajectory.metadata.invalid_responses` with the same sanitised fields.
+This avoids storing raw LLM text by default.
 
 ### Tool Arg Validation (Production Guardrails)
 
@@ -1473,5 +1476,54 @@ result = await planner.run(
 **Large file failures:**
 - Increase `max_artifact_bytes` in retention config
 - Check `max_session_bytes` isn't exceeded
+
+---
+
+## 15. Automatic Persistence & trace_id Propagation
+
+### What the planner persists automatically
+
+When a `StateStore` is provided (via `state_store=` on `ReactPlanner`), the planner
+handles trajectory and event persistence internally:
+
+- **Trajectories** are saved on `PlannerFinish` and `PlannerPause`.
+- **Planner events** are buffered during execution and flushed on every exit path (finish, pause, error, cancel).
+
+Both are spawned as fire-and-forget background tasks in the `finally` block of
+`run()` / `resume()`. Persistence failures are logged but never propagate to the
+caller.
+
+The caller only needs to ensure `trace_id` and `session_id` are present in
+`tool_context`.
+
+### Orchestrator trace_id propagation
+
+Orchestrators **must** propagate the caller's `trace_id` from `tool_context` into the
+planner's `run()` / `resume()` call. The recommended pattern:
+
+```python
+trace_id = (tool_context or {}).get("trace_id") or secrets.token_hex(8)
+```
+
+Pass the resulting `trace_id` into `tool_context` when calling the planner:
+
+```python
+result = await planner.run(
+    query=query,
+    tool_context={
+        "trace_id": trace_id,
+        "session_id": session_id,
+        **other_tool_context,
+    },
+)
+```
+
+**Important:** Orchestrators that generate their own `trace_id` unconditionally
+(e.g., `trace_id = secrets.token_hex(8)` without checking `tool_context` first)
+will break persistence alignment with the frontend.
+
+Projects generated from older templates may contain a hard-coded
+`trace_id = secrets.token_hex(8)` line in the orchestrator. Update it to use the
+pattern above so the frontend `run_id` flows through to the StateStore.
 
 ---

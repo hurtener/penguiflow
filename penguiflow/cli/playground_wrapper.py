@@ -17,11 +17,8 @@ from penguiflow.planner import (  # noqa: E402
     PlannerFinish,
     PlannerPause,
     ReactPlanner,
-    Trajectory,
 )
 from penguiflow.steering import SteeringInbox  # noqa: E402
-
-from .playground_state import PlaygroundStateStore  # noqa: E402
 
 
 @dataclass
@@ -70,11 +67,7 @@ class AgentWrapper(Protocol):
 
 
 class _EventRecorder:
-    """Buffers planner events and persists them once the trace is known."""
-
-    def __init__(self, state_store: PlaygroundStateStore | None) -> None:
-        self._state_store = state_store
-        self._buffer: list[PlannerEvent] = []
+    """Creates a planner event callback that forwards events to an optional consumer."""
 
     def callback(
         self,
@@ -82,27 +75,14 @@ class _EventRecorder:
         trace_id_supplier: Callable[[], str | None] | None = None,
         event_consumer: Callable[[PlannerEvent, str | None], None] | None = None,
     ) -> PlannerEventCallback | None:
-        if self._state_store is None and event_consumer is None:
+        if event_consumer is None:
             return None
 
         def _record(event: PlannerEvent) -> None:
-            self._buffer.append(event)
             trace_id = trace_id_supplier() if trace_id_supplier else None
-            if event_consumer:
-                event_consumer(event, trace_id)
+            event_consumer(event, trace_id)
 
         return _record
-
-    async def persist(self, trace_id: str) -> None:
-        if self._state_store is None:
-            self._buffer.clear()
-            return
-        if not self._buffer:
-            return
-        events = list(self._buffer)
-        self._buffer.clear()
-        for event in events:
-            await self._state_store.save_planner_event(trace_id, event)
 
 
 def _combine_callbacks(
@@ -171,46 +151,6 @@ def _normalise_answer(payload: Any) -> str | None:
     return str(payload)
 
 
-def _build_trajectory(
-    query: str,
-    session_id: str,
-    trace_id: str,
-    metadata: Mapping[str, Any] | None,
-    llm_context: Mapping[str, Any] | None,
-    tool_context: Mapping[str, Any] | None = None,
-) -> Trajectory | None:
-    if metadata is None:
-        return None
-    steps = metadata.get("steps")
-    if not isinstance(steps, list):
-        return None
-    # Prefer llm_context/tool_context from metadata (contains actual injected values
-    # including conversation_memory) over the input parameters
-    actual_llm_context = metadata.get("llm_context") or llm_context or {}
-    actual_tool_context = metadata.get("tool_context") or tool_context or {}
-    payload: dict[str, Any] = {
-        "query": query,
-        "llm_context": dict(actual_llm_context),
-        "tool_context": {
-            **(dict(actual_tool_context)),
-            "session_id": session_id,
-            "trace_id": trace_id,
-        },
-        "steps": steps,
-        "hint_state": {},
-    }
-    trajectory_meta = metadata.get("trajectory_metadata")
-    if isinstance(trajectory_meta, Mapping):
-        payload["metadata"] = dict(trajectory_meta)
-    if "artifacts" in metadata:
-        payload["artifacts"] = metadata["artifacts"]
-    if "sources" in metadata:
-        payload["sources"] = metadata["sources"]
-    if "summary" in metadata and metadata["summary"] is not None:
-        payload["summary"] = metadata["summary"]
-    return Trajectory.from_serialised(payload)
-
-
 class PlannerAgentWrapper:
     """Adapter for bare planners returned by build_planner()."""
 
@@ -218,12 +158,10 @@ class PlannerAgentWrapper:
         self,
         planner: ReactPlanner,
         *,
-        state_store: PlaygroundStateStore | None = None,
         tool_context_defaults: Mapping[str, Any] | None = None,
     ) -> None:
         self._planner = planner
-        self._state_store = state_store
-        self._event_recorder = _EventRecorder(state_store)
+        self._event_recorder = _EventRecorder()
         self._tool_context_defaults = dict(tool_context_defaults or {})
 
     async def initialize(self) -> None:
@@ -279,8 +217,6 @@ class PlannerAgentWrapper:
             if callback is not None:
                 self._planner._event_callback = original_callback
 
-        await self._event_recorder.persist(trace_id)
-
         if isinstance(result, PlannerPause):
             pause_payload = {
                 "reason": result.reason,
@@ -299,18 +235,11 @@ class PlannerAgentWrapper:
 
         metadata = _normalise_metadata(getattr(result, "metadata", None))
         _LOGGER.info(
-            "chat complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s, has_store=%s",
+            "chat complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s",
             trace_id, session_id,
             list(metadata.keys()) if metadata else None,
             bool(metadata and isinstance(metadata.get("steps"), list)),
-            self._state_store is not None,
         )
-        trajectory = _build_trajectory(query, session_id, trace_id, metadata, llm_context, merged_tool_context)
-        if trajectory is not None and self._state_store is not None:
-            await self._state_store.save_trajectory(trace_id, session_id, trajectory)
-            _LOGGER.info("trajectory saved: trace_id=%s, session_id=%s", trace_id, session_id)
-        elif trajectory is None:
-            _LOGGER.warning("trajectory not saved: trajectory is None (metadata=%s)", metadata is not None)
 
         # Extract answer from payload, falling back to thought in metadata
         answer = _normalise_answer(result.payload)
@@ -375,8 +304,6 @@ class PlannerAgentWrapper:
             if callback is not None:
                 self._planner._event_callback = original_callback
 
-        await self._event_recorder.persist(trace_id)
-
         if isinstance(result, PlannerPause):
             pause_payload = {
                 "reason": result.reason,
@@ -395,20 +322,11 @@ class PlannerAgentWrapper:
 
         metadata = _normalise_metadata(getattr(result, "metadata", None))
         _LOGGER.info(
-            "resume complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s, has_store=%s",
+            "resume complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s",
             trace_id, session_id,
             list(metadata.keys()) if metadata else None,
             bool(metadata and isinstance(metadata.get("steps"), list)),
-            self._state_store is not None,
         )
-
-        # Save trajectory (same as chat method)
-        trajectory = _build_trajectory(user_input or "", session_id, trace_id, metadata, {}, merged_tool_context)
-        if trajectory is not None and self._state_store is not None:
-            await self._state_store.save_trajectory(trace_id, session_id, trajectory)
-            _LOGGER.info("trajectory saved: trace_id=%s, session_id=%s", trace_id, session_id)
-        elif trajectory is None:
-            _LOGGER.warning("trajectory not saved: trajectory is None (metadata=%s)", metadata is not None)
 
         answer = _normalise_answer(result.payload)
         if answer is None and metadata is not None:
@@ -429,17 +347,15 @@ class OrchestratorAgentWrapper:
         self,
         orchestrator: Any,
         *,
-        state_store: PlaygroundStateStore | None = None,
         tenant_id: str = "playground-tenant",
         user_id: str = "playground-user",
         tool_context_defaults: Mapping[str, Any] | None = None,
     ) -> None:
         self._orchestrator = orchestrator
-        self._state_store = state_store
         self._tenant_id = tenant_id
         self._user_id = user_id
         self._tool_context_defaults = dict(tool_context_defaults or {})
-        self._event_recorder = _EventRecorder(state_store)
+        self._event_recorder = _EventRecorder()
         self._initialized = False
 
     async def _call_execute(
@@ -539,13 +455,15 @@ class OrchestratorAgentWrapper:
         trace_id_hint: str | None = None,
         steering: SteeringInbox | None = None,
     ) -> ChatResult:
-        ctx = dict(llm_context or {})
+        trace_id = trace_id_hint or secrets.token_hex(8)
         tool_ctx = {
             **self._tool_context_defaults,
             **dict(tool_context or {}),
+            "session_id": session_id,
+            "trace_id": trace_id,
         }
         planner = getattr(self._orchestrator, "_planner", None)
-        trace_holder: dict[str, str | None] = {"id": trace_id_hint}
+        trace_holder: dict[str, str | None] = {"id": trace_id}
 
         def _trace_id_supplier() -> str | None:
             if trace_holder["id"]:
@@ -569,26 +487,15 @@ class OrchestratorAgentWrapper:
             if planner is not None and callback is not None:
                 planner._event_callback = original_callback
 
-        # Prefer trace_id_hint (from AG-UI run_id) over response.trace_id
-        # This ensures the frontend's run_id is used for trajectory storage
-        trace_id = trace_id_hint or _get_attr(response, "trace_id") or _trace_id_supplier() or secrets.token_hex(8)
-        trace_holder["id"] = trace_id
-        await self._event_recorder.persist(trace_id)
+        # trace_id is already pre-computed and trace_holder already set -- nothing needed here
 
         metadata = _normalise_metadata(_get_attr(response, "metadata"))
         _LOGGER.debug(
-            "orchestrator chat complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s, has_store=%s",
+            "orchestrator chat complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s",
             trace_id, session_id,
             list(metadata.keys()) if metadata else None,
             bool(metadata and isinstance(metadata.get("steps"), list)),
-            self._state_store is not None,
         )
-        trajectory = _build_trajectory(query, session_id, trace_id, metadata, ctx, tool_ctx)
-        if trajectory is not None and self._state_store is not None:
-            await self._state_store.save_trajectory(trace_id, session_id, trajectory)
-            _LOGGER.debug("trajectory saved: trace_id=%s, session_id=%s", trace_id, session_id)
-        elif trajectory is None:
-            _LOGGER.warning("trajectory not saved: trajectory is None (metadata=%s)", metadata is not None)
 
         # Check if orchestrator returned a pause (HITL flow)
         pause_token = _get_attr(response, "pause_token")
@@ -649,12 +556,15 @@ class OrchestratorAgentWrapper:
                 "Ensure your agent was created with --with-hitl flag."
             )
 
+        trace_id = trace_id_hint or secrets.token_hex(8)
         tool_ctx = {
             **self._tool_context_defaults,
             **dict(tool_context or {}),
+            "session_id": session_id,
+            "trace_id": trace_id,
         }
         planner = getattr(self._orchestrator, "_planner", None)
-        trace_holder: dict[str, str | None] = {"id": trace_id_hint}
+        trace_holder: dict[str, str | None] = {"id": trace_id}
 
         def _trace_id_supplier() -> str | None:
             if trace_holder["id"]:
@@ -682,9 +592,7 @@ class OrchestratorAgentWrapper:
             if planner is not None and callback is not None:
                 planner._event_callback = original_callback
 
-        trace_id = trace_id_hint or _get_attr(response, "trace_id") or _trace_id_supplier() or secrets.token_hex(8)
-        trace_holder["id"] = trace_id
-        await self._event_recorder.persist(trace_id)
+        # trace_id is already pre-computed and trace_holder already set -- nothing needed here
 
         metadata = _normalise_metadata(_get_attr(response, "metadata"))
 

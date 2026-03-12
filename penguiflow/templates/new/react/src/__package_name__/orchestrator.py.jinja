@@ -206,7 +206,7 @@ class {{ class_name }}Orchestrator:
         steering: SteeringInbox | None = None,
     ) -> AgentResponse:
         """Execute the ReactPlanner with memory integration."""
-        trace_id = secrets.token_hex(8)
+        trace_id = (tool_context or {}).get("trace_id") or secrets.token_hex(8)
         turn_id = secrets.token_hex(8)
 
         llm_context: dict[str, Any] = {}
@@ -225,8 +225,8 @@ class {{ class_name }}Orchestrator:
         }
         merged_tool_context = {
             **self._tool_context_defaults,
-            **(dict(tool_context or {})),
             **base_tool_context,
+            **(dict(tool_context or {})),
         }
 {% if with_background_tasks %}
         if self._session_manager is not None:
@@ -312,7 +312,7 @@ class {{ class_name }}Orchestrator:
         steering: SteeringInbox | None = None,
     ) -> AgentResponse:
         """Resume a paused planner execution."""
-        trace_id = secrets.token_hex(8)
+        trace_id = (tool_context or {}).get("trace_id") or secrets.token_hex(8)
         turn_id = secrets.token_hex(8)
         base_tool_context = {
             "tenant_id": tenant_id,
@@ -326,8 +326,8 @@ class {{ class_name }}Orchestrator:
         }
         merged_tool_context = {
             **self._tool_context_defaults,
-            **(dict(tool_context or {})),
             **base_tool_context,
+            **(dict(tool_context or {})),
         }
 {% if with_background_tasks %}
         if self._session_manager is not None:

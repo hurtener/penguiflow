@@ -783,14 +783,12 @@ def load_agent(
         )
         wrapper: AgentWrapper = OrchestratorAgentWrapper(
             orchestrator,
-            state_store=state_store,
         )
     else:
         builder_output = _call_builder(result.target, config, state_store=state_store)
         planner = _unwrap_planner(builder_output)
         wrapper = PlannerAgentWrapper(
             planner,
-            state_store=state_store,
         )
 
     return wrapper, result
@@ -1030,19 +1028,20 @@ def create_playground_app(
         from penguiflow.artifacts import ArtifactStore, NoOpArtifactStore
 
         planner = _discover_planner()
-        if planner is None:
-            return None
+        if planner is not None:
+            found = getattr(planner, "artifact_store", None)
+            if found is None:
+                found = getattr(planner, "_artifact_store", None)
+            if found is not None and isinstance(found, ArtifactStore) and not isinstance(found, NoOpArtifactStore):
+                return found
 
-        store = getattr(planner, "artifact_store", None)
-        if store is None:
-            store = getattr(planner, "_artifact_store", None)
-        if store is None:
-            return None
-        if isinstance(store, NoOpArtifactStore):
-            return None
-        if not isinstance(store, ArtifactStore):
-            return None
-        return store
+        # Fallback: check the playground state store directly
+        if store is not None:
+            found = getattr(store, "artifact_store", None)
+            if found is not None and isinstance(found, ArtifactStore) and not isinstance(found, NoOpArtifactStore):
+                return found
+
+        return None
 
     def _namespace_from_tool_node(tool_node: Any) -> str | None:
         config = getattr(tool_node, "config", None)
@@ -1188,6 +1187,9 @@ def create_playground_app(
         async def exists(self, artifact_id: str):
             return await self._store.exists(artifact_id)
 
+        async def list(self, *, scope: Any | None = None) -> Any:
+            return await self._store.list(scope=scope or self._scope)
+
     class _DisabledArtifactStore:
         """ArtifactStore shim used when artifact storage is not enabled."""
 
@@ -1208,6 +1210,9 @@ def create_playground_app(
 
         async def exists(self, _artifact_id: str):
             return False
+
+        async def list(self, *, scope: Any | None = None) -> list[Any]:
+            return []
 
     @app.on_event("shutdown")
     async def _shutdown_events() -> None:  # pragma: no cover - exercised at runtime

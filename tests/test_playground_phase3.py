@@ -629,11 +629,11 @@ class TestArtifactEndpoints:
                 assert response.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_get_artifact_not_enabled(
+    async def test_get_artifact_not_found_with_state_store_fallback(
         self,
         state_store: InMemoryStateStore,
     ) -> None:
-        """GET /artifacts/{id} should return 501 when storage is disabled."""
+        """GET /artifacts/{id} should return 404 when planner has no store but state store has one."""
         import tempfile
 
         from httpx import ASGITransport, AsyncClient
@@ -644,8 +644,10 @@ class TestArtifactEndpoints:
             mock_wrapper = MagicMock()
             mock_wrapper.initialize = AsyncMock()
             mock_wrapper.shutdown = AsyncMock()
-            # Explicitly set _planner to None so _discover_artifact_store returns None
+            # Explicitly set _planner to None so the planner path returns None.
             # (MagicMock auto-creates attributes which would bypass the None checks)
+            # The state store fallback finds InMemoryStateStore's artifact store,
+            # so the endpoint returns 404 (not found) instead of 501 (not enabled).
             mock_wrapper._planner = None
             mock_wrapper._orchestrator = None
 
@@ -661,7 +663,7 @@ class TestArtifactEndpoints:
             ) as client:
                 response = await client.get("/artifacts/nonexistent")
 
-                assert response.status_code == 501
+                assert response.status_code == 404
 
 
 # ─── Resource Endpoint Tests ─────────────────────────────────────────────────

@@ -1251,7 +1251,7 @@ class ToolNode:
                         if mime is None:
                             mime = self._infer_mime_type(field_config.content_type)
 
-                        ref = await ctx._artifacts.put_bytes(
+                        ref = await ctx.artifacts.upload(
                             data,
                             mime_type=mime,
                             namespace=self.config.name,
@@ -1404,7 +1404,7 @@ class ToolNode:
                         try:
                             data = base64.b64decode(resource.blob)
                             mime = getattr(resource, "mimeType", None) or "application/octet-stream"
-                            ref = await ctx._artifacts.put_bytes(
+                            ref = await ctx.artifacts.upload(
                                 data,
                                 mime_type=mime,
                                 namespace=self.config.name,
@@ -1430,7 +1430,7 @@ class ToolNode:
                     try:
                         data = base64.b64decode(value["blob"])
                         mime = value.get("mimeType", "application/octet-stream")
-                        ref = await ctx._artifacts.put_bytes(
+                        ref = await ctx.artifacts.upload(
                             data,
                             mime_type=mime,
                             namespace=self.config.name,
@@ -1504,7 +1504,7 @@ class ToolNode:
                 return value
 
             # Store as artifact
-            ref = await ctx._artifacts.put_bytes(
+            ref = await ctx.artifacts.upload(
                 data,
                 mime_type=mime_type,
                 namespace=self.config.name,
@@ -1619,7 +1619,7 @@ class ToolNode:
 
         if isinstance(result, str) and len(result) > max_size:
             # Large string - store as text artifact
-            ref = await ctx._artifacts.put_text(
+            ref = await ctx.artifacts.upload(
                 result,
                 namespace=self.config.name,
             )
@@ -1654,7 +1654,7 @@ class ToolNode:
         for key, value in data.items():
             if isinstance(value, str) and len(value) > max_size:
                 # Store as text artifact
-                ref = await ctx._artifacts.put_text(
+                ref = await ctx.artifacts.upload(
                     value,
                     namespace=self.config.name,
                 )
@@ -1926,7 +1926,6 @@ class ToolNode:
         # Initialize resource cache if needed
         if self._resource_cache is None:
             self._resource_cache = ResourceCache(
-                artifact_store=ctx._artifacts,
                 namespace=self.config.name,
                 config=ResourceCacheConfig(
                     inline_text_if_under_chars=self.config.artifact_extraction.resources.inline_text_if_under_chars,
@@ -1987,7 +1986,7 @@ class ToolNode:
         if blob is not None:
             try:
                 data = base64.b64decode(blob)
-                ref = await ctx._artifacts.put_bytes(
+                ref = await ctx.artifacts.upload(
                     data,
                     mime_type=mime_type or "application/octet-stream",
                     namespace=f"{self.config.name}.resource",
@@ -2001,7 +2000,7 @@ class ToolNode:
             if len(text) <= threshold:
                 return {"text": text}
             else:
-                ref = await ctx._artifacts.put_text(
+                ref = await ctx.artifacts.upload(
                     text,
                     mime_type=mime_type or "text/plain",
                     namespace=f"{self.config.name}.resource",
@@ -2177,7 +2176,7 @@ class ToolNode:
 
         # Store HTML as artifact
         try:
-            ref = await ctx._artifacts.put_text(
+            ref = await ctx.artifacts.upload(
                 html,
                 mime_type=UI_MIME_TYPE,
                 namespace=f"{self.config.name}.app",
