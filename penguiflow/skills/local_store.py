@@ -517,6 +517,9 @@ def _canonical_skill_payload(skill: SkillDefinition) -> dict[str, Any]:
         "steps": list(skill.steps),
         "preconditions": list(skill.preconditions),
         "failure_modes": list(skill.failure_modes),
+        "required_tool_names": list(skill.required_tool_names),
+        "required_namespaces": list(skill.required_namespaces),
+        "required_tags": list(skill.required_tags),
         "tools": skill.tools,
         "extra": skill.extra_payload(),
     }
@@ -530,6 +533,15 @@ def _hash_payload(payload: Any) -> str:
 
 def _serialise_skill_payload(skill: SkillDefinition) -> dict[str, str]:
     extra = skill.extra_payload()
+    if skill.required_tool_names:
+        extra = dict(extra)
+        extra["required_tool_names"] = list(skill.required_tool_names)
+    if skill.required_namespaces:
+        extra = dict(extra)
+        extra["required_namespaces"] = list(skill.required_namespaces)
+    if skill.required_tags:
+        extra = dict(extra)
+        extra["required_tags"] = list(skill.required_tags)
     if skill.tools is not None:
         # Persist structured tool hints in the JSON column (v2.12 MVP).
         # The SkillStore schema does not have a dedicated tools column.
@@ -564,6 +576,10 @@ def _parse_json_dict(raw: str) -> dict[str, Any]:
     except (TypeError, ValueError):
         return {}
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _parse_extra_list(payload: dict[str, Any], key: str) -> list[str]:
+    return _parse_json_list(json.dumps(payload.get(key, []), ensure_ascii=False))
 
 
 def _coerce_scope_mode(value: Any) -> SkillScopeMode:
@@ -619,6 +635,7 @@ def _row_to_skill(row: Sequence[Any]) -> SkillRecord:
         use_count,
         extra,
     ) = row
+    extra_payload = _parse_json_dict(str(extra or "{}"))
     return SkillRecord(
         id=str(skill_id),
         scope_mode=_coerce_scope_mode(scope_mode),
@@ -633,6 +650,9 @@ def _row_to_skill(row: Sequence[Any]) -> SkillRecord:
         steps=_parse_json_list(str(steps or "[]")),
         preconditions=_parse_json_list(str(preconditions or "[]")),
         failure_modes=_parse_json_list(str(failure_modes or "[]")),
+        required_tool_names=_parse_extra_list(extra_payload, "required_tool_names"),
+        required_namespaces=_parse_extra_list(extra_payload, "required_namespaces"),
+        required_tags=_parse_extra_list(extra_payload, "required_tags"),
         origin=_coerce_origin(origin),
         origin_ref=str(origin_ref) if origin_ref else None,
         content_hash=str(content_hash),
@@ -640,7 +660,7 @@ def _row_to_skill(row: Sequence[Any]) -> SkillRecord:
         updated_at=int(updated_at or 0),
         last_used=int(last_used or 0),
         use_count=int(use_count or 0),
-        extra=_parse_json_dict(str(extra or "{}")),
+        extra=extra_payload,
     )
 
 

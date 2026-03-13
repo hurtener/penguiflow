@@ -202,6 +202,12 @@ def test_render_empty_parallel_plan() -> None:
     assert "at least one branch" in result
 
 
+def test_render_skill_proposal_guidance() -> None:
+    result = prompts.render_skill_proposal_guidance()
+    assert "skill_propose" in result
+    assert "does NOT save or persist skills" in result
+
+
 def test_render_parallel_with_next_node() -> None:
     result = prompts.render_parallel_with_next_node("next_tool")
     assert "next_tool" in result

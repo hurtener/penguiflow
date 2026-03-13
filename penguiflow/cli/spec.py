@@ -758,6 +758,14 @@ class PlannerSkillsDirectorySpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PlannerSkillsProposalSpec(BaseModel):
+    """Skill proposal drafting configuration."""
+
+    enabled: bool = False
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class PlannerSkillPackSpec(BaseModel):
     """Developer-registered skill pack."""
 
@@ -787,6 +795,7 @@ class PlannerSkillsSpec(BaseModel):
     prune_packs_not_in_config: bool = True
     skill_packs: list[PlannerSkillPackSpec] = Field(default_factory=list)
     directory: PlannerSkillsDirectorySpec = Field(default_factory=PlannerSkillsDirectorySpec)
+    proposal: PlannerSkillsProposalSpec = Field(default_factory=PlannerSkillsProposalSpec)
 
     model_config = ConfigDict(extra="forbid")
 

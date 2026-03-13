@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from ...catalog import ToolLoadingMode, tool
 from ...planner.models import PlannerEvent
 from ..models import SkillResultDetailed
+from ..provider import build_skill_capability_context
 
 
 class SkillGetArgs(BaseModel):
@@ -27,13 +28,17 @@ async def skill_get(args: SkillGetArgs, ctx: Any) -> SkillGetResponse:
     if provider is None:
         raise RuntimeError("skill_get is not configured")
     tool_context = getattr(ctx, "tool_context", {}) if ctx is not None else {}
-    all_tool_names = getattr(planner, "_execution_spec_by_name", {}).keys() if planner is not None else None
+    execution_specs = getattr(planner, "_execution_spec_by_name", {}) if planner is not None else {}
     allowed = getattr(planner, "_tool_visibility_allowed_names", None)
+    capability_context = build_skill_capability_context(
+        execution_specs=execution_specs,
+        all_tool_names=execution_specs.keys(),
+        allowed_tool_names=allowed,
+    )
     skills = await provider.get_by_name(
         list(args.names),
         tool_context=tool_context,
-        all_tool_names=all_tool_names,
-        allowed_tool_names=allowed,
+        capability_context=capability_context,
     )
     formatted = ""
     final_tokens = 0

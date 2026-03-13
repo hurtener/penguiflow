@@ -14,6 +14,7 @@ from penguiflow.planner import (
     LLMContextHook,
     ReactPlanner,
     SkillPackConfig,
+    SkillProposalConfig,
     SkillsConfig,
     SkillsDirectoryConfig,
     ToolDirectoryConfig,
@@ -278,8 +279,13 @@ def build_planner(
                 include_fields=list(config.skills_directory_include_fields),
                 selection_strategy=config.skills_directory_selection_strategy,
             ),
+            proposal=SkillProposalConfig(
+                enabled=config.skills_proposal_enabled,
+            ),
         )
 
+    # Runtime custom skill providers can be injected via the Python API with
+    # ReactPlanner(..., skills_provider=..., skills_provider_factory=...).
     planner = ReactPlanner(
         llm=config.llm_model,
         catalog=catalog,

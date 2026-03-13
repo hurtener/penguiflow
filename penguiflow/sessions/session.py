@@ -12,7 +12,11 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import date, datetime
+from enum import Enum
 from typing import Any, Literal, cast
+
+from pydantic import BaseModel
 
 from penguiflow.planner.models import BackgroundTasksConfig
 from penguiflow.planner.trajectory import BackgroundTaskResult, extract_background_results
@@ -54,6 +58,7 @@ from .telemetry import NoOpTaskTelemetrySink, TaskTelemetryEvent, TaskTelemetryS
 from .transport import SessionConnection, Transport
 
 _LOGGER = logging.getLogger(__name__)
+_SKIP_JSON_SNAPSHOT_VALUE = object()
 
 
 @dataclass(slots=True)
@@ -119,6 +124,52 @@ def _deepcopy_dict(value: dict[Any, Any]) -> dict[Any, Any]:
 
 def _deepcopy_list(value: list[Any]) -> list[Any]:
     return [_safe_deepcopy(item) for item in value]
+
+
+def _json_snapshot_value(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, BaseModel):
+        return _json_snapshot_value(value.model_dump(mode="json"))
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            converted = _json_snapshot_value(item)
+            if converted is _SKIP_JSON_SNAPSHOT_VALUE:
+                continue
+            result[str(key)] = converted
+        return result
+    if isinstance(value, list | tuple | set):
+        result_list: list[Any] = []
+        for item in value:
+            converted = _json_snapshot_value(item)
+            if converted is _SKIP_JSON_SNAPSHOT_VALUE:
+                continue
+            result_list.append(converted)
+        return result_list
+    try:
+        json.dumps(value)
+    except TypeError:
+        return _SKIP_JSON_SNAPSHOT_VALUE
+    return value
+
+
+def _json_snapshot_dict(value: dict[Any, Any]) -> dict[str, Any]:
+    converted = _json_snapshot_value(value)
+    if isinstance(converted, dict):
+        return converted
+    return {}
+
+
+def _json_snapshot_list(value: list[Any]) -> list[Any]:
+    converted = _json_snapshot_value(value)
+    if isinstance(converted, list):
+        return converted
+    return []
 
 
 class TaskRuntime:
@@ -1912,10 +1963,10 @@ class StreamingSession:
     ) -> TaskContextSnapshot:
         self._migrate_legacy_background_results()
         if task_type == TaskType.BACKGROUND:
-            llm_context = _deepcopy_dict(self._context.llm_context)
-            tool_context = _deepcopy_dict(self._context.tool_context)
-            memory = _deepcopy_dict(self._context.memory)
-            artifacts = _deepcopy_list(self._context.artifacts)
+            llm_context = _json_snapshot_dict(_deepcopy_dict(self._context.llm_context))
+            tool_context = _json_snapshot_dict(_deepcopy_dict(self._context.tool_context))
+            memory = _json_snapshot_dict(_deepcopy_dict(self._context.memory))
+            artifacts = _json_snapshot_list(_deepcopy_list(self._context.artifacts))
         else:
             llm_context = dict(self._context.llm_context)
             tool_context = dict(self._context.tool_context)

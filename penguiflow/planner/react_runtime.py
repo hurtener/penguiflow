@@ -17,6 +17,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..catalog import NodeSpec, ToolLoadingMode
 from ..skills.models import SkillQuery
+from ..skills.provider import build_skill_capability_context
 from ..steering import SteeringCancelled, SteeringEventType, SteeringInbox
 from . import prompts
 from .artifact_handling import _ArtifactCollector, _SourceCollector
@@ -269,13 +270,17 @@ async def _prepare_skills_context(
     if config is None or not getattr(config, "enabled", False) or provider is None:
         return
     tool_context = trajectory.tool_context or {}
+    capability_context = build_skill_capability_context(
+        execution_specs=getattr(planner, "_execution_spec_by_name", {}),
+        all_tool_names=all_tool_names,
+        allowed_tool_names=allowed_names,
+    )
     if _SKILLS_CONTEXT_METADATA_KEY not in trajectory.metadata:
         query = SkillQuery(task=trajectory.query, top_k=config.top_k)
         response = await provider.get_relevant(
             query,
             tool_context=tool_context,
-            all_tool_names=all_tool_names,
-            allowed_tool_names=allowed_names,
+            capability_context=capability_context,
         )
         if response.formatted_context:
             trajectory.metadata[_SKILLS_CONTEXT_METADATA_KEY] = response.formatted_context
@@ -299,8 +304,7 @@ async def _prepare_skills_context(
             entries = await provider.directory(
                 directory_cfg,
                 tool_context=tool_context,
-                all_tool_names=all_tool_names,
-                allowed_tool_names=allowed_names,
+                capability_context=capability_context,
             )
             if entries:
                 rendered = prompts.render_skill_directory(

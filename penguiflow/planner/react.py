@@ -463,6 +463,8 @@ class ReactPlanner:
         tool_search: ToolSearchConfig | None = None,
         tool_examples: ToolExamplesConfig | None = None,
         skills: SkillsConfig | None = None,
+        skills_provider: Any | None = None,
+        skills_provider_factory: Any | None = None,
         llm_context_hooks: Sequence[LLMContextHook] | None = None,
     ) -> None:
         # NOTE: ReactPlanner has mutable per-run state and is not safe to call concurrently on a single
@@ -525,6 +527,8 @@ class ReactPlanner:
             "tool_search": tool_search,
             "tool_examples": tool_examples,
             "skills": skills,
+            "skills_provider": skills_provider,
+            "skills_provider_factory": skills_provider_factory,
             "llm_context_hooks": list(llm_context_hooks or []),
         }
         _init_react_planner(
@@ -576,6 +580,8 @@ class ReactPlanner:
             tool_search_config=tool_search,
             tool_examples_config=tool_examples,
             skills_config=skills,
+            skills_provider=skills_provider,
+            skills_provider_factory=skills_provider_factory,
         )
         self._guardrail_stream_handler = None
         self._guardrail_stream_decision = None

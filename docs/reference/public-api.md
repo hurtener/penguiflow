@@ -20,6 +20,7 @@ from penguiflow import PenguiFlow, Context, NodePolicy, ReactPlanner
 - Runtime: `create()`, `PenguiFlow`, `Node`, `Context`, `NodePolicy`
 - Concurrency: `map_concurrent`, `join_k`, routers
 - Planner: `ReactPlanner`, `Trajectory`
+- Skills: `SkillsConfig`, `SkillPackConfig`, `SkillProvider`, `SkillProviderFactory`, `SkillProposeRequest`
 - Sessions: `StreamingSession`, `SessionManager`
 - Tools: `tool`, `build_catalog`, `ToolLoadingMode`
 
@@ -27,4 +28,3 @@ from penguiflow import PenguiFlow, Context, NodePolicy, ReactPlanner
 
 - Package version: `penguiflow.__version__`
 - Packaging metadata: `pyproject.toml`
-
