@@ -222,6 +222,8 @@ class TraceSummaryPayload(BaseModel):
     trace_id: str
     session_id: str
     tags: list[str] = Field(default_factory=list)
+    query_preview: str | None = None
+    turn_index: int | None = None
 
 
 class TraceTagsRequest(BaseModel):
@@ -955,6 +957,9 @@ def create_playground_app(
     broker = EventBroker()
     session_limits = SessionLimits()
     planner_factory: Callable[[], Any] | None = None
+    # Embedded MCP Apps keep calling back after the planner turn ends, so the
+    # backend needs a session-scoped handle to the live ToolNode/MCP client.
+    sticky_tool_nodes: dict[str, dict[str, Any]] = {}
     ui_dir = Path(__file__).resolve().parent / "playground_ui" / "dist"
     resolved_project_root = Path(project_root or ".").resolve()
     spec_payload, parsed_spec = _load_spec_payload(resolved_project_root)
@@ -1098,6 +1103,7 @@ def create_playground_app(
 
     async def _get_session(session_id: str) -> Any:
         session = await session_manager.get_or_create(session_id)
+        _sticky_tool_nodes_for_session(session_id)
         config = getattr(session, "_proactive_config", None)
         already_enabled = isinstance(config, dict) and bool(config.get("enabled"))
         if proactive_setup is not None and not already_enabled:
@@ -1142,12 +1148,13 @@ def create_playground_app(
 
     def _discover_planner() -> Any | None:
         """Discover the underlying planner instance from the agent wrapper."""
-        planner = getattr(agent_wrapper, "_planner", None)
+        wrapper_dict = getattr(agent_wrapper, "__dict__", {})
+        planner = wrapper_dict.get("_planner")
         if planner is not None:
             return planner
-        orchestrator = getattr(agent_wrapper, "_orchestrator", None)
+        orchestrator = wrapper_dict.get("_orchestrator")
         if orchestrator is not None:
-            planner = getattr(orchestrator, "_planner", None)
+            planner = getattr(orchestrator, "__dict__", {}).get("_planner")
             if planner is not None:
                 return planner
         return None
@@ -1174,6 +1181,77 @@ def create_playground_app(
                 return found
 
         return None
+
+    def _namespace_from_tool_node(tool_node: Any) -> str | None:
+        config = getattr(tool_node, "config", None)
+        raw_name = getattr(config, "name", None)
+        if isinstance(raw_name, str) and raw_name.strip():
+            return raw_name.strip()
+        return None
+
+    def _iter_tool_nodes(tool_nodes: Any) -> list[tuple[str, Any]]:
+        resolved: list[tuple[str, Any]] = []
+        if isinstance(tool_nodes, dict):
+            for key, tool_node in tool_nodes.items():
+                namespace = str(key).strip()
+                if namespace and tool_node is not None:
+                    resolved.append((namespace, tool_node))
+            return resolved
+        if isinstance(tool_nodes, list):
+            for tool_node in tool_nodes:
+                tool_namespace = _namespace_from_tool_node(tool_node)
+                if tool_namespace is not None:
+                    resolved.append((tool_namespace, tool_node))
+        return resolved
+
+    def _tool_nodes_from_planner_specs(planner: Any | None) -> dict[str, Any]:
+        resolved: dict[str, Any] = {}
+        if planner is None:
+            return resolved
+        specs = getattr(planner, "_specs", None)
+        if not isinstance(specs, list):
+            return resolved
+
+        for spec in specs:
+            extra = getattr(spec, "extra", None)
+            if not isinstance(extra, Mapping):
+                continue
+            tool_node = extra.get("tool_node")
+            if tool_node is None:
+                continue
+            raw_namespace = extra.get("namespace")
+            if isinstance(raw_namespace, str) and raw_namespace.strip():
+                resolved[raw_namespace.strip()] = tool_node
+                continue
+            namespace = _namespace_from_tool_node(tool_node)
+            if namespace is not None:
+                resolved[namespace] = tool_node
+
+        return resolved
+
+    def _discover_live_tool_nodes() -> dict[str, Any]:
+        resolved: dict[str, Any] = {}
+
+        for namespace, tool_node in _iter_tool_nodes(getattr(agent_wrapper, "__dict__", {}).get("_tool_nodes")):
+            resolved[namespace] = tool_node
+
+        planner = _discover_planner()
+        if planner is not None:
+            for namespace, tool_node in _iter_tool_nodes(getattr(planner, "__dict__", {}).get("_tool_nodes")):
+                resolved[namespace] = tool_node
+            resolved.update(_tool_nodes_from_planner_specs(planner))
+
+        return resolved
+
+    def _sticky_tool_nodes_for_session(session_id: str | None) -> dict[str, Any]:
+        if not isinstance(session_id, str) or not session_id.strip():
+            return {}
+        normalized_session_id = session_id.strip()
+        sticky_for_session = sticky_tool_nodes.setdefault(normalized_session_id, {})
+        live_tool_nodes = _discover_live_tool_nodes()
+        if live_tool_nodes:
+            sticky_for_session.update(live_tool_nodes)
+        return sticky_for_session
 
     def _rich_output_config_from_spec(spec: Spec | None) -> Any | None:
         if configure_rich_output is None or RichOutputConfig is None:
@@ -1292,6 +1370,117 @@ def create_playground_app(
     @app.get("/health")
     async def health() -> Mapping[str, str]:
         return {"status": "ok"}
+
+    def _jsonify_for_api(value: Any) -> Any:
+        if isinstance(value, BaseModel):
+            return value.model_dump(mode="json", exclude_none=True)
+        if hasattr(value, "model_dump") and callable(value.model_dump):
+            return value.model_dump(mode="json", exclude_none=True)
+        if isinstance(value, Mapping):
+            return {str(k): _jsonify_for_api(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_jsonify_for_api(v) for v in value]
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return value
+
+    def _resolve_tool_nodes(session_id: str | None = None) -> dict[str, Any]:
+        normalized_session_id = session_id.strip() if isinstance(session_id, str) and session_id.strip() else None
+        resolved: dict[str, Any] = {}
+        if normalized_session_id:
+            resolved.update(_sticky_tool_nodes_for_session(normalized_session_id))
+        live_tool_nodes = _discover_live_tool_nodes()
+        if live_tool_nodes:
+            resolved.update(live_tool_nodes)
+            if normalized_session_id:
+                sticky_tool_nodes.setdefault(normalized_session_id, {}).update(live_tool_nodes)
+        return resolved
+
+    def _resolve_tool_node(namespace: str, *, session_id: str | None = None) -> Any:
+        tool_nodes = _resolve_tool_nodes(session_id=session_id)
+        tool_node = tool_nodes.get(namespace)
+        if tool_node is not None:
+            return tool_node
+        if tool_nodes:
+            raise HTTPException(status_code=404, detail=f"Tool node '{namespace}' not found")
+        raise HTTPException(status_code=500, detail="No tool nodes available")
+
+    def _build_scoped_store(
+        session_id: str | None,
+        tenant_id: str | None,
+        user_id: str | None,
+    ) -> tuple[str, Any]:
+        resolved_session = session_id or "default"
+        artifact_store = _discover_artifact_store()
+        if artifact_store is None:
+            return resolved_session, _DisabledArtifactStore()
+
+        from penguiflow.artifacts import ArtifactScope
+
+        return resolved_session, _ScopedArtifactStore(
+            artifact_store,
+            ArtifactScope(
+                session_id=resolved_session,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            ),
+        )
+
+    def _build_minimal_ctx(
+        artifacts: Any,
+        *,
+        session_id: str,
+        tenant_id: str | None,
+        user_id: str | None,
+    ) -> Any:
+        class MinimalToolCtx:
+            def __init__(self) -> None:
+                self._artifacts_store = artifacts
+                self._tool_context = {
+                    "session_id": session_id,
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                }
+                self._llm_context: dict[str, Any] = {}
+                self._meta: dict[str, Any] = {}
+
+            @property
+            def tool_context(self) -> dict[str, Any]:
+                return self._tool_context
+
+            @property
+            def llm_context(self) -> dict[str, Any]:
+                return self._llm_context
+
+            @property
+            def meta(self) -> dict[str, Any]:
+                return self._meta
+
+            @property
+            def _artifacts(self) -> Any:
+                return self._artifacts_store
+
+        return MinimalToolCtx()
+
+    async def _ensure_live_mcp_client(tool_node: Any) -> Any | None:
+        current_loop = asyncio.get_running_loop()
+        connected_loop = getattr(tool_node, "_connected_loop", None)
+        if not getattr(tool_node, "_connected", False) or (
+            connected_loop is not None and connected_loop is not current_loop
+        ):
+            force_reconnect = getattr(tool_node, "_force_reconnect", None)
+            if callable(force_reconnect):
+                maybe_awaitable = force_reconnect()
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+        return getattr(tool_node, "_mcp_client", None)
+
+    def _resolve_original_tool_name(namespace: str, tool_name: str) -> str:
+        if "." in tool_name:
+            if not tool_name.startswith(f"{namespace}."):
+                raise HTTPException(status_code=400, detail="Tool name namespace mismatch")
+            return tool_name.removeprefix(f"{namespace}.")
+        return tool_name
 
     @app.get("/ui/spec", response_model=SpecPayload | None)
     async def ui_spec() -> SpecPayload | None:
@@ -1766,6 +1955,7 @@ def create_playground_app(
     @app.delete("/sessions/{session_id}")
     async def session_delete(session_id: str) -> Mapping[str, Any]:
         await session_manager.drop(session_id)
+        sticky_tool_nodes.pop(session_id, None)
         return {"deleted": True, "session_id": session_id}
 
     @app.patch("/sessions/{session_id}/context")
@@ -2056,7 +2246,15 @@ def create_playground_app(
         payload["session_id"] = session_id
         return payload
 
-    @app.get("/traces", response_model=list[TraceSummaryPayload])
+    def _query_preview(value: str, *, limit: int = 160) -> str:
+        """Build concise single-line query preview for trace tables."""
+
+        collapsed = " ".join(value.split())
+        if len(collapsed) <= limit:
+            return collapsed
+        return f"{collapsed[: limit - 1].rstrip()}…"
+
+    @app.get("/traces", response_model=list[TraceSummaryPayload], response_model_exclude_none=True)
     async def list_traces(limit: int = 50) -> list[TraceSummaryPayload]:
         if store is None:
             raise HTTPException(status_code=500, detail="State store is not configured")
@@ -2067,6 +2265,17 @@ def create_playground_app(
         refs = await list_trace_refs(limit=limit)
         get_trajectory = getattr(store, "get_trajectory", None)
 
+        session_turn_counts: dict[str, int] = {}
+        turn_index_by_key: dict[tuple[str, str], int] = {}
+        for ref in reversed(refs):
+            trace_id = str(ref.get("trace_id") or "")
+            session_id = str(ref.get("session_id") or "")
+            if not trace_id or not session_id:
+                continue
+            current = session_turn_counts.get(session_id, 0) + 1
+            session_turn_counts[session_id] = current
+            turn_index_by_key[(trace_id, session_id)] = current
+
         payloads: list[TraceSummaryPayload] = []
         for ref in refs:
             trace_id = str(ref.get("trace_id") or "")
@@ -2075,17 +2284,27 @@ def create_playground_app(
                 continue
 
             tags: list[str] = []
+            query_preview: str | None = None
             if get_trajectory is not None:
                 trajectory = await get_trajectory(trace_id, session_id)
                 if trajectory is not None:
                     tags_raw = trajectory.metadata.get("tags", [])
                     if isinstance(tags_raw, list):
                         tags = sorted({str(tag).strip() for tag in tags_raw if str(tag).strip()})
+                    query_preview = _query_preview(trajectory.query)
 
-            payloads.append(TraceSummaryPayload(trace_id=trace_id, session_id=session_id, tags=tags))
+            payloads.append(
+                TraceSummaryPayload(
+                    trace_id=trace_id,
+                    session_id=session_id,
+                    tags=tags,
+                    query_preview=query_preview,
+                    turn_index=turn_index_by_key.get((trace_id, session_id)),
+                )
+            )
         return payloads
 
-    @app.post("/traces/{trace_id}/tags", response_model=TraceSummaryPayload)
+    @app.post("/traces/{trace_id}/tags", response_model=TraceSummaryPayload, response_model_exclude_none=True)
     async def set_trace_tags(trace_id: str, request: TraceTagsRequest) -> TraceSummaryPayload:
         if store is None:
             raise HTTPException(status_code=500, detail="State store is not configured")
@@ -2125,6 +2344,7 @@ def create_playground_app(
             trace_id=trace_id,
             session_id=request.session_id,
             tags=normalized_tags,
+            query_preview=_query_preview(trajectory.query),
         )
 
     @app.get("/eval/datasets/browse", response_model=list[EvalDatasetBrowseEntry])
@@ -2541,31 +2761,18 @@ def create_playground_app(
     # ─── Resource Endpoints ───────────────────────────────────────────────────
 
     @app.get("/resources/{namespace}")
-    async def list_resources(namespace: str) -> Mapping[str, Any]:
+    async def list_resources(
+        namespace: str,
+        session_id: str | None = None,
+        x_session_id: str | None = Header(None, alias="X-Session-ID"),
+    ) -> Mapping[str, Any]:
         """List available MCP resources for a ToolNode namespace."""
-        # Get tool node from agent wrapper
-        tool_nodes = getattr(agent_wrapper, "_tool_nodes", None)
-        if tool_nodes is None:
-            # Try to find tool nodes from planner
-            planner = getattr(agent_wrapper, "_planner", None)
-            if planner is not None:
-                tool_nodes = getattr(planner, "_tool_nodes", None)
-
-        if tool_nodes is None:
-            return {"resources": [], "templates": [], "error": "No tool nodes available"}
-
-        # Find the tool node with matching namespace
-        tool_node = None
-        if isinstance(tool_nodes, dict):
-            tool_node = tool_nodes.get(namespace)
-        elif isinstance(tool_nodes, list):
-            for tn in tool_nodes:
-                if getattr(tn, "config", None) and getattr(tn.config, "name", None) == namespace:
-                    tool_node = tn
-                    break
-
-        if tool_node is None:
-            raise HTTPException(status_code=404, detail=f"Tool node '{namespace}' not found")
+        try:
+            tool_node = _resolve_tool_node(namespace, session_id=session_id or x_session_id)
+        except HTTPException as exc:
+            if exc.status_code == 500:
+                return {"resources": [], "templates": [], "error": exc.detail}
+            raise
 
         if not getattr(tool_node, "resources_supported", False):
             return {
@@ -2596,28 +2803,8 @@ def create_playground_app(
 
         The resource content is cached and stored as an artifact.
         """
-        # Get tool node
-        tool_nodes = getattr(agent_wrapper, "_tool_nodes", None)
-        if tool_nodes is None:
-            planner = getattr(agent_wrapper, "_planner", None)
-            if planner is not None:
-                tool_nodes = getattr(planner, "_tool_nodes", None)
-
-        if tool_nodes is None:
-            raise HTTPException(status_code=500, detail="No tool nodes available")
-
-        # Find tool node
-        tool_node = None
-        if isinstance(tool_nodes, dict):
-            tool_node = tool_nodes.get(namespace)
-        elif isinstance(tool_nodes, list):
-            for tn in tool_nodes:
-                if getattr(tn, "config", None) and getattr(tn.config, "name", None) == namespace:
-                    tool_node = tn
-                    break
-
-        if tool_node is None:
-            raise HTTPException(status_code=404, detail=f"Tool node '{namespace}' not found")
+        resolved_session_id = session_id or x_session_id
+        tool_node = _resolve_tool_node(namespace, session_id=resolved_session_id)
 
         if not getattr(tool_node, "resources_supported", False):
             raise HTTPException(
@@ -2625,34 +2812,17 @@ def create_playground_app(
                 detail=f"Tool node '{namespace}' does not support resources",
             )
 
-        # Create a minimal context for resource reading
-        resolved_session = session_id or x_session_id or "default"
-        artifact_store = _discover_artifact_store()
-        scoped_store: Any
-        if artifact_store is None:
-            scoped_store = _DisabledArtifactStore()
-        else:
-            from penguiflow.artifacts import ArtifactScope
-
-            scoped_store = _ScopedArtifactStore(
-                artifact_store,
-                ArtifactScope(
-                    session_id=resolved_session,
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                ),
-            )
-
-        # Create a context-like object for the read operation
-        class MinimalCtx:
-            def __init__(self, artifacts: Any):
-                self._artifacts_store = artifacts
-
-            @property
-            def _artifacts(self) -> Any:
-                return self._artifacts_store
-
-        ctx = MinimalCtx(scoped_store)
+        resolved_session, scoped_store = _build_scoped_store(
+            resolved_session_id,
+            tenant_id,
+            user_id,
+        )
+        ctx = _build_minimal_ctx(
+            scoped_store,
+            session_id=resolved_session,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
 
         try:
             result = await tool_node.read_resource(uri, ctx)
@@ -2661,7 +2831,7 @@ def create_playground_app(
             _LOGGER.warning(f"Resource read failed for {uri}: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    # ── MCP Apps: tool callback endpoint ──────────────────────────────────────
+    # ── MCP Apps: raw MCP proxy endpoints ─────────────────────────────────────
 
     @app.post("/apps/{namespace}/call-tool")
     async def app_call_tool(
@@ -2672,99 +2842,134 @@ def create_playground_app(
         user_id: str | None = None,
         x_session_id: str | None = Header(None, alias="X-Session-ID"),
     ) -> Mapping[str, Any]:
-        """Handle tool call requests from MCP App iframes.
-
-        This endpoint receives tool call requests forwarded from the
-        postMessage bridge in McpApp.svelte, routes them to the appropriate
-        ToolNode, and returns the result back to the frontend.
-        """
+        """Proxy raw MCP tools/call for embedded MCP Apps."""
         body = await request.json()
         tool_name = body.get("name")
         tool_args = body.get("arguments", {})
 
         if not tool_name:
             raise HTTPException(status_code=400, detail="Missing 'name' in request body")
-
-        # Find tool node
-        tool_nodes = getattr(agent_wrapper, "_tool_nodes", None)
-        if tool_nodes is None:
-            planner = getattr(agent_wrapper, "_planner", None)
-            if planner is not None:
-                tool_nodes = getattr(planner, "_tool_nodes", None)
-
-        if tool_nodes is None:
-            raise HTTPException(status_code=500, detail="No tool nodes available")
-
-        tool_node = None
-        if isinstance(tool_nodes, dict):
-            tool_node = tool_nodes.get(namespace)
-        elif isinstance(tool_nodes, list):
-            for tn in tool_nodes:
-                if getattr(tn, "config", None) and getattr(tn.config, "name", None) == namespace:
-                    tool_node = tn
-                    break
-
-        if tool_node is None:
-            raise HTTPException(status_code=404, detail=f"Tool node '{namespace}' not found")
-
-        # Build namespaced tool name
-        if "." in tool_name:
-            if not tool_name.startswith(f"{namespace}."):
-                raise HTTPException(status_code=400, detail="Tool name namespace mismatch")
-            namespaced_name = tool_name
-        else:
-            namespaced_name = f"{namespace}.{tool_name}"
-
-        # Create minimal context for tool execution
-        resolved_session = session_id or x_session_id or "default"
-        artifact_store = _discover_artifact_store()
-        scoped_store: Any
-        if artifact_store is None:
-            scoped_store = _DisabledArtifactStore()
-        else:
-            from penguiflow.artifacts import ArtifactScope
-
-            scoped_store = _ScopedArtifactStore(
-                artifact_store,
-                ArtifactScope(
-                    session_id=resolved_session,
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                ),
-            )
-
-        class MinimalToolCtx:
-            def __init__(self, artifacts: Any, tool_ctx: dict[str, Any]):
-                self._artifacts_store = artifacts
-                self._tool_context = tool_ctx
-                self._llm_context: dict[str, Any] = {}
-                self._meta: dict[str, Any] = {}
-
-            @property
-            def tool_context(self) -> dict[str, Any]:
-                return self._tool_context
-
-            @property
-            def llm_context(self) -> dict[str, Any]:
-                return self._llm_context
-
-            @property
-            def meta(self) -> dict[str, Any]:
-                return self._meta
-
-            @property
-            def _artifacts(self) -> Any:
-                return self._artifacts_store
-
-        ctx = MinimalToolCtx(scoped_store, {"session_id": resolved_session, "user_id": user_id})
+        resolved_session_id = session_id or x_session_id
+        tool_node = _resolve_tool_node(namespace, session_id=resolved_session_id)
+        original_name = _resolve_original_tool_name(namespace, str(tool_name))
 
         try:
-            result = await tool_node.call(namespaced_name, tool_args, ctx)
+            mcp_client = await _ensure_live_mcp_client(tool_node)
+            call_tool_mcp = getattr(mcp_client, "call_tool_mcp", None)
+            if callable(call_tool_mcp) and inspect.iscoroutinefunction(call_tool_mcp):
+                result = await call_tool_mcp(original_name, dict(tool_args))
+                return _jsonify_for_api(result)
+
+            resolved_session, scoped_store = _build_scoped_store(
+                resolved_session_id,
+                tenant_id,
+                user_id,
+            )
+            ctx = _build_minimal_ctx(
+                scoped_store,
+                session_id=resolved_session,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+            result = await tool_node.call(f"{namespace}.{original_name}", dict(tool_args), ctx)
             if isinstance(result, Mapping):
                 return result
             return {"result": result}
         except Exception as exc:
-            _LOGGER.warning(f"App tool call failed for {namespaced_name}: {exc}")
+            _LOGGER.warning(f"App tool call failed for {namespace}.{original_name}: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/apps/{namespace}/tools")
+    async def app_list_tools(
+        namespace: str,
+        session_id: str | None = None,
+        x_session_id: str | None = Header(None, alias="X-Session-ID"),
+    ) -> Mapping[str, Any]:
+        """Proxy raw MCP tools/list for embedded MCP Apps."""
+        tool_node = _resolve_tool_node(namespace, session_id=session_id or x_session_id)
+
+        try:
+            mcp_client = await _ensure_live_mcp_client(tool_node)
+            list_tools_fn = getattr(mcp_client, "list_tools", None)
+            if not callable(list_tools_fn) or not inspect.iscoroutinefunction(list_tools_fn):
+                raise HTTPException(status_code=400, detail=f"Tool node '{namespace}' does not support MCP tools")
+            tools = await list_tools_fn()
+            return {"tools": _jsonify_for_api(tools)}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(f"App tools/list failed for {namespace}: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/apps/{namespace}/resources")
+    async def app_list_resources(
+        namespace: str,
+        session_id: str | None = None,
+        x_session_id: str | None = Header(None, alias="X-Session-ID"),
+    ) -> Mapping[str, Any]:
+        """Proxy raw MCP resources/list and resources/templates/list for embedded MCP Apps."""
+        tool_node = _resolve_tool_node(namespace, session_id=session_id or x_session_id)
+
+        if not getattr(tool_node, "resources_supported", False):
+            return {"resources": [], "resourceTemplates": []}
+
+        try:
+            mcp_client = await _ensure_live_mcp_client(tool_node)
+            if mcp_client is None:
+                raise HTTPException(status_code=400, detail=f"Tool node '{namespace}' is not connected")
+            list_resources_fn = getattr(mcp_client, "list_resources", None)
+            list_templates_fn = getattr(mcp_client, "list_resource_templates", None)
+            resources = (
+                await list_resources_fn()
+                if callable(list_resources_fn) and inspect.iscoroutinefunction(list_resources_fn)
+                else []
+            )
+            templates = (
+                await list_templates_fn()
+                if callable(list_templates_fn) and inspect.iscoroutinefunction(list_templates_fn)
+                else []
+            )
+            return {
+                "resources": _jsonify_for_api(resources),
+                "resourceTemplates": _jsonify_for_api(templates),
+            }
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(f"App resources/list failed for {namespace}: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post("/apps/{namespace}/read-resource")
+    async def app_read_resource(
+        namespace: str,
+        request: Request,
+        session_id: str | None = None,
+        x_session_id: str | None = Header(None, alias="X-Session-ID"),
+    ) -> Mapping[str, Any]:
+        """Proxy raw MCP resources/read for embedded MCP Apps."""
+        body = await request.json()
+        uri = body.get("uri")
+        if not uri:
+            raise HTTPException(status_code=400, detail="Missing 'uri' in request body")
+
+        tool_node = _resolve_tool_node(namespace, session_id=session_id or x_session_id)
+        if not getattr(tool_node, "resources_supported", False):
+            raise HTTPException(status_code=400, detail=f"Tool node '{namespace}' does not support resources")
+
+        try:
+            mcp_client = await _ensure_live_mcp_client(tool_node)
+            read_resource_fn = getattr(mcp_client, "read_resource", None)
+            if not callable(read_resource_fn) or not inspect.iscoroutinefunction(read_resource_fn):
+                raise HTTPException(status_code=400, detail=f"Tool node '{namespace}' is not connected")
+            contents = await read_resource_fn(str(uri))
+            payload = _jsonify_for_api(contents)
+            if isinstance(payload, Mapping) and "contents" in payload:
+                return payload
+            return {"contents": payload}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning(f"App resources/read failed for {namespace} {uri}: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     if discovery:

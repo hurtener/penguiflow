@@ -1,5 +1,6 @@
 import { getContext, setContext } from 'svelte';
 import type { ArtifactChunkPayload, ComponentArtifact, PendingInteraction } from '$lib/types';
+import { isMcpAppArtifact } from '$lib/types';
 
 const INTERACTIONS_STORE_KEY = Symbol('interactions-store');
 
@@ -7,6 +8,7 @@ export interface InteractionsStore {
   readonly artifacts: ComponentArtifact[];
   readonly pendingInteraction: PendingInteraction | null;
   readonly lastArtifact: ComponentArtifact | null;
+  readonly latestMcpAppArtifact: ComponentArtifact | null;
   addArtifactChunk(
     payload: ArtifactChunkPayload,
     options?: { message_id?: string }
@@ -69,6 +71,15 @@ export function createInteractionsStore(): InteractionsStore {
     get artifacts() { return artifacts; },
     get pendingInteraction() { return pendingInteraction; },
     get lastArtifact() { return lastArtifact; },
+    get latestMcpAppArtifact() {
+      for (let index = artifacts.length - 1; index >= 0; index -= 1) {
+        const artifact = artifacts[index];
+        if (isMcpAppArtifact(artifact)) {
+          return artifact;
+        }
+      }
+      return null;
+    },
     addArtifactChunk,
     setPendingInteraction,
     updatePendingInteraction,

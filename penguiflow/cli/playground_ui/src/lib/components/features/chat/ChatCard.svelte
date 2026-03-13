@@ -6,6 +6,7 @@
   import SetupTab from '../setup/SetupTab.svelte';
   import { ContextTab } from '$lib/components/features/context';
   import EvalTab from '$lib/components/features/eval/EvalTab.svelte';
+  import TracesTab from '$lib/components/features/traces/TracesTab.svelte';
   import { ComponentLab } from '$lib/components/features/component-lab';
   import { getComponentRegistryStore } from '$lib/stores';
   import type { PendingInteraction } from '$lib/types';
@@ -18,8 +19,9 @@
 
   let { onSendChat, chatBodyEl = $bindable(null), onInteractionResult }: Props = $props();
 
-  type CenterTab = 'chat' | 'setup' | 'context' | 'eval' | 'components';
+  type CenterTab = 'chat' | 'setup' | 'context' | 'traces' | 'eval' | 'components';
   let activeTab = $state<CenterTab>('chat');
+  let traceOpenRequest = $state<{ traceId: string; sessionId: string; requestId: number } | null>(null);
 
   const componentRegistryStore = getComponentRegistryStore();
   const tabs = $derived.by(() => {
@@ -27,6 +29,7 @@
       { id: 'chat', label: 'Chat' },
       { id: 'setup', label: 'Setup' },
       { id: 'context', label: 'Context' },
+      { id: 'traces', label: 'Traces' },
       { id: 'eval', label: 'Eval' }
     ];
     if (componentRegistryStore.enabled) {
@@ -38,6 +41,15 @@
   export const switchToSetup = () => {
     activeTab = 'setup';
   };
+
+  async function reviewTraceInTraces(traceId: string, sessionId: string): Promise<void> {
+    traceOpenRequest = {
+      traceId,
+      sessionId,
+      requestId: Date.now()
+    };
+    activeTab = 'traces';
+  }
 </script>
 
 <Card class="chat-card">
@@ -53,7 +65,9 @@
   {:else if activeTab === 'context'}
     <ContextTab />
   {:else if activeTab === 'eval'}
-    <EvalTab />
+    <EvalTab onReviewTrace={reviewTraceInTraces} />
+  {:else if activeTab === 'traces'}
+    <TracesTab openRequest={traceOpenRequest} />
   {:else if activeTab === 'components'}
     <ComponentLab />
   {:else}

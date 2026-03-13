@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+from ..skills import (
+    SkillCapabilityContext,
+    SkillProposalConfig,
+    SkillProposalDraft,
+    SkillProposeRequest,
+    SkillProposeResponse,
+    SkillProvider,
+    SkillProviderFactory,
+)
 from .context import AnyContext, ToolContext
 from .dspy_client import DSPyLLMClient
 from .error_recovery import ErrorRecoveryConfig
@@ -73,7 +82,14 @@ __all__ = [
     "Trajectory",
     "TrajectoryStep",
     "TrajectorySummary",
+    "SkillCapabilityContext",
     "SkillPackConfig",
+    "SkillProposalConfig",
+    "SkillProposalDraft",
+    "SkillProposeRequest",
+    "SkillProposeResponse",
+    "SkillProvider",
+    "SkillProviderFactory",
     "SkillsConfig",
     "SkillsDirectoryConfig",
 ]

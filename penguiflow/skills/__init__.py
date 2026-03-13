@@ -3,6 +3,7 @@
 from .local_store import LocalSkillStore
 from .models import (
     RetrievalResponse,
+    SkillCapabilityContext,
     SkillDefinition,
     SkillDirectoryEntry,
     SkillDirectoryField,
@@ -12,6 +13,10 @@ from .models import (
     SkillPackConfig,
     SkillPackFormat,
     SkillPackLoadResult,
+    SkillProposalConfig,
+    SkillProposalDraft,
+    SkillProposeRequest,
+    SkillProposeResponse,
     SkillQuery,
     SkillRecord,
     SkillResultDetailed,
@@ -23,12 +28,14 @@ from .models import (
     SkillSearchType,
 )
 from .pack_loader import SkillPackLoader
-from .provider import LocalSkillProvider, SkillProvider
+from .provider import CompositeSkillProvider, LocalSkillProvider, SkillProvider, SkillProviderFactory
 
 __all__ = [
+    "CompositeSkillProvider",
     "LocalSkillProvider",
     "LocalSkillStore",
     "RetrievalResponse",
+    "SkillCapabilityContext",
     "SkillDefinition",
     "SkillDirectoryEntry",
     "SkillDirectoryField",
@@ -39,7 +46,12 @@ __all__ = [
     "SkillPackFormat",
     "SkillPackLoadResult",
     "SkillPackLoader",
+    "SkillProposalConfig",
+    "SkillProposalDraft",
+    "SkillProposeRequest",
+    "SkillProposeResponse",
     "SkillProvider",
+    "SkillProviderFactory",
     "SkillQuery",
     "SkillRecord",
     "SkillResultDetailed",

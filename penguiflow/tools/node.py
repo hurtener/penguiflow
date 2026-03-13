@@ -39,7 +39,7 @@ from penguiflow.planner.context import ToolContext
 from penguiflow.registry import ModelRegistry
 
 from .adapters import adapt_exception
-from .apps import UI_MIME_TYPE, AppMetadata, extract_app_metadata
+from .apps import UI_COMPAT_EXTENSION_IDS, UI_MIME_TYPE, AppMetadata, extract_app_metadata
 from .config import (
     AuthType,
     ExternalToolConfig,
@@ -216,8 +216,9 @@ class ToolNode:
                         env[key] = self._substitute_env(str(val)) if isinstance(val, str) else str(val)
                 transport = StdioTransport(command=command, args=args, env=env)
 
-            self._mcp_client = MCPClient(transport)
+            self._mcp_client = MCPClient(transport, auto_initialize=False)
             await self._mcp_client.__aenter__()
+            await self._initialize_mcp_client(self._mcp_client)
             mcp_tools = await self._mcp_client.list_tools()
         except Exception as exc:
             if self._mcp_client:
@@ -237,6 +238,103 @@ class ToolNode:
 
         # Discover MCP prompts (Phase 3)
         await self._discover_mcp_prompts()
+
+    async def _initialize_mcp_client(self, client: Any) -> Any:
+        """Initialize an MCP client, advertising Apps capability when enabled."""
+        if not self.config.apps.enabled:
+            return await client.initialize()
+
+        import anyio
+        import mcp.types as mcp_types
+        from mcp.client.session import (
+            _default_elicitation_callback,
+            _default_list_roots_callback,
+            _default_sampling_callback,
+        )
+        from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
+
+        if getattr(client, "initialize_result", None) is not None:
+            return client.initialize_result
+
+        session = client.session
+
+        sampling = (
+            (getattr(session, "_sampling_capabilities", None) or mcp_types.SamplingCapability())
+            if getattr(session, "_sampling_callback", None) is not _default_sampling_callback
+            else None
+        )
+        elicitation = (
+            mcp_types.ElicitationCapability(
+                form=mcp_types.FormElicitationCapability(),
+                url=mcp_types.UrlElicitationCapability(),
+            )
+            if getattr(session, "_elicitation_callback", None) is not _default_elicitation_callback
+            else None
+        )
+        roots = (
+            mcp_types.RootsCapability(listChanged=True)
+            if getattr(session, "_list_roots_callback", None) is not _default_list_roots_callback
+            else None
+        )
+        task_handlers = getattr(session, "_task_handlers", None)
+        tasks = task_handlers.build_capability() if task_handlers is not None else None
+
+        app_capability = {"mimeTypes": [UI_MIME_TYPE]}
+        app_extensions = {extension_id: dict(app_capability) for extension_id in UI_COMPAT_EXTENSION_IDS}
+
+        capabilities = mcp_types.ClientCapabilities.model_validate(
+            {
+                "sampling": sampling,
+                "elicitation": elicitation,
+                "experimental": dict(app_extensions),
+                "roots": roots,
+                "tasks": tasks,
+                "extensions": dict(app_extensions),
+            }
+        )
+        client_info = cast(mcp_types.Implementation, getattr(session, "_client_info", None))
+
+        request = mcp_types.ClientRequest(
+            mcp_types.InitializeRequest(
+                params=mcp_types.InitializeRequestParams(
+                    protocolVersion=mcp_types.LATEST_PROTOCOL_VERSION,
+                    capabilities=capabilities,
+                    clientInfo=client_info,
+                ),
+            )
+        )
+
+        timeout = getattr(client, "_init_timeout", None)
+        request_coro = session.send_request(request, mcp_types.InitializeResult)
+        send_request = (
+            client._await_with_session_monitoring(request_coro)
+            if hasattr(client, "_await_with_session_monitoring")
+            else request_coro
+        )
+
+        if timeout is None:
+            result = await send_request
+        else:
+            try:
+                with anyio.fail_after(timeout):
+                    result = await send_request
+            except TimeoutError as exc:
+                raise RuntimeError("Failed to initialize server session") from exc
+
+        if result.protocolVersion not in SUPPORTED_PROTOCOL_VERSIONS:
+            raise RuntimeError(
+                f"Unsupported protocol version from the server: {result.protocolVersion}"
+            )
+
+        if hasattr(client, "_session_state"):
+            client._session_state.initialize_result = result
+        if hasattr(session, "_server_capabilities"):
+            session._server_capabilities = result.capabilities
+
+        await session.send_notification(
+            mcp_types.ClientNotification(mcp_types.InitializedNotification())
+        )
+        return result
 
     async def _discover_mcp_resources(self) -> None:
         """Discover MCP resources and templates.
@@ -474,19 +572,35 @@ class ToolNode:
             if original_name is None:
                 original_name = tool_name.removeprefix(f"{self.config.name}.")
 
-            result = await self._call_with_retry(original_name, args, auth_headers)
+            app_meta = None
+            if self.config.apps.enabled and self.config.apps.fetch_html_on_call:
+                app_meta = self._app_metadata.get(tool_name)
+
+            raw_result = await self._call_with_retry(
+                original_name,
+                args,
+                auth_headers,
+                raw_mcp=app_meta is not None,
+            )
+            if self._mcp_client:
+                result = self._serialize_mcp_result_for_planner(
+                    raw_result,
+                    prefer_text_content=app_meta is not None,
+                )
+            else:
+                result = raw_result
             # Transform output through layered artifact extraction
             transformed = await self._transform_output(original_name, result, ctx)
 
             # MCP Apps: if tool has an app, fetch the UI resource and package it
-            if self.config.apps.enabled and self.config.apps.fetch_html_on_call:
-                app_meta = self._app_metadata.get(tool_name)
-                if app_meta is not None:
-                    transformed = await self._enrich_with_app_html(
-                        transformed,
-                        app_meta,
-                        ctx,
-                    )
+            if app_meta is not None:
+                transformed = await self._enrich_with_app_html(
+                    transformed,
+                    app_meta,
+                    args,
+                    ctx,
+                    raw_tool_result=raw_result,
+                )
 
             # Wrap result to match the output model schema: {"result": <data>}
             return {"result": transformed}
@@ -621,6 +735,8 @@ class ToolNode:
         tool_name: str,
         args: dict[str, Any],
         auth_headers: dict[str, str] | None = None,
+        *,
+        raw_mcp: bool = False,
     ) -> Any:
         """Execute tool call with intelligent retry based on error category."""
         policy = self.config.retry_policy
@@ -648,8 +764,12 @@ class ToolNode:
             try:
                 async with asyncio.timeout(self.config.timeout_s):
                     if self._mcp_client:
+                        if raw_mcp:
+                            call_tool_mcp = getattr(self._mcp_client, "call_tool_mcp", None)
+                            if callable(call_tool_mcp):
+                                return await call_tool_mcp(tool_name, args)
                         result = await self._mcp_client.call_tool(tool_name, args)
-                        return self._serialize_mcp_result(result)
+                        return result if raw_mcp else self._serialize_mcp_result(result)
                     if self._utcp_client:
                         return await self._call_utcp_tool(tool_name, args, auth_headers or {})
                     raise ToolNodeError("No client available for tool execution")
@@ -712,6 +832,41 @@ class ToolNode:
 
         # Last resort: convert to string
         return str(result)
+
+    def _serialize_mcp_result_for_planner(
+        self,
+        result: Any,
+        *,
+        prefer_text_content: bool = False,
+    ) -> Any:
+        """Serialize MCP results for planner context.
+
+        For app-enabled tools, prefer the human-facing text content over
+        structuredContent so the planner does not ingest large app state blobs.
+        The raw MCP payload is still preserved separately for the app runtime.
+        """
+        if prefer_text_content and hasattr(result, "content"):
+            texts: list[Any] = []
+            for item in result.content:
+                if hasattr(item, "text"):
+                    texts.append(item.text)
+                elif hasattr(item, "model_dump"):
+                    texts.append(item.model_dump())
+                else:
+                    texts.append(str(item))
+
+            if texts:
+                if len(texts) == 1:
+                    text = texts[0]
+                    if isinstance(text, str) and text.strip().startswith(("{", "[")):
+                        try:
+                            return json.loads(text)
+                        except json.JSONDecodeError:
+                            return text
+                    return text
+                return texts
+
+        return self._serialize_mcp_result(result)
 
     async def _call_utcp_tool(
         self,
@@ -1972,7 +2127,10 @@ class ToolNode:
         self,
         tool_result: Any,
         app_meta: AppMetadata,
+        tool_input: dict[str, Any],
         ctx: ToolContext,
+        *,
+        raw_tool_result: Any | None = None,
     ) -> Any:
         """Fetch the UI resource and attach it to the tool result.
 
@@ -2006,7 +2164,8 @@ class ToolNode:
         app_meta_payload: dict[str, Any] = {
             "csp": app_meta.csp.model_dump(),
             "permissions": app_meta.permissions.model_dump(),
-            "tool_data": tool_result,
+            "tool_data": self._serialize_app_tool_result(raw_tool_result, fallback=tool_result),
+            "tool_input": tool_input,
             "resource_uri": app_meta.resource_uri,
             "prefers_border": app_meta.prefers_border,
             "namespace": self.config.name,
@@ -2058,6 +2217,20 @@ class ToolNode:
         except Exception as e:
             logger.warning("Failed to fetch app HTML from %s: %s", uri, e)
             return None
+
+    @staticmethod
+    def _serialize_app_tool_result(raw_tool_result: Any, *, fallback: Any) -> Any:
+        """Preserve structured MCP results for apps while falling back safely."""
+        if raw_tool_result is None:
+            return fallback
+        if isinstance(raw_tool_result, (dict, list, str, int, float, bool, type(None))):
+            return raw_tool_result
+        if hasattr(raw_tool_result, "model_dump"):
+            try:
+                return raw_tool_result.model_dump(mode="json")
+            except Exception:
+                return fallback
+        return fallback
 
     @staticmethod
     def _extract_text_from_resource(contents: Any) -> str | None:

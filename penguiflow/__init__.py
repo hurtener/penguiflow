@@ -33,7 +33,14 @@ from .planner import (
     PlannerAction,
     PlannerFinish,
     ReactPlanner,
+    SkillCapabilityContext,
     SkillPackConfig,
+    SkillProposalConfig,
+    SkillProposalDraft,
+    SkillProposeRequest,
+    SkillProposeResponse,
+    SkillProvider,
+    SkillProviderFactory,
     SkillsConfig,
     SkillsDirectoryConfig,
     ToolExamplesConfig,
@@ -183,7 +190,14 @@ __all__ = [
     "ReactPlanner",
     "PlannerAction",
     "PlannerFinish",
+    "SkillCapabilityContext",
     "SkillPackConfig",
+    "SkillProposalConfig",
+    "SkillProposalDraft",
+    "SkillProposeRequest",
+    "SkillProposeResponse",
+    "SkillProvider",
+    "SkillProviderFactory",
     "SkillsConfig",
     "SkillsDirectoryConfig",
     "ToolExamplesConfig",
@@ -192,4 +206,4 @@ __all__ = [
     "TrajectoryStep",
 ]
 
-__version__ = "3.2.1"
+__version__ = "3.4.0"

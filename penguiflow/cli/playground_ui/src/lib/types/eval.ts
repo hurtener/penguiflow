@@ -2,6 +2,8 @@ export interface TraceSummary {
   trace_id: string;
   session_id: string;
   tags: string[];
+  query_preview?: string | null;
+  turn_index?: number | null;
 }
 
 export interface EvalDatasetExportResponse {

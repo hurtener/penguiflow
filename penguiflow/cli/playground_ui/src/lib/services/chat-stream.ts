@@ -451,6 +451,17 @@ class ChatStreamManager {
       }
     }
 
+    if (eventType === 'tool_call_result') {
+      const chunk = toMcpAppArtifactChunk(
+        data.result_json,
+        getString(data.tool_name),
+        getString(data.tool_call_id)
+      );
+      if (chunk) {
+        this.stores.interactionsStore.addArtifactChunk(chunk, { message_id: msg.id });
+      }
+    }
+
     this.stores.eventsStore.addEvent(data, eventName);
   }
 
@@ -812,6 +823,14 @@ class ChatStreamManager {
       case EventType.TOOL_CALL_RESULT: {
         const e = typedEvent as ToolCallResultEvent;
         const toolCallId = e.toolCallId;
+        const chunk = toMcpAppArtifactChunk(
+          e.content,
+          this.aguiToolCalls.get(toolCallId)?.name,
+          toolCallId
+        );
+        if (chunk) {
+          this.stores.interactionsStore.addArtifactChunk(chunk, { message_id: this.agentMsgId ?? undefined });
+        }
         this.stores.eventsStore.addEvent(
           { tool_call_id: toolCallId, content: e.content },
           'tool_call_result'
@@ -1079,6 +1098,90 @@ function toArtifactStoredEventFromCustom(
     session_id: sessionId ?? 'unknown',
     ts: Date.now()
   };
+}
+
+function toMcpAppArtifactChunk(
+  value: unknown,
+  toolName?: string,
+  invocationId?: string
+): ArtifactChunkPayload | null {
+  const app = extractMcpAppPayload(value);
+  if (!app) {
+    return null;
+  }
+
+  const artifactId = getString(app.artifact_id);
+  const namespace = getString(app.namespace);
+  if (!artifactId || !namespace) {
+    return null;
+  }
+
+  return {
+    stream_id: artifactId,
+    seq: 0,
+    done: true,
+    artifact_type: 'ui_component',
+    chunk: {
+      id: invocationId ? `${artifactId}:${invocationId}` : artifactId,
+      component: 'mcp_app',
+      title: toolName ?? namespace,
+      props: {
+        artifact_url: `/artifacts/${encodeURIComponent(artifactId)}`,
+        csp: asRecord(app.csp) ?? {},
+        permissions: asRecord(app.permissions) ?? {},
+        tool_data: app.tool_data,
+        tool_input: asRecord(app.tool_input) ?? {},
+        prefers_border: Boolean(app.prefers_border),
+        namespace,
+        session_id: getString(app.session_id),
+        sandbox: getString(app.sandbox),
+      }
+    },
+    meta: {
+      source_tool: toolName ?? namespace,
+      namespace,
+      title: toolName ?? namespace
+    }
+  };
+}
+
+function extractMcpAppPayload(value: unknown): Record<string, unknown> | null {
+  let current = value;
+  if (typeof current === 'string') {
+    current = safeParse(current);
+  }
+  return findMcpAppPayload(current);
+}
+
+function findMcpAppPayload(value: unknown): Record<string, unknown> | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findMcpAppPayload(item);
+      if (found) {
+        return found;
+      }
+    }
+    return null;
+  }
+
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const direct = asRecord(record.__mcp_app__);
+  if (direct) {
+    return direct;
+  }
+
+  for (const nested of Object.values(record)) {
+    const found = findMcpAppPayload(nested);
+    if (found) {
+      return found;
+    }
+  }
+
+  return null;
 }
 
 export function createChatStreamManager(stores: ChatStreamStores): ChatStreamManager {

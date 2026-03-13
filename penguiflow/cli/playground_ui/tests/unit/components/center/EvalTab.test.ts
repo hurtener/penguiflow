@@ -17,8 +17,6 @@ vi.mock('$lib/stores', async (importOriginal) => {
 });
 
 vi.mock('$lib/services/api', () => ({
-  listTraces: vi.fn(),
-  setTraceTags: vi.fn(),
   exportEvalDataset: vi.fn(),
   loadEvalDataset: vi.fn(),
   runEval: vi.fn(),
@@ -27,7 +25,7 @@ vi.mock('$lib/services/api', () => ({
   listEvalMetrics: vi.fn()
 }));
 
-describe('EvalTab Trace Selection', () => {
+describe('EvalTab', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.listEvalDatasets).mockResolvedValue([]);
@@ -35,118 +33,7 @@ describe('EvalTab Trace Selection', () => {
     trajectoryStoreMock.setFromPayload.mockReset();
   });
 
-  it('loads and renders traces with tags', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([
-      {
-        trace_id: 'trace-1',
-        session_id: 'session-1',
-        tags: ['split:val', 'dataset:policy']
-      }
-    ]);
-
-    render(EvalTab);
-
-    expect(await screen.findByText('trace-1')).toBeTruthy();
-    expect(screen.getByText('session-1')).toBeTruthy();
-    expect(screen.getByText('split:val')).toBeTruthy();
-    expect(screen.getByText('dataset:policy')).toBeTruthy();
-  });
-
-  it('adds an arbitrary tag to a trace', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([
-      {
-        trace_id: 'trace-1',
-        session_id: 'session-1',
-        tags: ['split:val']
-      }
-    ]);
-    vi.mocked(api.setTraceTags).mockResolvedValue({
-      trace_id: 'trace-1',
-      session_id: 'session-1',
-      tags: ['split:val', 'dataset:gold']
-    });
-
-    render(EvalTab);
-
-    const input = await screen.findByLabelText('Add tag for trace-1');
-    await fireEvent.input(input, { target: { value: 'dataset:gold' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Add tag trace-1' }));
-
-    expect(api.setTraceTags).toHaveBeenCalledWith('trace-1', 'session-1', ['dataset:gold'], []);
-    expect(await screen.findByText('dataset:gold')).toBeTruthy();
-  });
-
-  it('removes an existing tag from a trace', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([
-      {
-        trace_id: 'trace-1',
-        session_id: 'session-1',
-        tags: ['split:val', 'dataset:gold']
-      }
-    ]);
-    vi.mocked(api.setTraceTags).mockResolvedValue({
-      trace_id: 'trace-1',
-      session_id: 'session-1',
-      tags: ['dataset:gold']
-    });
-
-    render(EvalTab);
-
-    await screen.findByText('split:val');
-    await fireEvent.click(screen.getByRole('button', { name: 'Remove tag split:val trace-1' }));
-
-    expect(api.setTraceTags).toHaveBeenCalledWith('trace-1', 'session-1', [], ['split:val']);
-    expect(screen.queryByText('split:val')).toBeNull();
-  });
-
-  it('reassigns split tag from val to test', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([
-      {
-        trace_id: 'trace-1',
-        session_id: 'session-1',
-        tags: ['split:val']
-      }
-    ]);
-    vi.mocked(api.setTraceTags).mockResolvedValue({
-      trace_id: 'trace-1',
-      session_id: 'session-1',
-      tags: ['split:test']
-    });
-
-    render(EvalTab);
-
-    await screen.findByText('split:val');
-    await fireEvent.click(screen.getByRole('button', { name: 'Mark test trace-1' }));
-
-    expect(api.setTraceTags).toHaveBeenCalledWith('trace-1', 'session-1', ['split:test'], ['split:val']);
-    expect(await screen.findByText('split:test')).toBeTruthy();
-    expect(screen.queryByText('split:val')).toBeNull();
-  });
-
-  it('shows guidance that tagged traces feed dataset export', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
-
-    render(EvalTab);
-
-    expect(await screen.findByText('Tag traces here, then use those tags when exporting datasets.')).toBeTruthy();
-  });
-
-  it('shows inline load error and supports retry', async () => {
-    vi.mocked(api.listTraces)
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce([]);
-
-    render(EvalTab);
-
-    expect(await screen.findByText('Failed to load traces.')).toBeTruthy();
-    await fireEvent.click(screen.getByRole('button', { name: 'Retry trace load' }));
-
-    expect(api.listTraces).toHaveBeenCalledTimes(2);
-    expect(screen.queryByText('Failed to load traces.')).toBeNull();
-  });
-
   it('shows dataset export/browse entry points and semantics guidance', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
     vi.mocked(api.listEvalDatasets).mockResolvedValue([
       { path: 'example_app/evals/policy/dataset.jsonl', label: 'policy/dataset.jsonl', is_default: true }
     ]);
@@ -166,8 +53,19 @@ describe('EvalTab Trace Selection', () => {
     expect(screen.getByText('Preview reads the dataset from disk and does not import traces into memory.')).toBeTruthy();
   });
 
+  it('focuses on eval workflow and excludes trace management section', async () => {
+    vi.mocked(api.listEvalDatasets).mockResolvedValue([]);
+    vi.mocked(api.listEvalMetrics).mockResolvedValue([]);
+
+    render(EvalTab);
+
+    expect(screen.queryByText('Trace Selection')).toBeNull();
+    expect(await screen.findByText('Dataset')).toBeTruthy();
+    expect(screen.getByText('Run')).toBeTruthy();
+    expect(screen.getByText('Results')).toBeTruthy();
+  });
+
   it('submits dataset export and shows output paths', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
     vi.mocked(api.exportEvalDataset).mockResolvedValue({
       trace_count: 3,
       dataset_path: 'examples/evals/policy/dataset.jsonl',
@@ -193,7 +91,6 @@ describe('EvalTab Trace Selection', () => {
   });
 
   it('prefills dataset path from export and loads dataset summary', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
     vi.mocked(api.exportEvalDataset).mockResolvedValue({
       trace_count: 2,
       dataset_path: 'examples/evals/policy/dataset.jsonl',
@@ -235,7 +132,6 @@ describe('EvalTab Trace Selection', () => {
   });
 
   it('auto-previews when selecting a browsed dataset', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
     vi.mocked(api.listEvalDatasets).mockResolvedValue([
       { path: 'example_app/evals/policy/dataset.jsonl', label: 'policy/dataset.jsonl', is_default: true }
     ]);
@@ -256,7 +152,6 @@ describe('EvalTab Trace Selection', () => {
   });
 
   it('shows inline errors for export and load failures', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
     vi.mocked(api.exportEvalDataset).mockResolvedValue(null);
     vi.mocked(api.loadEvalDataset).mockResolvedValue(null);
 
@@ -273,8 +168,6 @@ describe('EvalTab Trace Selection', () => {
   });
 
   it('shows run guidance and staged dataset path', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
-
     render(EvalTab);
 
     await fireEvent.input(screen.getByLabelText('Selected dataset path'), { target: { value: 'examples/evals/policy/dataset.jsonl' } });
@@ -283,7 +176,6 @@ describe('EvalTab Trace Selection', () => {
   });
 
   it('submits run config and renders run summary with cases', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
     vi.mocked(api.listEvalMetrics).mockResolvedValue([
       {
         metric_spec: 'example_app.evals.metrics:policy_metric',
@@ -348,7 +240,6 @@ describe('EvalTab Trace Selection', () => {
   });
 
   it('shows running state and completion banner after run finishes', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
     vi.mocked(api.listEvalMetrics).mockResolvedValue([
       {
         metric_spec: 'example_app.evals.metrics:policy_metric',
@@ -385,7 +276,6 @@ describe('EvalTab Trace Selection', () => {
   });
 
   it('blocks run when dataset path is missing', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
     vi.mocked(api.listEvalMetrics).mockResolvedValue([
       {
         metric_spec: 'example_app.evals.metrics:policy_metric',
@@ -403,7 +293,6 @@ describe('EvalTab Trace Selection', () => {
   });
 
   it('preserves run config values after a failed run', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
     vi.mocked(api.listEvalMetrics).mockResolvedValue([
       {
         metric_spec: 'example_app.evals.metrics:policy_metric',
@@ -430,7 +319,6 @@ describe('EvalTab Trace Selection', () => {
   });
 
   it('shows worst-case rows first by score and opens trace into trajectory store', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
     vi.mocked(api.listEvalMetrics).mockResolvedValue([
       {
         metric_spec: 'example_app.evals.metrics:policy_metric',
@@ -488,7 +376,6 @@ describe('EvalTab Trace Selection', () => {
   });
 
   it('shows row-level error when open trace fails', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
     vi.mocked(api.listEvalMetrics).mockResolvedValue([
       {
         metric_spec: 'example_app.evals.metrics:policy_metric',
@@ -525,24 +412,18 @@ describe('EvalTab Trace Selection', () => {
   });
 
   it('shows clear Results empty-state guidance before any run', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
-
     render(EvalTab);
 
     expect(await screen.findByText('Completed eval runs appear here after you execute Run evaluation.')).toBeTruthy();
   });
 
   it('uses light-theme root class for Eval tab', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
-
     const { container } = render(EvalTab);
 
     expect(container.querySelector('.eval-tab')?.classList.contains('eval-light')).toBe(true);
   });
 
   it('renders a scrollable eval body container', async () => {
-    vi.mocked(api.listTraces).mockResolvedValue([]);
-
     const { container } = render(EvalTab);
 
     expect(container.querySelector('.eval-body')).toBeTruthy();

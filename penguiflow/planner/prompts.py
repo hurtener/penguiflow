@@ -584,6 +584,15 @@ You can discover and fetch skills:
 </skill_discovery>"""
 
 
+def render_skill_proposal_guidance() -> str:
+    return """<skill_proposal>
+You can draft a reusable skill playbook with `skill_propose`.
+- Use it when the user wants a new repeatable procedure or operating playbook.
+- It returns a draft only for host review.
+- It does NOT save or persist skills.
+</skill_proposal>"""
+
+
 def render_skill_directory(
     entries: Sequence[Mapping[str, Any]],
     *,

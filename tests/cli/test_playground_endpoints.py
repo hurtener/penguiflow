@@ -533,7 +533,15 @@ class TestTracesEndpoint:
 
         response = client.get("/traces", params={"limit": 1})
         assert response.status_code == 200
-        assert response.json() == [{"trace_id": "trace-new", "session_id": "session-b", "tags": []}]
+        assert response.json() == [
+            {
+                "trace_id": "trace-new",
+                "session_id": "session-b",
+                "tags": [],
+                "query_preview": "new",
+                "turn_index": 1,
+            }
+        ]
 
     def test_list_traces_reads_tags_from_trajectory_metadata(self, tmp_path: Path) -> None:
         wrapper = MockAgentWrapper()
@@ -552,7 +560,45 @@ class TestTracesEndpoint:
                 "trace_id": "trace-seeded",
                 "session_id": "session-a",
                 "tags": ["dataset:alpha", "split:test"],
+                "query_preview": "seeded",
+                "turn_index": 1,
             }
+        ]
+
+    def test_list_traces_includes_query_preview_and_session_turn_index(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        store = InMemoryStateStore()
+        asyncio.run(store.save_trajectory("trace-a1", "session-a", Trajectory(query="alpha first")))
+        asyncio.run(store.save_trajectory("trace-b1", "session-b", Trajectory(query="beta first")))
+        asyncio.run(store.save_trajectory("trace-a2", "session-a", Trajectory(query="alpha second")))
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/traces")
+        assert response.status_code == 200
+        assert response.json() == [
+            {
+                "trace_id": "trace-a2",
+                "session_id": "session-a",
+                "tags": [],
+                "query_preview": "alpha second",
+                "turn_index": 2,
+            },
+            {
+                "trace_id": "trace-b1",
+                "session_id": "session-b",
+                "tags": [],
+                "query_preview": "beta first",
+                "turn_index": 1,
+            },
+            {
+                "trace_id": "trace-a1",
+                "session_id": "session-a",
+                "tags": [],
+                "query_preview": "alpha first",
+                "turn_index": 1,
+            },
         ]
 
     def test_tag_trace_persists_into_trace_listing(self, tmp_path: Path) -> None:
@@ -568,12 +614,23 @@ class TestTracesEndpoint:
             json={"session_id": "session-a", "add": ["policy", "urgent", "policy"]},
         )
         assert tag_response.status_code == 200
-        assert tag_response.json() == {"trace_id": "trace-1", "session_id": "session-a", "tags": ["policy", "urgent"]}
+        assert tag_response.json() == {
+            "trace_id": "trace-1",
+            "session_id": "session-a",
+            "tags": ["policy", "urgent"],
+            "query_preview": "seed",
+        }
 
         list_response = client.get("/traces")
         assert list_response.status_code == 200
         assert list_response.json() == [
-            {"trace_id": "trace-1", "session_id": "session-a", "tags": ["policy", "urgent"]}
+            {
+                "trace_id": "trace-1",
+                "session_id": "session-a",
+                "tags": ["policy", "urgent"],
+                "query_preview": "seed",
+                "turn_index": 1,
+            }
         ]
 
         stored = asyncio.run(store.get_trajectory("trace-1", "session-a"))
@@ -600,6 +657,7 @@ class TestTracesEndpoint:
             "trace_id": "trace-1",
             "session_id": "session-a",
             "tags": ["dataset:alpha", "split:test"],
+            "query_preview": "seed",
         }
 
         stored = asyncio.run(store.get_trajectory("trace-1", "session-a"))

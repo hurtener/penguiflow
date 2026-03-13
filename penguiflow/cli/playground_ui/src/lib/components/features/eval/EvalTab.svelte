@@ -5,10 +5,8 @@
     fetchTrajectory,
     listEvalDatasets,
     listEvalMetrics,
-    listTraces,
     loadEvalDataset,
-    runEval,
-    setTraceTags
+    runEval
   } from '$lib/services/api';
   import { getTrajectoryStore } from '$lib/stores';
   import type {
@@ -16,15 +14,17 @@
     EvalDatasetExportResponse,
     EvalDatasetLoadResponse,
     EvalMetricBrowseEntry,
-    EvalRunResponse,
-    TraceSummary
+    EvalRunResponse
   } from '$lib/types';
+
+  interface Props {
+    onReviewTrace?: (traceId: string, sessionId: string, exampleId: string) => Promise<void> | void;
+  }
+
+  let { onReviewTrace }: Props = $props();
 
   const trajectoryStore = getTrajectoryStore();
 
-  let traces = $state<TraceSummary[]>([]);
-  let tagDrafts = $state<Record<string, string>>({});
-  let traceLoadError = $state(false);
   let exportIncludeTags = $state('split:val');
   let exportExcludeTags = $state('');
   let exportOutputDir = $state('examples/evals/policy_compliance_v1/dataset');
@@ -53,17 +53,6 @@
     return [...runResult.cases].sort((a, b) => a.score - b.score);
   });
 
-  async function loadTraces(): Promise<void> {
-    const rows = await listTraces(50);
-    if (rows === null) {
-      traceLoadError = true;
-      traces = [];
-      return;
-    }
-    traceLoadError = false;
-    traces = rows;
-  }
-
   async function loadDatasetBrowse(): Promise<void> {
     datasetBrowseError = null;
     const entries = await listEvalDatasets();
@@ -84,46 +73,15 @@
       return;
     }
     metricBrowse = entries;
-    if (!runMetricSpec && entries.length > 0) {
-      runMetricSpec = entries[0].metric_spec;
+    const firstMetric = entries.at(0);
+    if (!runMetricSpec && firstMetric) {
+      runMetricSpec = firstMetric.metric_spec;
     }
   }
 
   onMount(async () => {
-    await Promise.all([loadTraces(), loadDatasetBrowse(), loadMetricBrowse()]);
+    await Promise.all([loadDatasetBrowse(), loadMetricBrowse()]);
   });
-
-  async function addTag(trace: TraceSummary): Promise<void> {
-    const rawTag = tagDrafts[trace.trace_id] ?? '';
-    const tag = rawTag.trim();
-    if (!tag) return;
-    const updated = await setTraceTags(trace.trace_id, trace.session_id, [tag], []);
-    if (!updated) return;
-    traces = traces.map((item) => (item.trace_id === updated.trace_id ? updated : item));
-    tagDrafts = { ...tagDrafts, [trace.trace_id]: '' };
-  }
-
-  async function removeTag(trace: TraceSummary, tag: string): Promise<void> {
-    const updated = await setTraceTags(trace.trace_id, trace.session_id, [], [tag]);
-    if (!updated) return;
-    traces = traces.map((item) => (item.trace_id === updated.trace_id ? updated : item));
-  }
-
-  async function assignSplit(trace: TraceSummary, splitTag: 'split:val' | 'split:test'): Promise<void> {
-    const remove: string[] = [];
-    if (splitTag === 'split:val' && trace.tags.includes('split:test')) {
-      remove.push('split:test');
-    }
-    if (splitTag === 'split:test' && trace.tags.includes('split:val')) {
-      remove.push('split:val');
-    }
-    if (trace.tags.includes(splitTag)) {
-      return;
-    }
-    const updated = await setTraceTags(trace.trace_id, trace.session_id, [splitTag], remove);
-    if (!updated) return;
-    traces = traces.map((item) => (item.trace_id === updated.trace_id ? updated : item));
-  }
 
   function splitCsv(input: string): string[] {
     return input
@@ -221,6 +179,13 @@
   async function onOpenTrace(caseRow: EvalRunResponse['cases'][number]): Promise<void> {
     openTraceErrorByExample = { ...openTraceErrorByExample, [caseRow.example_id]: '' };
     openTraceLoadingByExample = { ...openTraceLoadingByExample, [caseRow.example_id]: true };
+    const reviewHandler = onReviewTrace;
+    if (reviewHandler) {
+      await reviewHandler(caseRow.pred_trace_id, caseRow.pred_session_id, caseRow.example_id);
+      lastReviewedExample = caseRow.example_id;
+      openTraceLoadingByExample = { ...openTraceLoadingByExample, [caseRow.example_id]: false };
+      return;
+    }
     const payload = await fetchTrajectory(caseRow.pred_trace_id, caseRow.pred_session_id);
     if (!payload) {
       openTraceErrorByExample = {
@@ -241,62 +206,6 @@
   <h3 class="title">Eval</h3>
 
   <div class="eval-body" data-testid="eval-body">
-    <div class="section">
-      <h4>Trace Selection</h4>
-      <p class="muted">Tag traces here, then use those tags when exporting datasets.</p>
-      <div class="trace-list">
-        {#if traceLoadError}
-          <div class="trace-error">
-            <p class="muted">Failed to load traces.</p>
-            <button class="tag-action" onclick={loadTraces} aria-label="Retry trace load">Retry</button>
-          </div>
-        {:else if traces.length === 0}
-          <p class="muted">No traces available yet.</p>
-        {:else}
-          {#each traces as trace (trace.trace_id)}
-            <article class="trace-row">
-              <div class="trace-meta">
-                <span class="trace-id">{trace.trace_id}</span>
-                <span class="session-id">{trace.session_id}</span>
-              </div>
-              <div class="tags">
-                {#each trace.tags as tag (tag)}
-                  <span class="tag">
-                    <span>{tag}</span>
-                    <button
-                      class="tag-remove"
-                      onclick={() => removeTag(trace, tag)}
-                      aria-label={`Remove tag ${tag} ${trace.trace_id}`}
-                    >
-                      x
-                    </button>
-                  </span>
-                {/each}
-              </div>
-              <div class="tag-editor">
-                <label class="sr-only" for={`add-tag-${trace.trace_id}`}>Add tag for {trace.trace_id}</label>
-                <input
-                  id={`add-tag-${trace.trace_id}`}
-                  class="tag-input"
-                  placeholder="tag:value"
-                  bind:value={tagDrafts[trace.trace_id]}
-                />
-                <button class="tag-action" onclick={() => addTag(trace)} aria-label={`Add tag ${trace.trace_id}`}>Add</button>
-              </div>
-              <div class="split-actions">
-                <button class="tag-action" onclick={() => assignSplit(trace, 'split:val')} aria-label={`Mark val ${trace.trace_id}`}>
-                  Mark Val
-                </button>
-                <button class="tag-action" onclick={() => assignSplit(trace, 'split:test')} aria-label={`Mark test ${trace.trace_id}`}>
-                  Mark Test
-                </button>
-              </div>
-            </article>
-          {/each}
-        {/if}
-      </div>
-    </div>
-
     <div class="section">
       <h4>Dataset</h4>
       <p class="muted">Preview reads the dataset from disk and does not import traces into memory.</p>
@@ -511,13 +420,6 @@
     color: var(--color-text-secondary, #3c3a36);
   }
 
-  .trace-list {
-    margin-top: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
   .trace-row {
     border: 1px solid var(--color-border, #e8e1d7);
     border-radius: 10px;
@@ -528,59 +430,10 @@
     gap: 6px;
   }
 
-  .trace-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    font-size: 12px;
-  }
-
-  .trace-id {
-    font-weight: 700;
-    color: var(--color-ink, #1e242c);
-  }
-
-  .session-id {
-    color: var(--color-text-secondary, #3c3a36);
-  }
-
-  .tags {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .tag {
-    display: inline-flex;
-    border-radius: 999px;
-    padding: 2px 8px;
-    font-size: 11px;
-    border: 1px solid var(--color-border, #e8e1d7);
-    color: var(--color-text-secondary, #3c3a36);
-    background: var(--color-btn-ghost-bg, #f2eee8);
-    gap: 6px;
-    align-items: center;
-  }
-
-  .tag-remove {
-    border: 0;
-    background: transparent;
-    color: var(--color-text-secondary, #3c3a36);
-    cursor: pointer;
-    padding: 0;
-    font-size: 11px;
-    line-height: 1;
-  }
-
   .muted {
     margin: 0;
     font-size: 12px;
     color: var(--color-text-secondary, #3c3a36);
-  }
-
-  .tag-editor {
-    display: flex;
-    gap: 6px;
   }
 
   .tag-input {
@@ -603,22 +456,6 @@
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
-  }
-
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    border: 0;
-  }
-
-  .split-actions {
-    display: flex;
-    gap: 6px;
   }
 
   .trace-error {

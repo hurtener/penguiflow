@@ -16,9 +16,10 @@ from ..catalog import NodeSpec, ToolLoadingMode, build_catalog
 from ..llm import create_native_adapter
 from ..node import Node
 from ..registry import ModelRegistry
-from ..skills.provider import LocalSkillProvider
+from ..skills.provider import CompositeSkillProvider, LocalSkillProvider, SkillProvider, SkillProviderFactory
 from ..skills.tools.skill_get_tool import SkillGetArgs, SkillGetResponse, skill_get
 from ..skills.tools.skill_list_tool import SkillListArgs, SkillListResponse, skill_list
+from ..skills.tools.skill_propose_tool import SkillProposeArgs, SkillProposeResponse, skill_propose
 from ..skills.tools.skill_search_tool import SkillSearchArgs, SkillSearchResponse, skill_search
 from . import prompts
 from .artifact_registry import ArtifactRegistry
@@ -104,6 +105,8 @@ def init_react_planner(
     tool_search_config: ToolSearchConfig | None = None,
     tool_examples_config: ToolExamplesConfig | None = None,
     skills_config: SkillsConfig | None = None,
+    skills_provider: SkillProvider | None = None,
+    skills_provider_factory: SkillProviderFactory | None = None,
 ) -> None:
     """Initialize a ReactPlanner instance with the specified configuration.
 
@@ -156,7 +159,15 @@ def init_react_planner(
     """
     tool_search_config = tool_search_config or ToolSearchConfig()
     tool_examples_config = tool_examples_config or ToolExamplesConfig()
+    if skills_provider is not None and skills_provider_factory is not None:
+        raise ValueError("skills_provider and skills_provider_factory are mutually exclusive")
+
+    explicit_runtime_provider = skills_provider is not None or skills_provider_factory is not None
+    if skills_config is None and explicit_runtime_provider:
+        skills_config = SkillsConfig(enabled=True)
     skills_config = skills_config or SkillsConfig()
+    if explicit_runtime_provider and not skills_config.enabled:
+        raise ValueError("skills_provider / skills_provider_factory require skills.enabled=True")
     planner._tool_search_config = tool_search_config
     planner._tool_examples_config = tool_examples_config
     planner._skills_config = skills_config
@@ -236,6 +247,13 @@ def init_react_planner(
                 "List available skills.",
             ),
         }
+        if skills_config.proposal.enabled:
+            skill_tools["skill_propose"] = (
+                skill_propose,
+                SkillProposeArgs,
+                SkillProposeResponse,
+                "Draft a skill playbook from freeform source material.",
+            )
         for name, (func, args_model, out_model, desc) in skill_tools.items():
             if any(spec.name == name for spec in specs):
                 continue
@@ -360,6 +378,11 @@ def init_react_planner(
             system_prompt_extra,
             prompts.render_skill_discovery_guidance(),
         )
+        if skills_config.proposal.enabled:
+            system_prompt_extra = prompts.merge_prompt_extras(
+                system_prompt_extra,
+                prompts.render_skill_proposal_guidance(),
+            )
 
     if planner._background_tasks.enabled and planner._background_tasks.include_prompt_guidance:
         system_prompt_extra = prompts.merge_prompt_extras(
@@ -453,22 +476,39 @@ def init_react_planner(
     planner._use_native_reasoning = use_native_reasoning
     planner._reasoning_effort = reasoning_effort
     if skills_config.enabled:
-        provider = LocalSkillProvider(skills_config)
-        planner._skills_provider = provider
-        pack_results = provider.load_packs()
-        for result in pack_results:
-            planner._emit_event(
-                PlannerEvent(
-                    event_type="skill_pack_loaded",
-                    ts=planner._time_source(),
-                    trajectory_step=0,
-                    extra={
-                        "pack_name": result.pack_name,
-                        "skill_count": result.skill_count,
-                        "updated_count": result.updated_count,
-                    },
+        local_provider: LocalSkillProvider | None = None
+        if skills_config.skill_packs:
+            local_provider = LocalSkillProvider(skills_config)
+            pack_results = local_provider.load_packs()
+            for result in pack_results:
+                planner._emit_event(
+                    PlannerEvent(
+                        event_type="skill_pack_loaded",
+                        ts=planner._time_source(),
+                        trajectory_step=0,
+                        extra={
+                            "pack_name": result.pack_name,
+                            "skill_count": result.skill_count,
+                            "updated_count": result.updated_count,
+                        },
+                    )
                 )
+
+        runtime_provider = skills_provider
+        if runtime_provider is None and skills_provider_factory is not None:
+            runtime_provider = skills_provider_factory(skills_config)
+
+        if runtime_provider is not None and local_provider is not None:
+            planner._skills_provider = CompositeSkillProvider(
+                [runtime_provider, local_provider],
+                config=skills_config,
             )
+        elif runtime_provider is not None:
+            planner._skills_provider = runtime_provider
+        elif local_provider is not None:
+            planner._skills_provider = local_provider
+        else:
+            planner._skills_provider = LocalSkillProvider(skills_config)
     from .llm import (
         _build_minimal_planner_schema,
         _build_planner_action_schema_conditional_finish,
