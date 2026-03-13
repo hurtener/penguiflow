@@ -4,8 +4,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
-from penguiflow.planner import PlannerEvent, PlannerPause
+from penguiflow.catalog import ToolLoadingMode, build_catalog, tool
+from penguiflow.node import Node
+from penguiflow.planner import PlannerEvent, PlannerPause, ReactPlanner, ToolSearchConfig
+from penguiflow.registry import ModelRegistry
 from penguiflow.sessions.models import TaskStatus, TaskType
 from penguiflow.sessions.planner import PlannerTaskPipeline
 from penguiflow.state.models import SteeringEvent, SteeringEventType, TaskContextSnapshot, TaskState
@@ -34,6 +38,19 @@ class _Steering:
     cancelled: bool = False
     cancel_reason: str = "cancelled"
     next_event: SteeringEvent | None = None
+
+    def has_event(self) -> bool:
+        return self.next_event is not None
+
+    def drain(self) -> list[SteeringEvent]:
+        if self.next_event is None:
+            return []
+        event = self.next_event
+        self.next_event = None
+        return [event]
+
+    async def wait_if_paused(self) -> None:
+        return None
 
     async def next(self) -> SteeringEvent:
         assert self.next_event is not None
@@ -64,6 +81,31 @@ class _StubPlanner:
 
     async def resume(self, *args: Any, **kwargs: Any) -> PlannerPause:  # noqa: ANN002, ANN003 - not exercised
         raise AssertionError("resume should not be called in these tests")
+
+
+class _EchoArgs(BaseModel):
+    text: str
+
+
+class _EchoOut(BaseModel):
+    text: str
+
+
+@tool(desc="Deferred echo tool.", loading_mode=ToolLoadingMode.DEFERRED)
+async def _deferred_echo(args: _EchoArgs, ctx: Any) -> _EchoOut:
+    del ctx
+    return _EchoOut(text=args.text)
+
+
+class _ScriptedClient:
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = list(responses)
+
+    async def complete(self, *, messages, response_format=None, stream=False, on_stream_chunk=None):  # type: ignore[no-untyped-def]
+        del messages, response_format, stream, on_stream_chunk
+        if not self._responses:
+            raise AssertionError("No scripted responses left")
+        return self._responses.pop(0), 0.0
 
 
 def _make_runtime(*, task_type: TaskType, steering: _Steering) -> _Runtime:
@@ -130,3 +172,50 @@ async def test_pipeline_raises_on_reject_event() -> None:
 
     with pytest.raises(SteeringCancelled, match="pause_rejected"):
         await pipeline(runtime)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_background_pipeline_parallel_can_activate_deferred_tool(tmp_path) -> None:
+    registry = ModelRegistry()
+    registry.register("deferred_echo", _EchoArgs, _EchoOut)
+    catalog = build_catalog(
+        [Node(_deferred_echo, name="deferred_echo")],
+        registry,
+        default_loading_mode=ToolLoadingMode.DEFERRED,
+    )
+
+    def _planner_factory() -> ReactPlanner:
+        return ReactPlanner(
+            llm_client=_ScriptedClient(
+                [
+                    '{"next_node":"parallel","args":{"steps":[{"node":"deferred_echo","args":{"text":"hello"}}]}}',
+                    '{"next_node":"final_response","args":{"answer":"done"}}',
+                ]
+            ),
+            catalog=catalog,
+            max_iters=2,
+            tool_search=ToolSearchConfig(
+                enabled=True,
+                cache_dir=str(tmp_path / "tool_cache_bg"),
+                default_loading_mode=ToolLoadingMode.DEFERRED,
+            ),
+        )
+
+    events: list[PlannerEvent] = []
+    runtime = _make_runtime(task_type=TaskType.BACKGROUND, steering=_Steering())
+    pipeline = PlannerTaskPipeline(
+        planner_factory=_planner_factory,
+        event_sink=lambda event, trace_id: events.append(event),  # noqa: ARG005
+    )
+
+    result = await pipeline(runtime)  # type: ignore[arg-type]
+
+    assert result.payload["raw_answer"] == "done"
+    assert any(
+        event.event_type == "tool_activated" and event.extra.get("tool_name") == "deferred_echo"
+        for event in events
+    )
+    assert any(
+        event.event_type == "tool_call_result" and event.extra.get("tool_name") == "deferred_echo"
+        for event in events
+    )

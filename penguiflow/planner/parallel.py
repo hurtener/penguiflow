@@ -76,6 +76,13 @@ async def execute_parallel_plan(
     for plan_item in plan:
         spec = planner._spec_by_name.get(plan_item.node)
         if spec is None:
+            # Deferred tools can be activated on first use in the single-action path.
+            # Apply the same activation behavior for parallel branches before setup validation fails.
+            from .react_runtime import _maybe_activate_tool
+
+            if _maybe_activate_tool(planner, plan_item.node, trajectory):
+                spec = planner._spec_by_name.get(plan_item.node)
+        if spec is None:
             validation_errors.append(prompts.render_invalid_node(plan_item.node, list(planner._spec_by_name.keys())))
             continue
         try:

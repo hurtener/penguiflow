@@ -21,7 +21,7 @@ from penguiflow.planner.models import BackgroundTasksConfig
 
 from .models import GroupReportStrategy, GroupStatus, MergeStrategy, TaskGroup, TaskStatus, TaskType
 from .planner import PlannerFactory, PlannerTaskPipeline
-from .session import SessionManager, TaskPipeline
+from .session import SessionManager, TaskPipeline, _json_snapshot_dict
 
 ContextDepth = Literal["full", "summary", "none"]
 SpawnMode = Literal["subagent", "job"]
@@ -356,8 +356,8 @@ class InProcessTaskService:
                 query=query,
                 propagate_on_cancel=propagate_on_cancel,
                 notify_on_complete=notify_on_complete,
-                llm_context=dict(llm_context),
-                tool_context=tool_context,
+                llm_context=_json_snapshot_dict(dict(llm_context)),
+                tool_context=_json_snapshot_dict(tool_context),
                 context_version=session.context_version,
                 context_hash=session.context_hash,
             )
@@ -623,8 +623,8 @@ class InProcessTaskService:
                 query=None,
                 propagate_on_cancel=propagate_on_cancel,
                 notify_on_complete=notify_on_complete,
-                llm_context=dict(llm_context),
-                tool_context=tool_context,
+                llm_context=_json_snapshot_dict(dict(llm_context)),
+                tool_context=_json_snapshot_dict(tool_context),
                 context_version=session.context_version,
                 context_hash=session.context_hash,
             )

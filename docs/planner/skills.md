@@ -15,6 +15,11 @@ Skills are designed for enterprise usage where you want:
 - reuse across agents without copying prompt text,
 - a safe way to expose internal process knowledge without adding new tools.
 
+They now support two authoring/delivery modes:
+
+- static local skill packs loaded into the SQLite store
+- runtime-provided skills supplied by the host app via Python APIs
+
 ## Non-goals / boundaries
 
 - Skills are not “tools”: they do not execute anything on their own.
@@ -29,13 +34,21 @@ Enable skills by passing `SkillsConfig(enabled=True, ...)` into `ReactPlanner(..
 
 - `ReactPlanner(..., skills=SkillsConfig(...))`
 
+Runtime-backed skills are also supported via Python-only extension points:
+
+- `ReactPlanner(..., skills_provider=my_provider)`
+- `ReactPlanner(..., skills_provider_factory=my_factory)`
+
 When enabled, ReactPlanner:
 
-- creates a `LocalSkillProvider`,
+- creates a `LocalSkillProvider` for configured packs,
+- optionally composes it with your runtime provider,
 - loads configured skill packs into a local SQLite skill store,
 - injects skill discovery guidance into the system prompt,
 - makes these always-visible tools available:
   - `skill_search`, `skill_get`, `skill_list`
+
+If `skills_provider` or `skills_provider_factory` is supplied and `skills` is omitted, PenguiFlow internally enables the skills subsystem with default settings. Passing a runtime provider while `skills.enabled=False` is a configuration error.
 
 ### Skills configuration: `SkillsConfig`
 
@@ -49,7 +62,39 @@ Key knobs (from `penguiflow.skills.models.SkillsConfig`):
 - `redact_pii`: redact PII in skill text before injection (recommended)
 - `skill_packs`: list of `SkillPackConfig(name, path, format?, scope_mode?, ...)`
 - `directory`: optional “known skills” directory rendering (useful for discoverability)
+- `proposal`: nested config for the opt-in `skill_propose` drafting tool
 - `scope_mode`: default scope for learned skills (packs can declare scope too)
+
+### Runtime providers
+
+Custom providers implement the `SkillProvider` protocol from `penguiflow.skills.provider`.
+
+- `skills_provider`: inject a concrete provider instance
+- `skills_provider_factory`: build a provider per planner instance/fork
+- if both a local pack provider and a runtime provider are configured, PenguiFlow composes them with deterministic precedence
+- runtime/custom provider entries win on skill-name collisions; local packs remain fallback
+
+This keeps host-controlled skill storage, tenancy, and review workflows outside the core planner while still exposing the standard skills tools and pre-flight retrieval flow.
+
+## Applicability filtering
+
+Skills can now declare optional applicability metadata:
+
+- `required_tool_names`
+- `required_namespaces`
+- `required_tags`
+
+These fields are enforced against the request’s allowed capability set, after tool policy / visibility filtering. A skill is considered applicable only if every populated requirement set is satisfied.
+
+Applicability filtering is applied consistently to:
+
+- pre-flight relevant-skill injection
+- `skill_search`
+- `skill_get`
+- `skill_list`
+- skill directory rendering
+
+This is useful for persona-style assistants where the skill should only appear when the matching capability is active, for example email skills that only surface when mail tools are allowed.
 
 ### Skill pack formats
 
@@ -80,6 +125,7 @@ Skill retrieval is **tool-aware**:
 
 - skill text can be redacted to avoid naming disallowed tools
 - if `tool_search` is available, skills can be rewritten to say “use tool_search” instead of naming a forbidden tool
+- applicability checks use allowed tools/namespaces/tags, including deferred-but-allowed tools
 
 This helps prevent capability leakage when tool visibility differs by tenant/user.
 
@@ -92,6 +138,24 @@ This helps prevent capability leakage when tool visibility differs by tenant/use
   - `tenant_id`, `project_id` (used by the provider’s scoping filter)
 - Enable the directory for discoverability in interactive UIs:
   - `SkillsDirectoryConfig(enabled=True, include_fields=["name","title","trigger"])`
+- Use runtime providers for per-user or per-persona skills; keep persistence and approval in the host app.
+
+## Drafting skills with `skill_propose`
+
+`skill_propose` is an opt-in built-in tool for drafting a structured skill from freeform source material.
+
+- enable it with `SkillsConfig(enabled=True, proposal={"enabled": True})`
+- it returns a typed draft payload only
+- it does not save, persist, or publish skills
+- persistence/review remains the responsibility of the host app
+
+Typical host workflow:
+
+1. user or agent gathers source material
+2. planner calls `skill_propose`
+3. host app reviews or stores the returned draft
+
+This keeps PenguiFlow’s default behavior safe and opt-in while still supporting agent-assisted skill authoring.
 
 ## Failure modes & recovery
 
@@ -104,6 +168,17 @@ This helps prevent capability leakage when tool visibility differs by tenant/use
 **Fix**
 
 - enable skills on the planner and ensure packs exist.
+
+### `skill_propose is not configured`
+
+**Likely cause**
+
+- `skills.proposal.enabled=False`
+
+**Fix**
+
+- enable proposal drafting explicitly:
+  - `SkillsConfig(enabled=True, proposal={"enabled": True})`
 
 ### Skill pack missing / empty
 
@@ -129,6 +204,7 @@ Useful planner events:
 - `skill_pack_loaded` (pack name, skill count)
 - `skills_retrieved` (count, token estimates, was_summarized)
 - `skill_search_query`, `skill_get`, `skill_list`
+- `skill_propose`
 - `skill_directory_rendered` (entry count)
 
 See **[Planner observability](observability.md)**.
@@ -138,6 +214,7 @@ See **[Planner observability](observability.md)**.
 - Treat skills as LLM-visible: never store secrets, credentials, or internal-only identifiers.
 - Scope skills per tenant/project when applicable (use `tenant_id`/`project_id` in `tool_context`).
 - Treat `cache_dir` as a data store (permissions, backups, and lifecycle matter if you have learned skills).
+- For runtime providers, enforce host-side ACLs before returning skills to the planner.
 
 ## Runnable example: load a temporary skill pack and call skill_search/skill_get
 

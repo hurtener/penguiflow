@@ -129,6 +129,7 @@ class Config:
     skills_directory_max_entries: int = {{ skills_directory_max_entries }}
     skills_directory_include_fields: list[str] = field(default_factory=lambda: {{ skills_directory_include_fields }})
     skills_directory_selection_strategy: str = "{{ skills_directory_selection_strategy }}"
+    skills_proposal_enabled: bool = {{ skills_proposal_enabled }}
     skills_skill_packs: list[dict[str, Any]] = field(default_factory=lambda: {{ skills_skill_packs }})
 
     # Artifact Store (binary/large text)
@@ -327,6 +328,10 @@ class Config:
             skills_directory_selection_strategy=_env_str(
                 "SKILLS_DIRECTORY_SELECTION_STRATEGY",
                 "{{ skills_directory_selection_strategy }}",
+            ),
+            skills_proposal_enabled=_env_flag(
+                "SKILLS_PROPOSAL_ENABLED",
+                {{ skills_proposal_enabled }},
             ),
 
             # Artifact Store (binary/large text)

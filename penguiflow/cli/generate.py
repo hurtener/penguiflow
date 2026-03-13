@@ -873,6 +873,7 @@ def _generate_config(
             "skills_directory_max_entries": int(skills.directory.max_entries),
             "skills_directory_include_fields": repr(list(skills.directory.include_fields)),
             "skills_directory_selection_strategy": skills.directory.selection_strategy,
+            "skills_proposal_enabled": bool(skills.proposal.enabled),
             "skills_skill_packs": repr([pack.model_dump() for pack in skills.skill_packs]),
             "artifact_store_enabled": bool(artifact_cfg.enabled),
             "artifact_store_ttl_seconds": artifact_retention.ttl_seconds,
