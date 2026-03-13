@@ -254,6 +254,7 @@ class LocalSkillStore:
         *,
         search_type: SkillSearchType,
         limit: int,
+        offset: int = 0,
         task_type: SkillTaskType | None,
         scope_clause: str,
         scope_params: Sequence[Any],
@@ -284,7 +285,9 @@ class LocalSkillStore:
             else:
                 results = _search_regex_exact(conn, cleaned_query, effective, task_type, scope_clause, scope_params)
         results = sorted(results, key=lambda item: (-float(item["score"]), len(item["name"]), item["name"]))
-        limited = results[: max(int(limit), 1)]
+        start = max(int(offset), 0)
+        end = start + max(int(limit), 1)
+        limited = results[start:end]
         output = [
             {
                 "name": item["name"],

@@ -26,6 +26,7 @@ from .models import (
     SkillSearchResponse,
     SkillSearchResult,
     SkillSearchType,
+    SkillTaskType,
 )
 from .pack_loader import SkillPackLoader
 from .redaction import redact_pii, redact_tool_references
@@ -105,6 +106,10 @@ def _build_scope_filter(tool_context: Mapping[str, object]) -> tuple[str, list[o
     return " OR ".join(parts), params
 
 
+def _namespace_from_tool_name(tool_name: str) -> str:
+    return tool_name.split(".", 1)[0] if "." in tool_name else "core"
+
+
 def build_skill_capability_context(
     *,
     execution_specs: Mapping[str, object] | None = None,
@@ -123,10 +128,7 @@ def build_skill_capability_context(
     allowed_namespaces: set[str] = set()
     allowed_tool_tags: set[str] = set()
     for tool_name in allowed_names:
-        if "." in tool_name:
-            allowed_namespaces.add(tool_name.split(".", 1)[0])
-        else:
-            allowed_namespaces.add(tool_name)
+        allowed_namespaces.add(_namespace_from_tool_name(tool_name))
         if execution_specs is None:
             continue
         spec = execution_specs.get(tool_name)
@@ -405,6 +407,69 @@ class LocalSkillProvider:
     ) -> list[SkillRecord]:
         return [record for record in records if _skill_is_applicable(record, capability_context)]
 
+    def _search_records(
+        self,
+        *,
+        query: str,
+        search_type: SkillSearchType,
+        limit: int,
+        task_type: SkillTaskType | None,
+        scope_clause: str,
+        scope_params: Sequence[object],
+        offset: int = 0,
+    ) -> tuple[list[SkillRecord], SkillSearchType]:
+        results, effective = self._store.search(
+            query,
+            search_type=search_type,
+            limit=limit,
+            offset=offset,
+            task_type=task_type,
+            scope_clause=scope_clause,
+            scope_params=scope_params,
+        )
+        names = [item["name"] for item in results]
+        records = self._store.get_by_name(names, scope_clause=scope_clause, scope_params=scope_params)
+        return records, cast(SkillSearchType, effective)
+
+    def _collect_applicable_search_records(
+        self,
+        *,
+        query: str,
+        search_type: SkillSearchType,
+        target_count: int,
+        task_type: SkillTaskType | None,
+        scope_clause: str,
+        scope_params: Sequence[object],
+        capability_context: SkillCapabilityContext | None,
+    ) -> tuple[list[SkillRecord], SkillSearchType]:
+        batch_size = max(int(target_count), 1)
+        offset = 0
+        effective = cast(SkillSearchType, search_type)
+        collected: list[SkillRecord] = []
+        seen: set[str] = set()
+        while len(collected) < target_count:
+            records, effective = self._search_records(
+                query=query,
+                search_type=effective,
+                limit=batch_size,
+                offset=offset,
+                task_type=task_type,
+                scope_clause=scope_clause,
+                scope_params=scope_params,
+            )
+            if not records:
+                break
+            applicable = self._applicable_records(records, capability_context)
+            for record in applicable:
+                if record.name in seen:
+                    continue
+                seen.add(record.name)
+                collected.append(record)
+                if len(collected) >= target_count:
+                    break
+            offset += batch_size
+        return collected[:target_count], effective
+
     async def get_relevant(
         self,
         query: SkillQuery,
@@ -413,18 +478,15 @@ class LocalSkillProvider:
         capability_context: SkillCapabilityContext | None = None,
     ) -> RetrievalResponse:
         scope_clause, scope_params = _build_scope_filter(tool_context)
-        results, effective = self._store.search(
-            query.task,
+        applicable, effective = self._collect_applicable_search_records(
+            query=query.task,
             search_type=query.search_type,
-            limit=query.top_k,
+            target_count=query.top_k,
             task_type=query.task_type,
             scope_clause=scope_clause,
             scope_params=scope_params,
+            capability_context=capability_context,
         )
-        effective = cast(SkillSearchType, effective)
-        names = [item["name"] for item in results]
-        records = self._store.get_by_name(names, scope_clause=scope_clause, scope_params=scope_params)
-        applicable = self._applicable_records(records, capability_context)
         disallowed, tool_search_allowed = _tool_redaction_sets(capability_context)
         detailed = [
             _redact_skill(
@@ -463,20 +525,61 @@ class LocalSkillProvider:
         results, effective = self._store.search(
             query.query,
             search_type=query.search_type,
-            limit=query.limit,
+            limit=max(query.limit, 1),
             task_type=query.task_type,
             scope_clause=scope_clause,
             scope_params=scope_params,
         )
         effective = cast(SkillSearchType, effective)
-        names = [item["name"] for item in results]
-        applicable_names = {
-            record.name
-            for record in self._applicable_records(
-                self._store.get_by_name(names, scope_clause=scope_clause, scope_params=scope_params),
-                capability_context,
+        if capability_context is not None:
+            applicable_records, effective = self._collect_applicable_search_records(
+                query=query.query,
+                search_type=effective,
+                target_count=query.limit,
+                task_type=query.task_type,
+                scope_clause=scope_clause,
+                scope_params=scope_params,
+                capability_context=capability_context,
             )
-        }
+            applicable_names = {record.name for record in applicable_records}
+            if applicable_names:
+                results, effective = self._store.search(
+                    query.query,
+                    search_type=effective,
+                    limit=max(query.limit, 1),
+                    task_type=query.task_type,
+                    scope_clause=scope_clause,
+                    scope_params=scope_params,
+                )
+                filtered_results = [item for item in results if item["name"] in applicable_names]
+                if len(filtered_results) < len(applicable_names):
+                    offset = len(results)
+                    while len(filtered_results) < len(applicable_names):
+                        batch, effective = self._store.search(
+                            query.query,
+                            search_type=effective,
+                            limit=max(query.limit, 1),
+                            offset=offset,
+                            task_type=query.task_type,
+                            scope_clause=scope_clause,
+                            scope_params=scope_params,
+                        )
+                        if not batch:
+                            break
+                        filtered_results.extend(item for item in batch if item["name"] in applicable_names)
+                        offset += len(batch)
+                results = filtered_results[: query.limit]
+            else:
+                results = []
+        else:
+            names = [item["name"] for item in results]
+            applicable_names = {
+                record.name
+                for record in self._applicable_records(
+                    self._store.get_by_name(names, scope_clause=scope_clause, scope_params=scope_params),
+                    capability_context,
+                )
+            }
         disallowed, tool_search_allowed = _tool_redaction_sets(capability_context)
         payload = [
             SkillSearchResult(
@@ -533,25 +636,30 @@ class LocalSkillProvider:
         capability_context: SkillCapabilityContext | None = None,
     ) -> SkillListResponse:
         scope_clause, scope_params = _build_scope_filter(tool_context)
-        records, total = self._store.list(
-            page=req.page,
-            page_size=req.page_size,
-            task_type=req.task_type,
-            origin=req.origin,
-            scope_clause=scope_clause,
-            scope_params=scope_params,
-        )
-        if capability_context is not None:
-            all_records, _ = self._store.list(
-                page=1,
-                page_size=max(total, req.page * req.page_size),
+        if capability_context is None:
+            records, total = self._store.list(
+                page=req.page,
+                page_size=req.page_size,
                 task_type=req.task_type,
                 origin=req.origin,
                 scope_clause=scope_clause,
                 scope_params=scope_params,
             )
-            total = len(self._applicable_records(all_records, capability_context))
-        applicable = self._applicable_records(records, capability_context)
+            applicable = records
+        else:
+            all_records, total = self._store.list(
+                page=1,
+                page_size=1_000_000,
+                task_type=req.task_type,
+                origin=req.origin,
+                scope_clause=scope_clause,
+                scope_params=scope_params,
+            )
+            applicable_records = self._applicable_records(all_records, capability_context)
+            total = len(applicable_records)
+            start = (max(req.page, 1) - 1) * max(req.page_size, 1)
+            end = start + max(req.page_size, 1)
+            applicable = applicable_records[start:end]
         disallowed, tool_search_allowed = _tool_redaction_sets(capability_context)
         entries = [
             SkillListEntry(

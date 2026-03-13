@@ -222,3 +222,114 @@ def test_build_skill_capability_context_preserves_explicit_empty_allowlist() -> 
     assert context.allowed_tool_names == set()
     assert context.allowed_namespaces == set()
     assert context.allowed_tool_tags == set()
+
+
+def test_build_skill_capability_context_maps_bare_tools_to_core_namespace() -> None:
+    context = build_skill_capability_context(
+        execution_specs={
+            "tool_search": type("Spec", (), {"tags": ()})(),
+            "skill_get": type("Spec", (), {"tags": ()})(),
+        },
+        allowed_tool_names={"tool_search", "skill_get"},
+    )
+
+    assert context.allowed_namespaces == {"core"}
+
+
+@pytest.mark.asyncio
+async def test_provider_get_relevant_fetches_past_inapplicable_top_k(tmp_path: Path) -> None:
+    config = SkillsConfig(enabled=True, cache_dir=str(tmp_path), redact_pii=False)
+    store = LocalSkillStore(db_path=tmp_path / "skills.db")
+    provider = LocalSkillProvider(config, store=store)
+    store.upsert_pack_skill(
+        SkillDefinition(
+            name="alpha.inapplicable.one",
+            trigger="Triage email alpha",
+            steps=["Open inbox"],
+            required_tool_names=["mail.search"],
+        ),
+        pack_name="core",
+        scope_mode="project",
+        update_existing=True,
+    )
+    store.upsert_pack_skill(
+        SkillDefinition(
+            name="alpha.inapplicable.two",
+            trigger="Triage email alpha",
+            steps=["Open inbox again"],
+            required_tool_names=["mail.search"],
+        ),
+        pack_name="core",
+        scope_mode="project",
+        update_existing=True,
+    )
+    store.upsert_pack_skill(
+        SkillDefinition(
+            name="alpha.applicable.three",
+            trigger="Triage email alpha",
+            steps=["Use the built-in mailbox summary flow"],
+            required_tool_names=["tool_search"],
+        ),
+        pack_name="core",
+        scope_mode="project",
+        update_existing=True,
+    )
+
+    capability_context = build_skill_capability_context(
+        execution_specs={
+            "mail.search": type("Spec", (), {"tags": ("email",)})(),
+            "tool_search": type("Spec", (), {"tags": ()})(),
+        },
+        allowed_tool_names={"tool_search"},
+    )
+
+    response = await provider.get_relevant(
+        SkillQuery(task="triage email alpha", top_k=1, search_type="regex"),
+        tool_context={"project_id": "proj"},
+        capability_context=capability_context,
+    )
+
+    assert [skill.name for skill in response.skills] == ["alpha.applicable.three"]
+
+
+@pytest.mark.asyncio
+async def test_provider_list_paginates_after_applicability_filtering(tmp_path: Path) -> None:
+    config = SkillsConfig(enabled=True, cache_dir=str(tmp_path), redact_pii=False)
+    store = LocalSkillStore(db_path=tmp_path / "skills.db")
+    provider = LocalSkillProvider(config, store=store)
+    for name in ("alpha.inapplicable.one", "alpha.inapplicable.two", "beta.applicable.one", "beta.applicable.two"):
+        required_tool_names = ["tool_search"] if name.startswith("beta") else ["mail.search"]
+        store.upsert_pack_skill(
+            SkillDefinition(
+                name=name,
+                trigger=f"Handle {name}",
+                steps=["Run the flow"],
+                required_tool_names=required_tool_names,
+            ),
+            pack_name="core",
+            scope_mode="project",
+            update_existing=True,
+        )
+
+    capability_context = build_skill_capability_context(
+        execution_specs={
+            "mail.search": type("Spec", (), {"tags": ("email",)})(),
+            "tool_search": type("Spec", (), {"tags": ()})(),
+        },
+        allowed_tool_names={"tool_search"},
+    )
+
+    page_one = await provider.list(
+        SkillListRequest(page=1, page_size=2),
+        tool_context={"project_id": "proj"},
+        capability_context=capability_context,
+    )
+    page_two = await provider.list(
+        SkillListRequest(page=2, page_size=1),
+        tool_context={"project_id": "proj"},
+        capability_context=capability_context,
+    )
+
+    assert [entry.name for entry in page_one.skills] == ["beta.applicable.one", "beta.applicable.two"]
+    assert page_one.total == 2
+    assert [entry.name for entry in page_two.skills] == ["beta.applicable.two"]
