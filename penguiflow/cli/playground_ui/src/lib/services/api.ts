@@ -5,7 +5,13 @@ import type {
   TrajectoryPayload,
   ArtifactRef,
   ComponentRegistryPayload,
-  TaskState
+  TaskState,
+  TraceSummary,
+  EvalDatasetExportResponse,
+  EvalDatasetLoadResponse,
+  EvalRunResponse,
+  EvalDatasetBrowseEntry,
+  EvalMetricBrowseEntry
 } from '$lib/types';
 import type { Result } from '$lib/utils/result';
 
@@ -298,4 +304,107 @@ export async function applyContextPatch(
     return false;
   }
   return Boolean(result.data.ok);
+}
+
+export async function listTraces(limit = 50): Promise<TraceSummary[] | null> {
+  const result = await fetchWithErrorHandling<TraceSummary[]>(`${BASE_URL}/traces?limit=${encodeURIComponent(String(limit))}`);
+  if (!result.ok) {
+    console.error('traces list failed', result.error);
+    return null;
+  }
+  return result.data;
+}
+
+export async function setTraceTags(
+  traceId: string,
+  sessionId: string,
+  add: string[] = [],
+  remove: string[] = []
+): Promise<TraceSummary | null> {
+  const result = await fetchWithErrorHandling<TraceSummary>(`${BASE_URL}/traces/${encodeURIComponent(traceId)}/tags`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, add, remove })
+  });
+  if (!result.ok) {
+    console.error('set trace tags failed', result.error);
+    return null;
+  }
+  return result.data;
+}
+
+export async function exportEvalDataset(params: {
+  include_tags: string[];
+  output_dir: string;
+  redaction_profile?: string;
+  exclude_tags?: string[];
+  limit?: number;
+}): Promise<EvalDatasetExportResponse | null> {
+  const result = await fetchWithErrorHandling<EvalDatasetExportResponse>(`${BASE_URL}/eval/datasets/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      selector: {
+        include_tags: params.include_tags,
+        exclude_tags: params.exclude_tags ?? [],
+        limit: params.limit ?? 0
+      },
+      output_dir: params.output_dir,
+      redaction_profile: params.redaction_profile ?? 'internal_safe'
+    })
+  });
+  if (!result.ok) {
+    console.error('eval dataset export failed', result.error);
+    return null;
+  }
+  return result.data;
+}
+
+export async function listEvalDatasets(): Promise<EvalDatasetBrowseEntry[] | null> {
+  const result = await fetchWithErrorHandling<EvalDatasetBrowseEntry[]>(`${BASE_URL}/eval/datasets/browse`);
+  if (!result.ok) {
+    console.error('eval dataset browse failed', result.error);
+    return null;
+  }
+  return result.data;
+}
+
+export async function listEvalMetrics(): Promise<EvalMetricBrowseEntry[] | null> {
+  const result = await fetchWithErrorHandling<EvalMetricBrowseEntry[]>(`${BASE_URL}/eval/metrics/browse`);
+  if (!result.ok) {
+    console.error('eval metric browse failed', result.error);
+    return null;
+  }
+  return result.data;
+}
+
+export async function loadEvalDataset(datasetPath: string): Promise<EvalDatasetLoadResponse | null> {
+  const result = await fetchWithErrorHandling<EvalDatasetLoadResponse>(`${BASE_URL}/eval/datasets/load`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dataset_path: datasetPath })
+  });
+  if (!result.ok) {
+    console.error('eval dataset load failed', result.error);
+    return null;
+  }
+  return result.data;
+}
+
+export async function runEval(payload: {
+  dataset_path: string;
+  metric_spec: string;
+  min_test_score?: number;
+  max_cases?: number;
+}): Promise<EvalRunResponse | null> {
+  const result = await fetchWithErrorHandling<EvalRunResponse>(`${BASE_URL}/eval/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!result.ok) {
+    console.error('eval run failed', result.error);
+    return null;
+  }
+  return result.data;
 }

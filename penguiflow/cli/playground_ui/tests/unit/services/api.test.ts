@@ -7,7 +7,14 @@ import {
   fetchTrajectory,
   extractFilename,
   downloadArtifact,
-  getArtifactMeta
+  getArtifactMeta,
+  listTraces,
+  setTraceTags,
+  exportEvalDataset,
+  loadEvalDataset,
+  runEval,
+  listEvalDatasets,
+  listEvalMetrics
 } from '$lib/services/api';
 
 describe('api service', () => {
@@ -459,6 +466,170 @@ describe('api service', () => {
       const result = await getArtifactMeta('artifact-123', 'session-456');
 
       expect(result).toBeNull();
+    });
+  });
+
+  describe('eval trace tagging api', () => {
+    it('lists traces successfully', async () => {
+      const mockData = [
+        { trace_id: 'trace-1', session_id: 'session-1', tags: ['dataset:alpha'] }
+      ];
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockData)
+      });
+
+      const result = await listTraces(25);
+
+      expect(fetch).toHaveBeenCalledWith('/traces?limit=25');
+      expect(result).toEqual(mockData);
+    });
+
+    it('sets trace tags successfully', async () => {
+      const mockData = { trace_id: 'trace-1', session_id: 'session-1', tags: ['dataset:alpha'] };
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockData)
+      });
+
+      const result = await setTraceTags('trace-1', 'session-1', ['dataset:alpha'], ['split:test']);
+
+      expect(fetch).toHaveBeenCalledWith('/traces/trace-1/tags', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: 'session-1', add: ['dataset:alpha'], remove: ['split:test'] })
+      });
+      expect(result).toEqual(mockData);
+    });
+
+    it('lists eval datasets successfully', async () => {
+      const mockData = [
+        { path: 'example_app/evals/policy/dataset.jsonl', label: 'policy/dataset.jsonl', is_default: true }
+      ];
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockData)
+      });
+
+      const result = await listEvalDatasets();
+
+      expect(fetch).toHaveBeenCalledWith('/eval/datasets/browse');
+      expect(result).toEqual(mockData);
+    });
+
+    it('returns null when browsing datasets fails', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: false });
+
+      const result = await listEvalDatasets();
+
+      expect(result).toBeNull();
+    });
+
+    it('lists eval metrics successfully', async () => {
+      const mockData = [
+        {
+          metric_spec: 'example_app.evals.metrics:policy_metric',
+          label: 'policy_metric',
+          source_spec_path: 'example_app/evals/policy/evaluate.spec.json'
+        }
+      ];
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockData)
+      });
+
+      const result = await listEvalMetrics();
+
+      expect(fetch).toHaveBeenCalledWith('/eval/metrics/browse');
+      expect(result).toEqual(mockData);
+    });
+
+    it('returns null when browsing metrics fails', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: false });
+
+      const result = await listEvalMetrics();
+
+      expect(result).toBeNull();
+    });
+
+    it('exports eval dataset successfully', async () => {
+      const mockData = {
+        trace_count: 2,
+        dataset_path: '/tmp/project/out/dataset.jsonl',
+        manifest_path: '/tmp/project/out/manifest.json'
+      };
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockData)
+      });
+
+      const result = await exportEvalDataset({
+        include_tags: ['dataset:alpha'],
+        output_dir: 'eval/dataset_a'
+      });
+
+      expect(fetch).toHaveBeenCalledWith('/eval/datasets/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          selector: { include_tags: ['dataset:alpha'], exclude_tags: [], limit: 0 },
+          output_dir: 'eval/dataset_a',
+          redaction_profile: 'internal_safe'
+        })
+      });
+      expect(result).toEqual(mockData);
+    });
+
+    it('loads eval dataset summary successfully', async () => {
+      const mockData = {
+        dataset_path: '/tmp/project/out/dataset.jsonl',
+        counts: { total: 2, by_split: { val: 1, test: 1 } },
+        examples: []
+      };
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockData)
+      });
+
+      const result = await loadEvalDataset('eval/dataset_a');
+
+      expect(fetch).toHaveBeenCalledWith('/eval/datasets/load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dataset_path: 'eval/dataset_a' })
+      });
+      expect(result).toEqual(mockData);
+    });
+
+    it('runs eval successfully', async () => {
+      const mockData = {
+        run_id: 'abc123',
+        counts: { total: 1, val: 1, test: 0 },
+        min_test_score: null,
+        passed_threshold: true,
+        cases: []
+      };
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockData)
+      });
+
+      const result = await runEval({
+        dataset_path: 'eval/dataset_a',
+        metric_spec: 'my_metric:score',
+        min_test_score: 0.7
+      });
+
+      expect(fetch).toHaveBeenCalledWith('/eval/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataset_path: 'eval/dataset_a',
+          metric_spec: 'my_metric:score',
+          min_test_score: 0.7
+        })
+      });
+      expect(result).toEqual(mockData);
     });
   });
 });

@@ -30,7 +30,11 @@ except Exception:  # pragma: no cover - optional dependency
 from penguiflow.cli.generate import run_generate
 from penguiflow.cli.spec import Spec, load_spec
 from penguiflow.cli.spec_errors import SpecValidationError
-from penguiflow.planner import PlannerEvent
+from penguiflow.evals.api import TraceSelector as EvalTraceSelector
+from penguiflow.evals.api import ensure_project_on_sys_path
+from penguiflow.evals.api import export_dataset as export_eval_dataset
+from penguiflow.evals.api import resolve_callable, wrap_metric
+from penguiflow.planner import PlannerEvent, Trajectory
 from penguiflow.sessions import (
     MergeStrategy,
     PlannerTaskPipeline,
@@ -79,6 +83,7 @@ from .playground_wrapper import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+EVAL_RUN_HARD_MAX_CASES = 200
 
 
 class PlaygroundError(RuntimeError):
@@ -211,6 +216,90 @@ class ComponentRegistryPayload(BaseModel):
     enabled: bool
     allowlist: list[str]
     components: dict[str, Any]
+
+
+class TraceSummaryPayload(BaseModel):
+    trace_id: str
+    session_id: str
+    tags: list[str] = Field(default_factory=list)
+
+
+class TraceTagsRequest(BaseModel):
+    session_id: str
+    add: list[str] = Field(default_factory=list)
+    remove: list[str] = Field(default_factory=list)
+
+
+class EvalDatasetSelectorPayload(BaseModel):
+    include_tags: list[str] = Field(default_factory=list)
+    exclude_tags: list[str] = Field(default_factory=list)
+    limit: int = 0
+
+
+class EvalDatasetExportRequest(BaseModel):
+    selector: EvalDatasetSelectorPayload | None = None
+    output_dir: str
+    redaction_profile: str = "internal_safe"
+
+
+class EvalDatasetExportResponse(BaseModel):
+    trace_count: int
+    dataset_path: str
+    manifest_path: str
+
+
+class EvalDatasetLoadRequest(BaseModel):
+    dataset_path: str
+
+
+class EvalDatasetExamplePayload(BaseModel):
+    example_id: str
+    split: str
+    question: str
+
+
+class EvalDatasetLoadResponse(BaseModel):
+    dataset_path: str
+    manifest_path: str | None = None
+    counts: dict[str, Any]
+    examples: list[EvalDatasetExamplePayload]
+
+
+class EvalDatasetBrowseEntry(BaseModel):
+    path: str
+    label: str
+    is_default: bool = False
+
+
+class EvalMetricBrowseEntry(BaseModel):
+    metric_spec: str
+    label: str
+    source_spec_path: str
+
+
+class EvalRunRequest(BaseModel):
+    dataset_path: str
+    metric_spec: str
+    min_test_score: float | None = None
+    max_cases: int | None = Field(default=None, ge=1)
+
+
+class EvalRunCasePayload(BaseModel):
+    example_id: str
+    split: str
+    score: float
+    feedback: str | None = None
+    pred_trace_id: str
+    pred_session_id: str
+    question: str
+
+
+class EvalRunResponse(BaseModel):
+    run_id: str
+    counts: dict[str, int]
+    min_test_score: float | None = None
+    passed_threshold: bool
+    cases: list[EvalRunCasePayload]
 
 
 class AguiResumeRequest(BaseModel):
@@ -643,11 +732,51 @@ def _find_builders(module: Any) -> list[Callable[..., Any]]:
     return []
 
 
-def discover_agent(project_root: Path | None = None) -> DiscoveryResult:
+def _discover_agent_with_package(*, base_dir: Path, agent_package: str) -> DiscoveryResult:
+    modules, import_errors = _import_modules(agent_package)
+    cfg_factory = _config_factory(agent_package)
+
+    orchestrator_matches: list[DiscoveryResult] = []
+    planner_matches: list[DiscoveryResult] = []
+    for module in modules:
+        for orchestrator in _find_orchestrators(module):
+            orchestrator_matches.append(
+                DiscoveryResult(
+                    kind="orchestrator",
+                    target=orchestrator,
+                    package=agent_package,
+                    module=module.__name__,
+                    config_factory=cfg_factory,
+                )
+            )
+        for builder in _find_builders(module):
+            planner_matches.append(
+                DiscoveryResult(
+                    kind="planner",
+                    target=builder,
+                    package=agent_package,
+                    module=module.__name__,
+                    config_factory=cfg_factory,
+                )
+            )
+
+    if orchestrator_matches:
+        return orchestrator_matches[0]
+    if planner_matches:
+        return planner_matches[0]
+
+    hint = "; ".join(import_errors) if import_errors else "no orchestrator or planner entry points found"
+    raise PlaygroundError(f"Could not discover agent package {agent_package!r} in {base_dir}: {hint}")
+
+
+def discover_agent(project_root: Path | None = None, *, agent_package: str | None = None) -> DiscoveryResult:
     """Locate an agent entry point within the provided project directory."""
 
     base_dir = Path(project_root or Path.cwd()).resolve()
     _ensure_sys_path(base_dir)
+    if agent_package:
+        return _discover_agent_with_package(base_dir=base_dir, agent_package=agent_package)
+
     packages = _candidate_packages(base_dir)
     errors: list[str] = []
     orchestrators: list[DiscoveryResult] = []
@@ -759,6 +888,7 @@ def load_agent(
     *,
     state_store: PlaygroundStateStore | None = None,
     session_manager: Any | None = None,
+    agent_package: str | None = None,
 ) -> tuple[AgentWrapper, DiscoveryResult]:
     """Discover and wrap the first available agent entry point.
 
@@ -770,7 +900,7 @@ def load_agent(
             the same instance will be used for both UI endpoints and orchestrator.
     """
 
-    result = discover_agent(project_root)
+    result = discover_agent(project_root, agent_package=agent_package)
     config = result.config_factory() if result.config_factory else None
     state_store = state_store or InMemoryStateStore()
 
@@ -815,6 +945,7 @@ def create_playground_app(
     *,
     agent: AgentWrapper | None = None,
     state_store: PlaygroundStateStore | None = None,
+    agent_package: str | None = None,
 ) -> FastAPI:
     """Create the FastAPI playground app."""
 
@@ -825,7 +956,8 @@ def create_playground_app(
     session_limits = SessionLimits()
     planner_factory: Callable[[], Any] | None = None
     ui_dir = Path(__file__).resolve().parent / "playground_ui" / "dist"
-    spec_payload, parsed_spec = _load_spec_payload(Path(project_root or ".").resolve())
+    resolved_project_root = Path(project_root or ".").resolve()
+    spec_payload, parsed_spec = _load_spec_payload(resolved_project_root)
     meta_payload = _meta_from_spec(parsed_spec)
 
     # Determine session_store first so we can create SessionManager before load_agent.
@@ -847,7 +979,12 @@ def create_playground_app(
 
     # Now load the agent, passing the shared SessionManager
     if agent_wrapper is None:
-        agent_wrapper, discovery = load_agent(project_root, state_store=store, session_manager=session_manager)
+        agent_wrapper, discovery = load_agent(
+            project_root,
+            state_store=store,
+            session_manager=session_manager,
+            agent_package=agent_package,
+        )
         planner_factory = _build_planner_factory(discovery, state_store=store)
     else:
         planner_factory = None
@@ -1918,6 +2055,353 @@ def create_playground_app(
         payload["trace_id"] = trace_id
         payload["session_id"] = session_id
         return payload
+
+    @app.get("/traces", response_model=list[TraceSummaryPayload])
+    async def list_traces(limit: int = 50) -> list[TraceSummaryPayload]:
+        if store is None:
+            raise HTTPException(status_code=500, detail="State store is not configured")
+        list_trace_refs = getattr(store, "list_trace_refs", None)
+        if list_trace_refs is None:
+            raise HTTPException(status_code=501, detail="Trace listing is not supported")
+
+        refs = await list_trace_refs(limit=limit)
+        get_trajectory = getattr(store, "get_trajectory", None)
+
+        payloads: list[TraceSummaryPayload] = []
+        for ref in refs:
+            trace_id = str(ref.get("trace_id") or "")
+            session_id = str(ref.get("session_id") or "")
+            if not trace_id or not session_id:
+                continue
+
+            tags: list[str] = []
+            if get_trajectory is not None:
+                trajectory = await get_trajectory(trace_id, session_id)
+                if trajectory is not None:
+                    tags_raw = trajectory.metadata.get("tags", [])
+                    if isinstance(tags_raw, list):
+                        tags = sorted({str(tag).strip() for tag in tags_raw if str(tag).strip()})
+
+            payloads.append(TraceSummaryPayload(trace_id=trace_id, session_id=session_id, tags=tags))
+        return payloads
+
+    @app.post("/traces/{trace_id}/tags", response_model=TraceSummaryPayload)
+    async def set_trace_tags(trace_id: str, request: TraceTagsRequest) -> TraceSummaryPayload:
+        if store is None:
+            raise HTTPException(status_code=500, detail="State store is not configured")
+        list_trace_refs = getattr(store, "list_trace_refs", None)
+        if list_trace_refs is None:
+            raise HTTPException(status_code=501, detail="Trace listing is not supported")
+
+        refs = await list_trace_refs(limit=0)
+        trace_ref = next((ref for ref in refs if ref.get("trace_id") == trace_id), None)
+        if trace_ref is None:
+            raise HTTPException(status_code=404, detail="Trace not found for tagging")
+
+        trace_session_id = str(trace_ref.get("session_id") or "")
+        if trace_session_id != request.session_id:
+            raise HTTPException(status_code=404, detail="Trace not found for tagging")
+
+        get_trajectory = getattr(store, "get_trajectory", None)
+        save_trajectory = getattr(store, "save_trajectory", None)
+        if get_trajectory is None or save_trajectory is None:
+            raise HTTPException(status_code=501, detail="Trajectory tagging is not supported")
+
+        trajectory = await get_trajectory(trace_id, request.session_id)
+        if trajectory is None:
+            raise HTTPException(status_code=404, detail="Trajectory not found for tagging")
+
+        existing_raw = trajectory.metadata.get("tags", [])
+        tags = (
+            {str(tag).strip() for tag in existing_raw if str(tag).strip()} if isinstance(existing_raw, list) else set()
+        )
+        tags.update(str(tag).strip() for tag in request.add if str(tag).strip())
+        tags.difference_update(str(tag).strip() for tag in request.remove if str(tag).strip())
+        normalized_tags = sorted(tags)
+
+        trajectory.metadata["tags"] = normalized_tags
+        await save_trajectory(trace_id, request.session_id, trajectory)
+        return TraceSummaryPayload(
+            trace_id=trace_id,
+            session_id=request.session_id,
+            tags=normalized_tags,
+        )
+
+    @app.get("/eval/datasets/browse", response_model=list[EvalDatasetBrowseEntry])
+    async def browse_eval_datasets() -> list[EvalDatasetBrowseEntry]:
+        evals_root = (
+            (resolved_project_root / Path(agent_package) / "evals").resolve()
+            if agent_package
+            else (resolved_project_root / "evals").resolve()
+        )
+        if evals_root != resolved_project_root and resolved_project_root not in evals_root.parents:
+            return []
+        if not evals_root.exists() or not evals_root.is_dir():
+            return []
+
+        entries: list[EvalDatasetBrowseEntry] = []
+        for dataset_path in sorted(evals_root.rglob("*.jsonl")):
+            if not dataset_path.is_file():
+                continue
+            try:
+                rel_project = dataset_path.relative_to(resolved_project_root)
+                rel_label = dataset_path.relative_to(evals_root)
+            except ValueError:
+                continue
+            entries.append(
+                EvalDatasetBrowseEntry(
+                    path=rel_project.as_posix(),
+                    label=rel_label.as_posix(),
+                    is_default=dataset_path.name == "dataset.jsonl",
+                )
+            )
+        entries.sort(key=lambda entry: (entry.label, entry.path))
+        return entries
+
+    @app.get("/eval/metrics/browse", response_model=list[EvalMetricBrowseEntry])
+    async def browse_eval_metrics() -> list[EvalMetricBrowseEntry]:
+        evals_root = (
+            (resolved_project_root / Path(agent_package) / "evals").resolve()
+            if agent_package
+            else (resolved_project_root / "evals").resolve()
+        )
+        if evals_root != resolved_project_root and resolved_project_root not in evals_root.parents:
+            return []
+        if not evals_root.exists() or not evals_root.is_dir():
+            return []
+
+        entries_by_metric: dict[str, EvalMetricBrowseEntry] = {}
+        for spec_path in sorted(evals_root.rglob("evaluate.spec.json")):
+            if not spec_path.is_file():
+                continue
+            try:
+                raw = json.loads(spec_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+            metric_spec = raw.get("metric_spec")
+            if not isinstance(metric_spec, str) or ":" not in metric_spec:
+                continue
+            try:
+                rel_spec = spec_path.relative_to(resolved_project_root)
+            except ValueError:
+                continue
+            metric_label = metric_spec.split(":")[-1]
+            if metric_spec in entries_by_metric:
+                continue
+            entries_by_metric[metric_spec] = EvalMetricBrowseEntry(
+                metric_spec=metric_spec,
+                label=metric_label,
+                source_spec_path=rel_spec.as_posix(),
+            )
+
+        return sorted(entries_by_metric.values(), key=lambda entry: entry.label)
+
+    @app.post("/eval/datasets/export", response_model=EvalDatasetExportResponse)
+    async def export_eval_dataset_bundle(request: EvalDatasetExportRequest) -> EvalDatasetExportResponse:
+        if store is None:
+            raise HTTPException(status_code=500, detail="State store is not configured")
+
+        output_dir = Path(request.output_dir)
+        if not output_dir.is_absolute():
+            output_dir = (resolved_project_root / output_dir).resolve()
+        else:
+            output_dir = output_dir.resolve()
+
+        if output_dir != resolved_project_root and resolved_project_root not in output_dir.parents:
+            raise HTTPException(status_code=400, detail="output_dir must be under project root")
+
+        selector = request.selector or EvalDatasetSelectorPayload()
+        export_result = await export_eval_dataset(
+            state_store=store,
+            output_dir=output_dir,
+            selector=EvalTraceSelector(
+                include_tags=tuple(selector.include_tags),
+                exclude_tags=tuple(selector.exclude_tags),
+                limit=selector.limit,
+            ),
+            redaction_profile=request.redaction_profile,
+        )
+        return EvalDatasetExportResponse(
+            trace_count=int(export_result["trace_count"]),
+            dataset_path=str(export_result["dataset_path"]),
+            manifest_path=str(export_result["manifest_path"]),
+        )
+
+    @app.post("/eval/datasets/load", response_model=EvalDatasetLoadResponse)
+    async def load_eval_dataset(request: EvalDatasetLoadRequest) -> EvalDatasetLoadResponse:
+        raw_path = Path(request.dataset_path)
+        if not raw_path.is_absolute():
+            raw_path = (resolved_project_root / raw_path).resolve()
+        else:
+            raw_path = raw_path.resolve()
+
+        if raw_path != resolved_project_root and resolved_project_root not in raw_path.parents:
+            raise HTTPException(status_code=400, detail="dataset_path must be under project root")
+
+        if raw_path.is_dir():
+            dataset_path = raw_path / "dataset.jsonl"
+            manifest_path = raw_path / "manifest.json"
+        else:
+            dataset_path = raw_path
+            manifest_path = raw_path.parent / "manifest.json"
+
+        if not dataset_path.exists() or not dataset_path.is_file():
+            raise HTTPException(status_code=404, detail="dataset.jsonl not found")
+
+        rows: list[dict[str, Any]] = []
+        counts_by_split: dict[str, int] = {}
+        with dataset_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                payload = json.loads(stripped)
+                if not isinstance(payload, dict):
+                    continue
+                rows.append(payload)
+                split = str(payload.get("split") or "unknown")
+                counts_by_split[split] = counts_by_split.get(split, 0) + 1
+
+        examples = [
+            EvalDatasetExamplePayload(
+                example_id=str(row.get("example_id") or ""),
+                split=str(row.get("split") or "unknown"),
+                question=str(row.get("question") or ""),
+            )
+            for row in rows
+        ]
+
+        resolved_manifest: str | None = str(manifest_path) if manifest_path.exists() else None
+        return EvalDatasetLoadResponse(
+            dataset_path=str(dataset_path),
+            manifest_path=resolved_manifest,
+            counts={"total": len(rows), "by_split": counts_by_split},
+            examples=examples,
+        )
+
+    @app.post("/eval/run", response_model=EvalRunResponse)
+    async def run_eval(request: EvalRunRequest) -> EvalRunResponse:
+        raw_path = Path(request.dataset_path)
+        if not raw_path.is_absolute():
+            raw_path = (resolved_project_root / raw_path).resolve()
+        else:
+            raw_path = raw_path.resolve()
+
+        if raw_path != resolved_project_root and resolved_project_root not in raw_path.parents:
+            raise HTTPException(status_code=400, detail="dataset_path must be under project root")
+
+        dataset_path = (raw_path / "dataset.jsonl") if raw_path.is_dir() else raw_path
+        if not dataset_path.exists() or not dataset_path.is_file():
+            raise HTTPException(status_code=404, detail="dataset.jsonl not found")
+
+        ensure_project_on_sys_path(resolved_project_root)
+        metric = wrap_metric(resolve_callable(request.metric_spec))
+
+        rows: list[dict[str, Any]] = []
+        for line in dataset_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            payload = json.loads(stripped)
+            if isinstance(payload, dict):
+                rows.append(payload)
+
+        effective_max_cases = EVAL_RUN_HARD_MAX_CASES
+        if request.max_cases is not None:
+            effective_max_cases = min(request.max_cases, EVAL_RUN_HARD_MAX_CASES)
+        rows = rows[:effective_max_cases]
+
+        run_id = secrets.token_hex(8)
+        pred_session_id = f"eval:{run_id}"
+        counts = {"total": len(rows), "val": 0, "test": 0}
+        test_scores: list[float] = []
+        cases: list[EvalRunCasePayload] = []
+
+        save_trajectory = getattr(store, "save_trajectory", None) if store is not None else None
+
+        for row in rows:
+            split = str(row.get("split") or "unknown")
+            if split == "val":
+                counts["val"] += 1
+            elif split == "test":
+                counts["test"] += 1
+
+            question = str(row.get("question") or "")
+            gold_trace = row.get("gold_trace")
+            inputs = gold_trace.get("inputs") if isinstance(gold_trace, Mapping) else {}
+            llm_context = inputs.get("llm_context") if isinstance(inputs, Mapping) else {}
+            tool_context = inputs.get("tool_context") if isinstance(inputs, Mapping) else {}
+            llm_context_dict = dict(llm_context) if isinstance(llm_context, Mapping) else {}
+            tool_context_dict = dict(tool_context) if isinstance(tool_context, Mapping) else {}
+
+            chat_result = await agent_wrapper.chat(
+                question,
+                session_id=pred_session_id,
+                llm_context=llm_context_dict,
+                tool_context=tool_context_dict,
+            )
+
+            if save_trajectory is not None:
+                trajectory = Trajectory(query=question, llm_context=llm_context_dict, tool_context=tool_context_dict)
+                trajectory.metadata["answer"] = chat_result.answer
+                await save_trajectory(chat_result.trace_id, pred_session_id, trajectory)
+
+            raw_score = metric(
+                gold_trace,
+                chat_result.answer,
+                gold_trace,
+                "baseline",
+                {
+                    "trace_id": chat_result.trace_id,
+                    "session_id": pred_session_id,
+                },
+            )
+            score = 0.0
+            feedback: str | None = None
+            if isinstance(raw_score, dict):
+                score_value = raw_score.get("score", 0.0)
+                if isinstance(score_value, (int, float)) and not isinstance(score_value, bool):
+                    score = float(score_value)
+                elif isinstance(score_value, bool):
+                    score = 1.0 if score_value else 0.0
+                feedback_raw = raw_score.get("feedback")
+                feedback = str(feedback_raw) if feedback_raw is not None else None
+            elif isinstance(raw_score, bool):
+                score = 1.0 if raw_score else 0.0
+            elif isinstance(raw_score, (int, float)):
+                score = float(raw_score)
+
+            if split == "test":
+                test_scores.append(score)
+
+            cases.append(
+                EvalRunCasePayload(
+                    example_id=str(row.get("example_id") or ""),
+                    split=split,
+                    score=score,
+                    feedback=feedback,
+                    pred_trace_id=chat_result.trace_id,
+                    pred_session_id=pred_session_id,
+                    question=question,
+                )
+            )
+
+        cases.sort(key=lambda item: item.score)
+
+        test_score = (sum(test_scores) / len(test_scores)) if test_scores else None
+        passed_threshold = True
+        if request.min_test_score is not None and test_score is not None:
+            passed_threshold = test_score >= request.min_test_score
+
+        return EvalRunResponse(
+            run_id=run_id,
+            counts=counts,
+            min_test_score=request.min_test_score,
+            passed_threshold=passed_threshold,
+            cases=cases,
+        )
 
     # ─── Artifact Endpoints ───────────────────────────────────────────────────
 

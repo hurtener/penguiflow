@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -14,6 +15,7 @@ from penguiflow.artifacts import ArtifactScope, InMemoryArtifactStore
 from penguiflow.cli.playground import create_playground_app
 from penguiflow.cli.playground_state import InMemoryStateStore
 from penguiflow.cli.playground_wrapper import AgentWrapper, ChatResult
+from penguiflow.planner import Trajectory
 
 
 class MockAgentWrapper(AgentWrapper):
@@ -517,6 +519,110 @@ class TestAguiResumeEndpoint:
         assert response.text
 
 
+class TestTracesEndpoint:
+    """Tests for /traces endpoint."""
+
+    def test_list_traces_returns_newest_first_with_limit(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        store = InMemoryStateStore()
+        asyncio.run(store.save_trajectory("trace-old", "session-a", Trajectory(query="old")))
+        asyncio.run(store.save_trajectory("trace-new", "session-b", Trajectory(query="new")))
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/traces", params={"limit": 1})
+        assert response.status_code == 200
+        assert response.json() == [{"trace_id": "trace-new", "session_id": "session-b", "tags": []}]
+
+    def test_list_traces_reads_tags_from_trajectory_metadata(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        store = InMemoryStateStore()
+        seeded = Trajectory(query="seeded")
+        seeded.metadata["tags"] = ["dataset:alpha", "split:test"]
+        asyncio.run(store.save_trajectory("trace-seeded", "session-a", seeded))
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/traces")
+        assert response.status_code == 200
+        assert response.json() == [
+            {
+                "trace_id": "trace-seeded",
+                "session_id": "session-a",
+                "tags": ["dataset:alpha", "split:test"],
+            }
+        ]
+
+    def test_tag_trace_persists_into_trace_listing(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        store = InMemoryStateStore()
+        asyncio.run(store.save_trajectory("trace-1", "session-a", Trajectory(query="seed")))
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        tag_response = client.post(
+            "/traces/trace-1/tags",
+            json={"session_id": "session-a", "add": ["policy", "urgent", "policy"]},
+        )
+        assert tag_response.status_code == 200
+        assert tag_response.json() == {"trace_id": "trace-1", "session_id": "session-a", "tags": ["policy", "urgent"]}
+
+        list_response = client.get("/traces")
+        assert list_response.status_code == 200
+        assert list_response.json() == [
+            {"trace_id": "trace-1", "session_id": "session-a", "tags": ["policy", "urgent"]}
+        ]
+
+        stored = asyncio.run(store.get_trajectory("trace-1", "session-a"))
+        assert stored is not None
+        assert stored.metadata["tags"] == ["policy", "urgent"]
+
+    def test_tag_trace_preserves_existing_metadata(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        store = InMemoryStateStore()
+        seeded = Trajectory(query="seed")
+        seeded.metadata["owner"] = "qa"
+        seeded.metadata["tags"] = ["legacy", "split:test"]
+        asyncio.run(store.save_trajectory("trace-1", "session-a", seeded))
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/traces/trace-1/tags",
+            json={"session_id": "session-a", "add": ["dataset:alpha"], "remove": ["legacy"]},
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "trace_id": "trace-1",
+            "session_id": "session-a",
+            "tags": ["dataset:alpha", "split:test"],
+        }
+
+        stored = asyncio.run(store.get_trajectory("trace-1", "session-a"))
+        assert stored is not None
+        assert stored.metadata["owner"] == "qa"
+        assert stored.metadata["tags"] == ["dataset:alpha", "split:test"]
+
+    def test_tag_unknown_trace_returns_404(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        store = InMemoryStateStore()
+        asyncio.run(store.save_trajectory("trace-1", "session-a", Trajectory(query="seed")))
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/traces/trace-missing/tags",
+            json={"session_id": "session-a", "add": ["policy"]},
+        )
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Trace not found for tagging"}
+
+
 class TestTrajectoryEndpoint:
     """Tests for /trajectory endpoint (lines 944-954)."""
 
@@ -541,6 +647,314 @@ class TestTrajectoryEndpoint:
         response = client.get("/trajectory/unknown-trace", params={"session_id": "test-session"})
         assert response.status_code == 404
         assert "Trajectory not found" in response.json()["detail"]
+
+
+class TestEvalDatasetExportEndpoint:
+    """Tests for /eval/datasets/export endpoint."""
+
+    def test_export_dataset_from_tag_selector(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        store = InMemoryStateStore()
+
+        selected = Trajectory(query="selected-question")
+        selected.metadata["tags"] = ["dataset:alpha", "split:test"]
+        asyncio.run(store.save_trajectory("trace-selected", "session-a", selected))
+
+        unselected = Trajectory(query="unselected-question")
+        unselected.metadata["tags"] = ["dataset:beta", "split:test"]
+        asyncio.run(store.save_trajectory("trace-unselected", "session-a", unselected))
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/eval/datasets/export",
+            json={
+                "selector": {"include_tags": ["dataset:alpha"]},
+                "output_dir": "playground_eval/dataset_a",
+                "redaction_profile": "internal_safe",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["trace_count"] == 1
+
+        dataset_path = Path(payload["dataset_path"])
+        manifest_path = Path(payload["manifest_path"])
+        assert dataset_path.exists()
+        assert manifest_path.exists()
+
+        rows = [json.loads(line) for line in dataset_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert len(rows) == 1
+        assert rows[0]["example_id"] == "trace-selected"
+
+
+class TestEvalDatasetLoadEndpoint:
+    """Tests for /eval/datasets/load endpoint."""
+
+    def test_load_dataset_summary(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=InMemoryStateStore())
+        client = TestClient(app, raise_server_exceptions=False)
+
+        dataset_dir = tmp_path / "fixtures" / "dataset"
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        dataset_path = dataset_dir / "dataset.jsonl"
+        manifest_path = dataset_dir / "manifest.json"
+        dataset_path.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "example_id": "ex-1",
+                            "split": "val",
+                            "question": "first question",
+                            "gold_trace": {"inputs": {}},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "example_id": "ex-2",
+                            "split": "test",
+                            "question": "second question",
+                            "gold_trace": {"inputs": {}},
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        manifest_path.write_text(json.dumps({"version": 1}), encoding="utf-8")
+
+        response = client.post("/eval/datasets/load", json={"dataset_path": "fixtures/dataset"})
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["counts"] == {"total": 2, "by_split": {"test": 1, "val": 1}}
+        assert payload["examples"] == [
+            {"example_id": "ex-1", "split": "val", "question": "first question"},
+            {"example_id": "ex-2", "split": "test", "question": "second question"},
+        ]
+
+
+class TestEvalDatasetBrowseEndpoint:
+    """Tests for /eval/datasets/browse endpoint."""
+
+    def test_browse_returns_only_app_eval_jsonl(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+
+        app_root = tmp_path / "example_app"
+        evals_dir = app_root / "evals" / "policy"
+        evals_dir.mkdir(parents=True, exist_ok=True)
+        (evals_dir / "dataset.jsonl").write_text("{}\n", encoding="utf-8")
+        (evals_dir / "notes.txt").write_text("ignore", encoding="utf-8")
+
+        other_dir = tmp_path / "other" / "evals"
+        other_dir.mkdir(parents=True, exist_ok=True)
+        (other_dir / "dataset.jsonl").write_text("{}\n", encoding="utf-8")
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, agent_package="example_app")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/eval/datasets/browse")
+        assert response.status_code == 200
+        payload = response.json()
+
+        assert payload == [
+            {
+                "path": "example_app/evals/policy/dataset.jsonl",
+                "label": "policy/dataset.jsonl",
+                "is_default": True,
+            }
+        ]
+
+
+class TestEvalMetricBrowseEndpoint:
+    """Tests for /eval/metrics/browse endpoint."""
+
+    def test_browse_metrics_from_eval_specs(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+
+        app_root = tmp_path / "example_app"
+        evals_dir = app_root / "evals" / "policy"
+        evals_dir.mkdir(parents=True, exist_ok=True)
+        (evals_dir / "evaluate.spec.json").write_text(
+            json.dumps(
+                {
+                    "dataset_path": "example_app/evals/policy/dataset/dataset.jsonl",
+                    "metric_spec": "example_app.evals.metrics:policy_metric",
+                }
+            ),
+            encoding="utf-8",
+        )
+        other_dir = app_root / "evals" / "security"
+        other_dir.mkdir(parents=True, exist_ok=True)
+        (other_dir / "evaluate.spec.json").write_text(
+            json.dumps(
+                {
+                    "dataset_path": "example_app/evals/security/dataset/dataset.jsonl",
+                    "metric_spec": "example_app.evals.metrics:policy_metric",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, agent_package="example_app")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/eval/metrics/browse")
+        assert response.status_code == 200
+        payload = response.json()
+
+        assert payload == [
+            {
+                "metric_spec": "example_app.evals.metrics:policy_metric",
+                "label": "policy_metric",
+                "source_spec_path": "example_app/evals/policy/evaluate.spec.json",
+            }
+        ]
+
+
+class TestEvalRunEndpoint:
+    """Tests for /eval/run endpoint."""
+
+    @staticmethod
+    def _write_eval_metric(tmp_path: Path) -> None:
+        metric_file = tmp_path / "eval_metric.py"
+        metric_file.write_text(
+            "def score(gold, pred, trace=None, pred_name=None, pred_trace=None):\n"
+            "    return {'score': 0.75, 'feedback': 'looks good'}\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _write_dataset(tmp_path: Path, questions: list[str]) -> None:
+        dataset_dir = tmp_path / "fixtures" / "dataset"
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        rows = [
+            json.dumps(
+                {
+                    "example_id": f"ex-{index + 1}",
+                    "split": "val",
+                    "question": question,
+                    "gold_trace": {"inputs": {"llm_context": {"tenant": "t-1"}, "tool_context": {"scope": "x"}}},
+                }
+            )
+            for index, question in enumerate(questions)
+        ]
+        (dataset_dir / "dataset.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    def test_eval_run_returns_cases_with_prediction_trace_refs(self, tmp_path: Path) -> None:
+        self._write_eval_metric(tmp_path)
+        self._write_dataset(tmp_path, ["what is policy"])
+
+        store = InMemoryStateStore()
+        wrapper = MockAgentWrapper(
+            chat_result=ChatResult(
+                trace_id="pred-trace-1",
+                session_id="ignored-by-endpoint",
+                answer="policy answer",
+                metadata={"steps": 1},
+                pause=None,
+            )
+        )
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/eval/run",
+            json={"dataset_path": "fixtures/dataset", "metric_spec": "eval_metric:score", "min_test_score": 0.5},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["counts"] == {"total": 1, "val": 1, "test": 0}
+        assert len(payload["cases"]) == 1
+        case = payload["cases"][0]
+        assert case["example_id"] == "ex-1"
+        assert case["split"] == "val"
+        assert case["score"] == 0.75
+        assert case["feedback"] == "looks good"
+        assert case["pred_trace_id"] == "pred-trace-1"
+        assert case["pred_session_id"].startswith("eval:")
+        assert case["question"] == "what is policy"
+
+    def test_eval_run_applies_default_hard_max_cases_cap(self, tmp_path: Path) -> None:
+        self._write_eval_metric(tmp_path)
+        self._write_dataset(tmp_path, [f"question {index}" for index in range(205)])
+
+        store = InMemoryStateStore()
+        wrapper = MockAgentWrapper(
+            chat_result=ChatResult(
+                trace_id="pred-trace-1",
+                session_id="ignored-by-endpoint",
+                answer="policy answer",
+                metadata={"steps": 1},
+                pause=None,
+            )
+        )
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/eval/run",
+            json={"dataset_path": "fixtures/dataset", "metric_spec": "eval_metric:score"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["counts"] == {"total": 200, "val": 200, "test": 0}
+        assert len(payload["cases"]) == 200
+
+    def test_eval_run_clamps_max_cases_above_hard_cap(self, tmp_path: Path) -> None:
+        self._write_eval_metric(tmp_path)
+        self._write_dataset(tmp_path, [f"question {index}" for index in range(205)])
+
+        store = InMemoryStateStore()
+        wrapper = MockAgentWrapper(
+            chat_result=ChatResult(
+                trace_id="pred-trace-1",
+                session_id="ignored-by-endpoint",
+                answer="policy answer",
+                metadata={"steps": 1},
+                pause=None,
+            )
+        )
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/eval/run",
+            json={"dataset_path": "fixtures/dataset", "metric_spec": "eval_metric:score", "max_cases": 1000},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["counts"] == {"total": 200, "val": 200, "test": 0}
+        assert len(payload["cases"]) == 200
+
+    def test_eval_run_rejects_non_positive_max_cases(self, tmp_path: Path) -> None:
+        self._write_eval_metric(tmp_path)
+        self._write_dataset(tmp_path, ["what is policy"])
+
+        store = InMemoryStateStore()
+        wrapper = MockAgentWrapper(
+            chat_result=ChatResult(
+                trace_id="pred-trace-1",
+                session_id="ignored-by-endpoint",
+                answer="policy answer",
+                metadata={"steps": 1},
+                pause=None,
+            )
+        )
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/eval/run",
+            json={"dataset_path": "fixtures/dataset", "metric_spec": "eval_metric:score", "max_cases": 0},
+        )
+
+        assert response.status_code == 422
 
 
 class TestArtifactEndpoints:
@@ -611,11 +1025,14 @@ class TestListArtifactsEndpoint:
         app = create_playground_app(project_root=tmp_path, agent=wrapper)
         client = TestClient(app, raise_server_exceptions=False)
 
-        response = client.get("/artifacts", params={
-            "session_id": "sess-1",
-            "tenant_id": "t-1",
-            "user_id": "u-1",
-        })
+        response = client.get(
+            "/artifacts",
+            params={
+                "session_id": "sess-1",
+                "tenant_id": "t-1",
+                "user_id": "u-1",
+            },
+        )
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1

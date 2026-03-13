@@ -236,3 +236,32 @@ def test_load_agent_injects_state_store_into_planner_builder(tmp_path: Path) -> 
     planner_module = sys.modules.get(f"{package_name}.planner")
     assert planner_module is not None
     assert planner_module.received_state_store is sentinel
+
+
+def test_discovery_selects_explicit_agent_package(tmp_path: Path) -> None:
+    src_dir = tmp_path / "src"
+
+    pkg_a = src_dir / "agent_a"
+    pkg_a.mkdir(parents=True)
+    (pkg_a / "__init__.py").write_text("", encoding="utf-8")
+    (pkg_a / "orchestrator.py").write_text(
+        "class AgentAOrchestrator:\n"
+        "    async def execute(self, query, *, tenant_id, user_id, session_id):\n"
+        "        return type('R', (), {'answer': query, 'trace_id': 'a', 'metadata': {}})()\n",
+        encoding="utf-8",
+    )
+
+    pkg_b = src_dir / "agent_b"
+    pkg_b.mkdir(parents=True)
+    (pkg_b / "__init__.py").write_text("", encoding="utf-8")
+    (pkg_b / "orchestrator.py").write_text(
+        "class AgentBOrchestrator:\n"
+        "    async def execute(self, query, *, tenant_id, user_id, session_id):\n"
+        "        return type('R', (), {'answer': query, 'trace_id': 'b', 'metadata': {}})()\n",
+        encoding="utf-8",
+    )
+
+    discovery = discover_agent(tmp_path, agent_package="agent_b")
+    assert discovery.kind == "orchestrator"
+    assert discovery.package == "agent_b"
+    assert discovery.target.__name__ == "AgentBOrchestrator"

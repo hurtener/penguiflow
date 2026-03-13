@@ -101,11 +101,16 @@ def init(
     help="Port to bind the playground server.",
 )
 @click.option(
+    "--agent-package",
+    default=None,
+    help="Explicit agent package to discover under project root.",
+)
+@click.option(
     "--no-browser",
     is_flag=True,
     help="Do not open the browser automatically.",
 )
-def dev(project_root: str, host: str, port: int, no_browser: bool) -> None:
+def dev(project_root: str, host: str, port: int, agent_package: str | None, no_browser: bool) -> None:
     """Launch the playground backend + UI for a project.
 
     IMPORTANT: The playground runs in penguiflow's Python environment, not the
@@ -129,6 +134,7 @@ def dev(project_root: str, host: str, port: int, no_browser: bool) -> None:
             host=host,
             port=port,
             open_browser=not no_browser,
+            agent_package=agent_package,
         )
     except DevCLIError as e:
         click.echo(f"✗ {e.message}", err=True)

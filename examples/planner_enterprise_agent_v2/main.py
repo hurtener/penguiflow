@@ -96,9 +96,11 @@ class EnterpriseAgentOrchestrator:
         config: AgentConfig,
         *,
         telemetry: AgentTelemetry | None = None,
+        state_store: Any | None = None,
     ) -> None:
         self.config = config
         self.telemetry = telemetry or AgentTelemetry(config)
+        self._state_store = state_store
 
         # Configure logging
         logging.basicConfig(
@@ -298,11 +300,15 @@ class EnterpriseAgentOrchestrator:
                 extra={"hints": planning_hints},
             )
 
-        # V2: Configure state store for durable pause/resume
-        state_store = None
-        if self.config.state_store_enabled:
-            # In production, use Redis, SQLite, or other durable backend
-            # For now, we'll pass None to use in-memory storage
+        # V2: Configure state store for durable pause/resume.
+        # Prefer injected store (e.g. playground/dev), fallback to config behavior.
+        state_store = self._state_store
+        if state_store is not None:
+            self.telemetry.logger.info(
+                "state_store_injected",
+                extra={"backend": type(state_store).__name__},
+            )
+        elif self.config.state_store_enabled:
             self.telemetry.logger.info(
                 "state_store_enabled",
                 extra={"backend": self.config.state_store_backend},
@@ -379,6 +385,8 @@ When context is provided, use it appropriately to enhance your responses.
         *,
         tenant_id: str = "default",
         memories: list[dict[str, Any]] | None = None,
+        session_id: str | None = None,
+        tool_context: Mapping[str, Any] | None = None,
     ) -> FinalAnswer:
         """Execute agent planning for a user query.
 
@@ -404,7 +412,10 @@ When context is provided, use it appropriately to enhance your responses.
             ... ]
             >>> result = await agent.execute("What was deployed?", memories=memories)
         """
-        trace_id = uuid4().hex
+        incoming_tool_context = dict(tool_context or {})
+        resolved_tenant_id = str(incoming_tool_context.get("tenant_id") or tenant_id)
+        resolved_session_id = str(incoming_tool_context.get("session_id") or session_id or "default")
+        trace_id = str(incoming_tool_context.get("trace_id") or uuid4().hex)
         status_history: list[StatusUpdate] = STATUS_BUFFER[trace_id]
         status_history_for_llm: list[dict[str, Any]] = []
 
@@ -447,17 +458,20 @@ When context is provided, use it appropriately to enhance your responses.
             llm_context["memories"] = memories
 
         # Node metadata - internal concerns only
-        tool_context: dict[str, Any] = {
-            "tenant_id": tenant_id,
+        planner_tool_context: dict[str, Any] = {
+            "tenant_id": resolved_tenant_id,
+            "session_id": resolved_session_id,
             "trace_id": trace_id,
             "status_publisher": publish_status,
             "telemetry": self.telemetry,
             "status_logger": self.telemetry.logger,
         }
+        if "user_id" in incoming_tool_context:
+            planner_tool_context["user_id"] = incoming_tool_context["user_id"]
 
         self.telemetry.logger.info(
             "execute_start",
-            extra={"query": query, "tenant_id": tenant_id, "trace_id": trace_id},
+            extra={"query": query, "tenant_id": resolved_tenant_id, "trace_id": trace_id},
         )
 
         finish: FinalAnswer | None = None
@@ -466,7 +480,7 @@ When context is provided, use it appropriately to enhance your responses.
             planner_result = await self._planner.run(
                 query=query,
                 llm_context=llm_context,
-                tool_context=tool_context,
+                tool_context=planner_tool_context,
             )
 
             if isinstance(planner_result, PlannerPause):
@@ -492,6 +506,9 @@ When context is provided, use it appropriately to enhance your responses.
                 metadata.setdefault("trace_id", trace_id)
                 if planner_meta:
                     metadata.setdefault("planner", planner_meta)
+                    answer_action_seq = planner_meta.get("answer_action_seq")
+                    if isinstance(answer_action_seq, int):
+                        metadata.setdefault("answer_action_seq", answer_action_seq)
                 final_answer = final_answer.model_copy(update={"metadata": metadata})
                 self.telemetry.logger.info(
                     "execute_success",
@@ -560,7 +577,7 @@ When context is provided, use it appropriately to enhance your responses.
                 "execute_error",
                 extra={
                     "query": query,
-                    "tenant_id": tenant_id,
+                    "tenant_id": resolved_tenant_id,
                     "trace_id": trace_id,
                     "error_class": exc.__class__.__name__,
                     "error_message": str(exc),
