@@ -1,56 +1,149 @@
+<script module lang="ts">
+  import type { EvalDatasetLoadResponse, EvalRunResponse } from '$lib/types';
+
+  type PersistedEvalState = {
+    datasetPath: string;
+    runMetricSpec: string;
+    runMinTestScore: string;
+    runMaxCases: string;
+    loadResult: EvalDatasetLoadResponse | null;
+    runResult: EvalRunResponse | null;
+    lastReviewedExample: string | null;
+    reviewedExampleIds: string[];
+    activeFilter: 'all' | 'failures' | 'reviewed' | 'val' | 'test';
+  };
+
+  const persistedEvalState: PersistedEvalState = {
+    datasetPath: '',
+    runMetricSpec: '',
+    runMinTestScore: '0.8',
+    runMaxCases: '50',
+    loadResult: null,
+    runResult: null,
+    lastReviewedExample: null,
+    reviewedExampleIds: [],
+    activeFilter: 'all'
+  };
+
+  export function resetPersistedEvalState(): void {
+    persistedEvalState.datasetPath = '';
+    persistedEvalState.runMetricSpec = '';
+    persistedEvalState.runMinTestScore = '0.8';
+    persistedEvalState.runMaxCases = '50';
+    persistedEvalState.loadResult = null;
+    persistedEvalState.runResult = null;
+    persistedEvalState.lastReviewedExample = null;
+    persistedEvalState.reviewedExampleIds = [];
+    persistedEvalState.activeFilter = 'all';
+  }
+</script>
+
 <script lang="ts">
   import { onMount } from 'svelte';
   import {
-    exportEvalDataset,
     fetchTrajectory,
     listEvalDatasets,
     listEvalMetrics,
     loadEvalDataset,
     runEval
   } from '$lib/services/api';
-  import { getTrajectoryStore } from '$lib/stores';
+  import { getSessionStore, getTrajectoryStore } from '$lib/stores';
   import type {
     EvalDatasetBrowseEntry,
-    EvalDatasetExportResponse,
-    EvalDatasetLoadResponse,
-    EvalMetricBrowseEntry,
-    EvalRunResponse
+    EvalMetricBrowseEntry
   } from '$lib/types';
 
-  interface Props {
-    onReviewTrace?: (traceId: string, sessionId: string, exampleId: string) => Promise<void> | void;
-  }
+  interface Props {}
 
-  let { onReviewTrace }: Props = $props();
+  let {}: Props = $props();
 
   const trajectoryStore = getTrajectoryStore();
+  const sessionStore = (() => {
+    try {
+      const store = getSessionStore();
+      if (store) {
+        return store;
+      }
+    } catch {
+    }
+    return {
+      activeTraceId: null as string | null
+    };
+  })();
 
-  let exportIncludeTags = $state('split:val');
-  let exportExcludeTags = $state('');
-  let exportOutputDir = $state('examples/evals/policy_compliance_v1/dataset');
-  let exportLimit = $state('0');
-  let exportResult = $state<EvalDatasetExportResponse | null>(null);
-  let exportError = $state<string | null>(null);
-  let datasetPath = $state('');
-  let loadResult = $state<EvalDatasetLoadResponse | null>(null);
+  let datasetPath = $state(persistedEvalState.datasetPath);
+  let loadResult = $state<EvalDatasetLoadResponse | null>(persistedEvalState.loadResult);
   let loadError = $state<string | null>(null);
   let datasetBrowse = $state<EvalDatasetBrowseEntry[]>([]);
   let datasetBrowseError = $state<string | null>(null);
   let metricBrowse = $state<EvalMetricBrowseEntry[]>([]);
   let metricBrowseError = $state<string | null>(null);
-  let runMetricSpec = $state('');
-  let runMinTestScore = $state('0.8');
-  let runMaxCases = $state('50');
+  let runMetricSpec = $state(persistedEvalState.runMetricSpec);
+  let runMinTestScore = $state(persistedEvalState.runMinTestScore);
+  let runMaxCases = $state(persistedEvalState.runMaxCases);
   let runError = $state<string | null>(null);
-  let runResult = $state<EvalRunResponse | null>(null);
+  let runResult = $state<EvalRunResponse | null>(persistedEvalState.runResult);
   let isRunning = $state(false);
   let openTraceErrorByExample = $state<Record<string, string>>({});
   let openTraceLoadingByExample = $state<Record<string, boolean>>({});
-  let lastReviewedExample = $state<string | null>(null);
+  let lastReviewedExample = $state<string | null>(persistedEvalState.lastReviewedExample);
+  let reviewedExampleIds = $state<string[]>(persistedEvalState.reviewedExampleIds);
+  let activeFilter = $state<'all' | 'failures' | 'reviewed' | 'val' | 'test'>(persistedEvalState.activeFilter);
 
   const sortedCases = $derived.by(() => {
     if (!runResult) return [];
     return [...runResult.cases].sort((a, b) => a.score - b.score);
+  });
+
+  const evalThreshold = $derived.by(() => runResult?.min_test_score ?? 0.8);
+
+  function getSeverity(score: number): 'critical' | 'warning' | 'ok' {
+    if (score < 0.5) return 'critical';
+    if (score < evalThreshold) return 'warning';
+    return 'ok';
+  }
+
+  const filteredCases = $derived.by(() => {
+    if (activeFilter === 'all') return sortedCases;
+    if (activeFilter === 'failures') {
+      return sortedCases.filter((caseRow) => caseRow.score < evalThreshold);
+    }
+    if (activeFilter === 'reviewed') {
+      return sortedCases.filter((caseRow) => reviewedExampleIds.includes(caseRow.example_id));
+    }
+    if (activeFilter === 'val') {
+      return sortedCases.filter((caseRow) => caseRow.split === 'val');
+    }
+    return sortedCases.filter((caseRow) => caseRow.split === 'test');
+  });
+
+  const filterCounts = $derived.by(() => {
+    const failures = sortedCases.filter((caseRow) => caseRow.score < evalThreshold).length;
+    const reviewed = sortedCases.filter((caseRow) => reviewedExampleIds.includes(caseRow.example_id)).length;
+    const val = sortedCases.filter((caseRow) => caseRow.split === 'val').length;
+    const test = sortedCases.filter((caseRow) => caseRow.split === 'test').length;
+    return {
+      all: sortedCases.length,
+      failures,
+      reviewed,
+      val,
+      test
+    };
+  });
+
+  const canRun = $derived(Boolean(datasetPath.trim()) && Boolean(runMetricSpec.trim()) && !isRunning);
+
+  const statusLine = $derived.by(() => {
+    if (isRunning) return 'Running evaluation...';
+    if (runError) return runError;
+    if (loadError) return loadError;
+    if (runResult) {
+      return `Run ${runResult.run_id}: ${runResult.counts.total} cases, threshold ${runResult.passed_threshold ? 'passed' : 'failed'}.`;
+    }
+    if (loadResult) {
+      return `Loaded ${loadResult.counts.total} examples from ${loadResult.dataset_path}.`;
+    }
+    return 'Select a dataset and metric to run evaluation.';
   });
 
   async function loadDatasetBrowse(): Promise<void> {
@@ -62,6 +155,12 @@
       return;
     }
     datasetBrowse = entries;
+    if (!datasetPath) {
+      const preferred = entries.find((entry) => entry.is_default) ?? entries[0];
+      if (preferred) {
+        await selectDatasetPath(preferred.path);
+      }
+    }
   }
 
   async function loadMetricBrowse(): Promise<void> {
@@ -73,86 +172,40 @@
       return;
     }
     metricBrowse = entries;
-    const firstMetric = entries.at(0);
-    if (!runMetricSpec && firstMetric) {
-      runMetricSpec = firstMetric.metric_spec;
+    if (!runMetricSpec && entries[0]) {
+      runMetricSpec = entries[0].metric_spec;
     }
-  }
-
-  onMount(async () => {
-    await Promise.all([loadDatasetBrowse(), loadMetricBrowse()]);
-  });
-
-  function splitCsv(input: string): string[] {
-    return input
-      .split(',')
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0);
-  }
-
-  async function onExportDataset(): Promise<void> {
-    exportError = null;
-    exportResult = null;
-    const includeTags = splitCsv(exportIncludeTags);
-    if (includeTags.length === 0) {
-      exportError = 'Include at least one tag.';
-      return;
-    }
-    const maybeLimit = Number(exportLimit || '0');
-    const limit = Number.isFinite(maybeLimit) && maybeLimit > 0 ? maybeLimit : 0;
-    const response = await exportEvalDataset({
-      include_tags: includeTags,
-      exclude_tags: splitCsv(exportExcludeTags),
-      output_dir: exportOutputDir.trim(),
-      limit
-    });
-    if (!response) {
-      exportError = 'Dataset export failed.';
-      return;
-    }
-    exportResult = response;
-    datasetPath = response.dataset_path;
   }
 
   async function onLoadDataset(): Promise<void> {
     loadError = null;
-    loadResult = null;
     const path = datasetPath.trim();
     if (!path) {
-      loadError = 'Dataset path is required.';
+      loadResult = null;
+      loadError = 'Dataset selection is required.';
       return;
     }
     const response = await loadEvalDataset(path);
     if (!response) {
-      loadError = 'Dataset load failed.';
+      loadResult = null;
+      loadError = 'Dataset preview failed.';
       return;
     }
     loadResult = response;
   }
 
-  async function selectDataset(entry: EvalDatasetBrowseEntry): Promise<void> {
-    datasetPath = entry.path;
+  async function selectDatasetPath(path: string): Promise<void> {
+    datasetPath = path;
     await onLoadDataset();
   }
 
   async function onRunEval(): Promise<void> {
-    if (isRunning) return;
+    if (isRunning || !canRun) return;
     runError = null;
-    runResult = null;
     isRunning = true;
-    const path = datasetPath.trim();
-    if (!path) {
-      runError = 'Dataset path is required before running eval.';
-      isRunning = false;
-      return;
-    }
-    if (!runMetricSpec.trim()) {
-      runError = 'Metric selection is required before running eval.';
-      isRunning = false;
-      return;
-    }
+
     const payload: { dataset_path: string; metric_spec: string; min_test_score?: number; max_cases?: number } = {
-      dataset_path: path,
+      dataset_path: datasetPath.trim(),
       metric_spec: runMetricSpec.trim()
     };
     const minScore = Number(runMinTestScore);
@@ -163,29 +216,26 @@
     if (Number.isFinite(maxCases) && maxCases > 0) {
       payload.max_cases = maxCases;
     }
+
     const response = await runEval(payload);
     if (!response) {
       runError = 'Eval run failed.';
       isRunning = false;
       return;
     }
+
     runResult = response;
     openTraceErrorByExample = {};
     openTraceLoadingByExample = {};
     lastReviewedExample = null;
+    reviewedExampleIds = [];
+    activeFilter = 'all';
     isRunning = false;
   }
 
   async function onOpenTrace(caseRow: EvalRunResponse['cases'][number]): Promise<void> {
     openTraceErrorByExample = { ...openTraceErrorByExample, [caseRow.example_id]: '' };
     openTraceLoadingByExample = { ...openTraceLoadingByExample, [caseRow.example_id]: true };
-    const reviewHandler = onReviewTrace;
-    if (reviewHandler) {
-      await reviewHandler(caseRow.pred_trace_id, caseRow.pred_session_id, caseRow.example_id);
-      lastReviewedExample = caseRow.example_id;
-      openTraceLoadingByExample = { ...openTraceLoadingByExample, [caseRow.example_id]: false };
-      return;
-    }
     const payload = await fetchTrajectory(caseRow.pred_trace_id, caseRow.pred_session_id);
     if (!payload) {
       openTraceErrorByExample = {
@@ -195,187 +245,190 @@
       openTraceLoadingByExample = { ...openTraceLoadingByExample, [caseRow.example_id]: false };
       return;
     }
+    sessionStore.activeTraceId = caseRow.pred_trace_id;
     trajectoryStore.clearArtifacts();
     trajectoryStore.setFromPayload(payload);
     lastReviewedExample = caseRow.example_id;
+    if (!reviewedExampleIds.includes(caseRow.example_id)) {
+      reviewedExampleIds = [...reviewedExampleIds, caseRow.example_id];
+    }
     openTraceLoadingByExample = { ...openTraceLoadingByExample, [caseRow.example_id]: false };
   }
+
+  onMount(async () => {
+    await Promise.all([loadDatasetBrowse(), loadMetricBrowse()]);
+  });
+
+  $effect(() => {
+    persistedEvalState.datasetPath = datasetPath;
+    persistedEvalState.runMetricSpec = runMetricSpec;
+    persistedEvalState.runMinTestScore = runMinTestScore;
+    persistedEvalState.runMaxCases = runMaxCases;
+    persistedEvalState.loadResult = loadResult;
+    persistedEvalState.runResult = runResult;
+    persistedEvalState.lastReviewedExample = lastReviewedExample;
+    persistedEvalState.reviewedExampleIds = reviewedExampleIds;
+    persistedEvalState.activeFilter = activeFilter;
+  });
 </script>
 
 <div class="eval-tab eval-light">
   <h3 class="title">Eval</h3>
-
   <div class="eval-body" data-testid="eval-body">
-    <div class="section">
-      <h4>Dataset</h4>
-      <p class="muted">Preview reads the dataset from disk and does not import traces into memory.</p>
-
-      <div class="dataset-grid">
-        <div class="dataset-pane">
-          <h5>Export from tagged traces</h5>
-          <div class="form-grid">
-            <label for="export-include-tags">Export include tags</label>
-            <input id="export-include-tags" class="tag-input" bind:value={exportIncludeTags} placeholder="split:val, dataset:policy" />
-
-            <label for="export-exclude-tags">Export exclude tags</label>
-            <input id="export-exclude-tags" class="tag-input" bind:value={exportExcludeTags} placeholder="tag:skip" />
-
-            <label for="export-output-dir">Export output directory</label>
-            <input id="export-output-dir" class="tag-input" bind:value={exportOutputDir} placeholder="examples/evals/policy_compliance_v1/dataset" />
-
-            <label for="export-limit">Export limit</label>
-            <input id="export-limit" class="tag-input" bind:value={exportLimit} placeholder="0" />
-          </div>
-          <button class="tag-action" onclick={onExportDataset} aria-label="Export dataset">Export dataset</button>
-
-          {#if exportError}
-            <p class="muted error-text">{exportError}</p>
-          {/if}
-          {#if exportResult}
-            <p class="muted">Exported {exportResult.trace_count} traces.</p>
-            <p class="muted mono">{exportResult.dataset_path}</p>
-            <p class="muted mono">{exportResult.manifest_path}</p>
-          {/if}
-        </div>
-        <div class="dataset-pane">
-          <h5>Browse datasets</h5>
-          {#if datasetBrowseError}
-            <div class="trace-error">
-              <p class="muted error-text">{datasetBrowseError}</p>
-              <button class="tag-action" onclick={loadDatasetBrowse} aria-label="Retry dataset browse">Retry</button>
-            </div>
-          {:else if datasetBrowse.length === 0}
-            <p class="muted">No datasets found in this app's evals folder.</p>
-          {:else}
-            <div class="dataset-list">
+    <section class="toolbar" data-testid="eval-toolbar">
+      <div class="toolbar-row">
+        <div class="field compact-grow">
+          <label for="dataset-select">Dataset selection</label>
+          <select
+            id="dataset-select"
+            class="tag-input"
+            bind:value={datasetPath}
+            onchange={(event) => selectDatasetPath((event.currentTarget as HTMLSelectElement).value)}
+          >
+            {#if datasetBrowse.length === 0}
+              <option value="">No datasets</option>
+            {:else}
               {#each datasetBrowse as entry (entry.path)}
-                <button
-                  class="dataset-item"
-                  onclick={() => selectDataset(entry)}
-                  aria-label={`Select dataset ${entry.label}`}
-                  data-selected={datasetPath === entry.path}
-                >
-                  <span>{entry.label}</span>
-                  {#if entry.is_default}
-                    <span class="dataset-badge">default</span>
-                  {/if}
-                </button>
+                <option value={entry.path}>{entry.label}{entry.is_default ? ' (default)' : ''}</option>
               {/each}
-            </div>
-          {/if}
-
-          <div class="form-grid">
-            <label for="dataset-path">Selected dataset path</label>
-            <input id="dataset-path" class="tag-input" bind:value={datasetPath} placeholder="example_app/evals/.../dataset.jsonl" />
-          </div>
-          <button class="tag-action" onclick={onLoadDataset} aria-label="Preview dataset">Preview dataset</button>
-          {#if loadError}
-            <p class="muted error-text">{loadError}</p>
-          {/if}
-          {#if loadResult}
-            <p class="muted">Loaded {loadResult.counts.total} examples.</p>
-            <p class="muted mono">{loadResult.dataset_path}</p>
-            <div class="dataset-summary">
-              {#each Object.entries(loadResult.counts.by_split) as [split, count] (split)}
-                <p class="muted">{split}: {count}</p>
-              {/each}
-              {#if loadResult.examples.length > 0}
-                <p class="muted">{loadResult.examples[0]?.question}</p>
-              {/if}
-            </div>
-          {/if}
+            {/if}
+          </select>
         </div>
+
+        <div class="field compact-grow">
+          <label for="run-metric-spec">Metric selection</label>
+          <select id="run-metric-spec" class="tag-input" bind:value={runMetricSpec}>
+            <option value="">Select metric</option>
+            {#each metricBrowse as metric (metric.metric_spec)}
+              <option value={metric.metric_spec}>{metric.label}</option>
+            {/each}
+          </select>
+        </div>
+
+        <div class="field compact-narrow">
+          <label for="run-min-test-score">Min score</label>
+          <input id="run-min-test-score" class="tag-input" bind:value={runMinTestScore} placeholder="0.8" />
+        </div>
+
+        <div class="field compact-narrow">
+          <label for="run-max-cases">Max cases</label>
+          <input id="run-max-cases" class="tag-input" bind:value={runMaxCases} placeholder="50" />
+        </div>
+
+        <button class="tag-action subtle" onclick={onLoadDataset} aria-label="Preview dataset">Preview</button>
+        <button class="tag-action" onclick={onRunEval} aria-label="Run evaluation" disabled={!canRun}>
+          {isRunning ? 'Running...' : 'Run'}
+        </button>
       </div>
-    </div>
 
-    <div class="section">
-      <h4>Run</h4>
-      <p class="muted">Run evaluates the currently staged dataset path with your metric spec.</p>
-      <p class="muted mono">Staged dataset: {datasetPath || 'none'}</p>
-
-      {#if isRunning}
-        <div class="run-banner">
-          <p class="muted">Running evaluation…</p>
-        </div>
-      {:else if runResult}
-        <div class="run-banner">
-          <p class="muted"><strong>Run completed</strong></p>
-          <p class="muted">{runResult.counts.total} cases evaluated</p>
-        </div>
-      {:else if runError}
-        <div class="run-banner">
-          <p class="muted error-text">{runError}</p>
-        </div>
+      {#if datasetBrowseError}
+        <p class="muted error-text">{datasetBrowseError}</p>
       {/if}
+      {#if metricBrowseError}
+        <p class="muted error-text">{metricBrowseError}</p>
+      {/if}
+      <p class="status-line" data-testid="eval-status-line">{statusLine}</p>
+    </section>
 
-      <div class="form-grid">
-        <label for="run-metric-spec">Metric selection</label>
-        <select id="run-metric-spec" class="tag-input" bind:value={runMetricSpec}>
-          <option value="">Select a metric</option>
-          {#each metricBrowse as metric (metric.metric_spec)}
-            <option value={metric.metric_spec}>{metric.label}</option>
-          {/each}
-        </select>
-        {#if metricBrowseError}
-          <p class="muted error-text">{metricBrowseError}</p>
-        {/if}
-        {#if metricBrowse.length === 0 && !metricBrowseError}
-          <p class="muted">No metrics discovered yet. Add an evaluate.spec.json with metric_spec.</p>
-        {/if}
-
-        <label for="run-min-test-score">Run min test score</label>
-        <input id="run-min-test-score" class="tag-input" bind:value={runMinTestScore} placeholder="0.8" />
-
-        <label for="run-max-cases">Run max cases</label>
-        <input id="run-max-cases" class="tag-input" bind:value={runMaxCases} placeholder="50" />
-      </div>
-
-      <button class="tag-action" onclick={onRunEval} aria-label="Run evaluation" disabled={isRunning}>
-        {isRunning ? 'Running evaluation…' : 'Run evaluation'}
-      </button>
-    </div>
-
-    <div class="section">
-      <h4>Results</h4>
+    <section class="results">
       {#if runResult}
-        <p class="muted">Run {runResult.run_id}</p>
-        <p class="muted">Total: {runResult.counts.total} | val: {runResult.counts.val} | test: {runResult.counts.test}</p>
-        {#if runResult.min_test_score !== null && runResult.min_test_score !== undefined}
-          <p class="muted">Min test score: {runResult.min_test_score}</p>
-        {/if}
-        <p class="muted">Passed threshold: {runResult.passed_threshold ? 'yes' : 'no'}</p>
-
-        {#if lastReviewedExample}
-          <p class="muted">Trajectory loaded below for case {lastReviewedExample}.</p>
-        {/if}
-
-        <div class="result-list">
-          {#each sortedCases as caseRow (caseRow.example_id)}
-            <article class="trace-row">
-              <p class="muted" data-testid="result-example-id">Case {caseRow.example_id}</p>
-              <p class="muted">{caseRow.split.toUpperCase()} • {caseRow.score}</p>
-              <p class="muted">{caseRow.question}</p>
-              {#if caseRow.feedback}
-                <p class="muted">{caseRow.feedback}</p>
-              {/if}
-              <button
-                class="tag-action"
-                aria-label={`Review trace ${caseRow.example_id}`}
-                onclick={() => onOpenTrace(caseRow)}
-                disabled={openTraceLoadingByExample[caseRow.example_id] === true}
-              >
-                {openTraceLoadingByExample[caseRow.example_id] === true ? 'Opening...' : 'Review trace'}
-              </button>
-              {#if openTraceErrorByExample[caseRow.example_id]}
-                <p class="muted error-text">{openTraceErrorByExample[caseRow.example_id]}</p>
-              {/if}
-            </article>
-          {/each}
+        <div class="summary-line" data-testid="eval-summary-line">
+          <span class="chip">{runResult.run_id}</span>
+          <button
+            class="chip filter-chip"
+            data-active={activeFilter === 'all'}
+            aria-pressed={activeFilter === 'all'}
+            onclick={() => (activeFilter = 'all')}
+          >
+            All {filterCounts.all}
+          </button>
+          <button
+            class="chip filter-chip"
+            data-active={activeFilter === 'failures'}
+            aria-pressed={activeFilter === 'failures'}
+            onclick={() => (activeFilter = 'failures')}
+          >
+            Failures {filterCounts.failures}
+          </button>
+          <button
+            class="chip filter-chip"
+            data-active={activeFilter === 'reviewed'}
+            aria-pressed={activeFilter === 'reviewed'}
+            onclick={() => (activeFilter = 'reviewed')}
+          >
+            Reviewed {filterCounts.reviewed}
+          </button>
+          <button
+            class="chip filter-chip"
+            data-active={activeFilter === 'val'}
+            aria-pressed={activeFilter === 'val'}
+            onclick={() => (activeFilter = 'val')}
+          >
+            Val {filterCounts.val}
+          </button>
+          <button
+            class="chip filter-chip"
+            data-active={activeFilter === 'test'}
+            aria-pressed={activeFilter === 'test'}
+            onclick={() => (activeFilter = 'test')}
+          >
+            Test {filterCounts.test}
+          </button>
+          <span class="chip" data-pass={runResult.passed_threshold ? 'true' : 'false'}>
+            {runResult.passed_threshold ? 'passed' : 'failed'}
+          </span>
+          {#if lastReviewedExample}
+            <span class="chip subtle">reviewed {lastReviewedExample}</span>
+          {/if}
         </div>
+
+        <table class="result-table" data-testid="eval-results-table">
+          <thead>
+            <tr>
+              <th>Case</th>
+              <th>Split</th>
+              <th>Score</th>
+              <th>Question</th>
+              <th>Feedback</th>
+              <th>Trace</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each filteredCases as caseRow (caseRow.example_id)}
+              <tr
+                class="result-row"
+                tabindex="0"
+                data-selected={lastReviewedExample === caseRow.example_id}
+                data-severity={getSeverity(caseRow.score)}
+                aria-busy={openTraceLoadingByExample[caseRow.example_id] === true}
+                onkeydown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    void onOpenTrace(caseRow);
+                  }
+                }}
+                onclick={() => onOpenTrace(caseRow)}
+              >
+                <td data-testid="result-example-id">{caseRow.example_id}</td>
+                <td>{caseRow.split.toUpperCase()}</td>
+                <td>{caseRow.score}</td>
+                <td>{caseRow.question}</td>
+                <td>{caseRow.feedback ?? '—'}</td>
+                <td class="mono">{caseRow.pred_trace_id}</td>
+              </tr>
+              {#if openTraceErrorByExample[caseRow.example_id]}
+                <tr class="error-row"><td class="error-text" colspan="6">{openTraceErrorByExample[caseRow.example_id]}</td></tr>
+              {/if}
+            {/each}
+          </tbody>
+        </table>
+        {#if filteredCases.length === 0}
+          <p class="muted">No cases in this filter.</p>
+        {/if}
       {:else}
-        <p class="muted">Completed eval runs appear here after you execute Run evaluation.</p>
+        <p class="muted">Run evaluation to see results.</p>
       {/if}
-    </div>
+    </section>
   </div>
 </div>
 
@@ -383,7 +436,7 @@
   .eval-tab {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
     padding: 8px 2px;
     flex: 1;
     min-height: 0;
@@ -392,7 +445,7 @@
   .eval-body {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
     flex: 1;
     min-height: 0;
     overflow-y: auto;
@@ -406,45 +459,52 @@
     color: var(--color-ink, #1e242c);
   }
 
-  .section {
+  .toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
     border: 1px solid var(--color-border, #e8e1d7);
     background: var(--color-card-bg, #fcfaf7);
-    border-radius: 12px;
-    padding: 12px;
-  }
-
-  .section h4 {
-    margin: 0;
-    font-size: 12px;
-    font-weight: 700;
-    color: var(--color-text-secondary, #3c3a36);
-  }
-
-  .trace-row {
-    border: 1px solid var(--color-border, #e8e1d7);
     border-radius: 10px;
-    padding: 10px;
-    background: var(--color-card-bg, #fcfaf7);
-    display: flex;
-    flex-direction: column;
+    padding: 8px;
+    display: grid;
     gap: 6px;
   }
 
-  .muted {
-    margin: 0;
-    font-size: 12px;
+  .toolbar-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .field {
+    display: grid;
+    gap: 3px;
+  }
+
+  .compact-grow {
+    flex: 1;
+    min-width: 200px;
+  }
+
+  .compact-narrow {
+    width: 92px;
+  }
+
+  .field label {
+    font-size: 10px;
     color: var(--color-text-secondary, #3c3a36);
   }
 
   .tag-input {
-    flex: 1;
-    min-width: 0;
     border: 1px solid var(--color-border, #e8e1d7);
     border-radius: 8px;
     background: var(--color-code-bg, #fbf8f3);
     color: var(--color-text-secondary, #3c3a36);
-    padding: 8px 10px;
+    padding: 7px 8px;
     font-size: 12px;
+    min-width: 0;
   }
 
   .tag-action {
@@ -452,118 +512,133 @@
     border-radius: 8px;
     background: var(--color-btn-ghost-bg, #f2eee8);
     color: var(--color-text-secondary, #3c3a36);
-    padding: 8px 12px;
+    padding: 7px 10px;
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
   }
 
-  .trace-error {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+  .tag-action.subtle {
+    background: #f8f4ed;
+    font-weight: 500;
   }
 
-  .dataset-grid {
-    margin-top: 8px;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
+  .tag-action:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
 
-  .dataset-pane {
-    border: 1px solid var(--color-border, #e8e1d7);
-    border-radius: 10px;
-    background: var(--color-card-bg, #fcfaf7);
-    padding: 10px;
-  }
-
-  .dataset-pane h5 {
+  .status-line,
+  .muted {
     margin: 0;
     font-size: 12px;
-    font-weight: 700;
     color: var(--color-text-secondary, #3c3a36);
   }
 
-  .dataset-list {
-    margin-top: 8px;
+  .results {
+    border: 1px solid var(--color-border, #e8e1d7);
+    background: var(--color-card-bg, #fcfaf7);
+    border-radius: 10px;
+    padding: 8px;
     display: grid;
-    gap: 6px;
+    gap: 8px;
   }
 
-  .dataset-item {
+  .summary-line {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .chip {
     border: 1px solid var(--color-border, #e8e1d7);
-    border-radius: 10px;
-    background: var(--color-card-bg, #fcfaf7);
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 11px;
     color: var(--color-text-secondary, #3c3a36);
-    padding: 8px 10px;
-    font-size: 12px;
+    background: #f8f4ed;
+  }
+
+  .filter-chip {
     cursor: pointer;
   }
 
-  .dataset-item[data-selected="true"] {
+  .filter-chip[data-active='true'] {
     border-color: var(--color-primary, #31a6a0);
+    background: #edf8f7;
   }
 
-  .dataset-badge {
-    border-radius: 999px;
-    padding: 2px 6px;
-    font-size: 10px;
-    border: 1px solid var(--color-border, #e8e1d7);
-    color: var(--color-text-secondary, #3c3a36);
-    background: var(--color-btn-ghost-bg, #f2eee8);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+  .chip[data-pass='true'] {
+    border-color: #6c9f64;
   }
 
-  .form-grid {
-    margin: 8px 0;
-    display: grid;
-    gap: 4px;
+  .chip[data-pass='false'] {
+    border-color: #b97a7a;
   }
 
-  .form-grid label {
+  .chip.subtle {
+    opacity: 0.8;
+  }
+
+  .result-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+
+  .result-table th,
+  .result-table td {
+    padding: 7px 8px;
+    border-bottom: 1px solid var(--color-border-muted, #eee6dc);
     font-size: 11px;
-    color: var(--color-text-secondary, #3c3a36);
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
   }
 
-  .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
-    word-break: break-all;
+  .result-table th {
+    background: #fffdf9;
+    color: var(--color-text-secondary, #5f5a51);
+    font-weight: 700;
+  }
+
+  .result-row {
+    cursor: pointer;
+    transition: background-color 120ms ease;
+  }
+
+  .result-row:hover {
+    background: #faf6ef;
+  }
+
+  .result-row[data-severity='critical'] {
+    border-left: 2px solid #c56f6f;
+    background: #fff7f7;
+  }
+
+  .result-row[data-severity='warning'] {
+    border-left: 2px solid #d3ad6c;
+    background: #fffcf6;
+  }
+
+  .result-row[data-severity='ok'] {
+    opacity: 0.92;
+  }
+
+  .result-row[data-selected='true'] {
+    background: #eef4ff;
+  }
+
+  .result-row[aria-busy='true'] {
+    opacity: 0.72;
+  }
+
+  .error-row td {
+    background: #fff9f8;
   }
 
   .error-text {
     color: var(--color-error-text, #9b2d2d);
-  }
-
-  .dataset-summary {
-    margin-top: 6px;
-    display: grid;
-    gap: 2px;
-  }
-
-  .run-banner {
-    margin-top: 10px;
-    padding: 8px 10px;
-    border-radius: 10px;
-    border: 1px solid var(--color-border, #e8e1d7);
-    background: var(--color-card-bg, #fcfaf7);
-  }
-
-  .result-list {
-    margin-top: 8px;
-    display: grid;
-    gap: 8px;
-  }
-
-  @media (max-width: 900px) {
-    .dataset-grid {
-      grid-template-columns: 1fr;
-    }
   }
 </style>

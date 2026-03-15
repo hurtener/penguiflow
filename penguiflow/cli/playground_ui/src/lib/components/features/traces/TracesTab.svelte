@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { fetchTrajectory, listTraces, setTraceTags } from '$lib/services/api';
+  import { exportEvalDataset, fetchTrajectory, listTraces } from '$lib/services/api';
   import { getSessionStore, getTrajectoryStore } from '$lib/stores';
-  import type { TraceSummary } from '$lib/types';
+  import type { EvalDatasetExportResponse, TraceSummary } from '$lib/types';
 
   type TraceRow = TraceSummary & {
     query_preview?: string | null;
@@ -49,16 +49,37 @@
   })();
 
   let traces = $state<TraceRow[]>([]);
-  let tagDrafts = $state<Record<string, string>>({});
   let traceLoadError = $state(false);
   let openTraceErrorById = $state<Record<string, string>>({});
   let openTraceLoadingById = $state<Record<string, boolean>>({});
   let selectedTraceId = $state<string | null>(null);
   let lastOpenRequestKey = $state<string | null>(null);
+  let exportTagsQuery = $state('+split:val');
+  let traceFilter = $state('');
+  let exportResult = $state<EvalDatasetExportResponse | null>(null);
+  let exportError = $state<string | null>(null);
+
+  const filteredTraces = $derived.by(() => {
+    const needle = traceFilter.trim().toLowerCase();
+    if (!needle) {
+      return traces;
+    }
+    return traces.filter((trace) => {
+      const haystack = [
+        trace.session_id,
+        trace.trace_id,
+        trace.query_preview ?? '',
+        trace.tags.join(' ')
+      ]
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  });
 
   const groupedSessions = $derived.by(() => {
     const bySession = new Map<string, TraceRow[]>();
-    for (const trace of traces) {
+    for (const trace of filteredTraces) {
       const existing = bySession.get(trace.session_id);
       if (existing) {
         existing.push(trace);
@@ -80,19 +101,10 @@
       .sort((a, b) => a.sessionId.localeCompare(b.sessionId));
   });
 
-  function mergeTraceUpdate(updated: TraceRow): void {
-    traces = traces.map((item) => {
-      if (item.trace_id !== updated.trace_id) {
-        return item;
-      }
-      return {
-        ...item,
-        ...updated,
-        query_preview: updated.query_preview ?? item.query_preview ?? null,
-        turn_index: updated.turn_index ?? item.turn_index ?? null
-      };
-    });
-  }
+  const exportTagSuggestions = $derived.by(() => {
+    const baseTags = Array.from(new Set(traces.flatMap((trace) => trace.tags))).sort();
+    return baseTags.flatMap((tag) => [`+${tag}`, `-${tag}`]);
+  });
 
   async function loadTraces(): Promise<void> {
     const rows = await listTraces(50);
@@ -105,36 +117,56 @@
     traces = rows;
   }
 
-  async function addTag(trace: TraceSummary): Promise<void> {
-    const rawTag = tagDrafts[trace.trace_id] ?? '';
-    const tag = rawTag.trim();
-    if (!tag) return;
-    const updated = await setTraceTags(trace.trace_id, trace.session_id, [tag], []);
-    if (!updated) return;
-    mergeTraceUpdate(updated as TraceRow);
-    tagDrafts = { ...tagDrafts, [trace.trace_id]: '' };
+  function parseTagQuery(input: string): { include: string[]; exclude: string[] } {
+    const include = new Set<string>();
+    const exclude = new Set<string>();
+    for (const rawToken of input.split(/[\s,]+/)) {
+      const token = rawToken.trim();
+      if (!token) {
+        continue;
+      }
+      if (token.startsWith('-')) {
+        const value = token.slice(1).trim();
+        if (value) {
+          exclude.add(value);
+        }
+        continue;
+      }
+      if (token.startsWith('+')) {
+        const value = token.slice(1).trim();
+        if (value) {
+          include.add(value);
+        }
+        continue;
+      }
+      include.add(token);
+    }
+    return {
+      include: Array.from(include),
+      exclude: Array.from(exclude)
+    };
   }
 
-  async function removeTag(trace: TraceSummary, tag: string): Promise<void> {
-    const updated = await setTraceTags(trace.trace_id, trace.session_id, [], [tag]);
-    if (!updated) return;
-    mergeTraceUpdate(updated as TraceRow);
-  }
-
-  async function assignSplit(trace: TraceSummary, splitTag: 'split:val' | 'split:test'): Promise<void> {
-    const remove: string[] = [];
-    if (splitTag === 'split:val' && trace.tags.includes('split:test')) {
-      remove.push('split:test');
-    }
-    if (splitTag === 'split:test' && trace.tags.includes('split:val')) {
-      remove.push('split:val');
-    }
-    if (trace.tags.includes(splitTag)) {
+  async function onExportDataset(): Promise<void> {
+    exportError = null;
+    exportResult = null;
+    const parsed = parseTagQuery(exportTagsQuery);
+    const includeTags = parsed.include;
+    if (includeTags.length === 0) {
+      exportError = 'Include at least one tag.';
       return;
     }
-    const updated = await setTraceTags(trace.trace_id, trace.session_id, [splitTag], remove);
-    if (!updated) return;
-    mergeTraceUpdate(updated as TraceRow);
+    const response = await exportEvalDataset({
+      include_tags: includeTags,
+      exclude_tags: parsed.exclude,
+      output_dir: 'examples/evals/policy_compliance_v1/dataset',
+      limit: 0
+    });
+    if (!response) {
+      exportError = 'Dataset export failed.';
+      return;
+    }
+    exportResult = response;
   }
 
   async function openTrace(trace: Pick<TraceSummary, 'trace_id' | 'session_id'>): Promise<void> {
@@ -161,6 +193,13 @@
   });
 
   $effect(() => {
+    const activeTraceId = sessionStore.activeTraceId;
+    if (activeTraceId) {
+      selectedTraceId = activeTraceId;
+    }
+  });
+
+  $effect(() => {
     if (!openRequest?.traceId || !openRequest.sessionId) {
       return;
     }
@@ -171,15 +210,69 @@
     lastOpenRequestKey = key;
     void openTrace({ trace_id: openRequest.traceId, session_id: openRequest.sessionId });
   });
+
+  $effect(() => {
+    const traceId = selectedTraceId;
+    const traceCount = traces.length;
+    void traceCount;
+    if (!traceId) {
+      return;
+    }
+    queueMicrotask(() => {
+      const row = document.querySelector<HTMLTableRowElement>(`tr[data-trace-id="${traceId}"]`);
+      if (row && typeof row.scrollIntoView === 'function') {
+        row.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      }
+    });
+  });
 </script>
 
 <div class="traces-tab">
   <h3 class="title">Traces</h3>
-  <p class="muted">Select a trace to load its trajectory below. Keep tagging here for dataset export workflows.</p>
+  <p class="muted">Select a trace row to load its trajectory below.</p>
 
   <div class="traces-body">
     <div class="section">
-      <h4>Trace Library</h4>
+      <h4>Dataset Export</h4>
+      <p class="muted">Export dataset with +include and -exclude tags.</p>
+      <div class="export-controls">
+        <span class="export-prefix">Export dataset</span>
+        <label class="sr-only" for="traces-export-query">Export tags query</label>
+        <input
+          id="traces-export-query"
+          class="tag-input"
+          bind:value={exportTagsQuery}
+          placeholder="+split:val -tag:skip dataset:policy"
+          list="traces-export-tag-suggestions"
+        />
+        <datalist id="traces-export-tag-suggestions">
+          {#each exportTagSuggestions as suggestion (suggestion)}
+            <option value={suggestion}></option>
+          {/each}
+        </datalist>
+        <button class="tag-action" onclick={onExportDataset} aria-label="Export dataset traces tab">Export</button>
+      </div>
+      {#if exportError}
+        <p class="muted error-text">{exportError}</p>
+      {/if}
+      {#if exportResult}
+        <p class="muted">Exported {exportResult.trace_count} traces.</p>
+        <p class="muted mono-path">{exportResult.dataset_path}</p>
+        <p class="muted mono-path">{exportResult.manifest_path}</p>
+      {/if}
+    </div>
+
+    <div class="section">
+      <h4>Trace history</h4>
+      <div class="filter-controls">
+        <label for="traces-filter">Filter traces</label>
+        <input
+          id="traces-filter"
+          class="tag-input"
+          bind:value={traceFilter}
+          placeholder="session, query, tag, or trace id"
+        />
+      </div>
       {#if traceLoadError}
         <div class="trace-error">
           <p class="muted">Failed to load traces.</p>
@@ -187,6 +280,8 @@
         </div>
       {:else if traces.length === 0}
         <p class="muted">No traces available yet.</p>
+      {:else if groupedSessions.length === 0}
+        <p class="muted">No traces match this filter.</p>
       {:else}
         <div class="trace-groups" data-testid="traces-table">
           {#each groupedSessions as group (group.sessionId)}
@@ -199,13 +294,13 @@
                     <th>Query</th>
                     <th>Tags</th>
                     <th>Trace</th>
-                    <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {#each group.rows as trace (trace.trace_id)}
                     <tr
                       class="trace-row"
+                      data-trace-id={trace.trace_id}
                       tabindex="0"
                       data-selected={selectedTraceId === trace.trace_id}
                       aria-busy={openTraceLoadingById[trace.trace_id] === true}
@@ -219,72 +314,18 @@
                     >
                       <td class="turn-cell">Turn {trace.turn_index ?? '-'}</td>
                       <td class="query-cell">{trace.query_preview ?? '—'}</td>
-                      <td>
+                      <td class="tags-cell">
                         <div class="tags">
                           {#each trace.tags as tag (tag)}
-                            <span class="tag">
-                              <span>{tag}</span>
-                              <button
-                                class="tag-remove"
-                                onclick={(event) => {
-                                  event.stopPropagation();
-                                  void removeTag(trace, tag);
-                                }}
-                                aria-label={`Remove tag ${tag} ${trace.trace_id}`}
-                              >
-                                x
-                              </button>
-                            </span>
+                            <span class="tag"><span>{tag}</span></span>
                           {/each}
                         </div>
                       </td>
                       <td class="trace-id mono">{trace.trace_id}</td>
-                      <td>
-                        <div class="inline-actions">
-                          <label class="sr-only" for={`add-tag-${trace.trace_id}`}>Add tag for {trace.trace_id}</label>
-                          <input
-                            id={`add-tag-${trace.trace_id}`}
-                            class="tag-input"
-                            placeholder="tag:value"
-                            bind:value={tagDrafts[trace.trace_id]}
-                            onclick={(event) => event.stopPropagation()}
-                          />
-                          <button
-                            class="tag-action"
-                            onclick={(event) => {
-                              event.stopPropagation();
-                              void addTag(trace);
-                            }}
-                            aria-label={`Add tag ${trace.trace_id}`}
-                          >
-                            Add
-                          </button>
-                          <button
-                            class="tag-action"
-                            onclick={(event) => {
-                              event.stopPropagation();
-                              void assignSplit(trace, 'split:val');
-                            }}
-                            aria-label={`Mark val ${trace.trace_id}`}
-                          >
-                            Val
-                          </button>
-                          <button
-                            class="tag-action"
-                            onclick={(event) => {
-                              event.stopPropagation();
-                              void assignSplit(trace, 'split:test');
-                            }}
-                            aria-label={`Mark test ${trace.trace_id}`}
-                          >
-                            Test
-                          </button>
-                        </div>
-                      </td>
                     </tr>
                     {#if openTraceErrorById[trace.trace_id]}
                       <tr class="error-row">
-                        <td colspan="5"><p class="muted error-text">{openTraceErrorById[trace.trace_id]}</p></td>
+                        <td colspan="4"><p class="muted error-text">{openTraceErrorById[trace.trace_id]}</p></td>
                       </tr>
                     {/if}
                   {/each}
@@ -385,6 +426,32 @@
     text-align: left;
   }
 
+  .export-controls {
+    margin: 8px 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .export-prefix {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-secondary, #5f5a51);
+  }
+
+  .filter-controls {
+    margin-top: 8px;
+    display: grid;
+    gap: 4px;
+  }
+
+  .filter-controls label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-secondary, #5f5a51);
+  }
+
   .trace-table th {
     font-weight: 700;
     color: var(--color-text-secondary, #5f5a51);
@@ -429,6 +496,10 @@
     overflow-wrap: anywhere;
   }
 
+  .tags-cell {
+    width: 220px;
+  }
+
   .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
   }
@@ -450,24 +521,8 @@
     background: #fffdf9;
   }
 
-  .tag-remove {
-    border: none;
-    background: transparent;
-    color: var(--color-text-secondary, #6b6255);
-    cursor: pointer;
-    padding: 0;
-    line-height: 1;
-  }
-
-  .inline-actions {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    align-items: center;
-  }
-
   .tag-input {
-    width: 120px;
+    width: 220px;
     border: 1px solid var(--color-border, #d9d0c4);
     border-radius: 8px;
     padding: 6px 8px;
@@ -506,6 +561,11 @@
 
   .error-row td {
     background: #fff9f8;
+  }
+
+  .mono-path {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+    overflow-wrap: anywhere;
   }
 
   .sr-only {

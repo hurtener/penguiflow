@@ -21,7 +21,6 @@
 
   type CenterTab = 'chat' | 'setup' | 'context' | 'traces' | 'eval' | 'components';
   let activeTab = $state<CenterTab>('chat');
-  let traceOpenRequest = $state<{ traceId: string; sessionId: string; requestId: number } | null>(null);
 
   const componentRegistryStore = getComponentRegistryStore();
   const tabs = $derived.by(() => {
@@ -42,14 +41,6 @@
     activeTab = 'setup';
   };
 
-  async function reviewTraceInTraces(traceId: string, sessionId: string): Promise<void> {
-    traceOpenRequest = {
-      traceId,
-      sessionId,
-      requestId: Date.now()
-    };
-    activeTab = 'traces';
-  }
 </script>
 
 <Card class="chat-card">
@@ -65,9 +56,9 @@
   {:else if activeTab === 'context'}
     <ContextTab />
   {:else if activeTab === 'eval'}
-    <EvalTab onReviewTrace={reviewTraceInTraces} />
+    <EvalTab />
   {:else if activeTab === 'traces'}
-    <TracesTab openRequest={traceOpenRequest} />
+    <TracesTab />
   {:else if activeTab === 'components'}
     <ComponentLab />
   {:else}

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import ChatCardEvalTabHost from './ChatCardEvalTabHost.svelte';
 import * as api from '$lib/services/api';
+import { resetPersistedEvalState } from '$lib/components/features/eval/EvalTab.svelte';
 
 vi.mock('$lib/services/api', async (importOriginal) => {
   const original = await importOriginal<typeof import('$lib/services/api')>();
@@ -10,6 +11,7 @@ vi.mock('$lib/services/api', async (importOriginal) => {
     listTraces: vi.fn(),
     listEvalDatasets: vi.fn(),
     listEvalMetrics: vi.fn(),
+    loadEvalDataset: vi.fn(),
     runEval: vi.fn(),
     fetchTrajectory: vi.fn()
   };
@@ -17,9 +19,22 @@ vi.mock('$lib/services/api', async (importOriginal) => {
 
 describe('ChatCard Eval tab', () => {
   beforeEach(() => {
+    resetPersistedEvalState();
     vi.clearAllMocks();
     vi.mocked(api.listTraces).mockResolvedValue([]);
-    vi.mocked(api.listEvalDatasets).mockResolvedValue([]);
+    vi.mocked(api.listEvalDatasets).mockResolvedValue([
+      {
+        path: 'examples/evals/policy/dataset.jsonl',
+        label: 'policy/dataset.jsonl',
+        is_default: true
+      }
+    ]);
+    vi.mocked(api.loadEvalDataset).mockResolvedValue({
+      dataset_path: 'examples/evals/policy/dataset.jsonl',
+      manifest_path: null,
+      counts: { total: 1, by_split: { val: 1 } },
+      examples: [{ example_id: 'ex-1', split: 'val', question: 'Q1' }]
+    });
     vi.mocked(api.listEvalMetrics).mockResolvedValue([
       {
         metric_spec: 'example_app.evals.metrics:policy_metric',
@@ -36,7 +51,7 @@ describe('ChatCard Eval tab', () => {
     expect(evalTab).toBeTruthy();
 
     await fireEvent.click(evalTab);
-    expect(screen.getByText('Dataset')).toBeTruthy();
+    expect(await screen.findByLabelText('Dataset selection')).toBeTruthy();
   });
 
   it('renders a Traces tab and shows traces surface when selected', async () => {
@@ -49,7 +64,7 @@ describe('ChatCard Eval tab', () => {
     expect(screen.getByRole('heading', { name: 'Traces' })).toBeTruthy();
   });
 
-  it('routes Eval review-trace action into Traces tab and opens the selected trace', async () => {
+  it('keeps focus on Eval when opening a case row and syncs selection with Traces', async () => {
     vi.mocked(api.runEval).mockResolvedValue({
       run_id: 'run-7',
       counts: { total: 1, val: 0, test: 1 },
@@ -83,12 +98,48 @@ describe('ChatCard Eval tab', () => {
     render(ChatCardEvalTabHost);
 
     await fireEvent.click(screen.getByRole('button', { name: 'Eval' }));
-    await fireEvent.input(screen.getByLabelText('Selected dataset path'), { target: { value: 'examples/evals/policy/dataset.jsonl' } });
-    await fireEvent.change(screen.getByLabelText('Metric selection'), { target: { value: 'example_app.evals.metrics:policy_metric' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Run evaluation' }));
-    await fireEvent.click(await screen.findByRole('button', { name: 'Review trace ex-low' }));
+    const evalRow = await screen.findByRole('row', { name: /ex-low/i });
+    await fireEvent.click(evalRow);
 
-    expect(await screen.findByRole('heading', { name: 'Traces' })).toBeTruthy();
+    expect(await screen.findByLabelText('Dataset selection')).toBeTruthy();
     expect(api.fetchTrajectory).toHaveBeenCalledWith('trace-low', 'session-low');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Traces' }));
+    const traceRow = await screen.findByRole('row', { name: /trace-low/i });
+    expect(traceRow.getAttribute('data-selected')).toBe('true');
+  });
+
+  it('keeps last eval run visible after switching tabs', async () => {
+    vi.mocked(api.runEval).mockResolvedValue({
+      run_id: 'run-persist',
+      counts: { total: 1, val: 1, test: 0 },
+      min_test_score: 0.8,
+      passed_threshold: true,
+      cases: [
+        {
+          example_id: 'ex-1',
+          split: 'val',
+          score: 0.95,
+          feedback: null,
+          pred_trace_id: 'trace-1',
+          pred_session_id: 'session-1',
+          question: 'Question text'
+        }
+      ]
+    });
+
+    render(ChatCardEvalTabHost);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Eval' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Run evaluation' }));
+
+    expect(await screen.findByText('run-persist')).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Traces' }));
+    expect(await screen.findByRole('heading', { name: 'Traces' })).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Eval' }));
+    expect(await screen.findByText('run-persist')).toBeTruthy();
   });
 });
