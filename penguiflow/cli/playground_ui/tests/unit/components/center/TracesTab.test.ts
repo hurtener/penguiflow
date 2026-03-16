@@ -42,8 +42,9 @@ describe('TracesTab', () => {
     render(TracesTab);
 
     expect(await screen.findByText('Trace history')).toBeTruthy();
-    expect(await screen.findByText('Session session-a')).toBeTruthy();
-    expect(screen.getByText('Session session-b')).toBeTruthy();
+    expect(screen.getByText(/\+tag include -tag ignore/)).toBeTruthy();
+    expect(await screen.findByText('session-a')).toBeTruthy();
+    expect(screen.getByText('session-b')).toBeTruthy();
     expect(screen.getAllByText('Turn 1').length).toBeGreaterThan(0);
     expect(screen.getByText('Turn 2')).toBeTruthy();
     expect(screen.getByText('alpha first')).toBeTruthy();
@@ -184,8 +185,8 @@ describe('TracesTab', () => {
     const searchInput = await screen.findByLabelText('Filter traces');
     await fireEvent.input(searchInput, { target: { value: 'policy' } });
 
-    expect(await screen.findByText('Session session-policy')).toBeTruthy();
-    expect(screen.queryByText('Session session-math')).toBeNull();
+    expect(await screen.findByText('session-policy')).toBeTruthy();
+    expect(screen.queryByText('session-math')).toBeNull();
     expect(screen.getByText('trace-policy-1')).toBeTruthy();
     expect(screen.queryByText('trace-math-1')).toBeNull();
   });

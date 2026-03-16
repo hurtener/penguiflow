@@ -11,7 +11,8 @@ import type {
   EvalDatasetLoadResponse,
   EvalRunResponse,
   EvalDatasetBrowseEntry,
-  EvalMetricBrowseEntry
+  EvalMetricBrowseEntry,
+  EvalCaseComparisonResponse
 } from '$lib/types';
 import type { Result } from '$lib/utils/result';
 
@@ -404,6 +405,24 @@ export async function runEval(payload: {
   });
   if (!result.ok) {
     console.error('eval run failed', result.error);
+    return null;
+  }
+  return result.data;
+}
+
+export async function fetchEvalCaseComparison(payload: {
+  dataset_path: string;
+  example_id: string;
+  pred_trace_id: string;
+  pred_session_id: string;
+}): Promise<EvalCaseComparisonResponse | null> {
+  const result = await fetchWithErrorHandling<EvalCaseComparisonResponse>(`${BASE_URL}/eval/cases/compare`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!result.ok) {
+    console.error('eval case comparison failed', result.error);
     return null;
   }
   return result.data;

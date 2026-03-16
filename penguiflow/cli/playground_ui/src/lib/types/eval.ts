@@ -57,3 +57,12 @@ export interface EvalRunResponse {
     question: string;
   }>;
 }
+
+export interface EvalCaseComparisonResponse {
+  example_id: string;
+  pred_trace_id: string;
+  pred_session_id: string;
+  gold_trace_id?: string | null;
+  gold_trajectory?: Record<string, unknown> | null;
+  pred_trajectory?: Record<string, unknown> | null;
+}

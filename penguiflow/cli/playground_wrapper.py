@@ -65,6 +65,14 @@ class AgentWrapper(Protocol):
 
     async def shutdown(self) -> None: ...
 
+    async def wait_for_trace_persistence(
+        self,
+        trace_id: str,
+        session_id: str,
+        *,
+        timeout_s: float = 1.0,
+    ) -> None: ...
+
 
 class _EventRecorder:
     """Creates a planner event callback that forwards events to an optional consumer."""
@@ -268,6 +276,15 @@ class PlannerAgentWrapper:
 
     async def shutdown(self) -> None:
         """Planner wrappers do not own additional resources."""
+
+    async def wait_for_trace_persistence(
+        self,
+        trace_id: str,
+        session_id: str,
+        *,
+        timeout_s: float = 1.0,
+    ) -> None:
+        await _await_trace_persistence(self._planner, trace_id, session_id, timeout_s=timeout_s)
 
     async def resume(
         self,
@@ -558,6 +575,18 @@ class OrchestratorAgentWrapper:
         if stop_fn is not None:
             await stop_fn()
 
+    async def wait_for_trace_persistence(
+        self,
+        trace_id: str,
+        session_id: str,
+        *,
+        timeout_s: float = 1.0,
+    ) -> None:
+        planner = getattr(self._orchestrator, "_planner", None)
+        if planner is None:
+            return
+        await _await_trace_persistence(planner, trace_id, session_id, timeout_s=timeout_s)
+
     async def resume(
         self,
         resume_token: str,
@@ -669,6 +698,21 @@ def _planner_trace_id(planner: Any) -> str | None:
         value = tool_ctx.get("trace_id")
         return str(value) if value is not None else None
     return None
+
+
+async def _await_trace_persistence(
+    planner: Any,
+    trace_id: str,
+    session_id: str,
+    *,
+    timeout_s: float,
+) -> None:
+    waiter = getattr(planner, "wait_for_trace_persistence", None)
+    if not callable(waiter):
+        return
+    wait_result = waiter(trace_id, session_id=session_id, timeout_s=timeout_s)
+    if inspect.isawaitable(wait_result):
+        await cast("Any", wait_result)
 
 
 __all__ = [

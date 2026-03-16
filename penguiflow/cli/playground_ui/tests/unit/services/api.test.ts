@@ -14,7 +14,8 @@ import {
   loadEvalDataset,
   runEval,
   listEvalDatasets,
-  listEvalMetrics
+  listEvalMetrics,
+  fetchEvalCaseComparison
 } from '$lib/services/api';
 
 describe('api service', () => {
@@ -627,6 +628,40 @@ describe('api service', () => {
           dataset_path: 'eval/dataset_a',
           metric_spec: 'my_metric:score',
           min_test_score: 0.7
+        })
+      });
+      expect(result).toEqual(mockData);
+    });
+
+    it('fetches eval case comparison successfully', async () => {
+      const mockData = {
+        example_id: 'ex-1',
+        pred_trace_id: 'trace-1',
+        pred_session_id: 'session-1',
+        gold_trace_id: 'gold-1',
+        gold_trajectory: { steps: [] },
+        pred_trajectory: { steps: [] }
+      };
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockData)
+      });
+
+      const result = await fetchEvalCaseComparison({
+        dataset_path: 'eval/dataset_a',
+        example_id: 'ex-1',
+        pred_trace_id: 'trace-1',
+        pred_session_id: 'session-1'
+      });
+
+      expect(fetch).toHaveBeenCalledWith('/eval/cases/compare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataset_path: 'eval/dataset_a',
+          example_id: 'ex-1',
+          pred_trace_id: 'trace-1',
+          pred_session_id: 'session-1'
         })
       });
       expect(result).toEqual(mockData);

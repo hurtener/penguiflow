@@ -132,6 +132,9 @@ from .react_runtime import (
     _log_action_received as _log_action_received_impl,
 )
 from .react_runtime import (
+    wait_for_trace_persistence as _wait_for_trace_persistence_impl,
+)
+from .react_runtime import (
     resume as _resume_impl,
 )
 from .react_runtime import (
@@ -412,6 +415,7 @@ class ReactPlanner:
     _session_locks: dict[str, asyncio.Lock]
     _session_planners: dict[str, ReactPlanner]
     _fallback_run_lock: asyncio.Lock
+    _pending_persistence_tasks: dict[str, asyncio.Task[None]]
 
     def __init__(
         self,
@@ -683,6 +687,26 @@ class ReactPlanner:
     def artifact_store(self) -> ArtifactStore:
         """Return the configured artifact store (NoOp when disabled)."""
         return self._artifact_store
+
+    async def wait_for_trace_persistence(
+        self,
+        trace_id: str,
+        *,
+        session_id: str | None = None,
+        timeout_s: float = 1.0,
+    ) -> bool:
+        """Wait for fire-and-forget persistence tasks for a trace.
+
+        Why: eval-style consumers need deterministic trajectory availability for
+        scoring without changing the low-latency run() contract.
+        """
+
+        if session_id and self._session_dispatch_enabled:
+            session_planner = self._session_planners.get(session_id)
+            if session_planner is not None:
+                return await _wait_for_trace_persistence_impl(session_planner, trace_id, timeout_s=timeout_s)
+
+        return await _wait_for_trace_persistence_impl(self, trace_id, timeout_s=timeout_s)
 
     async def run(
         self,

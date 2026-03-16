@@ -9,8 +9,7 @@
     loadResult: EvalDatasetLoadResponse | null;
     runResult: EvalRunResponse | null;
     lastReviewedExample: string | null;
-    reviewedExampleIds: string[];
-    activeFilter: 'all' | 'failures' | 'reviewed' | 'val' | 'test';
+    activeFilter: 'all' | 'failed' | 'passed';
   };
 
   const persistedEvalState: PersistedEvalState = {
@@ -21,7 +20,6 @@
     loadResult: null,
     runResult: null,
     lastReviewedExample: null,
-    reviewedExampleIds: [],
     activeFilter: 'all'
   };
 
@@ -33,7 +31,6 @@
     persistedEvalState.loadResult = null;
     persistedEvalState.runResult = null;
     persistedEvalState.lastReviewedExample = null;
-    persistedEvalState.reviewedExampleIds = [];
     persistedEvalState.activeFilter = 'all';
   }
 </script>
@@ -41,6 +38,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import {
+    fetchEvalCaseComparison,
     fetchTrajectory,
     listEvalDatasets,
     listEvalMetrics,
@@ -87,8 +85,7 @@
   let openTraceErrorByExample = $state<Record<string, string>>({});
   let openTraceLoadingByExample = $state<Record<string, boolean>>({});
   let lastReviewedExample = $state<string | null>(persistedEvalState.lastReviewedExample);
-  let reviewedExampleIds = $state<string[]>(persistedEvalState.reviewedExampleIds);
-  let activeFilter = $state<'all' | 'failures' | 'reviewed' | 'val' | 'test'>(persistedEvalState.activeFilter);
+  let activeFilter = $state<'all' | 'failed' | 'passed'>(persistedEvalState.activeFilter);
 
   const sortedCases = $derived.by(() => {
     if (!runResult) return [];
@@ -105,45 +102,38 @@
 
   const filteredCases = $derived.by(() => {
     if (activeFilter === 'all') return sortedCases;
-    if (activeFilter === 'failures') {
+    if (activeFilter === 'failed') {
       return sortedCases.filter((caseRow) => caseRow.score < evalThreshold);
     }
-    if (activeFilter === 'reviewed') {
-      return sortedCases.filter((caseRow) => reviewedExampleIds.includes(caseRow.example_id));
-    }
-    if (activeFilter === 'val') {
-      return sortedCases.filter((caseRow) => caseRow.split === 'val');
-    }
-    return sortedCases.filter((caseRow) => caseRow.split === 'test');
+    return sortedCases.filter((caseRow) => caseRow.score >= evalThreshold);
   });
 
   const filterCounts = $derived.by(() => {
-    const failures = sortedCases.filter((caseRow) => caseRow.score < evalThreshold).length;
-    const reviewed = sortedCases.filter((caseRow) => reviewedExampleIds.includes(caseRow.example_id)).length;
-    const val = sortedCases.filter((caseRow) => caseRow.split === 'val').length;
-    const test = sortedCases.filter((caseRow) => caseRow.split === 'test').length;
+    const failed = sortedCases.filter((caseRow) => caseRow.score < evalThreshold).length;
     return {
       all: sortedCases.length,
-      failures,
-      reviewed,
-      val,
-      test
+      failed,
+      passed: sortedCases.length - failed
     };
   });
 
   const canRun = $derived(Boolean(datasetPath.trim()) && Boolean(runMetricSpec.trim()) && !isRunning);
+
+  function formatCount(value: number, singular: string, plural: string): string {
+    return `${value} ${value === 1 ? singular : plural}`;
+  }
 
   const statusLine = $derived.by(() => {
     if (isRunning) return 'Running evaluation...';
     if (runError) return runError;
     if (loadError) return loadError;
     if (runResult) {
-      return `Run ${runResult.run_id}: ${runResult.counts.total} cases, threshold ${runResult.passed_threshold ? 'passed' : 'failed'}.`;
+      return `${formatCount(runResult.counts.total, 'case', 'cases')} evaluated.`;
     }
     if (loadResult) {
-      return `Loaded ${loadResult.counts.total} examples from ${loadResult.dataset_path}.`;
+      return `${formatCount(loadResult.counts.total, 'example', 'examples')} loaded.`;
     }
-    return 'Select a dataset and metric to run evaluation.';
+    return '';
   });
 
   async function loadDatasetBrowse(): Promise<void> {
@@ -202,6 +192,7 @@
   async function onRunEval(): Promise<void> {
     if (isRunning || !canRun) return;
     runError = null;
+    trajectoryStore.setEvalCaseSelection(null);
     isRunning = true;
 
     const payload: { dataset_path: string; metric_spec: string; min_test_score?: number; max_cases?: number } = {
@@ -228,7 +219,6 @@
     openTraceErrorByExample = {};
     openTraceLoadingByExample = {};
     lastReviewedExample = null;
-    reviewedExampleIds = [];
     activeFilter = 'all';
     isRunning = false;
   }
@@ -236,12 +226,46 @@
   async function onOpenTrace(caseRow: EvalRunResponse['cases'][number]): Promise<void> {
     openTraceErrorByExample = { ...openTraceErrorByExample, [caseRow.example_id]: '' };
     openTraceLoadingByExample = { ...openTraceLoadingByExample, [caseRow.example_id]: true };
+    const threshold = evalThreshold;
+    const isFailing = caseRow.score < threshold;
+    if (isFailing) {
+      trajectoryStore.setEvalCaseSelection({
+        exampleId: caseRow.example_id,
+        datasetPath: datasetPath.trim(),
+        predTraceId: caseRow.pred_trace_id,
+        predSessionId: caseRow.pred_session_id,
+        score: caseRow.score,
+        threshold
+      });
+      trajectoryStore.setEvalComparisonLoading(true);
+      trajectoryStore.setEvalComparisonError(null);
+      const comparison = await fetchEvalCaseComparison({
+        dataset_path: datasetPath.trim(),
+        example_id: caseRow.example_id,
+        pred_trace_id: caseRow.pred_trace_id,
+        pred_session_id: caseRow.pred_session_id
+      });
+      if (comparison) {
+        trajectoryStore.setEvalComparison(comparison);
+      } else {
+        trajectoryStore.setEvalComparison(null);
+        trajectoryStore.setEvalComparisonError('Trajectory divergence data unavailable.');
+      }
+      trajectoryStore.setEvalComparisonLoading(false);
+      trajectoryStore.setTrajectoryViewMode('divergence');
+    } else {
+      trajectoryStore.setEvalCaseSelection(null);
+    }
+
     const payload = await fetchTrajectory(caseRow.pred_trace_id, caseRow.pred_session_id);
     if (!payload) {
       openTraceErrorByExample = {
         ...openTraceErrorByExample,
         [caseRow.example_id]: `Failed to open trace for ${caseRow.example_id}.`
       };
+      if (isFailing) {
+        trajectoryStore.setEvalComparisonError('Failed to load predicted trajectory.');
+      }
       openTraceLoadingByExample = { ...openTraceLoadingByExample, [caseRow.example_id]: false };
       return;
     }
@@ -249,9 +273,6 @@
     trajectoryStore.clearArtifacts();
     trajectoryStore.setFromPayload(payload);
     lastReviewedExample = caseRow.example_id;
-    if (!reviewedExampleIds.includes(caseRow.example_id)) {
-      reviewedExampleIds = [...reviewedExampleIds, caseRow.example_id];
-    }
     openTraceLoadingByExample = { ...openTraceLoadingByExample, [caseRow.example_id]: false };
   }
 
@@ -267,7 +288,6 @@
     persistedEvalState.loadResult = loadResult;
     persistedEvalState.runResult = runResult;
     persistedEvalState.lastReviewedExample = lastReviewedExample;
-    persistedEvalState.reviewedExampleIds = reviewedExampleIds;
     persistedEvalState.activeFilter = activeFilter;
   });
 </script>
@@ -315,7 +335,6 @@
           <input id="run-max-cases" class="tag-input" bind:value={runMaxCases} placeholder="50" />
         </div>
 
-        <button class="tag-action subtle" onclick={onLoadDataset} aria-label="Preview dataset">Preview</button>
         <button class="tag-action" onclick={onRunEval} aria-label="Run evaluation" disabled={!canRun}>
           {isRunning ? 'Running...' : 'Run'}
         </button>
@@ -327,13 +346,14 @@
       {#if metricBrowseError}
         <p class="muted error-text">{metricBrowseError}</p>
       {/if}
-      <p class="status-line" data-testid="eval-status-line">{statusLine}</p>
+      {#if statusLine}
+        <p class="status-line" data-testid="eval-status-line">{statusLine}</p>
+      {/if}
     </section>
 
     <section class="results">
       {#if runResult}
         <div class="summary-line" data-testid="eval-summary-line">
-          <span class="chip">{runResult.run_id}</span>
           <button
             class="chip filter-chip"
             data-active={activeFilter === 'all'}
@@ -344,53 +364,31 @@
           </button>
           <button
             class="chip filter-chip"
-            data-active={activeFilter === 'failures'}
-            aria-pressed={activeFilter === 'failures'}
-            onclick={() => (activeFilter = 'failures')}
+            data-active={activeFilter === 'failed'}
+            aria-pressed={activeFilter === 'failed'}
+            onclick={() => (activeFilter = 'failed')}
           >
-            Failures {filterCounts.failures}
+            Failed {filterCounts.failed}
           </button>
           <button
             class="chip filter-chip"
-            data-active={activeFilter === 'reviewed'}
-            aria-pressed={activeFilter === 'reviewed'}
-            onclick={() => (activeFilter = 'reviewed')}
+            data-active={activeFilter === 'passed'}
+            aria-pressed={activeFilter === 'passed'}
+            onclick={() => (activeFilter = 'passed')}
           >
-            Reviewed {filterCounts.reviewed}
+            Passed {filterCounts.passed}
           </button>
-          <button
-            class="chip filter-chip"
-            data-active={activeFilter === 'val'}
-            aria-pressed={activeFilter === 'val'}
-            onclick={() => (activeFilter = 'val')}
-          >
-            Val {filterCounts.val}
-          </button>
-          <button
-            class="chip filter-chip"
-            data-active={activeFilter === 'test'}
-            aria-pressed={activeFilter === 'test'}
-            onclick={() => (activeFilter = 'test')}
-          >
-            Test {filterCounts.test}
-          </button>
-          <span class="chip" data-pass={runResult.passed_threshold ? 'true' : 'false'}>
-            {runResult.passed_threshold ? 'passed' : 'failed'}
-          </span>
-          {#if lastReviewedExample}
-            <span class="chip subtle">reviewed {lastReviewedExample}</span>
-          {/if}
         </div>
 
         <table class="result-table" data-testid="eval-results-table">
           <thead>
             <tr>
               <th>Case</th>
-              <th>Split</th>
-              <th>Score</th>
               <th>Question</th>
-              <th>Feedback</th>
+              <th>Split</th>
               <th>Trace</th>
+              <th>Score</th>
+              <th>Feedback</th>
             </tr>
           </thead>
           <tbody>
@@ -410,11 +408,21 @@
                 onclick={() => onOpenTrace(caseRow)}
               >
                 <td data-testid="result-example-id">{caseRow.example_id}</td>
-                <td>{caseRow.split.toUpperCase()}</td>
-                <td>{caseRow.score}</td>
                 <td>{caseRow.question}</td>
-                <td>{caseRow.feedback ?? '—'}</td>
+                <td>{caseRow.split.toUpperCase()}</td>
                 <td class="mono">{caseRow.pred_trace_id}</td>
+                <td class="score-cell" data-pass={caseRow.score >= evalThreshold ? 'true' : 'false'}>
+                  <span
+                    class="score-icon"
+                    aria-label={caseRow.score >= evalThreshold
+                      ? `Passed case ${caseRow.example_id}`
+                      : `Failed case ${caseRow.example_id}`}
+                  >
+                    {caseRow.score >= evalThreshold ? '✓' : '✕'}
+                  </span>
+                  <span>{caseRow.score}</span>
+                </td>
+                <td>{caseRow.feedback ?? '—'}</td>
               </tr>
               {#if openTraceErrorByExample[caseRow.example_id]}
                 <tr class="error-row"><td class="error-text" colspan="6">{openTraceErrorByExample[caseRow.example_id]}</td></tr>
@@ -518,11 +526,6 @@
     cursor: pointer;
   }
 
-  .tag-action.subtle {
-    background: #f8f4ed;
-    font-weight: 500;
-  }
-
   .tag-action:disabled {
     opacity: 0.6;
     cursor: default;
@@ -567,18 +570,6 @@
   .filter-chip[data-active='true'] {
     border-color: var(--color-primary, #31a6a0);
     background: #edf8f7;
-  }
-
-  .chip[data-pass='true'] {
-    border-color: #6c9f64;
-  }
-
-  .chip[data-pass='false'] {
-    border-color: #b97a7a;
-  }
-
-  .chip.subtle {
-    opacity: 0.8;
   }
 
   .result-table {
@@ -632,6 +623,27 @@
 
   .result-row[aria-busy='true'] {
     opacity: 0.72;
+  }
+
+  .score-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+  }
+
+  .score-icon {
+    font-size: 11px;
+    line-height: 1;
+    font-weight: 700;
+  }
+
+  .score-cell[data-pass='true'] .score-icon {
+    color: #2f6d3f;
+  }
+
+  .score-cell[data-pass='false'] .score-icon {
+    color: #8a2d2d;
   }
 
   .error-row td {

@@ -304,6 +304,22 @@ class EvalRunResponse(BaseModel):
     cases: list[EvalRunCasePayload]
 
 
+class EvalCaseComparisonRequest(BaseModel):
+    dataset_path: str
+    example_id: str
+    pred_trace_id: str
+    pred_session_id: str
+
+
+class EvalCaseComparisonResponse(BaseModel):
+    example_id: str
+    pred_trace_id: str
+    pred_session_id: str
+    gold_trace_id: str | None = None
+    gold_trajectory: dict[str, Any] | None = None
+    pred_trajectory: dict[str, Any] | None = None
+
+
 class AguiResumeRequest(BaseModel):
     resume_token: str
     thread_id: str
@@ -2540,6 +2556,8 @@ def create_playground_app(
         cases: list[EvalRunCasePayload] = []
 
         save_trajectory = getattr(store, "save_trajectory", None) if store is not None else None
+        get_trajectory = getattr(store, "get_trajectory", None) if store is not None else None
+        wait_for_trace_persistence = getattr(agent_wrapper, "wait_for_trace_persistence", None)
 
         for row in rows:
             split = str(row.get("split") or "unknown")
@@ -2563,20 +2581,66 @@ def create_playground_app(
                 tool_context=tool_context_dict,
             )
 
-            if save_trajectory is not None:
+            if callable(wait_for_trace_persistence):
+                try:
+                    maybe_wait = wait_for_trace_persistence(
+                        chat_result.trace_id,
+                        pred_session_id,
+                        timeout_s=1.0,
+                    )
+                    if inspect.isawaitable(maybe_wait):
+                        await maybe_wait
+                except TimeoutError:
+                    _LOGGER.info(
+                        "eval_run_trace_persistence_wait_timeout",
+                        extra={
+                            "trace_id": chat_result.trace_id,
+                            "session_id": pred_session_id,
+                        },
+                    )
+
+            pred_trace_payload: dict[str, Any] | None = None
+            pred_record = (
+                await get_trajectory(chat_result.trace_id, pred_session_id) if get_trajectory is not None else None
+            )
+            if pred_record is None and save_trajectory is not None:
                 trajectory = Trajectory(query=question, llm_context=llm_context_dict, tool_context=tool_context_dict)
                 trajectory.metadata["answer"] = chat_result.answer
                 await save_trajectory(chat_result.trace_id, pred_session_id, trajectory)
+                pred_record = trajectory
+            if pred_record is not None and hasattr(pred_record, "serialise"):
+                pred_trace_payload = dict(pred_record.serialise())
+                pred_trace_payload["trace_id"] = chat_result.trace_id
+                pred_trace_payload["session_id"] = pred_session_id
+            pred_steps = pred_trace_payload.get("steps") if isinstance(pred_trace_payload, Mapping) else None
+            pred_step_count = len(pred_steps) if isinstance(pred_steps, list) else 0
+
+            _LOGGER.info(
+                "eval_run_metric_debug",
+                extra={
+                    "example_id": str(row.get("example_id") or ""),
+                    "metric_spec": request.metric_spec,
+                    "pred_trace_id": chat_result.trace_id,
+                    "pred_session_id": pred_session_id,
+                    "pred_trace_has_steps": bool(pred_step_count > 0),
+                    "pred_trace_step_count": pred_step_count,
+                },
+            )
+            _LOGGER.info(
+                "eval_run_metric_debug_details example_id=%s metric_spec=%s pred_trace_id=%s pred_session_id=%s pred_trace_step_count=%d",
+                str(row.get("example_id") or ""),
+                request.metric_spec,
+                chat_result.trace_id,
+                pred_session_id,
+                pred_step_count,
+            )
 
             raw_score = metric(
-                gold_trace,
+                row,
                 chat_result.answer,
                 gold_trace,
                 "baseline",
-                {
-                    "trace_id": chat_result.trace_id,
-                    "session_id": pred_session_id,
-                },
+                pred_trace_payload,
             )
             score = 0.0
             feedback: str | None = None
@@ -2621,6 +2685,66 @@ def create_playground_app(
             min_test_score=request.min_test_score,
             passed_threshold=passed_threshold,
             cases=cases,
+        )
+
+    @app.post("/eval/cases/compare", response_model=EvalCaseComparisonResponse)
+    async def compare_eval_case(request: EvalCaseComparisonRequest) -> EvalCaseComparisonResponse:
+        raw_path = Path(request.dataset_path)
+        if not raw_path.is_absolute():
+            raw_path = (resolved_project_root / raw_path).resolve()
+        else:
+            raw_path = raw_path.resolve()
+
+        if raw_path != resolved_project_root and resolved_project_root not in raw_path.parents:
+            raise HTTPException(status_code=400, detail="dataset_path must be under project root")
+
+        dataset_path = (raw_path / "dataset.jsonl") if raw_path.is_dir() else raw_path
+        if not dataset_path.exists() or not dataset_path.is_file():
+            raise HTTPException(status_code=404, detail="dataset.jsonl not found")
+
+        selected_row: dict[str, Any] | None = None
+        for line in dataset_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            payload = json.loads(stripped)
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("example_id") or "") == request.example_id:
+                selected_row = payload
+                break
+
+        if selected_row is None:
+            raise HTTPException(status_code=404, detail="Eval example not found")
+
+        gold_trace_raw = selected_row.get("gold_trace") if isinstance(selected_row.get("gold_trace"), Mapping) else {}
+        gold_trace = dict(gold_trace_raw) if isinstance(gold_trace_raw, Mapping) else {}
+        gold_trajectory_raw = (
+            gold_trace.get("trajectory_full") if isinstance(gold_trace.get("trajectory_full"), Mapping) else None
+        )
+        gold_trajectory = dict(gold_trajectory_raw) if isinstance(gold_trajectory_raw, Mapping) else None
+        gold_trace_id = str(gold_trace.get("trace_id") or "") or None
+
+        if store is None:
+            raise HTTPException(status_code=500, detail="State store is not configured")
+        get_trajectory = getattr(store, "get_trajectory", None)
+        if get_trajectory is None:
+            raise HTTPException(status_code=501, detail="Trajectory retrieval is not supported")
+
+        pred_record = await get_trajectory(request.pred_trace_id, request.pred_session_id)
+        pred_trajectory: dict[str, Any] | None = None
+        if pred_record is not None and hasattr(pred_record, "serialise"):
+            pred_trajectory = dict(pred_record.serialise())
+            pred_trajectory["trace_id"] = request.pred_trace_id
+            pred_trajectory["session_id"] = request.pred_session_id
+
+        return EvalCaseComparisonResponse(
+            example_id=request.example_id,
+            pred_trace_id=request.pred_trace_id,
+            pred_session_id=request.pred_session_id,
+            gold_trace_id=gold_trace_id,
+            gold_trajectory=gold_trajectory,
+            pred_trajectory=pred_trajectory,
         )
 
     # ─── Artifact Endpoints ───────────────────────────────────────────────────

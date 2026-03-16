@@ -229,14 +229,11 @@
 
 <div class="traces-tab">
   <h3 class="title">Traces</h3>
-  <p class="muted">Select a trace row to load its trajectory below.</p>
 
   <div class="traces-body">
     <div class="section">
       <h4>Dataset Export</h4>
-      <p class="muted">Export dataset with +include and -exclude tags.</p>
       <div class="export-controls">
-        <span class="export-prefix">Export dataset</span>
         <label class="sr-only" for="traces-export-query">Export tags query</label>
         <input
           id="traces-export-query"
@@ -245,6 +242,7 @@
           placeholder="+split:val -tag:skip dataset:policy"
           list="traces-export-tag-suggestions"
         />
+        <span class="export-hint">+tag include -tag ignore</span>
         <datalist id="traces-export-tag-suggestions">
           {#each exportTagSuggestions as suggestion (suggestion)}
             <option value={suggestion}></option>
@@ -286,7 +284,7 @@
         <div class="trace-groups" data-testid="traces-table">
           {#each groupedSessions as group (group.sessionId)}
             <section class="session-group">
-              <h5 class="session-header">Session {group.sessionId}</h5>
+              <h5 class="session-header">{group.sessionId}</h5>
               <table class="trace-table">
                 <thead>
                   <tr>
@@ -403,9 +401,9 @@
   .session-header {
     margin: 0;
     padding: 7px 10px;
-    font-size: 11px;
+    font-size: 10px;
     letter-spacing: 0.02em;
-    font-weight: 700;
+    font-weight: 600;
     color: var(--color-text-secondary, #5f5a51);
     background: #f7f2ea;
     border-bottom: 1px solid var(--color-border-muted, #e4ddd2);
@@ -434,16 +432,17 @@
     flex-wrap: wrap;
   }
 
-  .export-prefix {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--color-text-secondary, #5f5a51);
-  }
-
   .filter-controls {
     margin-top: 8px;
     display: grid;
     gap: 4px;
+  }
+
+  .export-hint {
+    font-size: 10px;
+    color: var(--color-text-secondary, #5f5a51);
+    opacity: 0.78;
+    white-space: nowrap;
   }
 
   .filter-controls label {
@@ -492,7 +491,8 @@
 
   .trace-id {
     width: 180px;
-    color: var(--color-text, #1f1f1f);
+    font-size: 10px;
+    color: var(--color-text-secondary, #736f67);
     overflow-wrap: anywhere;
   }
 

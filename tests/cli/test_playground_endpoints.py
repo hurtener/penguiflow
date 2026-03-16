@@ -39,6 +39,15 @@ class MockAgentWrapper(AgentWrapper):
     async def shutdown(self) -> None:
         pass
 
+    async def wait_for_trace_persistence(
+        self,
+        trace_id: str,
+        session_id: str,
+        *,
+        timeout_s: float = 1.0,
+    ) -> None:
+        del trace_id, session_id, timeout_s
+
     async def resume(
         self,
         resume_token: str,
@@ -886,6 +895,18 @@ class TestEvalRunEndpoint:
         )
 
     @staticmethod
+    def _write_eval_metric_requiring_row_and_pred_trace(tmp_path: Path) -> None:
+        metric_file = tmp_path / "eval_metric_shape.py"
+        metric_file.write_text(
+            "def score(gold, pred, trace=None, pred_name=None, pred_trace=None):\n"
+            "    del pred, trace, pred_name\n"
+            "    has_question = isinstance(gold, dict) and gold.get('question') == 'what is policy'\n"
+            "    has_steps = isinstance(pred_trace, dict) and isinstance(pred_trace.get('steps'), list)\n"
+            "    return {'score': 1.0 if (has_question and has_steps) else 0.0, 'feedback': 'shape check'}\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
     def _write_dataset(tmp_path: Path, questions: list[str]) -> None:
         dataset_dir = tmp_path / "fixtures" / "dataset"
         dataset_dir.mkdir(parents=True, exist_ok=True)
@@ -935,6 +956,215 @@ class TestEvalRunEndpoint:
         assert case["pred_trace_id"] == "pred-trace-1"
         assert case["pred_session_id"].startswith("eval:")
         assert case["question"] == "what is policy"
+
+    def test_eval_run_passes_dataset_row_and_serialized_pred_trace_to_metric(self, tmp_path: Path) -> None:
+        self._write_eval_metric_requiring_row_and_pred_trace(tmp_path)
+        self._write_dataset(tmp_path, ["what is policy"])
+
+        class PersistingWrapper(MockAgentWrapper):
+            def __init__(self, state_store: InMemoryStateStore) -> None:
+                super().__init__(
+                    chat_result=ChatResult(
+                        trace_id="pred-trace-1",
+                        session_id="ignored-by-endpoint",
+                        answer="policy answer",
+                        metadata={"steps": 1},
+                        pause=None,
+                    )
+                )
+                self._state_store = state_store
+
+            async def chat(
+                self,
+                query: str,
+                *,
+                session_id: str,
+                llm_context: dict[str, Any] | None = None,
+                tool_context: dict[str, Any] | None = None,
+                event_consumer: Any = None,
+                trace_id_hint: str | None = None,
+                steering: Any = None,
+            ) -> ChatResult:
+                del event_consumer, trace_id_hint, steering
+                trajectory = Trajectory.from_serialised(
+                    {
+                        "query": query,
+                        "llm_context": dict(llm_context or {}),
+                        "tool_context": dict(tool_context or {}),
+                        "steps": [
+                            {
+                                "action": {
+                                    "thought": "route",
+                                    "next_node": "triage_query",
+                                    "args": {},
+                                }
+                            }
+                        ],
+                    }
+                )
+                await self._state_store.save_trajectory(self._chat_result.trace_id, session_id, trajectory)
+                return self._chat_result
+
+        store = InMemoryStateStore()
+        wrapper = PersistingWrapper(store)
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/eval/run",
+            json={"dataset_path": "fixtures/dataset", "metric_spec": "eval_metric_shape:score"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload["cases"]) == 1
+        assert payload["cases"][0]["score"] == 1.0
+
+    def test_eval_run_logs_pred_trace_step_visibility(self, tmp_path: Path, caplog: Any) -> None:
+        self._write_eval_metric_requiring_row_and_pred_trace(tmp_path)
+        self._write_dataset(tmp_path, ["what is policy"])
+
+        class PersistingWrapper(MockAgentWrapper):
+            def __init__(self, state_store: InMemoryStateStore) -> None:
+                super().__init__(
+                    chat_result=ChatResult(
+                        trace_id="pred-trace-1",
+                        session_id="ignored-by-endpoint",
+                        answer="policy answer",
+                        metadata={"steps": 1},
+                        pause=None,
+                    )
+                )
+                self._state_store = state_store
+
+            async def chat(
+                self,
+                query: str,
+                *,
+                session_id: str,
+                llm_context: dict[str, Any] | None = None,
+                tool_context: dict[str, Any] | None = None,
+                event_consumer: Any = None,
+                trace_id_hint: str | None = None,
+                steering: Any = None,
+            ) -> ChatResult:
+                del event_consumer, trace_id_hint, steering
+                trajectory = Trajectory.from_serialised(
+                    {
+                        "query": query,
+                        "llm_context": dict(llm_context or {}),
+                        "tool_context": dict(tool_context or {}),
+                        "steps": [
+                            {
+                                "action": {
+                                    "thought": "route",
+                                    "next_node": "triage_query",
+                                    "args": {},
+                                }
+                            }
+                        ],
+                    }
+                )
+                await self._state_store.save_trajectory(self._chat_result.trace_id, session_id, trajectory)
+                return self._chat_result
+
+        store = InMemoryStateStore()
+        wrapper = PersistingWrapper(store)
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        with caplog.at_level("INFO"):
+            response = client.post(
+                "/eval/run",
+                json={"dataset_path": "fixtures/dataset", "metric_spec": "eval_metric_shape:score"},
+            )
+
+        assert response.status_code == 200
+        assert any(record.msg == "eval_run_metric_debug" for record in caplog.records)
+        assert any("eval_run_metric_debug_details" in record.getMessage() for record in caplog.records)
+
+    def test_eval_run_waits_for_delayed_trace_persistence(self, tmp_path: Path) -> None:
+        self._write_eval_metric_requiring_row_and_pred_trace(tmp_path)
+        self._write_dataset(tmp_path, ["what is policy"])
+
+        class DelayedPersistingWrapper(MockAgentWrapper):
+            def __init__(self, state_store: InMemoryStateStore) -> None:
+                super().__init__(
+                    chat_result=ChatResult(
+                        trace_id="pred-trace-1",
+                        session_id="ignored-by-endpoint",
+                        answer="policy answer",
+                        metadata={"steps": 1},
+                        pause=None,
+                    )
+                )
+                self._state_store = state_store
+                self._persist_task: asyncio.Task[None] | None = None
+                self.wait_calls = 0
+
+            async def chat(
+                self,
+                query: str,
+                *,
+                session_id: str,
+                llm_context: dict[str, Any] | None = None,
+                tool_context: dict[str, Any] | None = None,
+                event_consumer: Any = None,
+                trace_id_hint: str | None = None,
+                steering: Any = None,
+            ) -> ChatResult:
+                del event_consumer, trace_id_hint, steering
+                trajectory = Trajectory.from_serialised(
+                    {
+                        "query": query,
+                        "llm_context": dict(llm_context or {}),
+                        "tool_context": dict(tool_context or {}),
+                        "steps": [
+                            {
+                                "action": {
+                                    "thought": "route",
+                                    "next_node": "triage_query",
+                                    "args": {},
+                                }
+                            }
+                        ],
+                    }
+                )
+
+                async def _persist_later() -> None:
+                    await asyncio.sleep(0.05)
+                    await self._state_store.save_trajectory(self._chat_result.trace_id, session_id, trajectory)
+
+                self._persist_task = asyncio.create_task(_persist_later())
+                return self._chat_result
+
+            async def wait_for_trace_persistence(
+                self,
+                trace_id: str,
+                session_id: str,
+                *,
+                timeout_s: float = 1.0,
+            ) -> None:
+                del trace_id, session_id
+                self.wait_calls += 1
+                if self._persist_task is not None:
+                    await asyncio.wait_for(self._persist_task, timeout=timeout_s)
+
+        store = InMemoryStateStore()
+        wrapper = DelayedPersistingWrapper(store)
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/eval/run",
+            json={"dataset_path": "fixtures/dataset", "metric_spec": "eval_metric_shape:score"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload["cases"]) == 1
+        assert payload["cases"][0]["score"] == 1.0
+        assert wrapper.wait_calls == 1
 
     def test_eval_run_applies_default_hard_max_cases_cap(self, tmp_path: Path) -> None:
         self._write_eval_metric(tmp_path)

@@ -467,6 +467,18 @@ class _EvalOrchestratorWrapper:
             else:
                 ensure_init()
 
+    async def wait_for_trace_persistence(
+        self,
+        trace_id: str,
+        session_id: str,
+        *,
+        timeout_s: float = 1.0,
+    ) -> None:
+        planner = getattr(self._orchestrator, "_planner", None)
+        if planner is None:
+            return
+        await _await_trace_persistence(planner, trace_id, session_id, timeout_s=timeout_s)
+
     async def chat(
         self,
         query: str,
@@ -478,7 +490,12 @@ class _EvalOrchestratorWrapper:
         execute = self._orchestrator.execute
         signature = inspect.signature(execute)
         kwargs: dict[str, Any] = {"query": query}
-        tool_ctx = dict(tool_context or {})
+        eval_trace_id = secrets.token_hex(8)
+        tool_ctx = {
+            **dict(tool_context or {}),
+            "session_id": session_id,
+            "trace_id": eval_trace_id,
+        }
         if "tenant_id" in signature.parameters:
             kwargs["tenant_id"] = str(tool_ctx.get("tenant_id") or "default")
         if "user_id" in signature.parameters:
@@ -490,14 +507,20 @@ class _EvalOrchestratorWrapper:
 
         response = await execute(**kwargs)
         metadata = _flatten_planner_metadata(_normalize_metadata(_get_attr(response, "metadata")))
-        trace_id = str(metadata.get("trace_id") or _get_attr(response, "trace_id") or secrets.token_hex(8))
+        trace_id = str(metadata.get("trace_id") or _get_attr(response, "trace_id") or eval_trace_id)
         answer = _normalise_answer(_get_attr(response, "answer"))
         if answer is None:
             answer = _normalise_answer(_get_attr(response, "text"))
 
-        trajectory = _build_trajectory(query, session_id, trace_id, metadata, llm_context or {}, tool_ctx)
-        if trajectory is not None and self._state_store is not None and hasattr(self._state_store, "save_trajectory"):
-            await self._state_store.save_trajectory(trace_id, session_id, trajectory)
+        planner = getattr(self._orchestrator, "_planner", None)
+        if not _supports_trace_persistence_wait(planner):
+            trajectory = _build_trajectory(query, session_id, trace_id, metadata, llm_context or {}, tool_ctx)
+            if (
+                trajectory is not None
+                and self._state_store is not None
+                and hasattr(self._state_store, "save_trajectory")
+            ):
+                await self._state_store.save_trajectory(trace_id, session_id, trajectory)
 
         return ChatResult(
             answer=answer,
@@ -516,6 +539,15 @@ class _EvalPlannerWrapper:
 
     async def initialize(self) -> None:
         return None
+
+    async def wait_for_trace_persistence(
+        self,
+        trace_id: str,
+        session_id: str,
+        *,
+        timeout_s: float = 1.0,
+    ) -> None:
+        await _await_trace_persistence(self._planner, trace_id, session_id, timeout_s=timeout_s)
 
     async def chat(
         self,
@@ -554,9 +586,14 @@ class _EvalPlannerWrapper:
 
         payload = result.payload if isinstance(result, PlannerFinish) else result
         metadata = _normalize_metadata(getattr(result, "metadata", None))
-        trajectory = _build_trajectory(query, session_id, trace_id, metadata, llm_context, merged_tool_context)
-        if trajectory is not None and self._state_store is not None and hasattr(self._state_store, "save_trajectory"):
-            await self._state_store.save_trajectory(trace_id, session_id, trajectory)
+        if not _supports_trace_persistence_wait(self._planner):
+            trajectory = _build_trajectory(query, session_id, trace_id, metadata, llm_context, merged_tool_context)
+            if (
+                trajectory is not None
+                and self._state_store is not None
+                and hasattr(self._state_store, "save_trajectory")
+            ):
+                await self._state_store.save_trajectory(trace_id, session_id, trajectory)
 
         answer = _normalise_answer(payload)
         if answer is None and metadata:
@@ -569,6 +606,25 @@ class _EvalPlannerWrapper:
             session_id=session_id,
             metadata=metadata,
         )
+
+
+async def _await_trace_persistence(
+    planner: Any,
+    trace_id: str,
+    session_id: str,
+    *,
+    timeout_s: float = 1.0,
+) -> None:
+    waiter = getattr(planner, "wait_for_trace_persistence", None)
+    if not callable(waiter):
+        return
+    wait_result = waiter(trace_id, session_id=session_id, timeout_s=timeout_s)
+    if inspect.isawaitable(wait_result):
+        await wait_result
+
+
+def _supports_trace_persistence_wait(planner: Any) -> bool:
+    return callable(getattr(planner, "wait_for_trace_persistence", None))
 
 
 def _candidate_packages(project_root: str | Path) -> list[str]:
@@ -829,6 +885,18 @@ async def _build_discovered_run_one(
             llm_context=llm_context,
             tool_context=tool_context,
         )
+        wait_for_trace_persistence = getattr(runner, "wait_for_trace_persistence", None)
+        if callable(wait_for_trace_persistence):
+            try:
+                await _maybe_await(
+                    wait_for_trace_persistence(
+                        result.trace_id,
+                        prediction_session_id,
+                        timeout_s=1.0,
+                    )
+                )
+            except TimeoutError:
+                pass
         pred = str(result.answer or "")
         pred_trace: dict[str, Any] = {}
 

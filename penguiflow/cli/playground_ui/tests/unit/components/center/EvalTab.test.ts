@@ -1,11 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import EvalTab, { resetPersistedEvalState } from '$lib/components/features/eval/EvalTab.svelte';
 import * as api from '$lib/services/api';
 
 const trajectoryStoreMock = {
   clearArtifacts: vi.fn(),
-  setFromPayload: vi.fn()
+  setFromPayload: vi.fn(),
+  setEvalCaseSelection: vi.fn(),
+  setEvalComparison: vi.fn(),
+  setEvalComparisonLoading: vi.fn(),
+  setEvalComparisonError: vi.fn(),
+  setTrajectoryViewMode: vi.fn()
 };
 
 vi.mock('$lib/stores', async (importOriginal) => {
@@ -20,6 +25,7 @@ vi.mock('$lib/services/api', () => ({
   loadEvalDataset: vi.fn(),
   runEval: vi.fn(),
   fetchTrajectory: vi.fn(),
+  fetchEvalCaseComparison: vi.fn(),
   listEvalDatasets: vi.fn(),
   listEvalMetrics: vi.fn()
 }));
@@ -47,6 +53,7 @@ describe('EvalTab minimalist flow', () => {
       counts: { total: 12, by_split: { val: 8, test: 4 } },
       examples: [{ example_id: 'ex-1', split: 'val', question: 'Q1' }]
     });
+    vi.mocked(api.fetchEvalCaseComparison).mockResolvedValue(null);
   });
 
   it('renders compact toolbar and removes legacy dataset path input', async () => {
@@ -57,6 +64,7 @@ describe('EvalTab minimalist flow', () => {
     expect(screen.getByLabelText('Metric selection')).toBeTruthy();
     expect(screen.queryByLabelText('Selected dataset path')).toBeNull();
     expect(screen.queryByText('Browse datasets')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Preview dataset' })).toBeNull();
   });
 
   it('auto-previews selected dataset from dropdown', async () => {
@@ -74,7 +82,7 @@ describe('EvalTab minimalist flow', () => {
   it('shows compact status line and empty results state', async () => {
     render(EvalTab);
 
-    expect(await screen.findByTestId('eval-status-line')).toBeTruthy();
+    expect(await screen.findByText('12 examples loaded.')).toBeTruthy();
     expect(screen.getByText('Run evaluation to see results.')).toBeTruthy();
   });
 
@@ -88,7 +96,7 @@ describe('EvalTab minimalist flow', () => {
     expect(runButton).toBeDisabled();
   });
 
-  it('submits run and renders compact summary and sorted cases', async () => {
+  it('submits run and renders minimalist summary chips and sorted cases', async () => {
     vi.mocked(api.runEval).mockResolvedValue({
       run_id: 'run-1',
       counts: { total: 2, val: 1, test: 1 },
@@ -120,7 +128,9 @@ describe('EvalTab minimalist flow', () => {
 
     await fireEvent.input(await screen.findByLabelText('Min score'), { target: { value: '0.8' } });
     await fireEvent.input(screen.getByLabelText('Max cases'), { target: { value: '25' } });
-    await fireEvent.click(screen.getByRole('button', { name: 'Run evaluation' }));
+    const runButton = screen.getByRole('button', { name: 'Run evaluation' });
+    await waitFor(() => expect(runButton).not.toBeDisabled());
+    await fireEvent.click(runButton);
 
     expect(api.runEval).toHaveBeenCalledWith({
       dataset_path: 'examples/evals/policy/dataset.jsonl',
@@ -128,12 +138,15 @@ describe('EvalTab minimalist flow', () => {
       min_test_score: 0.8,
       max_cases: 25
     });
+    expect(screen.getByText('2 cases evaluated.')).toBeTruthy();
+    expect(screen.queryByText(/run-1/i)).toBeNull();
     expect(await screen.findByTestId('eval-summary-line')).toBeTruthy();
-    expect(screen.getByText('run-1')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Failures 1' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Failed 1' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Passed 1' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'All 2' })).toBeTruthy();
-    expect(screen.getByRole('columnheader', { name: 'Case' })).toBeTruthy();
-    expect(screen.getByRole('columnheader', { name: 'Score' })).toBeTruthy();
+    const headers = screen.getAllByRole('columnheader').map((node) => node.textContent?.trim());
+    expect(headers[headers.length - 2]).toBe('Score');
+    expect(headers[headers.length - 1]).toBe('Feedback');
 
     const ordered = screen.getAllByTestId('result-example-id').map((node) => node.textContent);
     expect(ordered[0]).toContain('ex-low');
@@ -143,9 +156,11 @@ describe('EvalTab minimalist flow', () => {
     const highRow = screen.getByRole('row', { name: /ex-high/i });
     expect(lowRow.getAttribute('data-severity')).toBe('critical');
     expect(highRow.getAttribute('data-severity')).toBe('ok');
+    expect(screen.getByLabelText('Failed case ex-low')).toBeTruthy();
+    expect(screen.getByLabelText('Passed case ex-high')).toBeTruthy();
   });
 
-  it('filters result table with chips and supports reviewed filter', async () => {
+  it('filters result table with All/Failed/Passed chips only', async () => {
     vi.mocked(api.runEval).mockResolvedValue({
       run_id: 'run-filter',
       counts: { total: 3, val: 1, test: 2 },
@@ -190,25 +205,24 @@ describe('EvalTab minimalist flow', () => {
     render(EvalTab);
     await fireEvent.click(await screen.findByRole('button', { name: 'Run evaluation' }));
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Failures 1' }));
-    expect(screen.getByRole('button', { name: 'Failures 1' }).getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(screen.getByRole('button', { name: 'Failed 1' }));
+    expect(screen.getByRole('button', { name: 'Failed 1' }).getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByRole('button', { name: 'All 3' }).getAttribute('aria-pressed')).toBe('false');
     expect(screen.getByText('ex-fail')).toBeTruthy();
     expect(screen.queryByText('ex-test-pass')).toBeNull();
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Test 2' }));
-    expect(screen.getByText('ex-fail')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Passed 2' }));
+    expect(screen.queryByText('ex-fail')).toBeNull();
     expect(screen.getByText('ex-test-pass')).toBeTruthy();
-    expect(screen.queryByText('ex-val-pass')).toBeNull();
+    expect(screen.getByText('ex-val-pass')).toBeTruthy();
 
     await fireEvent.click(screen.getByRole('button', { name: 'All 3' }));
-    const reviewedRow = screen.getByRole('row', { name: /ex-fail/i });
-    await fireEvent.click(reviewedRow);
-
-    await fireEvent.click(screen.getByRole('button', { name: 'Reviewed 1' }));
     expect(screen.getByText('ex-fail')).toBeTruthy();
-    expect(screen.queryByText('ex-test-pass')).toBeNull();
-    expect(screen.queryByText('ex-val-pass')).toBeNull();
+    expect(screen.getByText('ex-test-pass')).toBeTruthy();
+    expect(screen.getByText('ex-val-pass')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Reviewed/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Val\b/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Test\b/i })).toBeNull();
   });
 
   it('keeps last successful run when next run fails', async () => {
@@ -224,12 +238,15 @@ describe('EvalTab minimalist flow', () => {
 
     render(EvalTab);
 
-    await fireEvent.click(await screen.findByRole('button', { name: 'Run evaluation' }));
-    expect(await screen.findByText('run-ok')).toBeTruthy();
+    const runButton = await screen.findByRole('button', { name: 'Run evaluation' });
+    await waitFor(() => expect(runButton).not.toBeDisabled());
+    await fireEvent.click(runButton);
+    expect(await screen.findByText('1 case evaluated.')).toBeTruthy();
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Run evaluation' }));
+    await fireEvent.click(runButton);
     expect(await screen.findByText('Eval run failed.')).toBeTruthy();
-    expect(screen.getByText('run-ok')).toBeTruthy();
+    expect(screen.getByTestId('eval-summary-line')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'All 0' })).toBeTruthy();
   });
 
   it('opens trace into trajectory store when clicking a case row', async () => {
@@ -255,16 +272,38 @@ describe('EvalTab minimalist flow', () => {
       trace_id: 'trace-1',
       session_id: 'session-1'
     } as never);
+    vi.mocked(api.fetchEvalCaseComparison).mockResolvedValue({
+      example_id: 'ex-1',
+      pred_trace_id: 'trace-1',
+      pred_session_id: 'session-1',
+      gold_trace_id: 'gold-trace-1',
+      gold_trajectory: { steps: [{ action: { next_node: 'gold_node' } }] },
+      pred_trajectory: { steps: [{ action: { next_node: 'pred_node' } }] }
+    } as never);
 
     render(EvalTab);
 
-    await fireEvent.click(await screen.findByRole('button', { name: 'Run evaluation' }));
-    const row = await screen.findByRole('row', { name: /ex-1/i });
-    await fireEvent.click(row);
+    const runButton = await screen.findByRole('button', { name: 'Run evaluation' });
+    await waitFor(() => expect(runButton).not.toBeDisabled());
+    await fireEvent.click(runButton);
+    const rowCell = await screen.findByText('ex-1');
+    const row = rowCell.closest('tr');
+    expect(row).toBeTruthy();
+    await fireEvent.click(row as HTMLTableRowElement);
 
     expect(api.fetchTrajectory).toHaveBeenCalledWith('trace-1', 'session-1');
+    expect(api.fetchEvalCaseComparison).toHaveBeenCalledWith({
+      dataset_path: 'examples/evals/policy/dataset.jsonl',
+      example_id: 'ex-1',
+      pred_trace_id: 'trace-1',
+      pred_session_id: 'session-1'
+    });
     expect(trajectoryStoreMock.clearArtifacts).toHaveBeenCalledTimes(1);
     expect(trajectoryStoreMock.setFromPayload).toHaveBeenCalledTimes(1);
+    expect(trajectoryStoreMock.setEvalComparisonLoading).toHaveBeenCalledWith(true);
+    expect(trajectoryStoreMock.setEvalComparison).toHaveBeenCalled();
+    expect(trajectoryStoreMock.setEvalCaseSelection).toHaveBeenCalled();
+    expect(trajectoryStoreMock.setTrajectoryViewMode).toHaveBeenCalledWith('divergence');
     expect(screen.queryByRole('button', { name: 'Review trace ex-1' })).toBeNull();
   });
 
@@ -277,7 +316,9 @@ describe('EvalTab minimalist flow', () => {
 
     render(EvalTab);
 
-    await fireEvent.click(await screen.findByRole('button', { name: 'Run evaluation' }));
+    const runButton = await screen.findByRole('button', { name: 'Run evaluation' });
+    await waitFor(() => expect(runButton).not.toBeDisabled());
+    await fireEvent.click(runButton);
     expect(screen.getByRole('button', { name: 'Run evaluation' }).textContent).toContain('Running...');
 
     resolveRun({
@@ -287,7 +328,7 @@ describe('EvalTab minimalist flow', () => {
       passed_threshold: true,
       cases: []
     });
-    expect(await screen.findByText('run-3')).toBeTruthy();
+    expect(await screen.findByText('0 cases evaluated.')).toBeTruthy();
   });
 
   it('keeps eval state persisted across remounts', async () => {
@@ -300,11 +341,13 @@ describe('EvalTab minimalist flow', () => {
     });
 
     const first = render(EvalTab);
-    await fireEvent.click(await screen.findByRole('button', { name: 'Run evaluation' }));
-    expect(await screen.findByText('run-persist')).toBeTruthy();
+    const runButton = await screen.findByRole('button', { name: 'Run evaluation' });
+    await waitFor(() => expect(runButton).not.toBeDisabled());
+    await fireEvent.click(runButton);
+    expect(await screen.findByText('1 case evaluated.')).toBeTruthy();
     first.unmount();
 
     render(EvalTab);
-    expect(await screen.findByText('run-persist')).toBeTruthy();
+    expect(await screen.findByText('1 case evaluated.')).toBeTruthy();
   });
 });

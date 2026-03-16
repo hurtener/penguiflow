@@ -13,7 +13,8 @@ vi.mock('$lib/services/api', async (importOriginal) => {
     listEvalMetrics: vi.fn(),
     loadEvalDataset: vi.fn(),
     runEval: vi.fn(),
-    fetchTrajectory: vi.fn()
+    fetchTrajectory: vi.fn(),
+    fetchEvalCaseComparison: vi.fn()
   };
 });
 
@@ -42,6 +43,7 @@ describe('ChatCard Eval tab', () => {
         source_spec_path: 'example_app/evals/policy/evaluate.spec.json'
       }
     ]);
+    vi.mocked(api.fetchEvalCaseComparison).mockResolvedValue(null);
   });
 
   it('renders an Eval tab and shows eval surface when selected', async () => {
@@ -134,12 +136,12 @@ describe('ChatCard Eval tab', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Eval' }));
     await fireEvent.click(screen.getByRole('button', { name: 'Run evaluation' }));
 
-    expect(await screen.findByText('run-persist')).toBeTruthy();
+    expect(await screen.findByText('1 case evaluated.')).toBeTruthy();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Traces' }));
     expect(await screen.findByRole('heading', { name: 'Traces' })).toBeTruthy();
 
     await fireEvent.click(screen.getByRole('button', { name: 'Eval' }));
-    expect(await screen.findByText('run-persist')).toBeTruthy();
+    expect(await screen.findByText('1 case evaluated.')).toBeTruthy();
   });
 });
