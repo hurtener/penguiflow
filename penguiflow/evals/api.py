@@ -504,6 +504,9 @@ class _EvalOrchestratorWrapper:
             kwargs["session_id"] = session_id
         if "tool_context" in signature.parameters:
             kwargs["tool_context"] = tool_ctx
+        raw_memories = (llm_context or {}).get("memories") if isinstance(llm_context, Mapping) else None
+        if "memories" in signature.parameters and isinstance(raw_memories, list):
+            kwargs["memories"] = raw_memories
 
         response = await execute(**kwargs)
         metadata = _flatten_planner_metadata(_normalize_metadata(_get_attr(response, "metadata")))
@@ -805,6 +808,18 @@ async def collect_traces(
             tool_context=case.tool_context,
         )
         trace_ids.append(result.trace_id)
+        wait_for_trace_persistence = getattr(runner, "wait_for_trace_persistence", None)
+        if callable(wait_for_trace_persistence):
+            try:
+                await _maybe_await(
+                    wait_for_trace_persistence(
+                        result.trace_id,
+                        session_id,
+                        timeout_s=1.0,
+                    )
+                )
+            except TimeoutError:
+                pass
 
         tags = _collect_tags(case)
         if tags and hasattr(state_store, "get_trajectory") and hasattr(state_store, "save_trajectory"):
