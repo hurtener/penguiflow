@@ -107,7 +107,8 @@ Flow:
 
 - define query suite,
 - collect/pin dataset,
-- run baseline eval by omitting `candidates_path` and using `min_test_score`.
+- run baseline eval by omitting `candidates_path` and using `min_test_score`,
+- use Playground for dataset curation from real traces, failing-case review, and trace-linked debugging while refining metrics.
 
 ---
 

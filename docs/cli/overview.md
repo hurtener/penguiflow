@@ -54,7 +54,7 @@ uv run penguiflow tools list
 uv run penguiflow tools connect github --discover
 ```
 
-### Workflow D: eval workflow (collect -> review -> evaluate)
+### Workflow D: eval workflow (author in Playground, operationalize in CLI)
 
 ```bash
 uv run penguiflow eval collect --spec examples/my_agent/datasets/eval_v1/collect.spec.json
@@ -62,7 +62,13 @@ uv run penguiflow eval collect --spec examples/my_agent/datasets/eval_v1/collect
 uv run penguiflow eval evaluate --spec examples/my_agent/datasets/eval_v1/evaluate.spec.json
 ```
 
+Recommended split:
+
+- use `penguiflow dev` when you want to curate datasets from real traces, review failing cases, and open prediction traces during metric design
+- use `penguiflow eval` when you want committed specs, repeatable reruns, and CI-friendly threshold checks
+
 For full eval spec fields and output contract, see **[`penguiflow eval`](eval-command.md)**.
+For the interactive dataset and trace-triage loop, see **[Playground eval workflow](playground-evals.md)**.
 
 ## Failure modes & recovery
 

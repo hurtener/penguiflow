@@ -6,7 +6,8 @@ Goal:
 1) collect real traces into a pinned dataset,
 2) inspect dataset structure,
 3) build deterministic metric logic,
-4) run baseline eval with threshold gating.
+4) review and debug cases in Playground,
+5) run baseline eval with threshold gating.
 
 ## Step 0 - Environment and credentials
 
@@ -123,7 +124,41 @@ Recommended rule style:
 - compare expected route/tool policy vs observed tool sequence,
 - avoid free-text answer matching as primary signal.
 
-## Step 6 - Create evaluate spec (baseline mode)
+Recommended metric shape:
+
+- define the metric with `@metric(...)`
+- keep the docstring short and human-readable because Playground surfaces it as summary context
+- use stable criterion ids for rubric items
+- return structured `checks` so per-case failures stay specific and scannable
+- keep `feedback` concise and failure-oriented
+
+Why: Playground can then show the metric definition, render `Failed: ...` from criterion ids, and collapse clean passes to `✓ All pass`.
+
+This example now includes both:
+
+- `policy_metric` for the main pass-oriented policy baseline
+- `fail_metric_demo` for intentionally mixed/failing cases during Playground UI review
+
+The demo spec lives at `examples/planner_enterprise_agent_v2/evals/fail_metric_demo_v1/evaluate.spec.json`.
+
+## Step 6 - Optional Playground review loop
+
+Before freezing the baseline gate, it is often useful to review the dataset and metric in Playground:
+
+```bash
+uv run penguiflow dev --project-root examples/planner_enterprise_agent_v2
+```
+
+Useful loop:
+
+- load the dataset from `examples/planner_enterprise_agent_v2/evals/policy_compliance_v1/dataset/`
+- run `examples.planner_enterprise_agent_v2.evals.metrics:policy_metric`
+- inspect low-scoring rows and open prediction traces
+- optionally run `examples.planner_enterprise_agent_v2.evals.metrics:fail_metric_demo` to verify failed criteria and divergence rendering
+
+Why: Playground is the fastest way to debug failing rows before you rely on the committed CLI gate.
+
+## Step 7 - Create evaluate spec (baseline mode)
 
 Create `evaluate.spec.json`:
 
@@ -149,7 +184,7 @@ Key meanings:
 
 Note: `candidates_path` is optional. If omitted, eval runs baseline-only mode.
 
-## Step 7 - Run baseline evaluation
+## Step 8 - Run baseline evaluation
 
 ```bash
 uv run penguiflow eval evaluate --spec examples/planner_enterprise_agent_v2/evals/policy_compliance_v1/evaluate.spec.json

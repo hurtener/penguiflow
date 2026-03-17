@@ -2,7 +2,7 @@
 
 ## What it is / when to use it
 
-`penguiflow eval` is the canonical CLI entrypoint for trace-derived evaluation.
+`penguiflow eval` is the canonical CLI entrypoint for repeatable, spec-driven trace-derived evaluation.
 
 Current default behavior is minimalistic:
 
@@ -17,6 +17,15 @@ Use it when you want to:
 - collect and export traces without running evaluation (metric design/debugging)
 - run baseline + patch candidate sweeps with holdout verification on a committed dataset
 - rerun evaluation on an already-exported dataset without recollecting traces
+
+Use Playground instead when you want to:
+
+- curate datasets from recently observed traces
+- inspect failing cases and open prediction traces directly in the UI
+- shape eval cases interactively before you freeze them into committed specs
+- work from multi-turn sessions where a useful eval target may come from a specific turn or intermediary step, not only the final answer
+
+The two workflows are complementary: author/debug in Playground, then operationalize in `penguiflow eval`.
 
 ## Commands
 
@@ -52,6 +61,20 @@ Baseline-only mode runs when `evaluate.spec.json` omits `candidates_path`.
 - no candidate ranking is computed
 - output reports baseline scores directly (`val_score`, `test_score`)
 - optional threshold gate via `min_test_score`
+
+## Playground companion workflow
+
+The Playground uses the same dataset/eval formats for an interactive debug loop:
+
+- tag stored traces
+- export a dataset bundle or load an existing one
+- run eval with a CLI-compatible `metric_spec`
+- inspect per-case scores, feedback, and structured failed checks
+- open prediction traces for low-scoring or failing rows
+
+When the workflow stabilizes, keep the dataset/specs in version control and rerun them with `penguiflow eval`.
+
+See **[Playground eval workflow](playground-evals.md)**.
 
 ## Spec formats
 
@@ -169,6 +192,7 @@ Optional report mode (`report_path` in evaluate specs):
 - Prefer deterministic, trace-aware metrics as your primary CI gate (stable, cheap, reproducible).
 - Use LLM-as-judge metrics as a secondary signal for ambiguous quality checks (tone/helpfulness/nuance).
 - If you use LLM judging, pin model + prompt + temperature and avoid using judge-only scores as the sole regression gate.
+- Prefer structured metrics with a stable definition, criterion ids, and per-case `checks` so Playground can show concise rubric-aware feedback.
 
 ## Environment loading behavior
 
