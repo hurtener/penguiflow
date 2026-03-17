@@ -9,6 +9,9 @@ import httpx
 
 from penguiflow.planner import PlannerFinish, PlannerPause
 
+{% if with_a2a %}
+from {{ package_name }}.a2a import create_a2a_app
+{% endif %}
 from {{ package_name }}.config import Config
 from {{ package_name }}.orchestrator import {{ class_name }}Orchestrator
 {% if memory_enabled %}
@@ -115,8 +118,7 @@ async def test_stop_marks_orchestrator_inactive(config: Config) -> None:
 @pytest.mark.asyncio
 async def test_a2a_server_stub(config: Config) -> None:
     orchestrator = {{ class_name }}Orchestrator(config)
-    await orchestrator.start_a2a()
-    app = orchestrator._a2a_server.app  # type: ignore[attr-defined]
+    app = create_a2a_app(orchestrator, include_docs=False)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get(

@@ -14,9 +14,6 @@ from penguiflow.types import StreamChunk
 {% if memory_enabled %}
 from .clients.memory import MemoryClient
 {% endif %}
-{% if with_a2a %}
-from .a2a import A2AServer
-{% endif %}
 from .config import Config
 from .flow import run_controller
 from .telemetry import AgentTelemetry
@@ -67,9 +64,6 @@ class {{ class_name }}Orchestrator:
             flow_name="{{ project_name }}",
             logger=_LOGGER,
         )
-{% if with_a2a %}
-        self._a2a_server = A2AServer(self)
-{% endif %}
         self._started = True
 
     async def execute(
@@ -179,15 +173,5 @@ class {{ class_name }}Orchestrator:
     async def stop(self) -> None:
         """Graceful shutdown hook."""
         if self._started:
-{% if with_a2a %}
-            if getattr(self, "_a2a_server", None):
-                await self._a2a_server.stop()
-{% endif %}
             self._started = False
             _LOGGER.info("{{ project_name }} orchestrator stopped")
-
-{% if with_a2a %}
-    async def start_a2a(self) -> None:
-        """Start the A2A HTTP+JSON server."""
-        await self._a2a_server.start()
-{% endif %}

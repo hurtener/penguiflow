@@ -23,9 +23,6 @@ from penguiflow.sessions.tool_jobs import build_tool_job_pipeline
 {% endif %}
 from penguiflow.rich_output import DEFAULT_ALLOWLIST, RichOutputConfig, attach_rich_output_nodes, get_runtime
 
-{% if with_a2a %}
-from .a2a import A2AServer
-{% endif %}
 {% if memory_enabled %}
 from .clients.memory import MemoryClient
 {% endif %}
@@ -242,9 +239,6 @@ class {{ class_name }}Orchestrator:
         # - Custom: pass any client with .complete(messages=[...], response_format=...).
         # Prompt tweaks: pass system_prompt_extra or planning_hints to ReactPlanner to append guidance without
         # editing penguiflow.planner.prompts.
-{% if with_a2a %}
-        self._a2a_server = A2AServer(self)
-{% endif %}
         self._tool_context_defaults: dict[str, Any] = {}
 {% if with_background_tasks %}
         self._session_manager = session_manager
@@ -523,15 +517,5 @@ class {{ class_name }}Orchestrator:
     async def stop(self) -> None:
         """Graceful shutdown hook."""
         if self._started:
-{% if with_a2a %}
-            if getattr(self, "_a2a_server", None):
-                await self._a2a_server.stop()
-{% endif %}
             self._started = False
             _LOGGER.info("{{ project_name }} orchestrator stopped")
-
-{% if with_a2a %}
-    async def start_a2a(self) -> None:
-        """Start the A2A HTTP+JSON server."""
-        await self._a2a_server.start()
-{% endif %}

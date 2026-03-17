@@ -34,6 +34,10 @@ PRICING: dict[str, tuple[float, float]] = {
     "gpt-5.2-codex": (0.00175, 0.014),  # $1.75/$14 per 1M tokens
     "gpt-5.2-pro": (0.021, 0.168),  # $21/$168 per 1M tokens
     "gpt-5.3-codex": (0.00175, 0.014),  # $1.75/$14 per 1M tokens
+    "gpt-5.4": (0.0025, 0.015),  # $2.50/$15 per 1M tokens
+    "gpt-5.4-pro": (0.03, 0.18),  # $30/$180 per 1M tokens
+    "gpt-5.4-mini": (0.00075, 0.0045),  # $0.75/$4.50 per 1M tokens
+    "gpt-5.4-nano": (0.0002, 0.00125),  # $0.20/$1.25 per 1M tokens
     # OpenAI - GPT Series
     "gpt-4o": (0.0025, 0.01),  # $2.50/$10.00 per 1M tokens
     "gpt-4o-mini": (0.00015, 0.0006),  # $0.15/$0.60 per 1M tokens
@@ -158,8 +162,15 @@ PRICING: dict[str, tuple[float, float]] = {
     "qwen/qwen3.5-27b": (0.00027, 0.00216),  # $0.27/$2.16 per 1M tokens
     "qwen/qwen3.5-35b-a3b": (0.000225, 0.0018),  # $0.225/$1.80 per 1M tokens
     "qwen/qwen3.5-397b-a17b": (0.00055, 0.0035),  # $0.55/$3.50 per 1M tokens
+    "qwen/qwen3.5-9b": (0.00005, 0.00015),  # $0.05/$0.15 per 1M tokens
+    "qwen3.5-9b": (0.00005, 0.00015),  # $0.05/$0.15 per 1M tokens
     "qwen/qwen3.5-flash-02-23": (0.0001, 0.0004),  # $0.10/$0.40 per 1M tokens
     "qwen/qwen3.5-plus-02-15": (0.0004, 0.0024),  # $0.40/$2.40 per 1M tokens
+    # OpenRouter - Z.ai GLM family (March 2026)
+    "glm-4.7-flash": (0.00006, 0.0004),  # $0.06/$0.40 per 1M tokens
+    "glm-4.7": (0.00038, 0.00198),  # $0.38/$1.98 per 1M tokens
+    "glm-5": (0.00072, 0.0023),  # $0.72/$2.30 per 1M tokens
+    "glm-5-turbo": (0.00096, 0.0032),  # $0.96/$3.20 per 1M tokens
 }
 
 

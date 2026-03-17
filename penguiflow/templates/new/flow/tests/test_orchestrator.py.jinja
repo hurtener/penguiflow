@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 {% if with_a2a %}
 import httpx
+from {{ package_name }}.a2a import create_a2a_app
 {% endif %}
 
 from {{ package_name }}.config import Config
@@ -81,8 +82,7 @@ async def test_orchestrator_stop_is_idempotent() -> None:
 async def test_a2a_server_stub() -> None:
     config = Config.from_env()
     orchestrator = {{ class_name }}Orchestrator(config)
-    await orchestrator.start_a2a()
-    app = orchestrator._a2a_server.app  # type: ignore[attr-defined]
+    app = create_a2a_app(orchestrator, include_docs=False)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get(

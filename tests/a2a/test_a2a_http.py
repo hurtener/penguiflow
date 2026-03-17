@@ -5,11 +5,19 @@ import json
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 
 from penguiflow import Message as FlowMessage
 from penguiflow import Node, NodePolicy, create
-from penguiflow_a2a import A2AConfig, A2AService, create_a2a_http_app
+from penguiflow_a2a import (
+    A2AConfig,
+    A2AService,
+    create_a2a_http_app,
+    create_a2a_http_router,
+    install_a2a_http,
+)
 from penguiflow_a2a.models import (
     AgentCapabilities,
     AgentCard,
@@ -86,6 +94,18 @@ def _build_slow_client(delay: float = 0.5) -> TestClient:
     service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
     app = create_a2a_http_app(service, include_docs=False)
     return TestClient(app, raise_server_exceptions=False)
+
+
+def _build_router_client() -> tuple[TestClient, A2AService]:
+    async def echo(message: FlowMessage, _ctx) -> str:
+        return f"echo:{message.payload}"
+
+    node = Node(echo, name="echo", policy=NodePolicy(validate="none"))
+    flow = create(node.to(), emit_errors_to_rookery=True)
+    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    app = FastAPI()
+    app.include_router(create_a2a_http_router(service))
+    return TestClient(app, raise_server_exceptions=False), service
 
 
 def _base_headers() -> dict[str, str]:
@@ -295,6 +315,92 @@ def test_version_not_supported() -> None:
         )
         assert response.status_code == 400
         assert response.json()["type"].endswith("version-not-supported")
+
+
+def test_router_direct_include_starts_service_via_lifespan() -> None:
+    client, service = _build_router_client()
+    assert service._flow_started is False
+
+    with client:
+        assert service._flow_started is True
+        response = client.get("/.well-known/agent-card.json")
+        assert response.status_code == 200
+        assert response.json()["name"] == "Test Agent"
+
+        response = client.post(
+            "/message:send",
+            json=_message_payload("hello", blocking=True),
+            headers=_base_headers(),
+        )
+        assert response.status_code == 200
+        assert response.json()["task"]["status"]["state"] == TaskState.COMPLETED.value
+
+    assert service._flow_started is False
+
+
+def test_router_include_does_not_change_unrelated_validation_errors() -> None:
+    async def echo(message: FlowMessage, _ctx) -> str:
+        return f"echo:{message.payload}"
+
+    class EchoPayload(BaseModel):
+        count: int
+
+    node = Node(echo, name="echo", policy=NodePolicy(validate="none"))
+    flow = create(node.to(), emit_errors_to_rookery=True)
+    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    app = FastAPI()
+
+    @app.post("/echo")
+    async def local_echo(payload: EchoPayload) -> dict[str, int]:
+        return payload.model_dump()
+
+    app.include_router(create_a2a_http_router(service))
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/echo", json={"count": "bad"})
+        assert response.status_code == 422
+        assert isinstance(response.json()["detail"], list)
+
+        response = client.get(
+            "/tasks",
+            params={"pageSize": "bad"},
+            headers=_base_headers(),
+        )
+        assert response.status_code == 422
+        assert response.json()["type"].endswith("invalid-request")
+
+
+def test_install_helper_mounts_aliases_and_agent_card_once() -> None:
+    async def echo(message: FlowMessage, _ctx) -> str:
+        return f"echo:{message.payload}"
+
+    node = Node(echo, name="echo", policy=NodePolicy(validate="none"))
+    flow = create(node.to(), emit_errors_to_rookery=True)
+    service = A2AService(flow, agent_card=_agent_card(), config=A2AConfig())
+    app = FastAPI()
+    install_a2a_http(app, service)
+
+    agent_card_routes = [
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == "/.well-known/agent-card.json"
+    ]
+    assert len(agent_card_routes) == 1
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/.well-known/agent-card.json")
+        assert response.status_code == 200
+
+        assert client.get("/v1/.well-known/agent-card.json").status_code == 404
+        assert client.get("/tenant-a/v1/.well-known/agent-card.json").status_code == 404
+
+        for path in ("/message:send", "/v1/message:send", "/tenant-a/v1/message:send"):
+            response = client.post(
+                path,
+                json=_message_payload("hello", blocking=True),
+                headers=_base_headers(),
+            )
+            assert response.status_code == 200
 
 
 @pytest.mark.asyncio
