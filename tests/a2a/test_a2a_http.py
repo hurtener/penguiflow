@@ -323,6 +323,10 @@ def test_router_direct_include_starts_service_via_lifespan() -> None:
 
     with client:
         assert service._flow_started is True
+        response = client.get("/.well-known/agent-card.json")
+        assert response.status_code == 200
+        assert response.json()["name"] == "Test Agent"
+
         response = client.post(
             "/message:send",
             json=_message_payload("hello", blocking=True),
@@ -386,6 +390,9 @@ def test_install_helper_mounts_aliases_and_agent_card_once() -> None:
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.get("/.well-known/agent-card.json")
         assert response.status_code == 200
+
+        assert client.get("/v1/.well-known/agent-card.json").status_code == 404
+        assert client.get("/tenant-a/v1/.well-known/agent-card.json").status_code == 404
 
         for path in ("/message:send", "/v1/message:send", "/tenant-a/v1/message:send"):
             response = client.post(

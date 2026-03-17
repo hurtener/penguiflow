@@ -301,6 +301,7 @@ def _include_operation_routes(app: Any, router: Any, service: A2AService, *, inc
         app.include_router(
             create_a2a_http_router(
                 service,
+                include_agent_card=False,
                 include_jsonrpc=include_jsonrpc,
                 _attach_lifespan=False,
             ),
@@ -310,6 +311,7 @@ def _include_operation_routes(app: Any, router: Any, service: A2AService, *, inc
         app.include_router(
             create_a2a_http_router(
                 service,
+                include_agent_card=False,
                 include_jsonrpc=include_jsonrpc,
                 _attach_lifespan=False,
             ),
@@ -319,6 +321,7 @@ def _include_operation_routes(app: Any, router: Any, service: A2AService, *, inc
             app.include_router(
                 create_a2a_http_router(
                     service,
+                    include_agent_card=False,
                     include_jsonrpc=include_jsonrpc,
                     _attach_lifespan=False,
                 ),
@@ -329,6 +332,7 @@ def _include_operation_routes(app: Any, router: Any, service: A2AService, *, inc
 def create_a2a_http_router(
     service: A2AService,
     *,
+    include_agent_card: bool = True,
     include_jsonrpc: bool = True,
     _attach_lifespan: bool = True,
 ):
@@ -347,6 +351,11 @@ def create_a2a_http_router(
         lifespan = _lifespan
 
     router = APIRouter(lifespan=lifespan)
+
+    if include_agent_card:
+        @router.get("/.well-known/agent-card.json")
+        async def agent_card():
+            return _agent_card_response(service)
 
     @router.get("/extendedAgentCard")
     async def extended_agent_card(request: FastAPIRequest, tenant: str | None = None):
@@ -809,7 +818,11 @@ def install_a2a_http(
             methods=["GET"],
         )
 
-    router = create_a2a_http_router(service, include_jsonrpc=include_jsonrpc)
+    router = create_a2a_http_router(
+        service,
+        include_agent_card=False,
+        include_jsonrpc=include_jsonrpc,
+    )
     _include_operation_routes(app, router, service, include_jsonrpc=include_jsonrpc)
 
 
