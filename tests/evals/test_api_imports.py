@@ -17,8 +17,8 @@ from penguiflow.evals.api import (
     evaluate_dataset_from_spec_file,
     load_candidates,
     load_eval_collect_spec,
-    metric,
     load_eval_dataset_spec,
+    metric,
     resolve_callable,
     wrap_metric,
 )

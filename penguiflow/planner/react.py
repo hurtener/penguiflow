@@ -132,9 +132,6 @@ from .react_runtime import (
     _log_action_received as _log_action_received_impl,
 )
 from .react_runtime import (
-    wait_for_trace_persistence as _wait_for_trace_persistence_impl,
-)
-from .react_runtime import (
     resume as _resume_impl,
 )
 from .react_runtime import (
@@ -142,6 +139,9 @@ from .react_runtime import (
 )
 from .react_runtime import (
     run_loop as _run_loop_impl,
+)
+from .react_runtime import (
+    wait_for_trace_persistence as _wait_for_trace_persistence_impl,
 )
 from .react_step import step as _step_impl
 from .react_utils import _safe_json_dumps  # noqa: F401

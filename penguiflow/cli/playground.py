@@ -31,9 +31,8 @@ from penguiflow.cli.generate import run_generate
 from penguiflow.cli.spec import Spec, load_spec
 from penguiflow.cli.spec_errors import SpecValidationError
 from penguiflow.evals.api import TraceSelector as EvalTraceSelector
-from penguiflow.evals.api import ensure_project_on_sys_path
+from penguiflow.evals.api import describe_metric, ensure_project_on_sys_path, resolve_callable, wrap_metric
 from penguiflow.evals.api import export_dataset as export_eval_dataset
-from penguiflow.evals.api import describe_metric, resolve_callable, wrap_metric
 from penguiflow.planner import PlannerEvent, Trajectory
 from penguiflow.sessions import (
     MergeStrategy,
@@ -2673,7 +2672,8 @@ def create_playground_app(
                 },
             )
             _LOGGER.info(
-                "eval_run_metric_debug_details example_id=%s metric_spec=%s pred_trace_id=%s pred_session_id=%s pred_trace_step_count=%d",
+                "eval_run_metric_debug_details example_id=%s metric_spec=%s "
+                "pred_trace_id=%s pred_session_id=%s pred_trace_step_count=%d",
                 str(row.get("example_id") or ""),
                 request.metric_spec,
                 chat_result.trace_id,

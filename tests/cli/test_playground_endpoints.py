@@ -889,7 +889,8 @@ class TestEvalMetricBrowseEndpoint:
         evals_dir.mkdir(parents=True, exist_ok=True)
         (tmp_path / "eval_metric_decorated.py").write_text(
             "from penguiflow.evals.api import metric\n"
-            "@metric(name='Policy Compliance', criteria=[{'id': 'starts_with_triage', 'label': 'Starts with triage'}])\n"
+            "@metric(name='Policy Compliance', criteria=[{'id': 'starts_with_triage', "
+            "'label': 'Starts with triage'}])\n"
             "def score(gold, pred, trace=None, pred_name=None, pred_trace=None):\n"
             '    """Checks that the run starts in triage."""\n'
             "    return {'score': 1.0, 'feedback': 'ok'}\n",
@@ -952,7 +953,8 @@ class TestEvalRunEndpoint:
         metric_file = tmp_path / "eval_metric_checks.py"
         metric_file.write_text(
             "from penguiflow.evals.api import metric\n"
-            "@metric(name='Policy Compliance', criteria=[{'id': 'starts_with_triage', 'label': 'Starts with triage'}])\n"
+            "@metric(name='Policy Compliance', criteria=[{'id': 'starts_with_triage', "
+            "'label': 'Starts with triage'}])\n"
             "def score(gold, pred, trace=None, pred_name=None, pred_trace=None):\n"
             "    del gold, pred, trace, pred_name, pred_trace\n"
             "    return {'score': 0.5, 'feedback': 'missed triage', 'checks': {'starts_with_triage': False}}\n",
@@ -964,7 +966,8 @@ class TestEvalRunEndpoint:
         metric_file = tmp_path / "eval_metric_bad_checks.py"
         metric_file.write_text(
             "from penguiflow.evals.api import metric\n"
-            "@metric(name='Policy Compliance', criteria=[{'id': 'starts_with_triage', 'label': 'Starts with triage'}])\n"
+            "@metric(name='Policy Compliance', criteria=[{'id': 'starts_with_triage', "
+            "'label': 'Starts with triage'}])\n"
             "def score(gold, pred, trace=None, pred_name=None, pred_trace=None):\n"
             "    del gold, pred, trace, pred_name, pred_trace\n"
             "    return {'score': 0.5, 'feedback': 'bad check id', 'checks': {'unknown_check': False}}\n",
