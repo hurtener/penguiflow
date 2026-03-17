@@ -8040,7 +8040,14 @@ pip install "penguiflow[a2a-grpc]"    # gRPC binding
 
 ```python
 from penguiflow import Message, Node, create
-from penguiflow_a2a import A2AConfig, A2AService, create_a2a_http_app
+from fastapi import FastAPI
+from penguiflow_a2a import (
+    A2AConfig,
+    A2AService,
+    create_a2a_http_app,
+    create_a2a_http_router,
+    install_a2a_http,
+)
 from penguiflow_a2a.models import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
 
 # Define your flow
@@ -8082,7 +8089,17 @@ service = A2AService(
     agent_card=card,
     config=A2AConfig(agent_url="https://main-agent.example/a2a"),
 )
-app = create_a2a_http_app(service, include_docs=True)  # OpenAPI docs at /docs
+
+# Standalone app
+app = create_a2a_http_app(service, include_docs=True)
+
+# Or install into an existing FastAPI application
+host_app = FastAPI()
+install_a2a_http(host_app, service)
+
+# Or include only the router if you want explicit mounting control
+router_app = FastAPI()
+router_app.include_router(create_a2a_http_router(service))
 
 # Run with uvicorn
 # uvicorn my_module:app --host 0.0.0.0 --port 8000

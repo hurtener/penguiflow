@@ -1,6 +1,6 @@
 """Optional A2A adapters for PenguiFlow."""
 
-from .bindings.http import create_a2a_http_app
+from .bindings.http import create_a2a_http_app, create_a2a_http_router, install_a2a_http
 from .config import A2AConfig, PayloadMode
 from .core import A2AService
 from .planner_tools import A2AAgentToolset
@@ -25,6 +25,8 @@ __all__ = [
     "PayloadMode",
     "A2AService",
     "create_a2a_http_app",
+    "create_a2a_http_router",
+    "install_a2a_http",
     "A2AHttpTransport",
     "A2AAgentToolset",
 ]

@@ -54,7 +54,8 @@ agent:
 
 **A2A binding:**
 If `agent.flags.a2a` is enabled, the scaffold includes an `a2a.py` module that wires
-`A2AService` + `create_a2a_http_app` so you can serve the agent over A2A HTTP+JSON.
+`A2AService` plus router/install/app helpers so you can mount the A2A HTTP+JSON
+surface into an existing FastAPI service or serve it standalone.
 
 ### Tool Definition
 
