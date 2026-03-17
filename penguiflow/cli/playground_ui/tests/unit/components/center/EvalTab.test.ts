@@ -102,12 +102,24 @@ describe('EvalTab minimalist flow', () => {
       counts: { total: 2, val: 1, test: 1 },
       min_test_score: 0.8,
       passed_threshold: false,
+      metric: {
+        name: 'Policy Compliance',
+        summary: 'Checks routing and tool discipline.',
+        criteria: [
+          {
+            id: 'starts_with_triage',
+            label: 'Starts with triage',
+            description: null
+          }
+        ]
+      },
       cases: [
         {
           example_id: 'ex-high',
           split: 'val',
           score: 0.95,
-          feedback: null,
+          feedback: "route=general; tools=['triage_query','answer_general']",
+          checks: { starts_with_triage: true },
           pred_trace_id: 'trace-high',
           pred_session_id: 'session-high',
           question: 'High score question'
@@ -115,8 +127,9 @@ describe('EvalTab minimalist flow', () => {
         {
           example_id: 'ex-low',
           split: 'test',
-          score: 0.3,
+          score: 0.6666666666666666,
           feedback: 'Needs evidence',
+          checks: { starts_with_triage: false },
           pred_trace_id: 'trace-low',
           pred_session_id: 'session-low',
           question: 'Low score question'
@@ -139,6 +152,8 @@ describe('EvalTab minimalist flow', () => {
       max_cases: 25
     });
     expect(screen.getByText('2 cases evaluated.')).toBeTruthy();
+    expect(screen.getByText('Policy Compliance')).toBeTruthy();
+    expect(screen.getByText(/Checks routing and tool discipline\./)).toBeTruthy();
     expect(screen.queryByText(/run-1/i)).toBeNull();
     expect(await screen.findByTestId('eval-summary-line')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Failed 1' })).toBeTruthy();
@@ -154,10 +169,15 @@ describe('EvalTab minimalist flow', () => {
 
     const lowRow = screen.getByRole('row', { name: /ex-low/i });
     const highRow = screen.getByRole('row', { name: /ex-high/i });
-    expect(lowRow.getAttribute('data-severity')).toBe('critical');
+    expect(lowRow.getAttribute('data-severity')).toBe('warning');
     expect(highRow.getAttribute('data-severity')).toBe('ok');
     expect(screen.getByLabelText('Failed case ex-low')).toBeTruthy();
     expect(screen.getByLabelText('Passed case ex-high')).toBeTruthy();
+    expect(screen.getByText('✓ All pass')).toBeTruthy();
+    expect(screen.queryByText(/route=general/)).toBeNull();
+    expect(screen.getByText('Failed: Starts with triage')).toBeTruthy();
+    expect(screen.getByText('0.67')).toBeTruthy();
+    expect(screen.queryByText('0.6666666666666666')).toBeNull();
   });
 
   it('filters result table with All/Failed/Passed chips only', async () => {

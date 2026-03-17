@@ -9,12 +9,15 @@ import penguiflow.evals.api as eval_api
 from penguiflow.evals.api import (
     EvalCollectSpec,
     EvalDatasetSpec,
+    MetricDefinition,
     QueryCase,
     TraceSelector,
+    describe_metric,
     ensure_project_on_sys_path,
     evaluate_dataset_from_spec_file,
     load_candidates,
     load_eval_collect_spec,
+    metric,
     load_eval_dataset_spec,
     resolve_callable,
     wrap_metric,
@@ -109,6 +112,121 @@ def test_wrap_metric_supports_minimal_signatures() -> None:
     assert isinstance(result, dict)
     assert result["score"] == 1.0
     assert seen["pred_trace"] == {"steps": []}
+
+
+def test_metric_decorator_uses_docstring_and_declared_criteria() -> None:
+    @metric(
+        name="Policy Compliance",
+        criteria=[
+            {"id": "starts_with_triage", "label": "Starts with triage"},
+            {"id": "uses_expected_terminal_tool", "label": "Uses expected terminal tool"},
+        ],
+    )
+    def policy_metric(gold, pred):
+        """Validate route discipline for policy queries."""
+
+        del gold, pred
+        return {"score": 1.0}
+
+    description = describe_metric(policy_metric)
+
+    assert isinstance(description, MetricDefinition)
+    assert description.name == "Policy Compliance"
+    assert description.summary == "Validate route discipline for policy queries."
+    assert [item.id for item in description.criteria] == [
+        "starts_with_triage",
+        "uses_expected_terminal_tool",
+    ]
+
+
+def test_metric_decorator_rejects_duplicate_criterion_ids() -> None:
+    with pytest.raises(ValueError, match="duplicate criterion id"):
+
+        @metric(
+            name="Policy Compliance",
+            criteria=[
+                {"id": "starts_with_triage", "label": "Starts with triage"},
+                {"id": "starts_with_triage", "label": "Starts with triage again"},
+            ],
+        )
+        def policy_metric(gold, pred):
+            del gold, pred
+            return {"score": 1.0}
+
+
+def test_enterprise_example_metric_exposes_definition_and_check_ids() -> None:
+    metric_fn = resolve_callable("examples.planner_enterprise_agent_v2.evals.metrics:policy_metric")
+    definition = describe_metric(metric_fn)
+
+    assert definition.name == "Policy Compliance"
+    assert [criterion.id for criterion in definition.criteria] == [
+        "starts_with_triage",
+        "uses_expected_terminal_tool",
+        "stays_within_tool_budget",
+    ]
+
+    result = metric_fn(
+        {"question": "how are you"},
+        "irrelevant",
+        None,
+        "baseline",
+        {
+            "steps": [
+                {"action": {"next_node": "triage_query"}},
+                {"action": {"next_node": "answer_general"}},
+            ]
+        },
+    )
+    assert isinstance(result, dict)
+    assert result.get("checks") == {
+        "starts_with_triage": True,
+        "uses_expected_terminal_tool": True,
+        "stays_within_tool_budget": True,
+    }
+
+
+def test_enterprise_fail_metric_demo_exposes_definition_and_check_ids() -> None:
+    metric_fn = resolve_callable("examples.planner_enterprise_agent_v2.evals.metrics:fail_metric_demo")
+    definition = describe_metric(metric_fn)
+
+    assert definition.name == "Failure Demo"
+    assert [criterion.id for criterion in definition.criteria] == [
+        "starts_with_triage",
+        "uses_expected_terminal_tool",
+        "stays_within_demo_budget",
+    ]
+
+
+def test_enterprise_fail_metric_demo_flags_demo_budget_failure() -> None:
+    metric_fn = resolve_callable("examples.planner_enterprise_agent_v2.evals.metrics:fail_metric_demo")
+
+    result = metric_fn(
+        {"question": "analyze this document report"},
+        "irrelevant",
+        None,
+        "baseline",
+        {
+            "steps": [
+                {"action": {"next_node": "triage_query"}},
+                {"action": {"next_node": "parse_documents"}},
+                {"action": {"next_node": "extract_metadata"}},
+                {"action": {"next_node": "summarize_documents"}},
+                {"action": {"next_node": "analyze_documents"}},
+            ]
+        },
+    )
+
+    assert isinstance(result, dict)
+    checks = result.get("checks")
+    assert isinstance(checks, dict)
+    assert checks.get("starts_with_triage") is True
+    assert checks.get("uses_expected_terminal_tool") is True
+    assert checks.get("stays_within_demo_budget") is False
+    feedback = result.get("feedback")
+    assert isinstance(feedback, str)
+    assert "demo budget allows" in feedback
+    assert "route=" not in feedback
+    assert "tools=" not in feedback
 
 
 def test_load_candidates_validates_rows(tmp_path) -> None:

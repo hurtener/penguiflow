@@ -36,6 +36,13 @@ export interface EvalMetricBrowseEntry {
   metric_spec: string;
   label: string;
   source_spec_path: string;
+  name?: string | null;
+  summary?: string | null;
+  criteria?: Array<{
+    id: string;
+    label: string;
+    description?: string | null;
+  }> | null;
 }
 
 export interface EvalRunResponse {
@@ -47,11 +54,21 @@ export interface EvalRunResponse {
   };
   min_test_score?: number | null;
   passed_threshold: boolean;
+  metric?: {
+    name: string;
+    summary: string;
+    criteria: Array<{
+      id: string;
+      label: string;
+      description?: string | null;
+    }>;
+  } | null;
   cases: Array<{
     example_id: string;
     split: string;
     score: number;
     feedback?: string | null;
+    checks?: Record<string, unknown> | null;
     pred_trace_id: string;
     pred_session_id: string;
     question: string;

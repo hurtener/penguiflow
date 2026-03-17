@@ -119,9 +119,8 @@
     const actualList = arrayValue(actual);
     if (referenceList && actualList) {
       const maxLength = Math.max(referenceList.length, actualList.length);
-      const children = Array.from({ length: maxLength }, (_, idx) => buildDiffTreeNode(`[${idx}]`, referenceList[idx], actualList[idx]));
-      const hasDiff = children.some((child) => child.kind !== 'same');
-      if (!hasDiff) {
+      const children = Array.from({ length: maxLength }, (_, idx) => buildDiffTreeNode(`item ${idx}`, referenceList[idx], actualList[idx]));
+      if (!children.some((child) => child.kind !== 'same')) {
         return { key, kind: 'same' };
       }
       return { key, kind: 'mixed', children };
@@ -132,8 +131,7 @@
     if (referenceObj && actualObj) {
       const keys = Array.from(new Set([...Object.keys(referenceObj), ...Object.keys(actualObj)])).sort((a, b) => a.localeCompare(b));
       const children = keys.map((childKey) => buildDiffTreeNode(childKey, referenceObj[childKey], actualObj[childKey]));
-      const hasDiff = children.some((child) => child.kind !== 'same');
-      if (!hasDiff) {
+      if (!children.some((child) => child.kind !== 'same')) {
         return { key, kind: 'same' };
       }
       return { key, kind: 'mixed', children };
@@ -661,13 +659,14 @@
     margin-top: -2px;
   }
 
+  .step-details {
+    margin-top: 2px;
+  }
+
   .token-tree {
     display: grid;
     gap: 4px;
-  }
-
-  .step-details {
-    margin-top: 2px;
+    margin-top: 4px;
   }
 
   .step-details summary {

@@ -100,6 +100,32 @@ class ChatResult:
     pause: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class MetricCriterion:
+    """Stable criterion identifier used by metrics and UI consumers.
+
+    Why: check ids must remain stable so metric feedback can be aggregated
+    across runs and mapped back to the declared rubric.
+    """
+
+    id: str
+    label: str
+    description: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MetricDefinition:
+    """Minimal metric contract describing what is being evaluated.
+
+    Why: metrics need first-class intent metadata so users can understand
+    scoring semantics without reverse-engineering case-by-case feedback.
+    """
+
+    name: str
+    summary: str
+    criteria: tuple[MetricCriterion, ...]
+
+
 def ensure_project_on_sys_path(project_root: str | Path) -> None:
     """Ensure project root is importable for consumer-owned metric/run hooks."""
 
@@ -125,6 +151,86 @@ def resolve_callable(spec: str) -> Callable[..., Any]:
     if not callable(target):
         raise TypeError(f"{spec!r} resolved to {type(target)!r}, not a callable")
     return target
+
+
+_METRIC_DEFINITION_ATTR = "__pf_metric_definition__"
+
+
+def _normalize_metric_criteria(
+    criteria: Sequence[str | Mapping[str, Any]] | None,
+) -> tuple[MetricCriterion, ...]:
+    items: list[MetricCriterion] = []
+    seen_ids: set[str] = set()
+    for raw in list(criteria or []):
+        if isinstance(raw, str):
+            criterion_id = raw.strip()
+            label = criterion_id
+            description = None
+        elif isinstance(raw, Mapping):
+            raw_id = raw.get("id")
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                raise ValueError("metric criterion must include non-empty string 'id'")
+            criterion_id = raw_id.strip()
+            raw_label = raw.get("label")
+            label = str(raw_label).strip() if raw_label is not None else criterion_id
+            description = str(raw.get("description")) if raw.get("description") is not None else None
+        else:
+            raise TypeError("metric criteria entries must be strings or mappings")
+
+        if criterion_id in seen_ids:
+            raise ValueError(f"duplicate criterion id: {criterion_id}")
+        seen_ids.add(criterion_id)
+        items.append(MetricCriterion(id=criterion_id, label=label or criterion_id, description=description))
+    return tuple(items)
+
+
+def metric(
+    *,
+    name: str,
+    summary: str | None = None,
+    criteria: Sequence[str | Mapping[str, Any]] | None = None,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Attach minimal eval metadata to a metric callable.
+
+    Why: colocating rubric metadata with metric logic keeps authoring simple
+    while making evaluation intent discoverable in CLI and Playground.
+    """
+
+    clean_name = name.strip()
+    if not clean_name:
+        raise ValueError("metric name must be a non-empty string")
+    criteria_items = _normalize_metric_criteria(criteria)
+
+    def _decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
+        doc_summary = inspect.getdoc(fn) or ""
+        resolved_summary = (summary.strip() if isinstance(summary, str) else "") or doc_summary
+        definition = MetricDefinition(
+            name=clean_name,
+            summary=resolved_summary,
+            criteria=criteria_items,
+        )
+        setattr(fn, _METRIC_DEFINITION_ATTR, definition)
+        return fn
+
+    return _decorate
+
+
+def describe_metric(metric_callable: Callable[..., Any]) -> MetricDefinition:
+    """Return normalized definition metadata for a metric callable.
+
+    Why: metric UIs need a stable descriptor even for plain callables that do
+    not use the decorator yet.
+    """
+
+    attached = getattr(metric_callable, _METRIC_DEFINITION_ATTR, None)
+    if isinstance(attached, MetricDefinition):
+        return attached
+    summary = inspect.getdoc(metric_callable) or ""
+    return MetricDefinition(
+        name=getattr(metric_callable, "__name__", "metric"),
+        summary=summary,
+        criteria=(),
+    )
 
 
 def wrap_metric(metric: Callable[..., Any]) -> MetricFn:
@@ -1459,10 +1565,13 @@ async def evaluate_dataset_from_spec_file(path: str | Path) -> dict[str, Any]:
 __all__ = [
     "EvalCollectSpec",
     "EvalDatasetSpec",
+    "MetricCriterion",
+    "MetricDefinition",
     "QueryCase",
     "TraceSelector",
     "collect_traces",
     "collect_and_export_traces",
+    "describe_metric",
     "evaluate_dataset",
     "evaluate_dataset_from_spec_file",
     "ensure_project_on_sys_path",
@@ -1470,6 +1579,7 @@ __all__ = [
     "load_candidates",
     "load_eval_collect_spec",
     "load_eval_dataset_spec",
+    "metric",
     "resolve_trace_refs",
     "resolve_callable",
     "wrap_metric",

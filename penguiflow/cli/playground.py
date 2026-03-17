@@ -33,7 +33,7 @@ from penguiflow.cli.spec_errors import SpecValidationError
 from penguiflow.evals.api import TraceSelector as EvalTraceSelector
 from penguiflow.evals.api import ensure_project_on_sys_path
 from penguiflow.evals.api import export_dataset as export_eval_dataset
-from penguiflow.evals.api import resolve_callable, wrap_metric
+from penguiflow.evals.api import describe_metric, resolve_callable, wrap_metric
 from penguiflow.planner import PlannerEvent, Trajectory
 from penguiflow.sessions import (
     MergeStrategy,
@@ -277,6 +277,9 @@ class EvalMetricBrowseEntry(BaseModel):
     metric_spec: str
     label: str
     source_spec_path: str
+    name: str | None = None
+    summary: str | None = None
+    criteria: list[dict[str, Any]] | None = None
 
 
 class EvalRunRequest(BaseModel):
@@ -291,9 +294,16 @@ class EvalRunCasePayload(BaseModel):
     split: str
     score: float
     feedback: str | None = None
+    checks: dict[str, Any] | None = None
     pred_trace_id: str
     pred_session_id: str
     question: str
+
+
+class EvalMetricDefinitionPayload(BaseModel):
+    name: str
+    summary: str
+    criteria: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class EvalRunResponse(BaseModel):
@@ -301,6 +311,7 @@ class EvalRunResponse(BaseModel):
     counts: dict[str, int]
     min_test_score: float | None = None
     passed_threshold: bool
+    metric: EvalMetricDefinitionPayload | None = None
     cases: list[EvalRunCasePayload]
 
 
@@ -2394,8 +2405,9 @@ def create_playground_app(
         entries.sort(key=lambda entry: (entry.label, entry.path))
         return entries
 
-    @app.get("/eval/metrics/browse", response_model=list[EvalMetricBrowseEntry])
+    @app.get("/eval/metrics/browse", response_model=list[EvalMetricBrowseEntry], response_model_exclude_none=True)
     async def browse_eval_metrics() -> list[EvalMetricBrowseEntry]:
+        ensure_project_on_sys_path(resolved_project_root)
         evals_root = (
             (resolved_project_root / Path(agent_package) / "evals").resolve()
             if agent_package
@@ -2426,10 +2438,37 @@ def create_playground_app(
             metric_label = metric_spec.split(":")[-1]
             if metric_spec in entries_by_metric:
                 continue
+            metric_name: str | None = None
+            metric_summary: str | None = None
+            metric_criteria: list[dict[str, Any]] | None = None
+            try:
+                module_name, _, _ = metric_spec.partition(":")
+                if module_name:
+                    importlib.invalidate_caches()
+                    sys.modules.pop(module_name, None)
+                metric_callable = resolve_callable(metric_spec)
+                metric_definition = describe_metric(metric_callable)
+                metric_name = metric_definition.name
+                metric_summary = metric_definition.summary or None
+                metric_criteria = [
+                    {
+                        "id": criterion.id,
+                        "label": criterion.label,
+                        "description": criterion.description,
+                    }
+                    for criterion in metric_definition.criteria
+                ]
+            except Exception:
+                metric_name = None
+                metric_summary = None
+                metric_criteria = None
             entries_by_metric[metric_spec] = EvalMetricBrowseEntry(
                 metric_spec=metric_spec,
                 label=metric_label,
                 source_spec_path=rel_spec.as_posix(),
+                name=metric_name,
+                summary=metric_summary,
+                criteria=metric_criteria,
             )
 
         return sorted(entries_by_metric.values(), key=lambda entry: entry.label)
@@ -2533,7 +2572,14 @@ def create_playground_app(
             raise HTTPException(status_code=404, detail="dataset.jsonl not found")
 
         ensure_project_on_sys_path(resolved_project_root)
-        metric = wrap_metric(resolve_callable(request.metric_spec))
+        module_name, _, _ = request.metric_spec.partition(":")
+        if module_name:
+            importlib.invalidate_caches()
+            sys.modules.pop(module_name, None)
+        metric_callable = resolve_callable(request.metric_spec)
+        metric_definition = describe_metric(metric_callable)
+        metric = wrap_metric(metric_callable)
+        declared_criterion_ids = {criterion.id for criterion in metric_definition.criteria}
 
         rows: list[dict[str, Any]] = []
         for line in dataset_path.read_text(encoding="utf-8").splitlines():
@@ -2644,6 +2690,7 @@ def create_playground_app(
             )
             score = 0.0
             feedback: str | None = None
+            checks: dict[str, Any] | None = None
             if isinstance(raw_score, dict):
                 score_value = raw_score.get("score", 0.0)
                 if isinstance(score_value, (int, float)) and not isinstance(score_value, bool):
@@ -2652,6 +2699,16 @@ def create_playground_app(
                     score = 1.0 if score_value else 0.0
                 feedback_raw = raw_score.get("feedback")
                 feedback = str(feedback_raw) if feedback_raw is not None else None
+                checks_raw = raw_score.get("checks")
+                if isinstance(checks_raw, Mapping):
+                    checks = {str(key): value for key, value in checks_raw.items()}
+                    if declared_criterion_ids:
+                        unknown_ids = sorted(set(checks.keys()) - declared_criterion_ids)
+                        if unknown_ids:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=("unknown metric check ids: " + ", ".join(unknown_ids)),
+                            )
             elif isinstance(raw_score, bool):
                 score = 1.0 if raw_score else 0.0
             elif isinstance(raw_score, (int, float)):
@@ -2666,6 +2723,7 @@ def create_playground_app(
                     split=split,
                     score=score,
                     feedback=feedback,
+                    checks=checks,
                     pred_trace_id=chat_result.trace_id,
                     pred_session_id=pred_session_id,
                     question=question,
@@ -2684,6 +2742,18 @@ def create_playground_app(
             counts=counts,
             min_test_score=request.min_test_score,
             passed_threshold=passed_threshold,
+            metric=EvalMetricDefinitionPayload(
+                name=metric_definition.name,
+                summary=metric_definition.summary,
+                criteria=[
+                    {
+                        "id": criterion.id,
+                        "label": criterion.label,
+                        "description": criterion.description,
+                    }
+                    for criterion in metric_definition.criteria
+                ],
+            ),
             cases=cases,
         )
 

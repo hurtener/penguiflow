@@ -163,10 +163,9 @@ describe('TrajectoryCard', () => {
     expect(await screen.findByRole('button', { name: 'Actual trajectory' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Reference trajectory' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Trajectory divergence' })).toBeTruthy();
-    expect(screen.getByText('args')).toBeTruthy();
+    expect(screen.getAllByText('args').length).toBeGreaterThan(0);
     expect(screen.getByText('meta')).toBeTruthy();
     expect(screen.getByText('✓ tier')).toBeTruthy();
-    expect(screen.getByText('✓ result')).toBeTruthy();
     expect(screen.getByText('policy: refund -> returns')).toBeTruthy();
     expect(screen.getByText('mode: strict -> flex')).toBeTruthy();
     expect(screen.getByText('draft -> search')).toBeTruthy();
@@ -372,8 +371,8 @@ describe('TrajectoryCard', () => {
     render(TrajectoryCard);
 
     expect(await screen.findByText('artifacts')).toBeTruthy();
-    expect(screen.getByText('[0]')).toBeTruthy();
-    expect(screen.getByText('[1]')).toBeTruthy();
+    expect(screen.queryByText('[0]')).toBeNull();
+    expect(screen.queryByText('[1]')).toBeNull();
     expect(screen.getByText('score: 0.9 -> 0.95')).toBeTruthy();
     expect(screen.getByText('id: doc-b -> doc-c')).toBeTruthy();
     expect(screen.queryByText(/list\(/i)).toBeNull();

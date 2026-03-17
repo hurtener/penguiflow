@@ -881,6 +881,47 @@ class TestEvalMetricBrowseEndpoint:
             }
         ]
 
+    def test_browse_metrics_includes_metric_definition_when_decorated(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+
+        package_root = tmp_path / "example_app"
+        evals_dir = package_root / "evals" / "policy"
+        evals_dir.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "eval_metric_decorated.py").write_text(
+            "from penguiflow.evals.api import metric\n"
+            "@metric(name='Policy Compliance', criteria=[{'id': 'starts_with_triage', 'label': 'Starts with triage'}])\n"
+            "def score(gold, pred, trace=None, pred_name=None, pred_trace=None):\n"
+            '    """Checks that the run starts in triage."""\n'
+            "    return {'score': 1.0, 'feedback': 'ok'}\n",
+            encoding="utf-8",
+        )
+        (evals_dir / "evaluate.spec.json").write_text(
+            json.dumps(
+                {
+                    "dataset_path": "example_app/evals/policy/dataset/dataset.jsonl",
+                    "metric_spec": "eval_metric_decorated:score",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, agent_package="example_app")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/eval/metrics/browse")
+        assert response.status_code == 200
+        payload = response.json()
+
+        assert payload[0]["name"] == "Policy Compliance"
+        assert payload[0]["summary"] == "Checks that the run starts in triage."
+        assert payload[0]["criteria"] == [
+            {
+                "id": "starts_with_triage",
+                "label": "Starts with triage",
+                "description": None,
+            }
+        ]
+
 
 class TestEvalRunEndpoint:
     """Tests for /eval/run endpoint."""
@@ -903,6 +944,30 @@ class TestEvalRunEndpoint:
             "    has_question = isinstance(gold, dict) and gold.get('question') == 'what is policy'\n"
             "    has_steps = isinstance(pred_trace, dict) and isinstance(pred_trace.get('steps'), list)\n"
             "    return {'score': 1.0 if (has_question and has_steps) else 0.0, 'feedback': 'shape check'}\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _write_eval_metric_with_structured_checks(tmp_path: Path) -> None:
+        metric_file = tmp_path / "eval_metric_checks.py"
+        metric_file.write_text(
+            "from penguiflow.evals.api import metric\n"
+            "@metric(name='Policy Compliance', criteria=[{'id': 'starts_with_triage', 'label': 'Starts with triage'}])\n"
+            "def score(gold, pred, trace=None, pred_name=None, pred_trace=None):\n"
+            "    del gold, pred, trace, pred_name, pred_trace\n"
+            "    return {'score': 0.5, 'feedback': 'missed triage', 'checks': {'starts_with_triage': False}}\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _write_eval_metric_with_unknown_check_id(tmp_path: Path) -> None:
+        metric_file = tmp_path / "eval_metric_bad_checks.py"
+        metric_file.write_text(
+            "from penguiflow.evals.api import metric\n"
+            "@metric(name='Policy Compliance', criteria=[{'id': 'starts_with_triage', 'label': 'Starts with triage'}])\n"
+            "def score(gold, pred, trace=None, pred_name=None, pred_trace=None):\n"
+            "    del gold, pred, trace, pred_name, pred_trace\n"
+            "    return {'score': 0.5, 'feedback': 'bad check id', 'checks': {'unknown_check': False}}\n",
             encoding="utf-8",
         )
 
@@ -1082,6 +1147,58 @@ class TestEvalRunEndpoint:
         assert response.status_code == 200
         assert any(record.msg == "eval_run_metric_debug" for record in caplog.records)
         assert any("eval_run_metric_debug_details" in record.getMessage() for record in caplog.records)
+
+    def test_eval_run_returns_structured_checks_when_metric_provides_them(self, tmp_path: Path) -> None:
+        self._write_eval_metric_with_structured_checks(tmp_path)
+        self._write_dataset(tmp_path, ["what is policy"])
+
+        store = InMemoryStateStore()
+        wrapper = MockAgentWrapper(
+            chat_result=ChatResult(
+                trace_id="pred-trace-1",
+                session_id="ignored-by-endpoint",
+                answer="policy answer",
+                metadata={"steps": 1},
+                pause=None,
+            )
+        )
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/eval/run",
+            json={"dataset_path": "fixtures/dataset", "metric_spec": "eval_metric_checks:score"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload["cases"]) == 1
+        assert payload["cases"][0]["checks"] == {"starts_with_triage": False}
+
+    def test_eval_run_rejects_metric_checks_with_unknown_criterion_ids(self, tmp_path: Path) -> None:
+        self._write_eval_metric_with_unknown_check_id(tmp_path)
+        self._write_dataset(tmp_path, ["what is policy"])
+
+        store = InMemoryStateStore()
+        wrapper = MockAgentWrapper(
+            chat_result=ChatResult(
+                trace_id="pred-trace-1",
+                session_id="ignored-by-endpoint",
+                answer="policy answer",
+                metadata={"steps": 1},
+                pause=None,
+            )
+        )
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/eval/run",
+            json={"dataset_path": "fixtures/dataset", "metric_spec": "eval_metric_bad_checks:score"},
+        )
+
+        assert response.status_code == 400
+        assert "unknown metric check ids" in response.json()["detail"]
 
     def test_eval_run_waits_for_delayed_trace_persistence(self, tmp_path: Path) -> None:
         self._write_eval_metric_requiring_row_and_pred_trace(tmp_path)

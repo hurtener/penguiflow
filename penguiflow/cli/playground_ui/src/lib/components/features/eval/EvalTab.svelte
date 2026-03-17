@@ -119,6 +119,59 @@
 
   const canRun = $derived(Boolean(datasetPath.trim()) && Boolean(runMetricSpec.trim()) && !isRunning);
 
+  const selectedMetric = $derived.by(() => {
+    if (runResult?.metric) {
+      return runResult.metric;
+    }
+    return metricBrowse.find((entry) => entry.metric_spec === runMetricSpec) ?? null;
+  });
+
+  const criterionLabelById = $derived.by(() => {
+    const labels: Record<string, string> = {};
+    const criteria = runResult?.metric?.criteria ?? selectedMetric?.criteria ?? [];
+    for (const criterion of criteria) {
+      labels[criterion.id] = criterion.label;
+    }
+    return labels;
+  });
+
+  function getFailedChecks(caseRow: EvalRunResponse['cases'][number]): string[] {
+    const checks = caseRow.checks;
+    if (!checks || typeof checks !== 'object') {
+      return [];
+    }
+    const failed: string[] = [];
+    for (const [key, value] of Object.entries(checks)) {
+      if (value === false) {
+        failed.push(criterionLabelById[key] ?? key);
+      }
+    }
+    return failed;
+  }
+
+  function hasAllChecksPassed(caseRow: EvalRunResponse['cases'][number]): boolean {
+    const checks = caseRow.checks;
+    if (!checks || typeof checks !== 'object') {
+      return false;
+    }
+    const values = Object.values(checks);
+    return values.length > 0 && values.every((value) => value === true);
+  }
+
+  function getFeedbackText(caseRow: EvalRunResponse['cases'][number]): string {
+    if (hasAllChecksPassed(caseRow)) {
+      return '✓ All pass';
+    }
+    if (caseRow.feedback) {
+      return caseRow.feedback;
+    }
+    return '—';
+  }
+
+  function formatScore(score: number): string {
+    return score.toFixed(2);
+  }
+
   function formatCount(value: number, singular: string, plural: string): string {
     return `${value} ${value === 1 ? singular : plural}`;
   }
@@ -317,13 +370,13 @@
 
         <div class="field compact-grow">
           <label for="run-metric-spec">Metric selection</label>
-          <select id="run-metric-spec" class="tag-input" bind:value={runMetricSpec}>
-            <option value="">Select metric</option>
-            {#each metricBrowse as metric (metric.metric_spec)}
-              <option value={metric.metric_spec}>{metric.label}</option>
-            {/each}
-          </select>
-        </div>
+            <select id="run-metric-spec" class="tag-input" bind:value={runMetricSpec}>
+              <option value="">Select metric</option>
+              {#each metricBrowse as metric (metric.metric_spec)}
+                <option value={metric.metric_spec}>{metric.name ?? metric.label}</option>
+              {/each}
+            </select>
+          </div>
 
         <div class="field compact-narrow">
           <label for="run-min-test-score">Min score</label>
@@ -348,6 +401,9 @@
       {/if}
       {#if statusLine}
         <p class="status-line" data-testid="eval-status-line">{statusLine}</p>
+      {/if}
+      {#if selectedMetric?.summary}
+        <p class="status-line metric-summary"><strong>{selectedMetric.name ?? selectedMetric.label}</strong>: {selectedMetric.summary}</p>
       {/if}
     </section>
 
@@ -420,9 +476,14 @@
                   >
                     {caseRow.score >= evalThreshold ? '✓' : '✕'}
                   </span>
-                  <span>{caseRow.score}</span>
+                  <span>{formatScore(caseRow.score)}</span>
                 </td>
-                <td>{caseRow.feedback ?? '—'}</td>
+                <td>
+                  <div>{getFeedbackText(caseRow)}</div>
+                  {#if getFailedChecks(caseRow).length > 0}
+                    <div class="check-fail-line">Failed: {getFailedChecks(caseRow).join(', ')}</div>
+                  {/if}
+                </td>
               </tr>
               {#if openTraceErrorByExample[caseRow.example_id]}
                 <tr class="error-row"><td class="error-text" colspan="6">{openTraceErrorByExample[caseRow.example_id]}</td></tr>
@@ -536,6 +597,16 @@
     margin: 0;
     font-size: 12px;
     color: var(--color-text-secondary, #3c3a36);
+  }
+
+  .metric-summary {
+    font-size: 11px;
+  }
+
+  .check-fail-line {
+    margin-top: 2px;
+    font-size: 10px;
+    color: #8a2d2d;
   }
 
   .results {

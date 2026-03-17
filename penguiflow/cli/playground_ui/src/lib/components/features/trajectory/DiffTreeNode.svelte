@@ -19,11 +19,11 @@
 
 <div class="tree-node" style={`--depth:${depth}`}>
   {#if node.kind === 'same'}
-    <span class="kv-token same">✓ {node.key}</span>
+    <span class="kv-line same">✓ {node.key}</span>
   {:else if node.kind === 'diff'}
-    <span class="kv-token diff">{node.key}: {node.reference} -&gt; {node.actual}</span>
+    <span class="kv-line diff">{node.key}: {node.reference} -&gt; {node.actual}</span>
   {:else}
-    <span class="kv-token mixed">{node.key}</span>
+    <span class="kv-line mixed">{node.key}</span>
   {/if}
 </div>
 
@@ -42,32 +42,36 @@
 
   .tree-children {
     display: grid;
-    gap: 4px;
+    gap: 3px;
+    margin-left: 6px;
+    padding-left: 8px;
+    border-left: 1px solid #e4ddd2;
   }
 
-  .kv-token {
-    border-radius: 999px;
-    padding: 2px 8px;
-    font-size: 11px;
+  .kv-line {
+    border-radius: 6px;
+    padding: 1px 6px;
+    font-size: 10px;
     line-height: 1.4;
     border: 1px solid transparent;
     display: inline-flex;
     width: fit-content;
+    font-family: var(--font-mono);
   }
 
-  .kv-token.same {
+  .kv-line.same {
     background: #f5faf7;
     border-color: #cfe7d8;
     color: #50745b;
   }
 
-  .kv-token.diff {
+  .kv-line.diff {
     background: #fff1f1;
     border-color: #e0a6a6;
     color: #8a2d2d;
   }
 
-  .kv-token.mixed {
+  .kv-line.mixed {
     background: #f6f1e8;
     border-color: #ddd2c4;
     color: #5f5a51;
