@@ -8,14 +8,17 @@ This module tests:
 - App HTML fetching and result enrichment
 """
 
+import asyncio
 from unittest.mock import AsyncMock
 
+import mcp.types as mcp_types
 import pytest
 
 from penguiflow.artifacts import ArtifactRef, InMemoryArtifactStore, ScopedArtifacts
 from penguiflow.planner.artifact_registry import ArtifactRegistry
 from penguiflow.registry import ModelRegistry
 from penguiflow.tools.apps import (
+    UI_COMPAT_EXTENSION_IDS,
     UI_MIME_TYPE,
     AppCSP,
     AppMetadata,
@@ -286,6 +289,22 @@ def test_extract_app_from_extension_id_key():
     assert result.visibility == ["app"]
 
 
+def test_extract_app_from_compat_extension_id_key():
+    """Should parse compatibility extension-id keyed metadata payload."""
+    tool = MockTool(
+        meta={
+            "io.modelcontextprotocol/apps": {
+                "resourceUri": "ui://test/compat.html",
+                "visibility": ["app"],
+            }
+        }
+    )
+    result = extract_app_metadata(tool)
+    assert result is not None
+    assert result.resource_uri == "ui://test/compat.html"
+    assert result.visibility == ["app"]
+
+
 # ─── ToolNode App Detection Tests ────────────────────────────────────────────
 
 
@@ -393,6 +412,123 @@ async def test_fetch_app_html_no_client(registry):
     assert html is None
 
 
+@pytest.mark.asyncio
+async def test_initialize_mcp_client_advertises_apps_compatibility_capabilities(registry):
+    """MCP initialize should advertise HTML app support in both compatibility shapes."""
+    config = build_config()
+    node = ToolNode(config=config, registry=registry)
+
+    class MockTaskHandlers:
+        def build_capability(self):
+            return None
+
+    class MockSession:
+        def __init__(self):
+            self._client_info = mcp_types.Implementation(name="penguiflow-test", version="1.0")
+            self._sampling_callback = object()
+            self._elicitation_callback = object()
+            self._list_roots_callback = object()
+            self._task_handlers = MockTaskHandlers()
+            self._server_capabilities = None
+            self.sent_request = None
+            self.sent_notification = None
+
+        async def send_request(self, request, result_type):
+            self.sent_request = request
+            return mcp_types.InitializeResult(
+                protocolVersion=mcp_types.LATEST_PROTOCOL_VERSION,
+                capabilities=mcp_types.ServerCapabilities(),
+                serverInfo=mcp_types.Implementation(name="mock-server", version="1.0"),
+            )
+
+        async def send_notification(self, notification):
+            self.sent_notification = notification
+
+    class MockSessionState:
+        def __init__(self):
+            self.initialize_result = None
+
+    class MockClient:
+        def __init__(self):
+            self.session = MockSession()
+            self._session_state = MockSessionState()
+            self._init_timeout = None
+
+        @property
+        def initialize_result(self):
+            return self._session_state.initialize_result
+
+    client = MockClient()
+
+    result = await node._initialize_mcp_client(client)
+
+    assert result.protocolVersion == mcp_types.LATEST_PROTOCOL_VERSION
+    request = client.session.sent_request.root
+    capabilities = request.params.capabilities
+    assert capabilities.extensions is not None
+    assert capabilities.experimental is not None
+    for extension_id in UI_COMPAT_EXTENSION_IDS:
+        assert capabilities.extensions[extension_id]["mimeTypes"] == [UI_MIME_TYPE]
+        assert capabilities.experimental[extension_id]["mimeTypes"] == [UI_MIME_TYPE]
+    assert client.session.sent_notification.root.method == "notifications/initialized"
+
+
+@pytest.mark.asyncio
+async def test_initialize_mcp_client_uses_session_monitoring(registry):
+    """Apps-aware init should use FastMCP session monitoring when available."""
+    config = build_config()
+    node = ToolNode(config=config, registry=registry)
+
+    class MockTaskHandlers:
+        def build_capability(self):
+            return None
+
+    class MockSession:
+        def __init__(self):
+            self._client_info = mcp_types.Implementation(name="penguiflow-test", version="1.0")
+            self._sampling_callback = object()
+            self._elicitation_callback = object()
+            self._list_roots_callback = object()
+            self._task_handlers = MockTaskHandlers()
+            self._server_capabilities = None
+            self.sent_notification = None
+
+        async def send_request(self, request, result_type):
+            return mcp_types.InitializeResult(
+                protocolVersion=mcp_types.LATEST_PROTOCOL_VERSION,
+                capabilities=mcp_types.ServerCapabilities(),
+                serverInfo=mcp_types.Implementation(name="mock-server", version="1.0"),
+            )
+
+        async def send_notification(self, notification):
+            self.sent_notification = notification
+
+    class MockSessionState:
+        def __init__(self):
+            self.initialize_result = None
+
+    class MockClient:
+        def __init__(self):
+            self.session = MockSession()
+            self._session_state = MockSessionState()
+            self._init_timeout = None
+            self.monitor_calls = 0
+
+        @property
+        def initialize_result(self):
+            return self._session_state.initialize_result
+
+        async def _await_with_session_monitoring(self, coro):
+            self.monitor_calls += 1
+            return await coro
+
+    client = MockClient()
+
+    await node._initialize_mcp_client(client)
+
+    assert client.monitor_calls == 1
+
+
 # ─── Text Extraction Tests ───────────────────────────────────────────────────
 
 
@@ -455,7 +591,12 @@ async def test_enrich_with_app_html(registry, artifact_store):
     ctx.tool_context["session_id"] = "sess-123"
     original_result = {"data": "tool output"}
 
-    enriched = await node._enrich_with_app_html(original_result, app_meta, ctx)
+    enriched = await node._enrich_with_app_html(
+        original_result,
+        app_meta,
+        {"deck_id": "deck-123"},
+        ctx,
+    )
 
     assert isinstance(enriched, dict)
     assert "__mcp_app__" in enriched
@@ -471,6 +612,78 @@ async def test_enrich_with_app_html(registry, artifact_store):
     assert ref.source["namespace"] == "test_server"
     assert ref.source["session_id"] == "sess-123"
     assert ref.source["csp"]["connect_domains"] == ["https://api.example.com"]
+    assert ref.source["tool_input"] == {"deck_id": "deck-123"}
+
+
+@pytest.mark.asyncio
+async def test_call_preserves_structured_mcp_result_for_app_payload(registry, artifact_store):
+    """App-enabled MCP tools should keep raw CallToolResult in tool_data for the app host."""
+    config = build_config()
+    node = ToolNode(config=config, registry=registry)
+    node._connected = True
+    node._connected_loop = asyncio.get_running_loop()
+    node._mcp_client = object()
+    node._app_metadata["test_server.open_deck_editor"] = AppMetadata(
+        resource_uri="ui://deck-editor/index.html"
+    )
+
+    raw_result = mcp_types.CallToolResult(
+        content=[
+            mcp_types.TextContent(
+                type="text",
+                text='Opening deck editor for "Q2 2026 Platform Roadmap: AI & Agent Deployment"',
+            )
+        ],
+        structuredContent={
+            "editor_state": {
+                "deck": {"id": "deck-123", "title": "Q2 2026 Platform Roadmap: AI & Agent Deployment"},
+                "selectedSlide": {
+                    "slideId": "slide-1",
+                    "revisionHash": "abc123",
+                    "metadata": {"title": "Intro"},
+                    "html": "<section>Intro</section>",
+                },
+            }
+        },
+        isError=False,
+    )
+
+    node._resolve_auth = AsyncMock(return_value={})
+    node._call_with_retry = AsyncMock(return_value=raw_result)
+    node._transform_output = AsyncMock(
+        return_value='Opening deck editor for "Q2 2026 Platform Roadmap: AI & Agent Deployment"'
+    )
+    node._fetch_app_html = AsyncMock(return_value="<html><body>Deck Editor</body></html>")
+
+    ctx = DummyCtx(artifact_store)
+    ctx.tool_context["session_id"] = "sess-123"
+
+    result = await node.call(
+        "test_server.open_deck_editor",
+        {"deck_id": "deck-123"},
+        ctx,
+    )
+
+    app_payload = result["result"]["__mcp_app__"]
+    assert result["result"]["value"] == 'Opening deck editor for "Q2 2026 Platform Roadmap: AI & Agent Deployment"'
+    assert app_payload["tool_input"] == {"deck_id": "deck-123"}
+    assert app_payload["tool_data"]["structuredContent"]["editor_state"]["deck"]["id"] == "deck-123"
+    assert app_payload["tool_data"]["content"][0]["text"].startswith("Opening deck editor")
+    node._transform_output.assert_awaited_once_with(
+        "open_deck_editor",
+        'Opening deck editor for "Q2 2026 Platform Roadmap: AI & Agent Deployment"',
+        ctx,
+    )
+    node._call_with_retry.assert_awaited_once_with(
+        "open_deck_editor",
+        {"deck_id": "deck-123"},
+        {},
+        raw_mcp=True,
+    )
+
+    ref = await artifact_store.get_ref(app_payload["artifact_id"])
+    assert ref is not None
+    assert ref.source["tool_data"]["structuredContent"]["editor_state"]["selectedSlide"]["slideId"] == "slide-1"
 
 
 @pytest.mark.asyncio
@@ -487,7 +700,7 @@ async def test_enrich_with_app_html_fetch_failure(registry, artifact_store):
     ctx = DummyCtx(artifact_store)
     original_result = {"data": "tool output"}
 
-    enriched = await node._enrich_with_app_html(original_result, app_meta, ctx)
+    enriched = await node._enrich_with_app_html(original_result, app_meta, {}, ctx)
 
     # Should return original result unchanged
     assert enriched == original_result
@@ -531,6 +744,7 @@ def test_artifact_registry_preserves_mcp_app_metadata():
             "csp": {"connect_domains": ["https://api.example.com"]},
             "permissions": {"camera": True},
             "tool_data": {"hello": "world"},
+            "tool_input": {"deck_id": "deck-1"},
             "prefers_border": True,
             "namespace": "test_ns",
             "session_id": "sess-1",
@@ -547,3 +761,4 @@ def test_artifact_registry_preserves_mcp_app_metadata():
     assert payload["props"]["session_id"] == "sess-1"
     assert payload["props"]["sandbox"] == "allow-scripts"
     assert payload["props"]["csp"]["connect_domains"] == ["https://api.example.com"]
+    assert payload["props"]["tool_input"] == {"deck_id": "deck-1"}

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -61,6 +61,10 @@ class SkillsDirectoryConfig(BaseModel):
     selection_strategy: Literal["pinned_then_recent", "pinned_then_top"] = "pinned_then_recent"
 
 
+class SkillProposalConfig(BaseModel):
+    enabled: bool = False
+
+
 class SkillsConfig(BaseModel):
     enabled: bool = False
     cache_dir: str = ".penguiflow"
@@ -70,6 +74,7 @@ class SkillsConfig(BaseModel):
     scope_mode: SkillScopeMode = "project"
     skill_packs: list[SkillPackConfig] = Field(default_factory=list)
     directory: SkillsDirectoryConfig = Field(default_factory=SkillsDirectoryConfig)
+    proposal: SkillProposalConfig = Field(default_factory=SkillProposalConfig)
     fts_fallback_to_regex: bool = True
     top_k: int = Field(default=6, ge=1, le=20)
 
@@ -90,6 +95,9 @@ class SkillDefinition(BaseModel):
     steps: list[str]
     preconditions: list[str] = Field(default_factory=list)
     failure_modes: list[str] = Field(default_factory=list)
+    required_tool_names: list[str] = Field(default_factory=list)
+    required_namespaces: list[str] = Field(default_factory=list)
+    required_tags: list[str] = Field(default_factory=list)
     tools: list[Mapping[str, Any]] | None = None
 
     @model_validator(mode="after")
@@ -97,6 +105,9 @@ class SkillDefinition(BaseModel):
         self.tags = _clean_str_list(self.tags)
         self.preconditions = _clean_str_list(self.preconditions)
         self.failure_modes = _clean_str_list(self.failure_modes)
+        self.required_tool_names = _clean_str_list(self.required_tool_names)
+        self.required_namespaces = _clean_str_list(self.required_namespaces)
+        self.required_tags = _clean_str_list(self.required_tags)
         self.steps = _coerce_steps(self.steps)
         self.trigger = str(self.trigger).strip() if self.trigger is not None else ""
         if not self.trigger:
@@ -126,6 +137,9 @@ class SkillRecord(BaseModel):
     steps: list[str] = Field(default_factory=list)
     preconditions: list[str] = Field(default_factory=list)
     failure_modes: list[str] = Field(default_factory=list)
+    required_tool_names: list[str] = Field(default_factory=list)
+    required_namespaces: list[str] = Field(default_factory=list)
+    required_tags: list[str] = Field(default_factory=list)
     origin: SkillOrigin = "pack"
     origin_ref: str | None = None
     scope_mode: SkillScopeMode = "project"
@@ -174,6 +188,9 @@ class SkillResultDetailed(BaseModel):
     steps: list[str]
     preconditions: list[str] = Field(default_factory=list)
     failure_modes: list[str] = Field(default_factory=list)
+    required_tool_names: list[str] = Field(default_factory=list)
+    required_namespaces: list[str] = Field(default_factory=list)
+    required_tags: list[str] = Field(default_factory=list)
     task_type: SkillTaskType | None = None
 
 
@@ -205,6 +222,48 @@ class SkillDirectoryEntry(BaseModel):
     task_type: SkillTaskType | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SkillCapabilityContext:
+    all_tool_names: set[str] = field(default_factory=set)
+    allowed_tool_names: set[str] = field(default_factory=set)
+    allowed_namespaces: set[str] = field(default_factory=set)
+    allowed_tool_tags: set[str] = field(default_factory=set)
+
+
+class SkillProposalDraft(BaseModel):
+    skill: SkillDefinition
+    warnings: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+
+
+class SkillProposeRequest(BaseModel):
+    source_material: str
+    task_type: SkillTaskType | None = None
+    title_hint: str | None = None
+    trigger_hint: str | None = None
+    required_tool_names: list[str] = Field(default_factory=list)
+    required_namespaces: list[str] = Field(default_factory=list)
+    required_tags: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_fields(self) -> SkillProposeRequest:
+        self.source_material = str(self.source_material).strip()
+        if not self.source_material:
+            raise ValueError("source_material must be non-empty")
+        self.required_tool_names = _clean_str_list(self.required_tool_names)
+        self.required_namespaces = _clean_str_list(self.required_namespaces)
+        self.required_tags = _clean_str_list(self.required_tags)
+        if self.title_hint is not None:
+            self.title_hint = self.title_hint.strip() or None
+        if self.trigger_hint is not None:
+            self.trigger_hint = self.trigger_hint.strip() or None
+        return self
+
+
+class SkillProposeResponse(BaseModel):
+    draft: SkillProposalDraft
+
+
 class RetrievalResponse(BaseModel):
     skills: list[SkillResultDetailed]
     formatted_context: str
@@ -229,6 +288,7 @@ __all__ = [
     "SkillDefinition",
     "SkillDirectoryEntry",
     "SkillDirectoryField",
+    "SkillCapabilityContext",
     "SkillListEntry",
     "SkillListRequest",
     "SkillListResponse",
@@ -236,6 +296,10 @@ __all__ = [
     "SkillPackConfig",
     "SkillPackFormat",
     "SkillPackLoadResult",
+    "SkillProposalConfig",
+    "SkillProposalDraft",
+    "SkillProposeRequest",
+    "SkillProposeResponse",
     "SkillQuery",
     "SkillRecord",
     "SkillSearchType",

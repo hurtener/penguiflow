@@ -83,6 +83,15 @@
   --sidebar-right-width: 320px;
   --page-gap: 16px;
   --page-padding: 16px;
+  --mcp-app-viewer-min-width: 420px;
+  --mcp-app-viewer-ideal-width: 48vw;
+  --mcp-app-viewer-max-width: 70vw;
+  --motion-mcp-app: 180ms ease;
+  --color-mcp-app-surface: #f7efe4;
+  --color-mcp-app-border: #e6dac8;
+  --color-mcp-app-handle: rgba(86, 117, 106, 0.18);
+  --color-mcp-app-handle-active: rgba(49, 166, 160, 0.6);
+  --shadow-mcp-app: 0 18px 38px rgba(72, 57, 40, 0.12);
 
   /* Mobile Layout */
   --mobile-header-height: 64px;

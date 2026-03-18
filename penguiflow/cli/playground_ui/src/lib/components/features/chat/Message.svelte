@@ -9,8 +9,8 @@
   import PauseCard from './PauseCard.svelte';
   import TypingIndicator from './TypingIndicator.svelte';
   import ComponentRenderer from '$lib/renderers/ComponentRenderer.svelte';
-  import { getInteractionsStore } from '$lib/stores';
-  import type { PendingInteraction } from '$lib/types/component_artifacts';
+  import { getInteractionsStore, getLayoutStore } from '$lib/stores';
+  import { isMcpAppArtifact, type PendingInteraction } from '$lib/types/component_artifacts';
 
   interface Props {
     message: ChatMessage & { artifacts?: ArtifactRef[] };
@@ -24,11 +24,16 @@
   );
 
   const interactionsStore = getInteractionsStore();
+  const layoutStore = getLayoutStore();
   const sessionStore = getSessionStore();
   let downloadingId = $state<string | null>(null);
   let downloadError = $state<string | null>(null);
   const componentArtifacts = $derived(
-    interactionsStore.artifacts.filter(a => a.message_id === message.id)
+    interactionsStore.artifacts.filter((artifact) => {
+      if (artifact.message_id !== message.id) return false;
+      if (layoutStore.isMobile) return true;
+      return !isMcpAppArtifact(artifact);
+    })
   );
 
   const pendingInteraction = $derived.by(() => {

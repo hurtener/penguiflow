@@ -60,3 +60,28 @@ def test_local_store_search_and_rankings(tmp_path: Path) -> None:
     )
     assert top[0].name == "pack.core.beta"
     assert any(record.name == "pack.core.beta" for record in recent)
+
+
+def test_local_store_round_trips_skill_applicability_metadata(tmp_path: Path) -> None:
+    store = LocalSkillStore(db_path=tmp_path / "skills.db")
+    store.upsert_pack_skill(
+        SkillDefinition(
+            name="pack.core.mail_triage",
+            title="Mail triage",
+            trigger="Triage a mailbox",
+            steps=["Open mailbox", "Prioritize urgent threads"],
+            required_tool_names=["mail.search"],
+            required_namespaces=["mail"],
+            required_tags=["email"],
+        ),
+        pack_name="core",
+        scope_mode="project",
+        update_existing=True,
+    )
+
+    records = store.get_by_name(["pack.core.mail_triage"], scope_clause="", scope_params=())
+    assert len(records) == 1
+    assert records[0].required_tool_names == ["mail.search"]
+    assert records[0].required_namespaces == ["mail"]
+    assert records[0].required_tags == ["email"]
+    assert records[0].extra["required_tool_names"] == ["mail.search"]

@@ -11,6 +11,7 @@ from penguiflow.registry import ModelRegistry
 from penguiflow.sessions import InMemorySessionStateStore, SessionManager, TaskResult, TaskStatus
 from penguiflow.sessions.models import MergeStrategy
 from penguiflow.sessions.task_service import InProcessTaskService
+from penguiflow.state.models import TaskStateModel
 
 
 class MockJSONLLMClient:
@@ -29,6 +30,12 @@ class MockJSONLLMClient:
 def _planner_factory() -> ReactPlanner:
     catalog = build_catalog([], ModelRegistry())
     return ReactPlanner(llm_client=MockJSONLLMClient(), catalog=catalog, max_iters=1)
+
+
+class JsonRoundTripStateStore(InMemorySessionStateStore):
+    async def save_task(self, state):  # type: ignore[no-untyped-def]
+        TaskStateModel.from_state(state).model_dump(mode="json")
+        await super().save_task(state)
 
 
 @pytest.mark.asyncio
@@ -50,6 +57,33 @@ async def test_inprocess_task_service_spawns_background_task() -> None:
     task = await session.get_task(result.task_id)
     assert task is not None
     assert task.status == TaskStatus.COMPLETE
+
+
+@pytest.mark.asyncio
+async def test_inprocess_task_service_sanitizes_nonserializable_tool_context() -> None:
+    sessions = SessionManager(state_store=JsonRoundTripStateStore())
+    service = InProcessTaskService(sessions=sessions, planner_factory=_planner_factory)
+
+    session = await sessions.get_or_create("s-json")
+    session.update_context(
+        tool_context={
+            "tenant_id": "tenant-1",
+            "task_service": service,
+            "custom_runtime": object(),
+            "feature_flags": {"background": True},
+        }
+    )
+
+    result = await service.spawn(session_id="s-json", query="do work", parent_task_id="foreground")
+    assert result.session_id == "s-json"
+    assert result.task_id
+
+    task = await session.get_task(result.task_id)
+    assert task is not None
+    assert task.context_snapshot.tool_context["tenant_id"] == "tenant-1"
+    assert task.context_snapshot.tool_context["feature_flags"] == {"background": True}
+    assert "task_service" not in task.context_snapshot.tool_context
+    assert "custom_runtime" not in task.context_snapshot.tool_context
 
 
 @pytest.mark.asyncio

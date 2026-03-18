@@ -5,6 +5,7 @@ from typing import Any
 from ...catalog import ToolLoadingMode, tool
 from ...planner.models import PlannerEvent
 from ..models import SkillListRequest, SkillListResponse
+from ..provider import build_skill_capability_context
 
 
 class SkillListArgs(SkillListRequest):
@@ -18,13 +19,17 @@ async def skill_list(args: SkillListArgs, ctx: Any) -> SkillListResponse:
     if provider is None:
         raise RuntimeError("skill_list is not configured")
     tool_context = getattr(ctx, "tool_context", {}) if ctx is not None else {}
-    all_tool_names = getattr(planner, "_execution_spec_by_name", {}).keys() if planner is not None else None
+    execution_specs = getattr(planner, "_execution_spec_by_name", {}) if planner is not None else {}
     allowed = getattr(planner, "_tool_visibility_allowed_names", None)
+    capability_context = build_skill_capability_context(
+        execution_specs=execution_specs,
+        all_tool_names=execution_specs.keys(),
+        allowed_tool_names=allowed,
+    )
     response = await provider.list(
         args,
         tool_context=tool_context,
-        all_tool_names=all_tool_names,
-        allowed_tool_names=allowed,
+        capability_context=capability_context,
     )
     if planner is not None:
         planner._emit_event(

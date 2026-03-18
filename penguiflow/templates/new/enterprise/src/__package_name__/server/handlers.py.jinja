@@ -131,11 +131,10 @@ def create_http_handler(orchestrator: {{ class_name }}Orchestrator) -> HTTPHandl
 {% if with_a2a %}
 from fastapi import FastAPI
 
-from ..a2a import A2AServer
+from ..a2a import create_a2a_app as build_a2a_app
 
 
 def create_a2a_app(orchestrator: {{ class_name }}Orchestrator) -> FastAPI:
     """Create the A2A HTTP+JSON app for this service."""
-    server = A2AServer(orchestrator)
-    return server.app
+    return build_a2a_app(orchestrator, include_docs=False)
 {% endif %}

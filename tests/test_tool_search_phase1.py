@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from penguiflow.catalog import ToolLoadingMode, build_catalog, tool
 from penguiflow.node import Node
-from penguiflow.planner import ReactPlanner, ToolSearchConfig
+from penguiflow.planner import ReactPlanner, ToolSearchConfig, ToolVisibilityPolicy
 from penguiflow.planner.models import PlannerEvent
 from penguiflow.registry import ModelRegistry
 
@@ -124,3 +124,89 @@ async def test_deferred_tool_activates_on_first_use(tmp_path: Any) -> None:
         if event.event_type == "tool_activated" and event.extra.get("tool_name") == "deferred_tool"
     ]
     assert activated
+
+
+class _HideDeferredTool(ToolVisibilityPolicy):
+    def visible_tools(self, specs, tool_context):  # type: ignore[no-untyped-def]
+        del tool_context
+        return [spec for spec in specs if spec.name != "deferred_tool"]
+
+
+@pytest.mark.asyncio
+async def test_parallel_deferred_tool_activates_on_first_use(tmp_path: Any) -> None:
+    responses = [
+        {
+            "next_node": "parallel",
+            "args": {"steps": [{"node": "deferred_tool", "args": {"text": "hello"}}]},
+        },
+        {"next_node": "final_response", "args": {"answer": "ok"}},
+    ]
+    events: list[PlannerEvent] = []
+    planner = ReactPlanner(
+        llm_client=StubClient(responses),
+        catalog=_build_catalog(default_loading_mode=ToolLoadingMode.DEFERRED),
+        max_iters=2,
+        tool_search=ToolSearchConfig(
+            enabled=True,
+            cache_dir=str(tmp_path / "tool_cache_parallel"),
+            default_loading_mode=ToolLoadingMode.DEFERRED,
+        ),
+        event_callback=events.append,
+    )
+
+    await planner.run("call the deferred tool in parallel", tool_context={"session_id": "s1"})
+
+    activated = [
+        event
+        for event in events
+        if event.event_type == "tool_activated" and event.extra.get("tool_name") == "deferred_tool"
+    ]
+    tool_results = [
+        event
+        for event in events
+        if event.event_type == "tool_call_result" and event.extra.get("tool_name") == "deferred_tool"
+    ]
+    assert activated
+    assert tool_results
+
+
+@pytest.mark.asyncio
+async def test_parallel_deferred_tool_activation_respects_visibility_policy(tmp_path: Any) -> None:
+    responses = [
+        {
+            "next_node": "parallel",
+            "args": {"steps": [{"node": "deferred_tool", "args": {"text": "hello"}}]},
+        },
+        {"next_node": "final_response", "args": {"answer": "ok"}},
+    ]
+    events: list[PlannerEvent] = []
+    planner = ReactPlanner(
+        llm_client=StubClient(responses),
+        catalog=_build_catalog(default_loading_mode=ToolLoadingMode.DEFERRED),
+        max_iters=2,
+        tool_search=ToolSearchConfig(
+            enabled=True,
+            cache_dir=str(tmp_path / "tool_cache_parallel_denied"),
+            default_loading_mode=ToolLoadingMode.DEFERRED,
+        ),
+        event_callback=events.append,
+    )
+
+    await planner.run(
+        "call the deferred tool in parallel",
+        tool_context={"session_id": "s1"},
+        tool_visibility=_HideDeferredTool(),
+    )
+
+    denied = [
+        event
+        for event in events
+        if event.event_type == "tool_activation_denied" and event.extra.get("reason") == "visibility_policy"
+    ]
+    tool_starts = [
+        event
+        for event in events
+        if event.event_type == "tool_call_start" and event.extra.get("tool_name") == "deferred_tool"
+    ]
+    assert denied
+    assert tool_starts == []
