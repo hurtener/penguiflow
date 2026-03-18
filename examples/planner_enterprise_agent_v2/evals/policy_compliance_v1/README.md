@@ -24,14 +24,8 @@ Minimum requirement: one working LLM provider key + model config.
 - `OPENAI_API_KEY` (or another provider key)
 - `LLM_MODEL`
 
-This folder also uses `examples/planner_enterprise_agent_v2/evals/policy_compliance_v1/.env.eval`:
-
-```dotenv
-DSPY_CLIENT=false
-REFLECTION_ENABLED=false
-```
-
-Keep eval runs deterministic and lightweight.
+Eval commands use the same env-loading model as `penguiflow dev`: they autoload
+`<project_root>/.env` and never overwrite existing process environment variables.
 
 ## Step 1 - Define query suite
 
@@ -75,8 +69,7 @@ Create `collect.spec.json`:
   "output_dir": "planner_enterprise_agent_v2/evals/policy_compliance_v1/dataset",
   "session_id": "policy-compliance-v1-collect",
   "dataset_tag": "dataset:policy_compliance_v1",
-  "agent_package": "planner_enterprise_agent_v2",
-  "env_files": ["planner_enterprise_agent_v2/.env", "planner_enterprise_agent_v2/evals/policy_compliance_v1/.env.eval"]
+  "agent_package": "planner_enterprise_agent_v2"
 }
 ```
 
@@ -88,7 +81,6 @@ Key meanings:
 - `session_id`: trace session grouping label.
 - `dataset_tag`: trace tag used for provenance.
 - `agent_package`: package to discover orchestrator/planner from.
-- `env_files`: env files loaded before run.
 
 ## Step 3 - Collect real traces
 
@@ -154,6 +146,7 @@ Useful loop:
 - load the dataset from `examples/planner_enterprise_agent_v2/evals/policy_compliance_v1/dataset/`
 - run `examples.planner_enterprise_agent_v2.evals.metrics:policy_metric`
 - inspect low-scoring rows and open prediction traces
+- use `Copy` in Trajectory to export the current view as JSON (`actual`, `reference`, or structured `divergence` diff) for quick metric-authoring payloads
 - optionally run `examples.planner_enterprise_agent_v2.evals.metrics:fail_metric_demo` to verify failed criteria and divergence rendering
 
 Why: Playground is the fastest way to debug failing rows before you rely on the committed CLI gate.
@@ -169,8 +162,7 @@ Create `evaluate.spec.json`:
   "metric_spec": "examples.planner_enterprise_agent_v2.evals.metrics:policy_metric",
   "min_test_score": 0.8,
   "output_dir": "planner_enterprise_agent_v2/evals/policy_compliance_v1/artifacts",
-  "agent_package": "planner_enterprise_agent_v2",
-  "env_files": ["planner_enterprise_agent_v2/.env", "planner_enterprise_agent_v2/evals/policy_compliance_v1/.env.eval"]
+  "agent_package": "planner_enterprise_agent_v2"
 }
 ```
 
@@ -223,8 +215,7 @@ Create `/tmp/pf-evaluate.optimize.spec.json`:
   "metric_spec": "examples.planner_enterprise_agent_v2.evals.metrics:policy_metric",
   "min_test_score": 0.8,
   "output_dir": "planner_enterprise_agent_v2/evals/policy_compliance_v1/artifacts",
-  "agent_package": "planner_enterprise_agent_v2",
-  "env_files": ["planner_enterprise_agent_v2/.env", "planner_enterprise_agent_v2/evals/policy_compliance_v1/.env.eval"]
+  "agent_package": "planner_enterprise_agent_v2"
 }
 ```
 

@@ -31,7 +31,14 @@ uv run penguiflow dev --project-root <agent_project>
 - run eval with a CLI-compatible `metric_spec`
 - inspect low-scoring rows and open prediction traces for debugging
 
-4. Once the workflow is stable, commit the dataset/specs and rerun with:
+4. In `Trajectory` / divergence review:
+
+- use `Copy` to export the currently active trajectory view
+- in `actual` view it copies full trajectory JSON for the prediction path
+- in `reference` view it copies full trajectory JSON for the reference path
+- in `divergence` view it copies structured diff JSON with path-level changes
+
+5. Once the workflow is stable, commit the dataset/specs and rerun with:
 
 ```bash
 uv run penguiflow eval evaluate --spec path/to/evaluate.spec.json
@@ -53,10 +60,24 @@ That makes it the right place to discover what should become a durable dataset o
 ## Dataset semantics
 
 - exported datasets keep the standard bundle shape: `dataset.jsonl` plus `manifest.json`
+- Playground export defaults to an app-scoped eval directory:
+  - with `agent_package`: `<project_root>/<agent_package>/evals/playground_export/dataset`
+  - without `agent_package`: `<project_root>/evals/playground_export/dataset`
+- if the target export directory already exists, Playground auto-renames to `dataset-2`, `dataset-3`, ... instead of overwriting
 - loaded datasets are preview/staging inputs for eval; they do not import traces into the Playground state store
 - eval runs store prediction traces in the active Playground process so result rows can open into trace review
 
 Because the formats stay aligned, the same dataset can move between Playground and `penguiflow eval` without conversion.
+
+## Trajectory copy and sharing
+
+Trajectory review includes copy actions with notification feedback:
+
+- `Copy` is contextual and always targets the currently selected view (`actual`, `reference`, or `divergence`)
+- trajectory views copy full JSON payloads aligned with metric-facing structure
+- divergence view copies structured diff JSON (`path`, `reference`, `actual`) for comparison metrics
+
+This is designed for external triage loops where raw JSON is too noisy.
 
 ## Metric guidance for Playground
 
@@ -78,3 +99,5 @@ Why: the UI can then show rubric context, `Failed: ...` rows for specific criter
 - run `penguiflow eval` for local repeatability and CI gating
 
 In short: author in Playground, operationalize in CLI.
+
+For a complete fresh-agent setup (including multi-turn case design), see **[ReAct planner eval guide](react-planner-evals.md)**.

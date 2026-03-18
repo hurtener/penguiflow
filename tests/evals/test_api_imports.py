@@ -303,7 +303,7 @@ def test_load_candidates_rejects_duplicate_patch_sets(tmp_path) -> None:
         load_candidates(path)
 
 
-def test_load_eval_collect_spec_resolves_env_files(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_eval_collect_spec_rejects_env_files_key(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     spec_path = tmp_path / "collect.spec.json"
     (tmp_path / "env").mkdir()
@@ -321,14 +321,8 @@ def test_load_eval_collect_spec_resolves_env_files(tmp_path, monkeypatch: pytest
         encoding="utf-8",
     )
 
-    spec = load_eval_collect_spec(spec_path)
-
-    assert isinstance(spec, EvalCollectSpec)
-    assert spec.project_root == tmp_path
-    assert spec.env_files == (
-        tmp_path / "env/local.env",
-        tmp_path / "env/secrets.env",
-    )
+    with pytest.raises(ValueError, match="env_files.*no longer supported"):
+        load_eval_collect_spec(spec_path)
 
 
 def test_load_eval_collect_spec_resolves_relative_fields_from_project_root(
@@ -347,7 +341,6 @@ def test_load_eval_collect_spec_resolves_relative_fields_from_project_root(
                 "output_dir": "artifacts/eval/collect",
                 "session_id": "session-collect",
                 "dataset_tag": "dataset:demo",
-                "env_files": ["env/collect.env"],
             }
         ),
         encoding="utf-8",
@@ -359,7 +352,6 @@ def test_load_eval_collect_spec_resolves_relative_fields_from_project_root(
     assert spec.project_root == project_root
     assert spec.query_suite_path == project_root / "datasets/query_suite.json"
     assert spec.output_dir == project_root / "artifacts/eval/collect"
-    assert spec.env_files == (project_root / "env/collect.env",)
 
 
 def test_load_eval_dataset_spec_resolves_relative_fields_from_project_root_when_provided(
@@ -380,7 +372,6 @@ def test_load_eval_dataset_spec_resolves_relative_fields_from_project_root_when_
                 "output_dir": "artifacts/eval/rerun",
                 "min_test_score": 0.8,
                 "report_path": "reports/eval-dataset.json",
-                "env_files": ["env/evaluate.env"],
             }
         ),
         encoding="utf-8",
@@ -395,7 +386,6 @@ def test_load_eval_dataset_spec_resolves_relative_fields_from_project_root_when_
     assert spec.min_test_score == 0.8
     assert spec.output_dir == project_root / "artifacts/eval/rerun"
     assert spec.report_path == project_root / "reports/eval-dataset.json"
-    assert spec.env_files == (project_root / "env/evaluate.env",)
 
 
 def test_load_eval_collect_spec_resolves_project_root_from_cwd(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -411,7 +401,6 @@ def test_load_eval_collect_spec_resolves_project_root_from_cwd(tmp_path, monkeyp
                 "output_dir": "artifacts/eval/native_avails_v1/collect-local",
                 "session_id": "session-collect",
                 "dataset_tag": "dataset:demo",
-                "env_files": [".env"],
             }
         ),
         encoding="utf-8",
@@ -420,7 +409,6 @@ def test_load_eval_collect_spec_resolves_project_root_from_cwd(tmp_path, monkeyp
     spec = load_eval_collect_spec(spec_path)
 
     assert spec.project_root == tmp_path
-    assert spec.env_files == (tmp_path / ".env",)
     assert spec.query_suite_path == tmp_path / "evals/native_avails_v1/query_suite.json"
 
 
@@ -437,7 +425,6 @@ def test_load_eval_dataset_spec_resolves_project_root_from_cwd(tmp_path, monkeyp
                 "candidates_path": "evals/native_avails_v1/candidates.json",
                 "metric_spec": "demo.metric:metric",
                 "output_dir": "artifacts/eval/native_avails_v1/rerun",
-                "env_files": [".env"],
             }
         ),
         encoding="utf-8",
@@ -446,8 +433,25 @@ def test_load_eval_dataset_spec_resolves_project_root_from_cwd(tmp_path, monkeyp
     spec = load_eval_dataset_spec(spec_path)
 
     assert spec.project_root == tmp_path
-    assert spec.env_files == (tmp_path / ".env",)
     assert spec.dataset_path == tmp_path / "artifacts/eval/native_avails_v1/run-local/bundle/dataset.jsonl"
+
+
+def test_load_eval_dataset_spec_rejects_env_files_key(tmp_path) -> None:
+    spec_path = tmp_path / "evaluate.spec.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "dataset_path": "dataset.jsonl",
+                "metric_spec": "demo.metric:metric",
+                "output_dir": "artifacts/eval/rerun",
+                "env_files": [".env"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="env_files.*no longer supported"):
+        load_eval_dataset_spec(spec_path)
 
 
 def test_load_eval_dataset_spec_allows_missing_candidates_path(tmp_path) -> None:

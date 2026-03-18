@@ -4,9 +4,5 @@
   "metric_spec": "examples.planner_enterprise_agent_v2.evals.metrics:policy_metric",
   "min_test_score": 0.8,
   "output_dir": "planner_enterprise_agent_v2/evals/policy_compliance_v1/artifacts",
-  "agent_package": "planner_enterprise_agent_v2",
-  "env_files": [
-    "planner_enterprise_agent_v2/.env",
-    "planner_enterprise_agent_v2/evals/policy_compliance_v1/.env.eval"
-  ]
+  "agent_package": "planner_enterprise_agent_v2"
 }

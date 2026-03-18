@@ -239,7 +239,7 @@ class EvalDatasetSelectorPayload(BaseModel):
 
 class EvalDatasetExportRequest(BaseModel):
     selector: EvalDatasetSelectorPayload | None = None
-    output_dir: str
+    output_dir: str | None = None
     redaction_profile: str = "internal_safe"
 
 
@@ -2477,7 +2477,25 @@ def create_playground_app(
         if store is None:
             raise HTTPException(status_code=500, detail="State store is not configured")
 
-        output_dir = Path(request.output_dir)
+        def _default_eval_export_dir() -> Path:
+            if agent_package:
+                return (
+                    resolved_project_root / Path(agent_package) / "evals" / "playground_export" / "dataset"
+                ).resolve()
+            return (resolved_project_root / "evals" / "playground_export" / "dataset").resolve()
+
+        def _auto_rename_output_dir(path: Path) -> Path:
+            if not path.exists():
+                return path
+            parent = path.parent
+            stem = path.name
+            for suffix in range(2, 10_000):
+                candidate = parent / f"{stem}-{suffix}"
+                if not candidate.exists():
+                    return candidate
+            raise HTTPException(status_code=500, detail="Could not allocate dataset export directory")
+
+        output_dir = Path(request.output_dir) if request.output_dir is not None else _default_eval_export_dir()
         if not output_dir.is_absolute():
             output_dir = (resolved_project_root / output_dir).resolve()
         else:
@@ -2485,6 +2503,7 @@ def create_playground_app(
 
         if output_dir != resolved_project_root and resolved_project_root not in output_dir.parents:
             raise HTTPException(status_code=400, detail="output_dir must be under project root")
+        output_dir = _auto_rename_output_dir(output_dir)
 
         selector = request.selector or EvalDatasetSelectorPayload()
         export_result = await export_eval_dataset(

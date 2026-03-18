@@ -205,7 +205,7 @@ class TestEvalCommand:
         assert "evaluate" in result.output
         assert "run" not in result.output
 
-    def test_collect_nested_spec_uses_cwd_project_root_for_env_file(self, tmp_path: Path, monkeypatch) -> None:
+    def test_collect_nested_spec_autoloads_project_root_dotenv(self, tmp_path: Path, monkeypatch) -> None:
         runner = CliRunner()
         monkeypatch.chdir(tmp_path)
         env_key = "PENGUIFLOW_EVAL_COLLECT_CWD_BASE"
@@ -222,7 +222,6 @@ class TestEvalCommand:
                     "output_dir": "artifacts/eval/native_avails_v1/collect-local",
                     "session_id": "session-collect",
                     "dataset_tag": "dataset:demo",
-                    "env_files": [".env"],
                 }
             ),
             encoding="utf-8",
@@ -235,6 +234,55 @@ class TestEvalCommand:
 
         assert result.exit_code == 0
         assert os.environ.get(env_key) == "from_root"
+
+    def test_evaluate_autoloads_project_root_dotenv(self, tmp_path: Path, monkeypatch) -> None:
+        runner = CliRunner()
+        monkeypatch.chdir(tmp_path)
+        env_key = "PENGUIFLOW_EVAL_EVALUATE_CWD_BASE"
+        (tmp_path / ".env").write_text(f"{env_key}=from_root\n", encoding="utf-8")
+
+        spec_dir = tmp_path / "evals" / "native_avails_v1"
+        spec_dir.mkdir(parents=True)
+        spec_file = spec_dir / "evaluate.spec.json"
+        spec_file.write_text(
+            json.dumps(
+                {
+                    "project_root": ".",
+                    "dataset_path": "artifacts/eval/native_avails_v1/run-local/bundle/dataset.jsonl",
+                    "metric_spec": "demo.metric:metric",
+                    "output_dir": "artifacts/eval/native_avails_v1/rerun",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        os.environ.pop(env_key, None)
+        with patch("penguiflow.evals.api.evaluate_dataset_from_spec_file") as mock_eval:
+            mock_eval.return_value = {"mode": "baseline", "test_score": 0.9, "passed_threshold": True}
+            result = runner.invoke(app, ["eval", "evaluate", "--spec", str(spec_file)])
+
+        assert result.exit_code == 0
+        assert os.environ.get(env_key) == "from_root"
+
+    def test_eval_collect_rejects_env_file_option(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        spec_file = tmp_path / "collect.spec.json"
+        spec_file.write_text("{}", encoding="utf-8")
+
+        result = runner.invoke(app, ["eval", "collect", "--spec", str(spec_file), "--env-file", ".env"])
+
+        assert result.exit_code != 0
+        assert "No such option: --env-file" in result.output
+
+    def test_eval_evaluate_rejects_env_file_option(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        spec_file = tmp_path / "evaluate.spec.json"
+        spec_file.write_text("{}", encoding="utf-8")
+
+        result = runner.invoke(app, ["eval", "evaluate", "--spec", str(spec_file), "--env-file", ".env"])
+
+        assert result.exit_code != 0
+        assert "No such option: --env-file" in result.output
 
     def test_evaluate_invokes_api_with_dataset(self, tmp_path: Path) -> None:
         runner = CliRunner()
@@ -277,7 +325,6 @@ class TestEvalCommand:
             mock_spec.dataset_tag = "dataset:demo"
             mock_spec.agent_package = "demo_pkg"
             mock_spec.state_store_spec = None
-            mock_spec.env_files = ()
             mock_load_spec.return_value = mock_spec
             with patch("penguiflow.evals.api.collect_and_export_traces") as mock_collect:
                 mock_collect.return_value = {"trace_count": 1, "dataset_path": "dataset.jsonl"}

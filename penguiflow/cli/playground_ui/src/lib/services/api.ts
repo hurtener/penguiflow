@@ -336,23 +336,26 @@ export async function setTraceTags(
 
 export async function exportEvalDataset(params: {
   include_tags: string[];
-  output_dir: string;
+  output_dir?: string;
   redaction_profile?: string;
   exclude_tags?: string[];
   limit?: number;
 }): Promise<EvalDatasetExportResponse | null> {
+  const payload: Record<string, unknown> = {
+    selector: {
+      include_tags: params.include_tags,
+      exclude_tags: params.exclude_tags ?? [],
+      limit: params.limit ?? 0
+    },
+    redaction_profile: params.redaction_profile ?? 'internal_safe'
+  };
+  if (params.output_dir && params.output_dir.trim()) {
+    payload.output_dir = params.output_dir.trim();
+  }
   const result = await fetchWithErrorHandling<EvalDatasetExportResponse>(`${BASE_URL}/eval/datasets/export`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      selector: {
-        include_tags: params.include_tags,
-        exclude_tags: params.exclude_tags ?? [],
-        limit: params.limit ?? 0
-      },
-      output_dir: params.output_dir,
-      redaction_profile: params.redaction_profile ?? 'internal_safe'
-    })
+    body: JSON.stringify(payload)
   });
   if (!result.ok) {
     console.error('eval dataset export failed', result.error);

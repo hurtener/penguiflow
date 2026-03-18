@@ -69,6 +69,7 @@ Recommended split:
 
 For full eval spec fields and output contract, see **[`penguiflow eval`](eval-command.md)**.
 For the interactive dataset and trace-triage loop, see **[Playground eval workflow](playground-evals.md)**.
+For a full fresh-agent walkthrough (including multi-turn case curation), see **[ReAct planner eval guide](react-planner-evals.md)**.
 
 ## Failure modes & recovery
 

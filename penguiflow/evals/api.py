@@ -33,7 +33,6 @@ class EvalDatasetSpec:
     report_path: Path | None = None
     min_test_score: float | None = None
     project_root: Path | None = None
-    env_files: tuple[Path, ...] = ()
     agent_package: str | None = None
     run_one_spec: str | None = None
 
@@ -52,7 +51,6 @@ class EvalCollectSpec:
     output_dir: Path
     session_id: str
     dataset_tag: str
-    env_files: tuple[Path, ...] = ()
     agent_package: str | None = None
     state_store_spec: str | None = None
 
@@ -1223,13 +1221,8 @@ def load_eval_collect_spec(path: str | Path) -> EvalCollectSpec:
     project_root = _resolve_project_root(payload=payload, spec_path=spec_path, required=True)
     assert project_root is not None
     base_dir = _resolution_base(project_root=project_root, spec_path=spec_path)
-    raw_env_files = payload.get("env_files", [])
-    if raw_env_files is None:
-        raw_env_files = []
-    if not isinstance(raw_env_files, list):
-        raise ValueError("eval collect spec field 'env_files' must be a list")
-
-    env_files = tuple(_resolve_against(base_dir, str(item)) for item in raw_env_files)
+    if "env_files" in payload:
+        raise ValueError("eval collect spec field 'env_files' is no longer supported")
 
     return EvalCollectSpec(
         project_root=project_root,
@@ -1237,7 +1230,6 @@ def load_eval_collect_spec(path: str | Path) -> EvalCollectSpec:
         output_dir=_resolve_against(base_dir, str(payload["output_dir"])),
         session_id=str(payload["session_id"]),
         dataset_tag=str(payload["dataset_tag"]),
-        env_files=env_files,
         agent_package=str(payload["agent_package"]) if payload.get("agent_package") is not None else None,
         state_store_spec=(str(payload["state_store_spec"]) if payload.get("state_store_spec") is not None else None),
     )
@@ -1258,11 +1250,8 @@ def load_eval_dataset_spec(path: str | Path) -> EvalDatasetSpec:
 
     project_root = _resolve_project_root(payload=payload, spec_path=spec_path, required=False)
     base_dir = _resolution_base(project_root=project_root, spec_path=spec_path)
-    raw_env_files = payload.get("env_files", [])
-    if raw_env_files is None:
-        raw_env_files = []
-    if not isinstance(raw_env_files, list):
-        raise ValueError("eval dataset spec field 'env_files' must be a list")
+    if "env_files" in payload:
+        raise ValueError("eval dataset spec field 'env_files' is no longer supported")
 
     min_test_score = payload.get("min_test_score")
     if min_test_score is not None:
@@ -1284,7 +1273,6 @@ def load_eval_dataset_spec(path: str | Path) -> EvalDatasetSpec:
         ),
         min_test_score=min_test_score,
         project_root=project_root,
-        env_files=tuple(_resolve_against(base_dir, str(item)) for item in raw_env_files),
         agent_package=str(payload["agent_package"]) if payload.get("agent_package") is not None else None,
         run_one_spec=str(payload["run_one_spec"]) if payload.get("run_one_spec") is not None else None,
     )

@@ -2,13 +2,14 @@
   import { Card, Empty } from '$lib/components/composites';
   import { Pill } from '$lib/components/primitives';
   import { listTraces, setTraceTags } from '$lib/services/api';
-  import { getSessionStore, getTrajectoryStore } from '$lib/stores';
+  import { getNotificationsStore, getSessionStore, getTrajectoryStore } from '$lib/stores';
   import type { TimelineStep } from '$lib/types';
   import DiffTreeNode from './DiffTreeNode.svelte';
   import Timeline from './Timeline.svelte';
 
   const sessionStore = getSessionStore();
   const trajectoryStore = getTrajectoryStore();
+  const notificationsStore = getNotificationsStore();
 
   let tags = $state<string[]>([]);
   let knownTags = $state<string[]>([]);
@@ -44,6 +45,234 @@
     hasDiff: boolean;
     branchStop: boolean;
   };
+
+  type DiffChange = {
+    path: string;
+    reference: unknown;
+    actual: unknown;
+  };
+
+  function safeStringify(value: unknown): string {
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return JSON.stringify({ error: 'Could not serialize value' }, null, 2);
+    }
+  }
+
+  function timelineStepsToTrajectory(steps: TimelineStep[]): Record<string, unknown> {
+    return {
+      steps: steps.map((step) => {
+        const action: Record<string, unknown> = { next_node: step.name };
+        if (step.thought !== undefined) action.thought = step.thought;
+        if (step.args !== undefined) action.args = step.args;
+        const row: Record<string, unknown> = {
+          action,
+          observation: step.result ?? null
+        };
+        if (step.latencyMs !== undefined) row.latency_ms = step.latencyMs;
+        if (step.status === 'error') row.error = true;
+        return row;
+      })
+    };
+  }
+
+  function actualTrajectoryForCopy(): Record<string, unknown> {
+    const comparison = trajectoryStore.evalComparison;
+    if (hasComparisonForActive && comparison?.pred_trajectory && typeof comparison.pred_trajectory === 'object') {
+      return comparison.pred_trajectory as Record<string, unknown>;
+    }
+    return timelineStepsToTrajectory(trajectoryStore.steps);
+  }
+
+  function referenceTrajectoryForCopy(): Record<string, unknown> {
+    const comparison = trajectoryStore.evalComparison;
+    if (comparison?.gold_trajectory && typeof comparison.gold_trajectory === 'object') {
+      return comparison.gold_trajectory as Record<string, unknown>;
+    }
+    return timelineStepsToTrajectory(referenceTimelineSteps);
+  }
+
+  function isEqualValue(reference: unknown, actual: unknown): boolean {
+    try {
+      return JSON.stringify(reference) === JSON.stringify(actual);
+    } catch {
+      return reference === actual;
+    }
+  }
+
+  function pushDiffs(reference: unknown, actual: unknown, path: string, changes: DiffChange[]): void {
+    if (isEqualValue(reference, actual)) {
+      return;
+    }
+
+    const referenceList = arrayValue(reference);
+    const actualList = arrayValue(actual);
+    if (referenceList && actualList) {
+      const maxLength = Math.max(referenceList.length, actualList.length);
+      for (let idx = 0; idx < maxLength; idx += 1) {
+        const nextPath = `${path}[${idx}]`;
+        pushDiffs(referenceList[idx], actualList[idx], nextPath, changes);
+      }
+      return;
+    }
+
+    const referenceObj = objectValue(reference);
+    const actualObj = objectValue(actual);
+    if (referenceObj && actualObj) {
+      const keys = Array.from(new Set([...Object.keys(referenceObj), ...Object.keys(actualObj)])).sort((a, b) => a.localeCompare(b));
+      for (const key of keys) {
+        const nextPath = path ? `${path}.${key}` : key;
+        pushDiffs(referenceObj[key], actualObj[key], nextPath, changes);
+      }
+      return;
+    }
+
+    changes.push({ path, reference, actual });
+  }
+
+  function serializeActualPayload(): string {
+    return safeStringify({
+      mode: 'actual',
+      trace_id: activeTraceId,
+      session_id: activeSessionId,
+      trajectory: actualTrajectoryForCopy()
+    });
+  }
+
+  function serializeReferencePayload(): string {
+    const comparison = trajectoryStore.evalComparison;
+    return safeStringify({
+      mode: 'reference',
+      gold_trace_id: comparison?.gold_trace_id ?? null,
+      trajectory: referenceTrajectoryForCopy()
+    });
+  }
+
+  function serializeDivergencePayload(): string {
+    const referenceTrajectory = referenceTrajectoryForCopy();
+    const actualTrajectory = actualTrajectoryForCopy();
+    const referenceSteps = mapRawSteps((referenceTrajectory as { steps?: unknown }).steps);
+    const actualSteps = mapRawSteps((actualTrajectory as { steps?: unknown }).steps);
+    const total = Math.max(referenceSteps.length, actualSteps.length);
+    const steps: Array<{
+      index: number;
+      status: 'same' | 'changed' | 'added' | 'removed';
+      reference_node: string | null;
+      actual_node: string | null;
+      changes: DiffChange[];
+    }> = [];
+    let addedStepCount = 0;
+    let removedStepCount = 0;
+    let changedStepCount = 0;
+
+    for (let idx = 0; idx < total; idx += 1) {
+      const reference = referenceSteps[idx] ?? null;
+      const actual = actualSteps[idx] ?? null;
+      if (reference == null && actual == null) {
+        continue;
+      }
+      const referenceNode = reference ? nodeName(reference) : null;
+      const actualNode = actual ? nodeName(actual) : null;
+      if (reference == null && actual) {
+        addedStepCount += 1;
+        steps.push({
+          index: idx + 1,
+          status: 'added',
+          reference_node: null,
+          actual_node: actualNode,
+          changes: [{ path: 'step', reference: null, actual }]
+        });
+        continue;
+      }
+      if (reference && actual == null) {
+        removedStepCount += 1;
+        steps.push({
+          index: idx + 1,
+          status: 'removed',
+          reference_node: referenceNode,
+          actual_node: null,
+          changes: [{ path: 'step', reference, actual: null }]
+        });
+        continue;
+      }
+
+      const changes: DiffChange[] = [];
+      pushDiffs(reference, actual, '', changes);
+      const normalized = changes.map((entry) => ({
+        path: entry.path || 'step',
+        reference: entry.reference,
+        actual: entry.actual
+      }));
+      if (normalized.length > 0) {
+        changedStepCount += 1;
+      }
+      steps.push({
+        index: idx + 1,
+        status: normalized.length > 0 ? 'changed' : 'same',
+        reference_node: referenceNode,
+        actual_node: actualNode,
+        changes: normalized
+      });
+    }
+
+    const comparison = trajectoryStore.evalComparison;
+    return safeStringify({
+      mode: 'divergence',
+      reference_trace_id: comparison?.gold_trace_id ?? null,
+      actual_trace_id: activeTraceId,
+      summary: {
+        reference_step_count: referenceSteps.length,
+        actual_step_count: actualSteps.length,
+        changed_step_count: changedStepCount,
+        added_step_count: addedStepCount,
+        removed_step_count: removedStepCount
+      },
+      steps
+    });
+  }
+
+  async function copyText(value: string, successMessage: string): Promise<void> {
+    const clipboard = globalThis.navigator?.clipboard;
+    if (!clipboard || typeof clipboard.writeText !== 'function') {
+      notificationsStore.add('Clipboard is unavailable in this environment.', 'warning');
+      return;
+    }
+    try {
+      await clipboard.writeText(value);
+      notificationsStore.add(successMessage, 'success');
+    } catch {
+      notificationsStore.add('Failed to copy trajectory text.', 'error');
+    }
+  }
+
+  async function copyActualTrajectory(): Promise<void> {
+    await copyText(serializeActualPayload(), 'Copied actual trajectory.');
+  }
+
+  async function copyReferenceTrajectory(): Promise<void> {
+    await copyText(serializeReferencePayload(), 'Copied reference trajectory.');
+  }
+
+  async function copyDivergence(): Promise<void> {
+    await copyText(serializeDivergencePayload(), 'Copied divergence diff.');
+  }
+
+  async function copyCurrentTrajectory(): Promise<void> {
+    if (!hasComparisonForActive) {
+      await copyActualTrajectory();
+      return;
+    }
+    if (trajectoryStore.trajectoryViewMode === 'reference') {
+      await copyReferenceTrajectory();
+      return;
+    }
+    if (trajectoryStore.trajectoryViewMode === 'divergence') {
+      await copyDivergence();
+      return;
+    }
+    await copyActualTrajectory();
+  }
 
   function nodeName(step: Record<string, unknown> | null): string {
     if (!step) return '—';
@@ -358,9 +587,12 @@
 <Card class="trajectory-card">
   <div class="trajectory-header">
     <div class="title-small">Execution Trajectory</div>
-    {#if activeTraceId}
-      <Pill variant="subtle" size="small">trace {activeTraceId.slice(0, 8)}</Pill>
-    {/if}
+    <div class="header-actions">
+      {#if activeTraceId}
+        <Pill variant="subtle" size="small">trace {activeTraceId.slice(0, 8)}</Pill>
+      {/if}
+      <button class="tag-action" aria-label="Copy trajectory text" onclick={copyCurrentTrajectory}>Copy</button>
+    </div>
   </div>
   {#if hasComparisonForActive}
     <div class="view-toggle" data-testid="trajectory-view-toggle">
@@ -486,6 +718,12 @@
     font-size: 13px;
     font-weight: 700;
     color: var(--color-text, #1f1f1f);
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 
   :global(.trajectory-card) {

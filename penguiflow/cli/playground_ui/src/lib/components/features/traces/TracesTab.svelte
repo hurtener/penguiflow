@@ -159,7 +159,6 @@
     const response = await exportEvalDataset({
       include_tags: includeTags,
       exclude_tags: parsed.exclude,
-      output_dir: 'examples/evals/policy_compliance_v1/dataset',
       limit: 0
     });
     if (!response) {

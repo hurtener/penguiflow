@@ -755,6 +755,78 @@ class TestEvalDatasetExportEndpoint:
         assert len(rows) == 1
         assert rows[0]["example_id"] == "trace-selected"
 
+    def test_export_dataset_uses_default_agent_evals_path_when_output_dir_missing(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        store = InMemoryStateStore()
+
+        selected = Trajectory(query="selected-question")
+        selected.metadata["tags"] = ["dataset:alpha", "split:test"]
+        asyncio.run(store.save_trajectory("trace-selected", "session-a", selected))
+
+        app = create_playground_app(
+            project_root=tmp_path,
+            agent=wrapper,
+            state_store=store,
+            agent_package="example_app",
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/eval/datasets/export",
+            json={
+                "selector": {"include_tags": ["dataset:alpha"]},
+                "redaction_profile": "internal_safe",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        dataset_path = Path(payload["dataset_path"])
+        assert dataset_path.parent == tmp_path / "example_app" / "evals" / "playground_export" / "dataset"
+        assert dataset_path.exists()
+
+    def test_export_dataset_auto_renames_existing_output_dir(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        store = InMemoryStateStore()
+
+        selected = Trajectory(query="selected-question")
+        selected.metadata["tags"] = ["dataset:alpha", "split:test"]
+        asyncio.run(store.save_trajectory("trace-selected", "session-a", selected))
+
+        app = create_playground_app(
+            project_root=tmp_path,
+            agent=wrapper,
+            state_store=store,
+            agent_package="example_app",
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        first = client.post(
+            "/eval/datasets/export",
+            json={
+                "selector": {"include_tags": ["dataset:alpha"]},
+                "redaction_profile": "internal_safe",
+            },
+        )
+        assert first.status_code == 200
+        first_payload = first.json()
+
+        second = client.post(
+            "/eval/datasets/export",
+            json={
+                "selector": {"include_tags": ["dataset:alpha"]},
+                "redaction_profile": "internal_safe",
+            },
+        )
+        assert second.status_code == 200
+        second_payload = second.json()
+
+        first_dataset_path = Path(first_payload["dataset_path"])
+        second_dataset_path = Path(second_payload["dataset_path"])
+        assert first_dataset_path.exists()
+        assert second_dataset_path.exists()
+        assert first_dataset_path != second_dataset_path
+        assert second_dataset_path.parent.name == "dataset-2"
+
 
 class TestEvalDatasetLoadEndpoint:
     """Tests for /eval/datasets/load endpoint."""

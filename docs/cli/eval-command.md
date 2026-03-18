@@ -71,10 +71,18 @@ The Playground uses the same dataset/eval formats for an interactive debug loop:
 - run eval with a CLI-compatible `metric_spec`
 - inspect per-case scores, feedback, and structured failed checks
 - open prediction traces for low-scoring or failing rows
+- copy the active trajectory view JSON payload (actual, reference, or divergence) for external triage and metric authoring
+
+Playground export defaults are app-scoped and collision-safe:
+
+- with `agent_package`: `<project_root>/<agent_package>/evals/playground_export/dataset`
+- without `agent_package`: `<project_root>/evals/playground_export/dataset`
+- existing targets are auto-renamed (`dataset-2`, `dataset-3`, ...) instead of overwritten
 
 When the workflow stabilizes, keep the dataset/specs in version control and rerun them with `penguiflow eval`.
 
 See **[Playground eval workflow](playground-evals.md)**.
+For a full step-by-step setup for new ReAct planner agents, see **[ReAct planner eval guide](react-planner-evals.md)**.
 
 ## Spec formats
 
@@ -90,13 +98,8 @@ All path-like fields in eval specs use one base rule:
 - If `project_root` is absent (only valid for `evaluate.spec.json`), relative
   paths resolve from the spec file directory.
 
-This applies uniformly to input/output/env-file fields in `collect.spec.json`
+This applies uniformly to input/output fields in `collect.spec.json`
 and `evaluate.spec.json`.
-
-CLI `--env-file` follows the same base as the loaded spec:
-
-- `eval collect`: relative to `project_root`
-- `eval evaluate`: relative to `project_root` when provided, otherwise spec dir
 
 CLI commands now emit concise text summaries instead of JSON blobs.
 
@@ -114,7 +117,6 @@ Optional fields:
 
 - `agent_package`
 - `state_store_spec`
-- `env_files`
 
 Minimal example:
 
@@ -125,8 +127,7 @@ Minimal example:
   "output_dir": "artifacts/eval/collect-local",
   "session_id": "collect-session-1",
   "dataset_tag": "dataset:eval-v1",
-  "agent_package": "my_agent",
-  "env_files": [".env-values"]
+  "agent_package": "my_agent"
 }
 ```
 
@@ -148,7 +149,6 @@ Optional fields:
 - `candidates_path` (candidate ranking mode; omit for baseline mode)
 - `report_path` (optional single JSON report output)
 - `min_test_score` (threshold gate on test score)
-- `env_files`
 
 Minimal example:
 
@@ -196,8 +196,9 @@ Optional report mode (`report_path` in evaluate specs):
 
 ## Environment loading behavior
 
-- `env_files` from spec are loaded first.
-- Repeated `--env-file` flags are loaded after spec files.
+- `eval collect` autoloads `<project_root>/.env` if present.
+- `eval evaluate` autoloads `<project_root>/.env` if `project_root` is set.
 - Existing process env vars win and are not overwritten.
+- `env_files` in specs and CLI `--env-file` overrides are intentionally not part of this command surface.
 
-Why: this lets local and CI runners inject secrets safely while keeping specs reproducible.
+Why: this matches `penguiflow dev` behavior and keeps secret loading simple and predictable.

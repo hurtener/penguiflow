@@ -39,10 +39,18 @@ Use it when you want to:
 - run evals with a normal `metric_spec`
 - review per-case scores, feedback, and structured failed checks
 - open prediction traces for triage from the same UI
+- copy the active trajectory view JSON payload (actual, reference, or divergence) for metric design and external review
+
+Export defaults in Playground:
+
+- with `agent_package`: `<project_root>/<agent_package>/evals/playground_export/dataset`
+- without `agent_package`: `<project_root>/evals/playground_export/dataset`
+- existing targets are auto-renamed (`dataset-2`, `dataset-3`, ...) instead of overwritten
 
 This is especially useful for multi-turn agents: you can curate eval cases from real sessions, including cases where the interesting target is an intermediate turn or subtask rather than only the final response.
 
 See **[Playground eval workflow](playground-evals.md)** for the end-to-end loop.
+For a fresh-agent eval setup with multi-turn curation guidance, see **[ReAct planner eval guide](react-planner-evals.md)**.
 
 ## IMPORTANT: which Python environment runs the agent?
 

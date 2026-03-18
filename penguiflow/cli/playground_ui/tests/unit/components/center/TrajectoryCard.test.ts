@@ -20,12 +20,22 @@ const trajectoryStoreMock = {
   setTrajectoryViewMode: vi.fn()
 };
 
+const notificationsStoreMock = {
+  items: [],
+  add: vi.fn(),
+  remove: vi.fn(),
+  clear: vi.fn()
+};
+
+const clipboardWriteTextMock = vi.fn<(text: string) => Promise<void>>();
+
 vi.mock('$lib/stores', async (importOriginal) => {
   const original = await importOriginal<typeof import('$lib/stores')>();
   return {
     ...original,
     getSessionStore: vi.fn(() => sessionStoreMock),
-    getTrajectoryStore: vi.fn(() => trajectoryStoreMock)
+    getTrajectoryStore: vi.fn(() => trajectoryStoreMock),
+    getNotificationsStore: vi.fn(() => notificationsStoreMock)
   };
 });
 
@@ -37,11 +47,19 @@ vi.mock('$lib/services/api', () => ({
 describe('TrajectoryCard', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clipboardWriteTextMock.mockReset();
+    notificationsStoreMock.add.mockReset();
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: clipboardWriteTextMock
+      }
+    });
     trajectoryStoreMock.evalCaseSelection = null;
     trajectoryStoreMock.evalComparison = null;
     trajectoryStoreMock.evalComparisonLoading = false;
     trajectoryStoreMock.evalComparisonError = null;
     trajectoryStoreMock.trajectoryViewMode = 'actual';
+    trajectoryStoreMock.steps = [];
   });
 
   it('shows trace-level tagging controls and existing tags for loaded trajectory', async () => {
@@ -376,5 +394,182 @@ describe('TrajectoryCard', () => {
     expect(screen.getByText('score: 0.9 -> 0.95')).toBeTruthy();
     expect(screen.getByText('id: doc-b -> doc-c')).toBeTruthy();
     expect(screen.queryByText(/list\(/i)).toBeNull();
+  });
+
+  it('copies actual trajectory as full JSON payload', async () => {
+    trajectoryStoreMock.steps = [
+      {
+        id: 'step-1',
+        name: 'triage_query',
+        thought: 'route to bug flow',
+        args: { route: 'bug' },
+        result: { status: 'ok' },
+        latencyMs: 120,
+        reflectionScore: undefined,
+        status: 'ok'
+      }
+    ];
+
+    vi.mocked(api.listTraces).mockResolvedValue([
+      {
+        trace_id: 'trace-1',
+        session_id: 'session-1',
+        tags: []
+      }
+    ]);
+
+    render(TrajectoryCard);
+    expect(screen.getByRole('button', { name: 'Copy trajectory text' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Copy actual trajectory text' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy reference trajectory text' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy divergence text' })).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Copy trajectory text' }));
+
+    expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1);
+    const copied = JSON.parse(clipboardWriteTextMock.mock.calls[0][0]) as {
+      mode: string;
+      trace_id: string;
+      session_id: string;
+      trajectory: { steps: Array<{ action: { next_node: string }; observation: { status: string } }> };
+    };
+    expect(copied.mode).toBe('actual');
+    expect(copied.trace_id).toBe('trace-1');
+    expect(copied.session_id).toBe('session-1');
+    expect(copied.trajectory.steps[0]?.action.next_node).toBe('triage_query');
+    expect(copied.trajectory.steps[0]?.observation.status).toBe('ok');
+    expect(notificationsStoreMock.add).toHaveBeenCalledWith('Copied actual trajectory.', 'success');
+  });
+
+  it('copies reference trajectory as full JSON payload', async () => {
+    trajectoryStoreMock.evalCaseSelection = {
+      exampleId: 'ex-copy-ref',
+      datasetPath: 'examples/evals/policy/dataset.jsonl',
+      predTraceId: 'trace-1',
+      predSessionId: 'session-1',
+      score: 0.2,
+      threshold: 0.8
+    } as never;
+    trajectoryStoreMock.evalComparison = {
+      example_id: 'ex-copy-ref',
+      pred_trace_id: 'trace-1',
+      pred_session_id: 'session-1',
+      gold_trace_id: 'gold-copy-ref',
+      gold_trajectory: {
+        steps: [{ action: { next_node: 'triage_query', thought: 'gold thought', args: { route: 'bug' } }, observation: { ok: true } }]
+      },
+      pred_trajectory: {
+        steps: [{ action: { next_node: 'triage_query', thought: 'pred thought', args: { route: 'bug' } }, observation: { ok: true } }]
+      }
+    } as never;
+
+    vi.mocked(api.listTraces).mockResolvedValue([
+      {
+        trace_id: 'trace-1',
+        session_id: 'session-1',
+        tags: []
+      }
+    ]);
+
+    render(TrajectoryCard);
+    await fireEvent.click(screen.getByRole('button', { name: 'Reference trajectory' }));
+    expect(trajectoryStoreMock.setTrajectoryViewMode).toHaveBeenCalledWith('reference');
+    trajectoryStoreMock.trajectoryViewMode = 'reference';
+    await fireEvent.click(screen.getByRole('button', { name: 'Copy trajectory text' }));
+
+    expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1);
+    const copied = JSON.parse(clipboardWriteTextMock.mock.calls[0][0]) as {
+      mode: string;
+      gold_trace_id: string;
+      trajectory: { steps: Array<{ action: { thought: string; next_node: string } }> };
+    };
+    expect(copied.mode).toBe('reference');
+    expect(copied.gold_trace_id).toBe('gold-copy-ref');
+    expect(copied.trajectory.steps[0]?.action.next_node).toBe('triage_query');
+    expect(copied.trajectory.steps[0]?.action.thought).toBe('gold thought');
+    expect(notificationsStoreMock.add).toHaveBeenCalledWith('Copied reference trajectory.', 'success');
+  });
+
+  it('copies divergence as structured diff JSON', async () => {
+    trajectoryStoreMock.evalCaseSelection = {
+      exampleId: 'ex-copy-diff',
+      datasetPath: 'examples/evals/policy/dataset.jsonl',
+      predTraceId: 'trace-1',
+      predSessionId: 'session-1',
+      score: 0.2,
+      threshold: 0.8
+    } as never;
+    trajectoryStoreMock.trajectoryViewMode = 'divergence';
+    trajectoryStoreMock.evalComparison = {
+      example_id: 'ex-copy-diff',
+      pred_trace_id: 'trace-1',
+      pred_session_id: 'session-1',
+      gold_trace_id: 'gold-copy-diff',
+      gold_trajectory: {
+        steps: [{ action: { next_node: 'classify', args: { route: 'safe' } }, observation: { verdict: 'allow' } }]
+      },
+      pred_trajectory: {
+        steps: [{ action: { next_node: 'classify', args: { route: 'risky' } }, observation: { verdict: 'allow' } }]
+      }
+    } as never;
+
+    vi.mocked(api.listTraces).mockResolvedValue([
+      {
+        trace_id: 'trace-1',
+        session_id: 'session-1',
+        tags: []
+      }
+    ]);
+
+    render(TrajectoryCard);
+    await fireEvent.click(screen.getByRole('button', { name: 'Copy trajectory text' }));
+
+    expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1);
+    const copied = JSON.parse(clipboardWriteTextMock.mock.calls[0][0]) as {
+      mode: string;
+      summary: { changed_step_count: number };
+      steps: Array<{
+        index: number;
+        status: string;
+        changes: Array<{ path: string; reference: unknown; actual: unknown }>;
+      }>;
+    };
+    expect(copied.mode).toBe('divergence');
+    expect(copied.summary.changed_step_count).toBe(1);
+    expect(copied.steps[0]?.index).toBe(1);
+    expect(copied.steps[0]?.status).toBe('changed');
+    expect(copied.steps[0]?.changes[0]?.path).toBe('action.args.route');
+    expect(copied.steps[0]?.changes[0]?.reference).toBe('safe');
+    expect(copied.steps[0]?.changes[0]?.actual).toBe('risky');
+    expect(notificationsStoreMock.add).toHaveBeenCalledWith('Copied divergence diff.', 'success');
+  });
+
+  it('shows warning when clipboard API is unavailable', async () => {
+    trajectoryStoreMock.steps = [
+      {
+        id: 'step-1',
+        name: 'triage_query',
+        thought: 'route to bug flow',
+        args: { route: 'bug' },
+        result: { status: 'ok' },
+        latencyMs: 120,
+        reflectionScore: undefined,
+        status: 'ok'
+      }
+    ];
+
+    vi.mocked(api.listTraces).mockResolvedValue([
+      {
+        trace_id: 'trace-1',
+        session_id: 'session-1',
+        tags: []
+      }
+    ]);
+
+    Object.assign(navigator, { clipboard: undefined });
+
+    render(TrajectoryCard);
+    await fireEvent.click(screen.getByRole('button', { name: 'Copy trajectory text' }));
+
+    expect(notificationsStoreMock.add).toHaveBeenCalledWith('Clipboard is unavailable in this environment.', 'warning');
   });
 });
