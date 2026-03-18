@@ -64,7 +64,7 @@ Key operational point:
 
 PenguiFlow includes A2A-inspired server/client bindings in the `penguiflow_a2a` package:
 
-- server: `A2AService` + `create_a2a_http_app(...)`
+- server: `A2AService` + `create_a2a_http_router(...)` / `install_a2a_http(...)` / `create_a2a_http_app(...)`
 - client transport: `A2AHttpTransport` (implements `RemoteTransport`)
 
 Install extras:
@@ -131,4 +131,3 @@ For remote-node patterns (transport-dependent), search for `RemoteNode(` usage i
   - confirm `StateStore` durability and idempotency,
   - confirm queue/worker semantics (visibility timeout, retries),
   - confirm per-trace correlation (`fetch(trace_id=...)`) and tenant headers.
-

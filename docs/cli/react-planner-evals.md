@@ -183,4 +183,4 @@ Typical progression:
 - [`penguiflow eval`](eval-command.md)
 - [Playground eval workflow](playground-evals.md)
 - [`penguiflow dev`](dev-command.md)
-- [Enterprise reference example](../../examples/planner_enterprise_agent_v2/evals/policy_compliance_v1/README.md)
+- Enterprise reference example: `examples/planner_enterprise_agent_v2/evals/policy_compliance_v1/README.md`

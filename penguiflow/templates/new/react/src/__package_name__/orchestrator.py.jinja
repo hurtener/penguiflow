@@ -19,9 +19,6 @@ from penguiflow.sessions.task_tools import SUBAGENT_FLAG_KEY, TASK_SERVICE_KEY
 from penguiflow.sessions.telemetry import LoggingTaskTelemetrySink
 from penguiflow.sessions.tool_jobs import build_tool_job_pipeline
 {% endif %}
-{% if with_a2a %}
-from .a2a import A2AServer
-{% endif %}
 {% if memory_enabled %}
 from .clients.memory import MemoryClient
 {% endif %}
@@ -131,9 +128,6 @@ class {{ class_name }}Orchestrator:
             self._tool_context_defaults[SUBAGENT_FLAG_KEY] = False
         elif config.background_tasks_enabled:
             self._setup_background_tasks_fallback()
-{% endif %}
-{% if with_a2a %}
-        self._a2a_server = A2AServer(self)
 {% endif %}
         self._started = True
 
@@ -399,15 +393,5 @@ class {{ class_name }}Orchestrator:
     async def stop(self) -> None:
         """Graceful shutdown hook."""
         if self._started:
-{% if with_a2a %}
-            if getattr(self, "_a2a_server", None):
-                await self._a2a_server.stop()
-{% endif %}
             self._started = False
             _LOGGER.info("{{ project_name }} orchestrator stopped")
-
-{% if with_a2a %}
-    async def start_a2a(self) -> None:
-        """Start the A2A HTTP+JSON server."""
-        await self._a2a_server.start()
-{% endif %}
