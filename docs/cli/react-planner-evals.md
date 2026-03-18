@@ -59,9 +59,15 @@ In `Eval` / `Trajectory`:
 
 Export defaults in Playground:
 
-- with `agent_package`: `<project_root>/<agent_package>/evals/playground_export/dataset`
+- with `agent_package`: `<project_root>/src/<agent_package>/evals/playground_export/dataset` when `src/` exists, otherwise `<project_root>/<agent_package>/evals/playground_export/dataset`
 - without `agent_package`: `<project_root>/evals/playground_export/dataset`
 - existing targets are auto-renamed (`dataset-2`, `dataset-3`, ...) instead of overwritten
+
+Dataset split rule:
+
+- at least one `val` row is required
+- `test` rows are optional for diagnostic iterations
+- if `min_test_score` is set but no `test` split exists, threshold status is reported as `null`
 
 ## Step 3: curate multi-turn cases (important)
 

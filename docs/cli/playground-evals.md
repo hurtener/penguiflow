@@ -61,11 +61,13 @@ That makes it the right place to discover what should become a durable dataset o
 
 - exported datasets keep the standard bundle shape: `dataset.jsonl` plus `manifest.json`
 - Playground export defaults to an app-scoped eval directory:
-  - with `agent_package`: `<project_root>/<agent_package>/evals/playground_export/dataset`
+  - with `agent_package`: `<project_root>/src/<agent_package>/evals/playground_export/dataset` when `src/` exists, otherwise `<project_root>/<agent_package>/evals/playground_export/dataset`
   - without `agent_package`: `<project_root>/evals/playground_export/dataset`
 - if the target export directory already exists, Playground auto-renames to `dataset-2`, `dataset-3`, ... instead of overwriting
 - loaded datasets are preview/staging inputs for eval; they do not import traces into the Playground state store
 - eval runs store prediction traces in the active Playground process so result rows can open into trace review
+- eval runs require at least one `val` case; `test` is optional for diagnostic workflows
+- when `min_test_score` is set but no `test` split exists, `passed_threshold` is `null`
 
 Because the formats stay aligned, the same dataset can move between Playground and `penguiflow eval` without conversion.
 

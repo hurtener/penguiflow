@@ -309,7 +309,7 @@ class EvalRunResponse(BaseModel):
     run_id: str
     counts: dict[str, int]
     min_test_score: float | None = None
-    passed_threshold: bool
+    passed_threshold: bool | None
     metric: EvalMetricDefinitionPayload | None = None
     cases: list[EvalRunCasePayload]
 
@@ -988,6 +988,15 @@ def create_playground_app(
     sticky_tool_nodes: dict[str, dict[str, Any]] = {}
     ui_dir = Path(__file__).resolve().parent / "playground_ui" / "dist"
     resolved_project_root = Path(project_root or ".").resolve()
+    resolved_agent_base = (
+        (resolved_project_root / "src") if (resolved_project_root / "src").exists() else resolved_project_root
+    )
+
+    def _resolve_evals_root() -> Path:
+        if agent_package:
+            return (resolved_agent_base / Path(agent_package) / "evals").resolve()
+        return (resolved_project_root / "evals").resolve()
+
     spec_payload, parsed_spec = _load_spec_payload(resolved_project_root)
     meta_payload = _meta_from_spec(parsed_spec)
 
@@ -2375,11 +2384,7 @@ def create_playground_app(
 
     @app.get("/eval/datasets/browse", response_model=list[EvalDatasetBrowseEntry])
     async def browse_eval_datasets() -> list[EvalDatasetBrowseEntry]:
-        evals_root = (
-            (resolved_project_root / Path(agent_package) / "evals").resolve()
-            if agent_package
-            else (resolved_project_root / "evals").resolve()
-        )
+        evals_root = _resolve_evals_root()
         if evals_root != resolved_project_root and resolved_project_root not in evals_root.parents:
             return []
         if not evals_root.exists() or not evals_root.is_dir():
@@ -2407,11 +2412,7 @@ def create_playground_app(
     @app.get("/eval/metrics/browse", response_model=list[EvalMetricBrowseEntry], response_model_exclude_none=True)
     async def browse_eval_metrics() -> list[EvalMetricBrowseEntry]:
         ensure_project_on_sys_path(resolved_project_root)
-        evals_root = (
-            (resolved_project_root / Path(agent_package) / "evals").resolve()
-            if agent_package
-            else (resolved_project_root / "evals").resolve()
-        )
+        evals_root = _resolve_evals_root()
         if evals_root != resolved_project_root and resolved_project_root not in evals_root.parents:
             return []
         if not evals_root.exists() or not evals_root.is_dir():
@@ -2478,11 +2479,7 @@ def create_playground_app(
             raise HTTPException(status_code=500, detail="State store is not configured")
 
         def _default_eval_export_dir() -> Path:
-            if agent_package:
-                return (
-                    resolved_project_root / Path(agent_package) / "evals" / "playground_export" / "dataset"
-                ).resolve()
-            return (resolved_project_root / "evals" / "playground_export" / "dataset").resolve()
+            return (_resolve_evals_root() / "playground_export" / "dataset").resolve()
 
         def _auto_rename_output_dir(path: Path) -> Path:
             if not path.exists():
@@ -2613,9 +2610,14 @@ def create_playground_app(
             effective_max_cases = min(request.max_cases, EVAL_RUN_HARD_MAX_CASES)
         rows = rows[:effective_max_cases]
 
+        val_count = sum(1 for row in rows if str(row.get("split") or "unknown") == "val")
+        test_count = sum(1 for row in rows if str(row.get("split") or "unknown") == "test")
+        if val_count == 0:
+            raise HTTPException(status_code=400, detail="dataset must contain at least one val example")
+
         run_id = secrets.token_hex(8)
         pred_session_id = f"eval:{run_id}"
-        counts = {"total": len(rows), "val": 0, "test": 0}
+        counts = {"total": len(rows), "val": val_count, "test": test_count}
         test_scores: list[float] = []
         cases: list[EvalRunCasePayload] = []
 
@@ -2625,10 +2627,6 @@ def create_playground_app(
 
         for row in rows:
             split = str(row.get("split") or "unknown")
-            if split == "val":
-                counts["val"] += 1
-            elif split == "test":
-                counts["test"] += 1
 
             question = str(row.get("question") or "")
             gold_trace = row.get("gold_trace")
@@ -2752,8 +2750,11 @@ def create_playground_app(
         cases.sort(key=lambda item: item.score)
 
         test_score = (sum(test_scores) / len(test_scores)) if test_scores else None
-        passed_threshold = True
-        if request.min_test_score is not None and test_score is not None:
+        if request.min_test_score is None:
+            passed_threshold: bool | None = True
+        elif test_score is None:
+            passed_threshold = None
+        else:
             passed_threshold = test_score >= request.min_test_score
 
         return EvalRunResponse(

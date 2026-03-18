@@ -53,7 +53,7 @@ export interface EvalRunResponse {
     test: number;
   };
   min_test_score?: number | null;
-  passed_threshold: boolean;
+  passed_threshold: boolean | null;
   metric?: {
     name: string;
     summary: string;

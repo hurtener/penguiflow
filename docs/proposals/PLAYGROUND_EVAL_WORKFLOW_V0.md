@@ -2,9 +2,9 @@
 
 ## Status
 
-This document describes the current state of the Playground eval workflow, what is already implemented, what is intentionally discarded, and the remaining delivery increments.
+This document now reflects the implemented v0 baseline and the remaining follow-up work.
 
-It is written as a standalone plan for finishing v0 from the current repo state.
+The core Playground eval workflow is live (trace tagging, dataset export/load, run, case review, open trace).
 
 ## Goal
 
@@ -20,11 +20,12 @@ The workflow must remain compatible with the existing CLI dataset and eval forma
 
 ## Current Product Position
 
-The backend foundation for Playground evals now exists.
+Playground eval is now a first-class center workflow and remains CLI-format-compatible.
 
-The current UI implementation does not match the intended product shape and should be treated as disposable.
+The product now follows this model:
 
-Specifically, the temporary right-sidebar Eval card should be considered discarded design, even if parts of its API wiring can still be reused internally.
+- author/debug interactively in Playground
+- operationalize/re-run in `penguiflow eval`
 
 ## What v0 Includes
 
@@ -75,6 +76,12 @@ Dataset export selects stored traces by tag and writes a standard dataset bundle
 
 This is compatible with the CLI export/eval path.
 
+Default export directory behavior:
+
+- with `agent_package`: `<project_root>/src/<agent_package>/evals/playground_export/dataset` when `src/` exists, otherwise `<project_root>/<agent_package>/evals/playground_export/dataset`
+- without `agent_package`: `<project_root>/evals/playground_export/dataset`
+- collision policy: auto-rename (`dataset-2`, `dataset-3`, ...), never overwrite by default
+
 ### Dataset load
 
 Dataset load is a read/validate/preview action.
@@ -88,6 +95,12 @@ It does **not** populate the Playground in-memory state store.
 Eval run reads dataset rows from disk, executes them through the Playground backend using the running agent wrapper, computes metric results, and stores prediction traces in the active Playground process.
 
 This is what makes "Open trace" possible for eval results.
+
+Dataset split semantics:
+
+- at least one `val` row is required
+- `test` rows are optional for diagnostic runs
+- when `min_test_score` is set and no `test` rows exist, `passed_threshold` is `null`
 
 ## Implemented Backend Scope
 
@@ -103,57 +116,71 @@ The following backend pieces are already done:
 - eval hard cap for `max_cases`
 - prediction-trace persistence for Playground debug flow
 
-## Implemented but Discarded UI Scope
+## Implemented UI Scope (Current v0 Surface)
 
-The following UI work exists in code but should not be treated as the v0 product surface:
+The current v0 UI surface includes:
 
-- right-sidebar `EvalCard`
-- sidebar-based trace tagging controls
-- sidebar-based dataset export/load/run forms
-- sidebar-based eval results list
+- Eval section in center workflow (trace selection, dataset export/load, run, results)
+- metric metadata and structured checks rendering
+- clear pass/fail row semantics (`✓ All pass`, `Failed: ...`)
+- case-level open-trace debug loop
+- comparison + divergence review for selected eval cases
+- contextual `Copy` in trajectory view:
+  - `actual` view -> full trajectory JSON
+  - `reference` view -> full trajectory JSON
+  - `divergence` view -> structured diff JSON (`path`, `reference`, `actual`)
 
-Reason: this shape is too cramped, obscures the workflow, and does not make evals feel like a first-class Playground activity.
+## Remaining Product Work
 
-## Missing v0 Product Work
+Most foundational v0 work is complete. Remaining work is coherence and trace-centric synchronization polish.
 
-Almost all remaining work is now UI and UX restructuring.
+### Pending: trace-driven UI sync across existing widgets
 
-### Missing information architecture
+Current behavior when selecting a trace is trajectory-first.
 
-- Add Eval as a first-class Playground section alongside `Chat`, `Setup`, and `Context`.
-- Remove the right-sidebar Eval card from the intended UX.
-- Make the eval flow navigable as a whole, not as unrelated controls.
+Pending improvement: selecting a trace should synchronize the existing widgets so the whole UI reflects that trace.
 
-### Missing tagging UX
+Use existing elements (no net-new major widgets):
 
-- Show recent traces in a trace-selection workflow.
-- Support adding/removing arbitrary tags, not just split toggles.
-- Make split assignment (`split:val`, `split:test`) a clear part of tagging.
-- Explain that tagged traces are what power dataset export.
+- keep `Trajectory` as anchor
+- synchronize `EventsCard` to selected trace history + follow stream
+- synchronize `ArtifactsCard` to selected trace/session context using existing artifact plumbing
+- continue reusing `ContextTab` from trajectory payload (`llm_context`, `tool_context`, memory, background results)
 
-### Missing dataset UX
+This is currently the highest-value hanging fruit for review/debug coherence.
 
-- Clarify the difference between:
-  - building a dataset from tagged traces
-  - loading an existing dataset from disk
-- Show the loaded dataset summary more clearly.
-- Make it obvious that load is preview/staging for evaluation, not state-store import.
+### Pending: trace/eval review coherence
 
-### Missing eval-run UX
+- ensure all trace-open entry points (Traces tab, Eval case open, chat completion) trigger the same sync behavior
+- keep session-level widgets (`Tasks`, `Notifications`) session-scoped; do not force trace-level semantics there
 
-- Present metric configuration in a clearer form.
-- Show run counts, threshold state, and worst cases more clearly.
-- Support an explicit debug loop from failing case to trace inspection.
+### Done: tagging UX baseline
 
-### Missing result/debug UX
+- recent traces available for selection
+- arbitrary tag add/remove supported
+- split tags (`split:val`, `split:test`) part of trace tagging flow
 
-- Make "Open trace" part of a proper results table or list.
-- Show question, score, split, and feedback in a scannable layout.
-- Make it easy to move from results back into trace/context inspection.
+### Done: dataset UX baseline
 
-## Recommended v0 UI Shape
+- export from tags and load-from-path are both available
+- dataset load returns summary/preview
+- load semantics remain preview/staging, not state-store import
 
-Add an `Eval` top-level section in the center workspace.
+### Done: eval-run UX baseline
+
+- run controls are exposed in Eval workflow
+- run counts/threshold/case list are visible
+- explicit case -> open trace debug loop is available
+
+### Done: result/debug baseline
+
+- results are presented in scannable rows
+- open trace is integrated into eval case review
+- trajectory comparison/divergence is available for failed-case triage
+
+## Recommended v0+ Iteration Shape
+
+Keep `Eval` as a top-level center section and iterate on trace-synced coherence.
 
 That section should contain four sub-areas:
 
@@ -181,66 +208,40 @@ That section should contain four sub-areas:
 
 ## Delivery Increments From Current State
 
-### Increment 1: Replace sidebar eval surface
+### Increment 1: Trace selection should synchronize Events
 
 Outcome:
 
-- Eval becomes a first-class center section/tab.
-- The right-sidebar Eval card is removed from the intended experience.
+- Selecting/opening a trace updates EventsCard to that trace history (and follow stream)
+- Traces tab / Eval open trace / chat completion share the same sync behavior
 
-Notes:
-
-- Existing service calls and backend endpoints can be reused.
-- This increment is mostly structural UI work.
-
-### Increment 2: Build proper trace-tagging workflow
+### Increment 2: Trace selection should synchronize Artifacts
 
 Outcome:
 
-- Users can tag traces intentionally for dataset construction.
-- Users can manage arbitrary tags and split tags clearly.
+- Existing ArtifactsCard reflects selected trace/session context using current artifact store/services
+- Preserve session-level artifact behavior where trace metadata is unavailable
 
-Notes:
-
-- Current split-only controls are insufficient.
-- This increment should explain dataset selection semantics directly in the UI.
-
-### Increment 3: Build proper dataset section
+### Increment 3: Keep Context/Trajectory coupling explicit
 
 Outcome:
 
-- Users can export datasets from tags.
-- Users can load an existing dataset from a path.
-- Users can see clearly what was loaded and what it means.
+- Make it explicit in UX copy that `llm_context`, `tool_context`, memory, and background results come from the selected trajectory payload
+- avoid introducing duplicate context widgets
 
-Notes:
-
-- Keep path-based loading only for v0.
-- Do not add upload in this phase.
-
-### Increment 4: Build proper eval-run section
+### Increment 4: Optional artifact filtering by active trace
 
 Outcome:
 
-- Users can run evaluation with clear metric and limit controls.
-- The run summary is understandable without reading raw JSON-like fragments.
+- If low-risk, add trace-level filtering in ArtifactsCard using existing trace/session metadata
+- keep fallback to session-level list when filtering metadata is incomplete
 
-Notes:
-
-- Reuse current backend eval execution.
-- Keep CLI-compatible `metric_spec` input.
-
-### Increment 5: Build proper results/debug section
+### Increment 5: Coherence validation pass
 
 Outcome:
 
-- Users can inspect worst cases, read feedback, and open prediction traces directly.
-- The debug loop becomes concrete and discoverable.
-
-Notes:
-
-- Prediction traces already exist in backend behavior.
-- This increment is about making the flow legible and useful.
+- verify that selecting a trace synchronizes trajectory, context, events, and artifacts reliably across all entry points
+- ensure no regressions in eval run flow, case comparison, and copy behavior
 
 ## Success Criteria
 
@@ -251,11 +252,12 @@ v0 is complete when:
 - A user can load a dataset from disk and understand that this is preview/staging, not state import.
 - A user can run eval from Playground and inspect per-case results.
 - A user can open prediction traces from failing or low-scoring cases in the trace viewer.
+- Selecting a trace synchronizes trajectory + context + events (+ artifacts where available) using existing UI widgets.
 - The workflow remains compatible with the existing CLI dataset/eval formats.
 
 ## Explicit Non-Goals For This Revision
 
-- Do not preserve the current sidebar Eval card UX.
 - Do not add upload support in this revision.
 - Do not redefine dataset load as state-store population.
 - Do not add new CLI commands.
+- Do not add a separate parallel trace-review surface when existing widgets can be synchronized.

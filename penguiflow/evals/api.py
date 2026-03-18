@@ -1324,8 +1324,6 @@ def _split_dataset_payload_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[list
 
     if not val_rows:
         raise ValueError("dataset must contain at least one val example")
-    if not test_rows:
-        raise ValueError("dataset must contain at least one test example")
     return val_rows, test_rows
 
 
@@ -1410,23 +1408,30 @@ async def _evaluate_dataset_rows(
     rankings.sort(key=lambda item: (-item["score"], item["patch_size"], item["id"]))
     winner = rankings[0] if rankings else {"id": "baseline", "score": baseline_val_score, "patches": {}}
 
-    baseline_score = await _evaluate_rows_mean(
-        test_rows,
-        run_one=run_one,
-        metric=metric,
-        pred_name="test_baseline",
-        patch_bundle=None,
-    )
-    if _is_baseline_bundle(winner):
-        winner_score = baseline_score
-    else:
-        winner_score = await _evaluate_rows_mean(
+    has_test_split = len(test_rows) > 0
+    baseline_score: float | None
+    winner_score: float | None
+    if has_test_split:
+        baseline_score = await _evaluate_rows_mean(
             test_rows,
             run_one=run_one,
             metric=metric,
-            pred_name="test_winner",
-            patch_bundle=winner.get("patch_bundle"),
+            pred_name="test_baseline",
+            patch_bundle=None,
         )
+        if _is_baseline_bundle(winner):
+            winner_score = baseline_score
+        else:
+            winner_score = await _evaluate_rows_mean(
+                test_rows,
+                run_one=run_one,
+                metric=metric,
+                pred_name="test_winner",
+                patch_bundle=winner.get("patch_bundle"),
+            )
+    else:
+        baseline_score = None
+        winner_score = None
 
     counts = {
         "val": len(val_rows),
@@ -1434,10 +1439,20 @@ async def _evaluate_dataset_rows(
         "total": len(val_rows) + len(test_rows),
     }
     if rankings:
-        passed_holdout_regression = winner_score >= baseline_score
-        baseline_threshold_ok = min_test_score is None or baseline_score >= min_test_score
-        winner_threshold_ok = min_test_score is None or winner_score >= min_test_score
-        passed_threshold = baseline_threshold_ok and winner_threshold_ok
+        if has_test_split:
+            assert baseline_score is not None
+            assert winner_score is not None
+            passed_holdout_regression = winner_score >= baseline_score
+        else:
+            passed_holdout_regression = True
+        if min_test_score is None:
+            passed_threshold: bool | None = True
+        elif not has_test_split:
+            passed_threshold = None
+        else:
+            baseline_threshold_ok = bool(baseline_score is not None and baseline_score >= min_test_score)
+            winner_threshold_ok = bool(winner_score is not None and winner_score >= min_test_score)
+            passed_threshold = baseline_threshold_ok and winner_threshold_ok
         summary: dict[str, Any] = {
             "mode": "candidates",
             "winner_id": winner["id"],
@@ -1454,7 +1469,12 @@ async def _evaluate_dataset_rows(
         if min_test_score is not None:
             summary["min_test_score"] = min_test_score
     else:
-        passed_threshold = min_test_score is None or baseline_score >= min_test_score
+        if min_test_score is None:
+            passed_threshold = True
+        elif not has_test_split:
+            passed_threshold = None
+        else:
+            passed_threshold = bool(baseline_score is not None and baseline_score >= min_test_score)
         summary = {
             "mode": "baseline",
             "val_score": baseline_val_score,
@@ -1473,9 +1493,9 @@ async def _evaluate_dataset_rows(
         path.write_text(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
         resolved_report_path = str(path)
 
-    if rankings and not summary["passed_holdout_regression"]:
+    if rankings and has_test_split and not summary["passed_holdout_regression"]:
         raise ValueError("holdout regression detected")
-    if not summary["passed_threshold"]:
+    if summary["passed_threshold"] is False:
         raise ValueError("min_test_score threshold not met")
 
     return {

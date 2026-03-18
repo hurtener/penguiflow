@@ -75,7 +75,7 @@ The Playground uses the same dataset/eval formats for an interactive debug loop:
 
 Playground export defaults are app-scoped and collision-safe:
 
-- with `agent_package`: `<project_root>/<agent_package>/evals/playground_export/dataset`
+- with `agent_package`: `<project_root>/src/<agent_package>/evals/playground_export/dataset` when `src/` exists, otherwise `<project_root>/<agent_package>/evals/playground_export/dataset`
 - without `agent_package`: `<project_root>/evals/playground_export/dataset`
 - existing targets are auto-renamed (`dataset-2`, `dataset-3`, ...) instead of overwritten
 
@@ -184,8 +184,9 @@ Optional report mode (`report_path` in evaluate specs):
 
 - metric returns per-example score (`float` or `{ "score": ... }`)
 - eval aggregates split scores with arithmetic mean
-- baseline mode outputs `val_score` and `test_score`
-- candidate mode outputs `val_baseline_score`, `val_winner_score`, `test_baseline_score`, `test_winner_score`
+- baseline mode outputs `val_score` and `test_score` (`test_score` is `null` for val-only diagnostic datasets)
+- candidate mode outputs `val_baseline_score`, `val_winner_score`, `test_baseline_score`, `test_winner_score` (test scores are `null` when no test split exists)
+- datasets must include at least one `val` example; `test` is optional for diagnostic runs
 
 ## Metric design guidance
 
@@ -202,3 +203,9 @@ Optional report mode (`report_path` in evaluate specs):
 - `env_files` in specs and CLI `--env-file` overrides are intentionally not part of this command surface.
 
 Why: this matches `penguiflow dev` behavior and keeps secret loading simple and predictable.
+
+## Threshold behavior with val-only datasets
+
+- `min_test_score` is evaluated only when a `test` split exists
+- for val-only diagnostic datasets, `passed_threshold` is reported as `null`
+- this lets teams iterate on metric/debug loops before holdout gating is available

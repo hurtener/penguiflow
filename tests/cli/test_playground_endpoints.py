@@ -827,6 +827,36 @@ class TestEvalDatasetExportEndpoint:
         assert first_dataset_path != second_dataset_path
         assert second_dataset_path.parent.name == "dataset-2"
 
+    def test_export_dataset_default_dir_uses_src_layout_agent_package(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+        store = InMemoryStateStore()
+        (tmp_path / "src" / "example_app").mkdir(parents=True, exist_ok=True)
+
+        selected = Trajectory(query="selected-question")
+        selected.metadata["tags"] = ["dataset:alpha", "split:test"]
+        asyncio.run(store.save_trajectory("trace-selected", "session-a", selected))
+
+        app = create_playground_app(
+            project_root=tmp_path,
+            agent=wrapper,
+            state_store=store,
+            agent_package="example_app",
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/eval/datasets/export",
+            json={
+                "selector": {"include_tags": ["dataset:alpha"]},
+                "redaction_profile": "internal_safe",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        dataset_path = Path(payload["dataset_path"])
+        assert dataset_path.parent == tmp_path / "src" / "example_app" / "evals" / "playground_export" / "dataset"
+        assert dataset_path.exists()
+
 
 class TestEvalDatasetLoadEndpoint:
     """Tests for /eval/datasets/load endpoint."""
@@ -907,6 +937,27 @@ class TestEvalDatasetBrowseEndpoint:
             }
         ]
 
+    def test_browse_returns_src_layout_eval_jsonl(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+
+        app_root = tmp_path / "src" / "example_app"
+        evals_dir = app_root / "evals" / "policy"
+        evals_dir.mkdir(parents=True, exist_ok=True)
+        (evals_dir / "dataset.jsonl").write_text("{}\n", encoding="utf-8")
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, agent_package="example_app")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/eval/datasets/browse")
+        assert response.status_code == 200
+        assert response.json() == [
+            {
+                "path": "src/example_app/evals/policy/dataset.jsonl",
+                "label": "policy/dataset.jsonl",
+                "is_default": True,
+            }
+        ]
+
 
 class TestEvalMetricBrowseEndpoint:
     """Tests for /eval/metrics/browse endpoint."""
@@ -950,6 +1001,35 @@ class TestEvalMetricBrowseEndpoint:
                 "metric_spec": "example_app.evals.metrics:policy_metric",
                 "label": "policy_metric",
                 "source_spec_path": "example_app/evals/policy/evaluate.spec.json",
+            }
+        ]
+
+    def test_browse_metrics_from_src_layout_eval_specs(self, tmp_path: Path) -> None:
+        wrapper = MockAgentWrapper()
+
+        app_root = tmp_path / "src" / "example_app"
+        evals_dir = app_root / "evals" / "policy"
+        evals_dir.mkdir(parents=True, exist_ok=True)
+        (evals_dir / "evaluate.spec.json").write_text(
+            json.dumps(
+                {
+                    "dataset_path": "src/example_app/evals/policy/dataset/dataset.jsonl",
+                    "metric_spec": "example_app.evals.metrics:policy_metric",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, agent_package="example_app")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/eval/metrics/browse")
+        assert response.status_code == 200
+        assert response.json() == [
+            {
+                "metric_spec": "example_app.evals.metrics:policy_metric",
+                "label": "policy_metric",
+                "source_spec_path": "src/example_app/evals/policy/evaluate.spec.json",
             }
         ]
 
@@ -1096,6 +1176,45 @@ class TestEvalRunEndpoint:
         assert case["pred_trace_id"] == "pred-trace-1"
         assert case["pred_session_id"].startswith("eval:")
         assert case["question"] == "what is policy"
+        assert payload["passed_threshold"] is None
+
+    def test_eval_run_rejects_test_only_dataset(self, tmp_path: Path) -> None:
+        self._write_eval_metric(tmp_path)
+        dataset_dir = tmp_path / "fixtures" / "dataset"
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        (dataset_dir / "dataset.jsonl").write_text(
+            json.dumps(
+                {
+                    "example_id": "ex-1",
+                    "split": "test",
+                    "question": "what is policy",
+                    "gold_trace": {"inputs": {"llm_context": {"tenant": "t-1"}, "tool_context": {"scope": "x"}}},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        store = InMemoryStateStore()
+        wrapper = MockAgentWrapper(
+            chat_result=ChatResult(
+                trace_id="pred-trace-1",
+                session_id="ignored-by-endpoint",
+                answer="policy answer",
+                metadata={"steps": 1},
+                pause=None,
+            )
+        )
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/eval/run",
+            json={"dataset_path": "fixtures/dataset", "metric_spec": "eval_metric:score"},
+        )
+
+        assert response.status_code == 400
+        assert "at least one val" in response.json()["detail"]
 
     def test_eval_run_passes_dataset_row_and_serialized_pred_trace_to_metric(self, tmp_path: Path) -> None:
         self._write_eval_metric_requiring_row_and_pred_trace(tmp_path)

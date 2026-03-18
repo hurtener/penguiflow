@@ -305,7 +305,6 @@ Required content:
 Optional content:
 
 - `agent_package`
-- `env_files`
 - `state_store_spec`
 
 ### `evaluate.spec.json`
@@ -324,7 +323,6 @@ Optional content:
 - `project_root`
 - `agent_package`
 - `run_one_spec`
-- `env_files`
 - `report_path`
 - `min_test_score`
 
