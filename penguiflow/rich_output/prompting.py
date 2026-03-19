@@ -49,8 +49,8 @@ def generate_component_system_prompt(
     lines: list[str] = [
         "# Rich Output Components",
         "",
-        "You can create rich, interactive outputs beyond plain text. Use the `render_component` tool to emit",
-        "visualizations, data displays, forms, and composite layouts.",
+        "You can create rich, interactive outputs beyond plain text. Use `render_component` or the",
+        "typed `render_*` tools to emit visualizations, data displays, forms, and composite layouts.",
         "",
         "## Quick Reference",
         "",
@@ -65,9 +65,34 @@ def generate_component_system_prompt(
             continue
         lines.append(f"| {need} | `{comp}` | {when} |")
 
+    lines.extend([""])
+    wrapper_lines: list[str] = []
+    if "echarts" in components:
+        wrapper_lines.append("- `render_chart_echarts(...)` for charts")
+    if "datagrid" in components:
+        wrapper_lines.append("- `render_table(...)` for data grids")
+    if "report" in components:
+        wrapper_lines.append("- `render_report(...)` for document-style reports")
+    if "grid" in components:
+        wrapper_lines.append("- `render_grid(...)` for dashboard-style layouts")
+    if "tabs" in components:
+        wrapper_lines.append("- `render_tabs(...)` for related views in one artifact")
+    if "accordion" in components:
+        wrapper_lines.append("- `render_accordion(...)` for collapsible structured sections")
+    if wrapper_lines:
+        lines.extend(
+            [
+                "## Convenience Render Tools",
+                "",
+                "Prefer these typed tools when they fit your goal. They are easier to call correctly than",
+                "building nested `render_component(component=..., props=...)` payloads by hand:",
+                *wrapper_lines,
+                "",
+            ]
+        )
+
     lines.extend(
         [
-            "",
             "## Important: Interactive Components",
             "",
             "Components marked with (PAUSES) will pause your execution until the user responds:",

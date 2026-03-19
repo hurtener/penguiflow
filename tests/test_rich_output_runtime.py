@@ -25,18 +25,35 @@ def test_attach_rich_output_nodes_enabled() -> None:
     registry = ModelRegistry()
     nodes = attach_rich_output_nodes(
         registry,
-        config=RichOutputConfig(enabled=True, allowlist=["markdown"], max_payload_bytes=1000, max_total_bytes=2000),
+        config=RichOutputConfig(
+            enabled=True,
+            allowlist=["markdown", "echarts", "report", "datagrid", "grid", "tabs", "accordion"],
+            max_payload_bytes=1000,
+            max_total_bytes=2000,
+        ),
     )
     assert nodes
     assert registry.has("render_component")
+    assert registry.has("render_chart_echarts")
+    assert registry.has("render_report")
+    assert registry.has("render_table")
+    assert registry.has("render_grid")
+    assert registry.has("render_tabs")
+    assert registry.has("render_accordion")
     assert registry.has("list_artifacts")
 
 
 def test_runtime_prompt_section() -> None:
     reset_runtime()
-    runtime = configure_rich_output(RichOutputConfig(enabled=True, allowlist=["markdown"]))
+    runtime = configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["markdown", "report", "grid", "tabs", "accordion"])
+    )
     prompt = runtime.prompt_section()
     assert "`markdown`" in prompt
+    assert "render_report" in prompt
+    assert "render_grid" in prompt
+    assert "render_tabs" in prompt
+    assert "render_accordion" in prompt
 
 
 def test_runtime_prompt_section_include_examples_override() -> None:
@@ -48,6 +65,21 @@ def test_runtime_prompt_section_include_examples_override() -> None:
     assert "`markdown`" in prompt
     # With examples enabled, prompt generator may include extra example blocks.
     assert "Example" in prompt or "```json" in prompt
+
+
+def test_attach_rich_output_nodes_omits_wrappers_for_disallowed_components() -> None:
+    registry = ModelRegistry()
+    attach_rich_output_nodes(
+        registry,
+        config=RichOutputConfig(enabled=True, allowlist=["markdown"], max_payload_bytes=1000, max_total_bytes=2000),
+    )
+    assert registry.has("render_component")
+    assert not registry.has("render_chart_echarts")
+    assert not registry.has("render_report")
+    assert not registry.has("render_table")
+    assert not registry.has("render_grid")
+    assert not registry.has("render_tabs")
+    assert not registry.has("render_accordion")
 
 
 def test_rich_output_extensions_patch_registry_and_nodes() -> None:

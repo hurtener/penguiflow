@@ -23,6 +23,12 @@ from penguiflow.planner.react import (
     TrajectoryStep,
 )
 from penguiflow.registry import ModelRegistry
+from penguiflow.rich_output.runtime import (
+    RichOutputConfig,
+    attach_rich_output_nodes,
+    configure_rich_output,
+    reset_runtime,
+)
 
 
 def _extract_read_only_conversation_memory(messages: list[Mapping[str, str]]) -> dict[str, Any] | None:
@@ -656,6 +662,63 @@ async def test_multi_action_sequential_executes_extra_readonly_tools_without_llm
     assert client.calls == 2
     tool_names = [evt.extra.get("tool_name") for evt in events if evt.event_type == "tool_call_start"]
     assert tool_names == ["triage", "retrieve"]
+
+
+@pytest.mark.asyncio
+async def test_multi_action_sequential_does_not_enqueue_render_report_wrapper() -> None:
+    """Render wrappers should stay blocked when emitted as alternate actions."""
+
+    class MixedClient:
+        def __init__(self, raw_responses: list[str]) -> None:
+            self._responses = list(raw_responses)
+            self.calls: int = 0
+
+        async def complete(  # type: ignore[override]
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del messages, response_format, stream, on_stream_chunk
+            self.calls += 1
+            if not self._responses:
+                raise AssertionError("No stub responses left")
+            return self._responses.pop(0), 0.0
+
+    reset_runtime()
+    config = RichOutputConfig(enabled=True, allowlist=["report"])
+    configure_rich_output(config)
+
+    registry = ModelRegistry()
+    registry.register("retrieve", Intent, Documents)
+    nodes = list(attach_rich_output_nodes(registry, config=config)) + [Node(retrieve, name="retrieve")]
+    catalog = build_catalog(nodes, registry)
+
+    events: list[PlannerEvent] = []
+    client = MixedClient(
+        [
+            '{"next_node":"retrieve","args":{"intent":"docs"}}\n'
+            '{"next_node":"render_report","args":{"title":"Status","sections":[{"title":"Summary","content":"ok"}]}}',
+            '{"next_node":"final_response","args":{"answer":"ok"}}',
+        ]
+    )
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=catalog,
+        max_iters=10,
+        event_callback=events.append,
+        multi_action_sequential=True,
+        multi_action_read_only_only=True,
+        multi_action_max_tools=2,
+    )
+    result = await planner.run("show a report")
+
+    assert result.reason == "answer_complete"
+    tool_names = [evt.extra.get("tool_name") for evt in events if evt.event_type == "tool_call_start"]
+    assert tool_names == ["retrieve"]
+    assert not any(evt.event_type == "multi_action_enqueued" for evt in events)
 
 
 @pytest.mark.asyncio

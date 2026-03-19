@@ -15,6 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from ..rich_output.tools import RICH_OUTPUT_RENDER_TOOL_NAMES
 from ..steering import SteeringCancelled, SteeringInbox
 from . import prompts
 from .llm import _redact_artifacts
@@ -155,7 +156,7 @@ async def execute_tool_call(
 
     # Prevent "render_component" loops where the model re-renders the exact same UI payload in
     # the next step because it can't infer success from a minimal {"ok": true} observation.
-    if spec.name == "render_component" and isinstance(trajectory.metadata, MutableMapping):
+    if spec.name in RICH_OUTPUT_RENDER_TOOL_NAMES and isinstance(trajectory.metadata, MutableMapping):
         dedupe = _dedupe_key(args_payload)
         last_key = trajectory.metadata.get("_render_component_last_dedupe_key")
         last_step = trajectory.metadata.get("_render_component_last_step_index")
@@ -335,7 +336,7 @@ async def execute_tool_call(
             streams=ctx._collect_chunks() or None,
         )
     except Exception as exc:
-        if spec.name == "render_component":
+        if spec.name in RICH_OUTPUT_RENDER_TOOL_NAMES:
             try:
                 count = int(getattr(planner, "_render_component_failure_history_count", 0))
             except Exception:
@@ -392,7 +393,7 @@ async def execute_tool_call(
 
     observation_json = observation_model.model_dump(mode="json")
 
-    if spec.name == "render_component" and isinstance(trajectory.metadata, MutableMapping):
+    if spec.name in RICH_OUTPUT_RENDER_TOOL_NAMES and isinstance(trajectory.metadata, MutableMapping):
         key = observation_json.get("dedupe_key")
         if not isinstance(key, str):
             key = _dedupe_key(args_payload)

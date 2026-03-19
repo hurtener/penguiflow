@@ -8,6 +8,10 @@ def test_prompt_includes_components() -> None:
     registry = get_registry()
     prompt = generate_component_system_prompt(registry)
     assert "render_component" in prompt
+    assert "render_report" in prompt
+    assert "render_grid" in prompt
+    assert "render_tabs" in prompt
+    assert "render_accordion" in prompt
     assert "`echarts`" in prompt
     assert "`form`" in prompt
 

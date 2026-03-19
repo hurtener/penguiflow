@@ -14,15 +14,32 @@ from penguiflow.rich_output.nodes import (
     _summarise_component,
     describe_component,
     list_artifacts,
+    render_accordion,
+    render_chart_echarts,
     render_component,
+    render_grid,
+    render_report,
+    render_table,
+    render_tabs,
     ui_confirm,
     ui_form,
     ui_select_option,
 )
 from penguiflow.rich_output.runtime import RichOutputConfig, configure_rich_output, reset_runtime
 from penguiflow.rich_output.tools import (
+    AccordionItem,
+    DataGridColumn,
+    GridItem,
     ListArtifactsArgs,
+    RenderAccordionArgs,
+    RenderChartEChartsArgs,
     RenderComponentArgs,
+    RenderGridArgs,
+    RenderReportArgs,
+    RenderTableArgs,
+    RenderTabsArgs,
+    ReportSection,
+    TabItem,
     UIConfirmArgs,
     UIFormArgs,
     UISelectOptionArgs,
@@ -102,6 +119,123 @@ async def test_render_component_emits_artifact() -> None:
     emitted = ctx.emitted[0]
     assert emitted["artifact_type"] == "ui_component"
     assert emitted["chunk"]["component"] == "markdown"
+
+
+@pytest.mark.asyncio
+async def test_render_report_emits_report_component_artifact() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["report", "markdown"], max_payload_bytes=4000, max_total_bytes=8000)
+    )
+    ctx = DummyContext()
+    args = RenderReportArgs(
+        title="Quarterly Report",
+        sections=[ReportSection(title="Summary", content="All good.")],
+    )
+    result = await render_report(args, ctx)
+    assert result.ok is True
+    emitted = ctx.emitted[0]
+    assert emitted["chunk"]["component"] == "report"
+    assert emitted["chunk"]["props"]["title"] == "Quarterly Report"
+    assert emitted["meta"]["source_tool"] == "render_report"
+
+
+@pytest.mark.asyncio
+async def test_render_chart_echarts_injects_title_when_missing() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["echarts"], max_payload_bytes=4000, max_total_bytes=8000)
+    )
+    ctx = DummyContext()
+    args = RenderChartEChartsArgs(title="Revenue", option={"series": [{"type": "line", "data": [1, 2, 3]}]})
+    result = await render_chart_echarts(args, ctx)
+    assert result.ok is True
+    emitted = ctx.emitted[0]
+    assert emitted["chunk"]["component"] == "echarts"
+    assert emitted["chunk"]["props"]["option"]["title"] == {"text": "Revenue"}
+    assert emitted["meta"]["source_tool"] == "render_chart_echarts"
+
+
+@pytest.mark.asyncio
+async def test_render_table_emits_datagrid_component_artifact() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["datagrid"], max_payload_bytes=4000, max_total_bytes=8000)
+    )
+    ctx = DummyContext()
+    args = RenderTableArgs(
+        title="Results",
+        columns=[DataGridColumn(field="name", header="Name")],
+        rows=[{"name": "PenguiFlow"}],
+    )
+    result = await render_table(args, ctx)
+    assert result.ok is True
+    emitted = ctx.emitted[0]
+    assert emitted["chunk"]["component"] == "datagrid"
+    assert emitted["chunk"]["title"] == "Results"
+    assert emitted["chunk"]["props"]["columns"][0]["field"] == "name"
+
+
+@pytest.mark.asyncio
+async def test_render_grid_emits_grid_component_artifact() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["grid", "metric"], max_payload_bytes=4000, max_total_bytes=8000)
+    )
+    ctx = DummyContext()
+    args = RenderGridArgs(
+        title="Dashboard",
+        items=[GridItem(component="metric", props={"label": "Users", "value": 42}, colSpan=2)],
+    )
+    result = await render_grid(args, ctx)
+    assert result.ok is True
+    emitted = ctx.emitted[0]
+    assert emitted["chunk"]["component"] == "grid"
+    assert emitted["chunk"]["props"]["items"][0]["colSpan"] == 2
+    assert emitted["meta"]["source_tool"] == "render_grid"
+
+
+@pytest.mark.asyncio
+async def test_render_tabs_emits_tabs_component_artifact() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["tabs", "markdown"], max_payload_bytes=4000, max_total_bytes=8000)
+    )
+    ctx = DummyContext()
+    args = RenderTabsArgs(
+        title="Views",
+        tabs=[
+            TabItem(label="Overview", content="Hello"),
+            TabItem(label="Details", component="markdown", props={"content": "World"}),
+        ],
+        defaultTab=1,
+    )
+    result = await render_tabs(args, ctx)
+    assert result.ok is True
+    emitted = ctx.emitted[0]
+    assert emitted["chunk"]["component"] == "tabs"
+    assert emitted["chunk"]["props"]["defaultTab"] == 1
+    assert emitted["meta"]["source_tool"] == "render_tabs"
+
+
+@pytest.mark.asyncio
+async def test_render_accordion_emits_accordion_component_artifact() -> None:
+    configure_rich_output(
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["accordion", "markdown"],
+            max_payload_bytes=4000,
+            max_total_bytes=8000,
+        )
+    )
+    ctx = DummyContext()
+    args = RenderAccordionArgs(
+        title="FAQ",
+        items=[AccordionItem(title="One", content="First", defaultOpen=True)],
+        allowMultiple=True,
+    )
+    result = await render_accordion(args, ctx)
+    assert result.ok is True
+    emitted = ctx.emitted[0]
+    assert emitted["chunk"]["component"] == "accordion"
+    assert emitted["chunk"]["props"]["allowMultiple"] is True
+    assert emitted["chunk"]["props"]["items"][0]["defaultOpen"] is True
+    assert emitted["meta"]["source_tool"] == "render_accordion"
 
 
 @pytest.mark.asyncio

@@ -445,25 +445,49 @@ class TestOpenRouterProviderBuildParams:
             assert "reasoning_effort" not in params
             assert "reasoning" not in params
 
-    def test_build_params_non_xai_keeps_reasoning_effort(self, mock_openai_sdk: MagicMock) -> None:
+    def test_build_params_non_xai_maps_reasoning_controls_to_extra_body(self, mock_openai_sdk: MagicMock) -> None:
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
             from penguiflow.llm.providers.openrouter import OpenRouterProvider
 
             provider = OpenRouterProvider(
-                "anthropic/claude-sonnet-4.5",
+                "openrouter/inception/mercury-2",
                 api_key="key",
             )
 
             request = LLMRequest(
-                model="anthropic/claude-sonnet-4.5",
+                model="openrouter/inception/mercury-2",
                 messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
-                extra={"reasoning_enabled": True, "reasoning_effort": "high"},
+                extra={"reasoning_enabled": True, "reasoning_effort": "high", "include_reasoning": True},
             )
 
             params = provider._build_params(request)
 
+            assert params["extra_body"]["reasoning"] == {"enabled": True}
+            assert params["extra_body"]["include_reasoning"] is True
             assert params["reasoning_effort"] == "high"
             assert "reasoning_enabled" not in params
+            assert "include_reasoning" not in params
+
+    def test_build_params_non_xai_keeps_explicit_reasoning_payload(self, mock_openai_sdk: MagicMock) -> None:
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.openrouter import OpenRouterProvider
+
+            provider = OpenRouterProvider(
+                "openrouter/inception/mercury-2",
+                api_key="key",
+            )
+
+            request = LLMRequest(
+                model="openrouter/inception/mercury-2",
+                messages=(LLMMessage(role="user", parts=[TextPart(text="Hello")]),),
+                extra={"reasoning": {"enabled": False}, "include_reasoning": True},
+            )
+
+            params = provider._build_params(request)
+
+            assert params["extra_body"]["reasoning"] == {"enabled": False}
+            assert params["extra_body"]["include_reasoning"] is True
+            assert "reasoning" not in params
 
     def test_build_params_sets_max_tokens_tools_and_tool_choice(
         self, mock_openai_sdk: MagicMock
@@ -551,6 +575,95 @@ def test_openrouter_xai_profile_supports_reasoning() -> None:
     profile = get_openrouter_profile("openrouter/x-ai/grok-4.1-fast:thinking")
     assert profile.supports_reasoning is True
     assert profile.max_context_tokens == 2000000
+
+
+def test_openrouter_inception_profile_supports_reasoning() -> None:
+    from penguiflow.llm.profiles.openrouter import get_openrouter_profile
+
+    profile = get_openrouter_profile("openrouter/inception/mercury-2")
+    assert profile.supports_reasoning is True
+    assert profile.supports_schema_guided_output is True
+    assert profile.max_context_tokens == 128000
+
+
+def test_openrouter_minimax_profile_supports_reasoning() -> None:
+    from penguiflow.llm.profiles.openrouter import get_openrouter_profile
+
+    profile = get_openrouter_profile("openrouter/minimax/minimax-m2.7")
+    assert profile.supports_reasoning is True
+    assert profile.supports_schema_guided_output is True
+    assert profile.max_context_tokens == 204800
+    assert profile.max_output_tokens == 131072
+
+
+def test_openrouter_xiaomi_profile_supports_reasoning() -> None:
+    from penguiflow.llm.profiles.openrouter import get_openrouter_profile
+
+    profile = get_openrouter_profile("openrouter/xiaomi/mimo-v2-pro")
+    assert profile.supports_reasoning is True
+    assert profile.supports_schema_guided_output is True
+    assert profile.max_context_tokens == 1048576
+    assert profile.max_output_tokens == 131072
+
+
+def test_openrouter_openai_gpt_5_3_chat_profile() -> None:
+    from penguiflow.llm.profiles.openrouter import get_openrouter_profile
+
+    profile = get_openrouter_profile("openrouter/openai/gpt-5.3-chat")
+    assert profile.supports_reasoning is False
+    assert profile.supports_schema_guided_output is True
+    assert profile.max_context_tokens == 128000
+    assert profile.max_output_tokens == 16384
+
+
+def test_openrouter_anthropic_claude_4_6_profile() -> None:
+    from penguiflow.llm.profiles.openrouter import get_openrouter_profile
+
+    profile = get_openrouter_profile("openrouter/anthropic/claude-sonnet-4.6")
+    assert profile.supports_reasoning is True
+    assert profile.supports_schema_guided_output is True
+    assert profile.max_context_tokens == 1000000
+    assert profile.max_output_tokens == 128000
+
+
+def test_openrouter_google_gemini_3_1_flash_lite_profile() -> None:
+    from penguiflow.llm.profiles.openrouter import get_openrouter_profile
+
+    profile = get_openrouter_profile("openrouter/google/gemini-3.1-flash-lite-preview")
+    assert profile.supports_reasoning is True
+    assert profile.supports_schema_guided_output is True
+    assert profile.max_context_tokens == 1048576
+    assert profile.max_output_tokens == 65536
+
+
+def test_openrouter_zai_glm_5_turbo_profile() -> None:
+    from penguiflow.llm.profiles.openrouter import get_openrouter_profile
+
+    profile = get_openrouter_profile("openrouter/z-ai/glm-5-turbo")
+    assert profile.supports_reasoning is True
+    assert profile.supports_schema_guided_output is True
+    assert profile.max_context_tokens == 202752
+    assert profile.max_output_tokens == 131072
+
+
+def test_openrouter_nvidia_nemotron_profile() -> None:
+    from penguiflow.llm.profiles.openrouter import get_openrouter_profile
+
+    profile = get_openrouter_profile("openrouter/nvidia/nemotron-3-super-120b-a12b")
+    assert profile.supports_reasoning is True
+    assert profile.supports_schema_guided_output is True
+    assert profile.max_context_tokens == 262144
+    assert profile.max_output_tokens is None
+
+
+def test_openrouter_mistral_explicit_profile_fallback_match() -> None:
+    from penguiflow.llm.profiles.openrouter import get_openrouter_profile
+
+    profile = get_openrouter_profile("openrouter/mistralai/mistral-small-2603:online")
+    assert profile.supports_reasoning is True
+    assert profile.supports_schema_guided_output is True
+    assert profile.max_context_tokens == 262144
+    assert profile.max_output_tokens is None
 
 
 def test_openrouter_anthropic_profile_fallback_match() -> None:

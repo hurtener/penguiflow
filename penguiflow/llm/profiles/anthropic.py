@@ -8,6 +8,33 @@ from __future__ import annotations
 from . import ModelProfile
 
 PROFILES: dict[str, ModelProfile] = {
+    # Claude 4.6 family
+    "claude-opus-4-6": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=False,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="anthropic_tool_use",
+        schema_transformer_name="AnthropicJsonSchemaTransformer",
+        strict_mode_default=False,
+        max_context_tokens=1000000,
+        max_output_tokens=128000,
+    ),
+    "claude-sonnet-4-6": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=False,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="anthropic_tool_use",
+        schema_transformer_name="AnthropicJsonSchemaTransformer",
+        strict_mode_default=False,
+        max_context_tokens=1000000,
+        max_output_tokens=128000,
+    ),
     # Claude 4.5 family (latest)
     "claude-opus-4-5": ModelProfile(
         supports_schema_guided_output=True,

@@ -1489,27 +1489,28 @@ def render_render_component_guidance(failure_count: int) -> str | None:
     if failure_count == 1:
         return (
             "<render_component_reminder>\n"
-            "REMINDER: `render_component` props must match the target component schema.\n"
-            "If unsure, call `describe_component(name=...)` first, then retry.\n"
+            "REMINDER: rich-output render tools must produce props that match the target component schema.\n"
+            "If unsure, call `describe_component(name=...)` first, then retry with the wrapper tool "
+            "or `render_component`.\n"
             "</render_component_reminder>"
         )
     if failure_count == 2:
         return (
             "<render_component_warning>\n"
             "IMPORTANT: You have previously failed to render UI components due to invalid props.\n"
-            "When using `render_component`, follow this sequence:\n"
+            "When using `render_component` or any typed `render_*` wrapper, follow this sequence:\n"
             "1) `describe_component(name=...)` to get the exact props schema\n"
-            "2) `render_component(component=..., props=...)` with props matching that schema exactly\n"
+            "2) Call the render tool with args that produce props matching that schema exactly\n"
             "If stuck, simplify by rendering `markdown` instead of repeatedly retrying the same invalid payload.\n"
             "</render_component_warning>"
         )
     return (
         "<render_component_critical>\n"
-        "CRITICAL: You repeatedly failed to call `render_component` with valid props.\n"
+        "CRITICAL: You repeatedly failed to call rich-output render tools with valid props.\n"
         "STOP retrying the same invalid component payload.\n\n"
         "RULES:\n"
         "- If you don't know the schema: call `describe_component(name=...)`.\n"
-        "- Then construct props that match the schema exactly.\n"
+        "- Then call the wrapper or `render_component` with args that match the schema exactly.\n"
         "- If you still cannot satisfy it, use a simpler component (e.g. `markdown`) "
         "or ask the user for missing details.\n"
         "</render_component_critical>"
