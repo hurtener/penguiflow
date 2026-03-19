@@ -42,3 +42,31 @@ def test_get_pricing_google_gemini_3_1_pro_preview() -> None:
 
 def test_get_pricing_claude_sonnet_4_6() -> None:
     assert get_pricing("anthropic/claude-sonnet-4.6") == (0.003, 0.015)
+
+
+def test_get_pricing_openrouter_inception_mercury_2() -> None:
+    assert get_pricing("openrouter/inception/mercury-2") == (0.00025, 0.00075)
+
+
+def test_get_pricing_openrouter_nested_provider_model_gpt_5_3_chat() -> None:
+    assert get_pricing("openrouter/openai/gpt-5.3-chat") == (0.00175, 0.014)
+
+
+def test_get_pricing_openrouter_minimax_m2_7() -> None:
+    assert get_pricing("openrouter/minimax/minimax-m2.7") == (0.0003, 0.0012)
+
+
+def test_get_pricing_openrouter_xiaomi_mimo_v2_pro() -> None:
+    assert get_pricing("openrouter/xiaomi/mimo-v2-pro") == (0.001, 0.003)
+
+
+def test_get_pricing_openrouter_xiaomi_mimo_v2_omni() -> None:
+    assert get_pricing("openrouter/xiaomi/mimo-v2-omni") == (0.0004, 0.002)
+
+
+def test_get_pricing_openrouter_nvidia_nemotron_3_super_120b_a12b() -> None:
+    assert get_pricing("openrouter/nvidia/nemotron-3-super-120b-a12b") == (0.0001, 0.0005)
+
+
+def test_get_pricing_openrouter_mistral_small_2603() -> None:
+    assert get_pricing("openrouter/mistralai/mistral-small-2603") == (0.00015, 0.0006)

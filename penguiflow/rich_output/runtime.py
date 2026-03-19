@@ -17,8 +17,14 @@ from .tools import (
     DescribeComponentResult,
     ListArtifactsArgs,
     ListArtifactsResult,
+    RenderAccordionArgs,
+    RenderChartEChartsArgs,
     RenderComponentArgs,
     RenderComponentResult,
+    RenderGridArgs,
+    RenderReportArgs,
+    RenderTableArgs,
+    RenderTabsArgs,
     UIConfirmArgs,
     UIFormArgs,
     UIInteractionResult,
@@ -188,7 +194,13 @@ def attach_rich_output_nodes(registry: ModelRegistry, *, config: RichOutputConfi
     from .nodes import (
         describe_component,
         list_artifacts,
+        render_accordion,
+        render_chart_echarts,
         render_component,
+        render_grid,
+        render_report,
+        render_table,
+        render_tabs,
         ui_confirm,
         ui_form,
         ui_select_option,
@@ -202,6 +214,24 @@ def attach_rich_output_nodes(registry: ModelRegistry, *, config: RichOutputConfi
         Node(ui_select_option, name="ui_select_option"),
         Node(describe_component, name="describe_component"),
     ]
+    if not runtime.allowlist or "echarts" in runtime.allowlist:
+        registry.register("render_chart_echarts", RenderChartEChartsArgs, RenderComponentResult)
+        nodes.append(Node(render_chart_echarts, name="render_chart_echarts"))
+    if not runtime.allowlist or "report" in runtime.allowlist:
+        registry.register("render_report", RenderReportArgs, RenderComponentResult)
+        nodes.append(Node(render_report, name="render_report"))
+    if not runtime.allowlist or "datagrid" in runtime.allowlist:
+        registry.register("render_table", RenderTableArgs, RenderComponentResult)
+        nodes.append(Node(render_table, name="render_table"))
+    if not runtime.allowlist or "grid" in runtime.allowlist:
+        registry.register("render_grid", RenderGridArgs, RenderComponentResult)
+        nodes.append(Node(render_grid, name="render_grid"))
+    if not runtime.allowlist or "tabs" in runtime.allowlist:
+        registry.register("render_tabs", RenderTabsArgs, RenderComponentResult)
+        nodes.append(Node(render_tabs, name="render_tabs"))
+    if not runtime.allowlist or "accordion" in runtime.allowlist:
+        registry.register("render_accordion", RenderAccordionArgs, RenderComponentResult)
+        nodes.append(Node(render_accordion, name="render_accordion"))
     for extension in extensions:
         if extension.register_nodes:
             nodes.extend(extension.register_nodes(registry))

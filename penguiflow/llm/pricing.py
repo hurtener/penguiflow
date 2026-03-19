@@ -33,6 +33,7 @@ PRICING: dict[str, tuple[float, float]] = {
     "gpt-5.2-chat": (0.00175, 0.014),  # $1.75/$14 per 1M tokens
     "gpt-5.2-codex": (0.00175, 0.014),  # $1.75/$14 per 1M tokens
     "gpt-5.2-pro": (0.021, 0.168),  # $21/$168 per 1M tokens
+    "gpt-5.3-chat": (0.00175, 0.014),  # $1.75/$14 per 1M tokens
     "gpt-5.3-codex": (0.00175, 0.014),  # $1.75/$14 per 1M tokens
     "gpt-5.4": (0.0025, 0.015),  # $2.50/$15 per 1M tokens
     "gpt-5.4-pro": (0.03, 0.18),  # $30/$180 per 1M tokens
@@ -142,6 +143,7 @@ PRICING: dict[str, tuple[float, float]] = {
     "mistralai/mistral-large": (0.002, 0.006),  # $2/$6 per 1M tokens
     "mistralai/mistral-medium": (0.00275, 0.0081),
     "mistralai/mistral-small": (0.0002, 0.0006),
+    "mistralai/mistral-small-2603": (0.00015, 0.0006),  # $0.15/$0.60 per 1M tokens
     # OpenRouter - Meta Llama
     "meta-llama/llama-3.1-70b-instruct": (0.00052, 0.00075),
     "meta-llama/llama-3.1-8b-instruct": (0.00006, 0.00006),
@@ -166,12 +168,39 @@ PRICING: dict[str, tuple[float, float]] = {
     "qwen3.5-9b": (0.00005, 0.00015),  # $0.05/$0.15 per 1M tokens
     "qwen/qwen3.5-flash-02-23": (0.0001, 0.0004),  # $0.10/$0.40 per 1M tokens
     "qwen/qwen3.5-plus-02-15": (0.0004, 0.0024),  # $0.40/$2.40 per 1M tokens
+    # OpenRouter - Inception (March 2026)
+    "inception/mercury-2": (0.00025, 0.00075),  # $0.25/$0.75 per 1M tokens
+    # OpenRouter - MiniMax and Xiaomi (March 2026)
+    "minimax/minimax-m2.7": (0.0003, 0.0012),  # $0.30/$1.20 per 1M tokens
+    "xiaomi/mimo-v2-pro": (0.001, 0.003),  # $1/$3 per 1M tokens
+    "xiaomi/mimo-v2-omni": (0.0004, 0.002),  # $0.40/$2 per 1M tokens
     # OpenRouter - Z.ai GLM family (March 2026)
     "glm-4.7-flash": (0.00006, 0.0004),  # $0.06/$0.40 per 1M tokens
     "glm-4.7": (0.00038, 0.00198),  # $0.38/$1.98 per 1M tokens
     "glm-5": (0.00072, 0.0023),  # $0.72/$2.30 per 1M tokens
     "glm-5-turbo": (0.00096, 0.0032),  # $0.96/$3.20 per 1M tokens
+    "nvidia/nemotron-3-super-120b-a12b": (0.0001, 0.0005),  # $0.10/$0.50 per 1M tokens
 }
+
+
+def _pricing_candidates(model: str) -> list[str]:
+    """Generate exact and normalized candidates for nested model identifiers."""
+    seen: set[str] = set()
+    candidates: list[str] = []
+
+    parts = model.split("/")
+    for idx in range(len(parts)):
+        candidate = "/".join(parts[idx:])
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+
+        normalized = candidate.replace(".", "-")
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            candidates.append(normalized)
+
+    return candidates
 
 
 def get_pricing(model: str) -> tuple[float, float]:
@@ -183,39 +212,16 @@ def get_pricing(model: str) -> tuple[float, float]:
     Returns:
         Tuple of (input_price_per_1k, output_price_per_1k) in USD.
     """
-    # Exact match
-    if model in PRICING:
-        return PRICING[model]
+    candidates = _pricing_candidates(model)
 
-    # Strip provider prefix and normalize naming convention
-    if "/" in model:
-        stripped = model.split("/", 1)[-1]
-        if stripped in PRICING:
-            return PRICING[stripped]
-        # Try normalizing dots to hyphens (e.g., claude-4.5 -> claude-4-5)
-        normalized = stripped.replace(".", "-")
-        if normalized in PRICING:
-            return PRICING[normalized]
-
-    # Also try normalizing the full model name
-    normalized_model = model.replace(".", "-")
-    if normalized_model in PRICING:
-        return PRICING[normalized_model]
+    for candidate in candidates:
+        if candidate in PRICING:
+            return PRICING[candidate]
 
     # Prefix match for versioned models
     for key, price in PRICING.items():
-        if model.startswith(key):
-            return price
-        # Also try with normalization
-        if normalized_model.startswith(key):
-            return price
-        if "/" in model:
-            stripped = model.split("/", 1)[-1]
-            if stripped.startswith(key):
-                return price
-            # Try normalized prefix match
-            normalized = stripped.replace(".", "-")
-            if normalized.startswith(key):
+        for candidate in candidates:
+            if candidate.startswith(key):
                 return price
 
     # Default: unknown pricing (free)

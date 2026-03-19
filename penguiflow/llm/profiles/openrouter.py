@@ -39,6 +39,11 @@ PROVIDER_PROFILE_MAPPING = {
     "stepfun": "stepfun",
     "x-ai": "xai",
     "xai": "xai",
+    "inception": "inception",
+    "minimax": "openrouter_explicit",
+    "xiaomi": "openrouter_explicit",
+    "z-ai": "openrouter_explicit",
+    "nvidia": "openrouter_explicit",
 }
 
 # Profiles for OpenRouter-specific models
@@ -91,6 +96,54 @@ PROFILES: dict[str, ModelProfile] = {
         strict_mode_default=True,
         max_context_tokens=400000,
         max_output_tokens=32768,
+    ),
+    "openai/gpt-5.4-mini": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="openai_response_format",
+        strict_mode_default=True,
+        max_context_tokens=400000,
+        max_output_tokens=128000,
+    ),
+    "openai/gpt-5.4-nano": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="openai_response_format",
+        strict_mode_default=True,
+        max_context_tokens=400000,
+        max_output_tokens=128000,
+    ),
+    "openai/gpt-5.4": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="openai_response_format",
+        strict_mode_default=True,
+        max_context_tokens=1050000,
+        max_output_tokens=128000,
+    ),
+    "openai/gpt-5.3-chat": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=False,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="openai_response_format",
+        strict_mode_default=True,
+        max_context_tokens=128000,
+        max_output_tokens=16384,
     ),
     # Anthropic Claude 4.x via OpenRouter (January 2026)
     "anthropic/claude-sonnet-4.5": ModelProfile(
@@ -165,6 +218,18 @@ PROFILES: dict[str, ModelProfile] = {
         strict_mode_default=True,
         max_context_tokens=1000000,
         max_output_tokens=8192,
+    ),
+    "google/gemini-3.1-flash-lite-preview": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="openai_compatible_tools",
+        strict_mode_default=True,
+        max_context_tokens=1048576,
+        max_output_tokens=65536,
     ),
     # DeepSeek models via OpenRouter (R1 is 671B parameter model)
     "deepseek/deepseek-r1": ModelProfile(
@@ -291,6 +356,18 @@ PROFILES: dict[str, ModelProfile] = {
         strict_mode_default=True,
         max_context_tokens=32000,
         max_output_tokens=8192,
+    ),
+    "mistralai/mistral-small-2603": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="openai_compatible_tools",
+        strict_mode_default=True,
+        max_context_tokens=262144,
+        max_output_tokens=None,
     ),
     "mistralai/mixtral-8x7b-instruct": ModelProfile(
         supports_schema_guided_output=False,
@@ -549,7 +626,116 @@ PROFILES: dict[str, ModelProfile] = {
         max_context_tokens=2000000,
         max_output_tokens=10000,
     ),
+    "anthropic/claude-sonnet-4.6": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="openai_compatible_tools",
+        strict_mode_default=True,
+        max_context_tokens=1000000,
+        max_output_tokens=128000,
+    ),
+    "anthropic/claude-opus-4.6": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="openai_compatible_tools",
+        strict_mode_default=True,
+        max_context_tokens=1000000,
+        max_output_tokens=128000,
+    ),
+    "inception/mercury-2": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="openai_compatible_tools",
+        strict_mode_default=True,
+        max_context_tokens=128000,
+        max_output_tokens=50000,
+    ),
+    "minimax/minimax-m2.7": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="openai_compatible_tools",
+        strict_mode_default=True,
+        max_context_tokens=204800,
+        max_output_tokens=131072,
+    ),
+    "xiaomi/mimo-v2-pro": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="openai_compatible_tools",
+        strict_mode_default=True,
+        max_context_tokens=1048576,
+        max_output_tokens=131072,
+    ),
+    "xiaomi/mimo-v2-omni": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="openai_compatible_tools",
+        strict_mode_default=True,
+        max_context_tokens=262144,
+        max_output_tokens=65536,
+    ),
+    "z-ai/glm-5-turbo": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="openai_compatible_tools",
+        strict_mode_default=True,
+        max_context_tokens=202752,
+        max_output_tokens=131072,
+    ),
+    "nvidia/nemotron-3-super-120b-a12b": ModelProfile(
+        supports_schema_guided_output=True,
+        supports_json_only_output=True,
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        default_output_mode="native",
+        native_structured_kind="openai_compatible_tools",
+        strict_mode_default=True,
+        max_context_tokens=262144,
+        max_output_tokens=None,
+    ),
 }
+
+
+def _match_prefixed_profiles(model_name: str, *provider_prefixes: str) -> ModelProfile | None:
+    """Match a model against explicit OpenRouter profile entries for a provider prefix."""
+    items = sorted(PROFILES.items(), key=lambda item: len(item[0]), reverse=True)
+    for key, profile in items:
+        if not any(key.startswith(prefix) for prefix in provider_prefixes):
+            continue
+        key_model = key.split("/", 1)[-1]
+        if model_name.startswith(key_model) or key_model in model_name:
+            return profile
+
+    return None
 
 
 def get_openrouter_profile(model: str) -> ModelProfile:
@@ -615,23 +801,39 @@ def get_openrouter_profile(model: str) -> ModelProfile:
                         return profile
 
             elif profile_type == "stepfun":
-                # Prefer explicit StepFun profile entries when available.
                 model_name = parts[-1] if len(parts) > 1 else model
-                for key, profile in PROFILES.items():
-                    if not key.startswith("stepfun/"):
-                        continue
-                    key_model = key.split("/", 1)[-1]
-                    if model_name.startswith(key_model) or key_model in model_name:
-                        return profile
+                matched = _match_prefixed_profiles(model_name, "stepfun/")
+                if matched is not None:
+                    return matched
 
             elif profile_type == "xai":
                 model_name = parts[-1] if len(parts) > 1 else model
-                for key, profile in PROFILES.items():
-                    if not (key.startswith("x-ai/") or key.startswith("xai/")):
-                        continue
-                    key_model = key.split("/", 1)[-1]
-                    if model_name.startswith(key_model) or key_model in model_name:
-                        return profile
+                matched = _match_prefixed_profiles(model_name, "x-ai/", "xai/")
+                if matched is not None:
+                    return matched
+
+            elif profile_type == "inception":
+                model_name = parts[-1] if len(parts) > 1 else model
+                matched = _match_prefixed_profiles(model_name, "inception/")
+                if matched is not None:
+                    return matched
+
+            elif profile_type == "openrouter_explicit":
+                model_name = parts[-1] if len(parts) > 1 else model
+                matched = _match_prefixed_profiles(model_name, f"{provider}/")
+                if matched is not None:
+                    return matched
+
+        model_name = parts[-1] if len(parts) > 1 else model
+        provider_prefixes = [f"{provider}/"]
+        if provider == "x-ai":
+            provider_prefixes.append("xai/")
+        elif provider == "xai":
+            provider_prefixes.append("x-ai/")
+
+        matched = _match_prefixed_profiles(model_name, *provider_prefixes)
+        if matched is not None:
+            return matched
 
     # Default OpenRouter profile
     return ModelProfile(

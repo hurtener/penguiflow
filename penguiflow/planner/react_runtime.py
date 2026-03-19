@@ -16,6 +16,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ValidationError
 
 from ..catalog import NodeSpec, ToolLoadingMode
+from ..rich_output.tools import RICH_OUTPUT_RENDER_TOOL_NAMES
 from ..skills.models import SkillQuery
 from ..skills.provider import build_skill_capability_context
 from ..steering import SteeringCancelled, SteeringEventType, SteeringInbox
@@ -42,12 +43,20 @@ from .streaming import _StreamingArgsExtractor
 from .tool_aliasing import build_aliased_tool_catalog, rewrite_action_node
 from .tool_calls import execute_tool_call
 from .trajectory import Trajectory, TrajectoryStep, extract_background_results
-from .validation_repair import _autofill_missing_args, _coerce_tool_context, _validate_llm_context
+from .validation_repair import (
+    _autofill_missing_args,
+    _clear_rich_output_schema_repair_state,
+    _coerce_tool_context,
+    _get_rich_output_schema_error,
+    _mark_rich_output_schema_arg_fill_attempted,
+    _rich_output_schema_arg_fill_attempted,
+    _validate_llm_context,
+)
 
 logger = logging.getLogger("penguiflow.planner")
 
 _TASK_SERVICE_KEY = "task_service"
-_MULTI_ACTION_BLOCKED_NODES = frozenset({"final_response", "render_component", "tasks.spawn"})
+_MULTI_ACTION_BLOCKED_NODES = frozenset({"final_response", "tasks.spawn"} | set(RICH_OUTPUT_RENDER_TOOL_NAMES))
 _MULTI_ACTION_READONLY_SIDE_EFFECTS = frozenset({"pure", "read"})
 _ACTIVATED_TOOLS_METADATA_KEY = "activated_tools"
 _SKILLS_CONTEXT_METADATA_KEY = "skills_context"
@@ -1960,16 +1969,23 @@ async def run_loop(
 
                 # Try arg-fill if eligible:
                 # - Default: only for autofilled required args (missing fields at Pydantic layer)
-                # - Special case: render_component may be "Pydantic-valid" but still invalid vs
-                #   rich output registry schemas (e.g. report requires props.sections). In that
-                #   case, trigger arg-fill for `props` to avoid deterministic tool failures/loops.
+                # - Special case: rich-output render tools may be "Pydantic-valid" but still
+                #   invalid vs the component registry schemas. In that case, trigger arg-fill for
+                #   the tool's top-level payload field (`props`, `sections`, `items`, etc.) to
+                #   avoid deterministic tool failures/loops.
                 missing_fields_for_arg_fill: list[str] | None = None
                 if autofilled_fields:
                     missing_fields_for_arg_fill = list(autofilled_fields)
-                elif spec.name == "render_component":
-                    schema_error = trajectory.metadata.get("render_component_schema_error")
-                    if isinstance(schema_error, Mapping) and schema_error.get("code") == "schema_invalid":
-                        missing_fields_for_arg_fill = ["props"]
+                else:
+                    schema_error = _get_rich_output_schema_error(trajectory)
+                    repair_field = schema_error.get("repair_field") if isinstance(schema_error, Mapping) else None
+                    if (
+                        isinstance(schema_error, Mapping)
+                        and schema_error.get("tool_name") == spec.name
+                        and schema_error.get("code") == "schema_invalid"
+                        and isinstance(repair_field, str)
+                    ):
+                        missing_fields_for_arg_fill = [repair_field]
 
                 if missing_fields_for_arg_fill and planner._is_arg_fill_eligible(
                     spec, missing_fields_for_arg_fill, trajectory
@@ -2009,9 +2025,7 @@ async def run_loop(
                                 trajectory.metadata[f"consecutive_arg_failures_{spec.name}"] = 0
                                 trajectory.metadata[f"autofill_rejection_count_{spec.name}"] = 0
                                 trajectory.metadata[f"arg_fill_attempted_{spec.name}"] = False
-                                if isinstance(trajectory.metadata, MutableMapping):
-                                    trajectory.metadata.pop("render_component_schema_error", None)
-                                    trajectory.metadata.pop("render_component_props_arg_fill_attempted", None)
+                                _clear_rich_output_schema_repair_state(trajectory)
 
                                 logger.info(
                                     "arg_fill_merged_success",
@@ -2035,24 +2049,32 @@ async def run_loop(
                                         "error": revalidation_error,
                                     },
                                 )
-                                # Special-case: allow a second arg-fill for render_component props
-                                # if the first arg-fill filled `component` but left `props` empty.
+                                # Special-case: allow a second arg-fill for rich-output payload
+                                # fields if the first arg-fill solved another field but left the
+                                # schema-invalid payload untouched.
+                                schema_error = _get_rich_output_schema_error(trajectory)
+                                repair_field = (
+                                    schema_error.get("repair_field")
+                                    if isinstance(schema_error, Mapping)
+                                    else None
+                                )
                                 if (
-                                    spec.name == "render_component"
-                                    and "props" not in filled_args
-                                    and isinstance(trajectory.metadata.get("render_component_schema_error"), Mapping)
-                                    and not trajectory.metadata.get("render_component_props_arg_fill_attempted")
+                                    isinstance(schema_error, Mapping)
+                                    and schema_error.get("tool_name") == spec.name
+                                    and isinstance(repair_field, str)
+                                    and repair_field not in filled_args
+                                    and not _rich_output_schema_arg_fill_attempted(trajectory)
                                 ):
-                                    trajectory.metadata["render_component_props_arg_fill_attempted"] = True
+                                    _mark_rich_output_schema_arg_fill_attempted(trajectory)
                                     trajectory.metadata[f"arg_fill_attempted_{spec.name}"] = False
-                                    if planner._is_arg_fill_eligible(spec, ["props"], trajectory):
+                                    if planner._is_arg_fill_eligible(spec, [repair_field], trajectory):
                                         props_fill = await planner._attempt_arg_fill(
                                             trajectory,
                                             spec,
                                             action,
-                                            ["props"],
+                                            [repair_field],
                                         )
-                                        if props_fill is not None and "props" in props_fill:
+                                        if props_fill is not None and repair_field in props_fill:
                                             merged_again = dict(action.args or {})
                                             merged_again.update(props_fill)
                                             try:
@@ -2073,11 +2095,7 @@ async def run_loop(
                                                     trajectory.metadata[f"consecutive_arg_failures_{spec.name}"] = 0
                                                     trajectory.metadata[f"autofill_rejection_count_{spec.name}"] = 0
                                                     trajectory.metadata[f"arg_fill_attempted_{spec.name}"] = False
-                                                    if isinstance(trajectory.metadata, MutableMapping):
-                                                        trajectory.metadata.pop("render_component_schema_error", None)
-                                                        trajectory.metadata.pop(
-                                                            "render_component_props_arg_fill_attempted", None
-                                                        )
+                                                    _clear_rich_output_schema_repair_state(trajectory)
                                                     logger.info(
                                                         "arg_fill_merged_success",
                                                         extra={

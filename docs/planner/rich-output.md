@@ -50,6 +50,12 @@ This registers models in your `ModelRegistry` and returns `Node` entries you can
 Passive output:
 
 - `render_component(component, props, id?, title?, metadata?) -> RenderComponentResult`
+- `render_chart_echarts(option, title?, height?, width?, theme?, loading?, id?, artifactMetadata?) -> RenderComponentResult`
+- `render_report(title?, subtitle?, metadata?, toc?, sections, footer?, id?, artifactMetadata?) -> RenderComponentResult`
+- `render_table(columns, rows, pageSize?, sortable?, filterable?, selectable?, exportable?, striped?, compact?, title?, id?, artifactMetadata?) -> RenderComponentResult`
+- `render_grid(columns?, gap?, items, equalHeight?, id?, title?, artifactMetadata?) -> RenderComponentResult`
+- `render_tabs(tabs, defaultTab?, variant?, id?, title?, artifactMetadata?) -> RenderComponentResult`
+- `render_accordion(items, allowMultiple?, id?, title?, artifactMetadata?) -> RenderComponentResult`
 
 Schemas/introspection:
 
@@ -97,6 +103,7 @@ Rich output is designed to avoid expensive prompt bloat and UI spam:
 
 - Keep the allowlist small for production (only the components you render and support).
 - Prefer `describe_component` for weak models instead of embedding all schemas.
+- Prefer typed wrapper tools (`render_chart_echarts`, `render_table`, `render_report`, `render_grid`, `render_tabs`, `render_accordion`) when they fit the UI you need.
 - Enforce payload size limits (`max_payload_bytes`, `max_total_bytes`) and keep heavy data in artifacts.
 - Use guardrails to prevent sensitive data from being rendered into UI props (see **[Guardrails](guardrails.md)**).
 
@@ -221,4 +228,3 @@ if __name__ == "__main__":
 - Are you rendering `artifact_chunk` events in your UI transport layer?
 - Are payload size limits blocking your props?
 - Are you using `describe_component` when a model keeps failing validation?
-

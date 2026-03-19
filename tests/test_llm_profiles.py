@@ -38,6 +38,13 @@ class TestGetProfileForModel:
         assert profile is not None
         assert profile.supports_tools is True
 
+    def test_nested_provider_prefixes_resolve_profile(self) -> None:
+        """Test nested provider prefixes like openrouter/provider/model."""
+        profile = get_profile("openrouter/anthropic/claude-sonnet-4.6")
+        assert profile is not None
+        assert profile.supports_reasoning is True
+        assert profile.max_context_tokens == 1000000
+
     def test_unknown_model_returns_default(self) -> None:
         """Test that unknown models return default profile."""
         profile = get_profile("unknown-model-xyz")

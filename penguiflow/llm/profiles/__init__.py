@@ -71,6 +71,26 @@ class ModelProfile:
 _PROFILES: dict[str, ModelProfile] | None = None
 
 
+def _profile_candidates(model: str) -> list[str]:
+    """Generate exact and normalized candidates for nested model identifiers."""
+    seen: set[str] = set()
+    candidates: list[str] = []
+
+    parts = model.split("/")
+    for idx in range(len(parts)):
+        candidate = "/".join(parts[idx:])
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+
+        normalized = candidate.replace(".", "-")
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            candidates.append(normalized)
+
+    return candidates
+
+
 def _load_profiles() -> dict[str, ModelProfile]:
     """Load all profiles from submodules."""
     from . import anthropic, bedrock, databricks, google, nim, openai, openrouter
@@ -105,24 +125,16 @@ def get_profile(model: str) -> ModelProfile:
     """
     profiles = get_profiles()
 
-    # Exact match
-    if model in profiles:
-        return profiles[model]
+    candidates = _profile_candidates(model)
 
-    # Strip provider prefix (e.g., "openai/gpt-4o" -> "gpt-4o")
-    if "/" in model:
-        stripped = model.split("/", 1)[-1]
-        if stripped in profiles:
-            return profiles[stripped]
+    for candidate in candidates:
+        if candidate in profiles:
+            return profiles[candidate]
 
     # Prefix matching for versioned models (e.g., "gpt-4o-2024-08-06" -> "gpt-4o")
     for key, profile in profiles.items():
-        if model.startswith(key):
-            return profile
-        # Also try with stripped prefix
-        if "/" in model:
-            stripped = model.split("/", 1)[-1]
-            if stripped.startswith(key):
+        for candidate in candidates:
+            if candidate.startswith(key):
                 return profile
 
     # Default fallback
