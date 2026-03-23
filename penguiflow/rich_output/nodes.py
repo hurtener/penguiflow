@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal, overload
 
 from penguiflow.catalog import tool
 from penguiflow.planner import ToolContext
@@ -21,6 +21,12 @@ from penguiflow.planner.artifact_registry import (
 from .runtime import get_runtime
 from .tools import (
     ArtifactSummary,
+    BuildAccordionArgs,
+    BuildChartEChartsArgs,
+    BuildComponentResult,
+    BuildGridArgs,
+    BuildTableArgs,
+    BuildTabsArgs,
     DescribeComponentArgs,
     DescribeComponentResult,
     ListArtifactsArgs,
@@ -65,34 +71,41 @@ def _dedupe_key(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
-def _summarise_component(component: str, props: Mapping[str, Any]) -> str:
+def _tool_dedupe_payload(source_tool: str, payload: Any) -> Mapping[str, Any]:
+    return {
+        "tool": source_tool,
+        "payload": payload,
+    }
+
+
+def _summarise_component(component: str, props: Mapping[str, Any], *, verb: str = "Rendered") -> str:
     if component == "report":
         sections = props.get("sections")
         if isinstance(sections, list):
-            return f"Rendered report ({len(sections)} sections)"
-        return "Rendered report"
+            return f"{verb} report ({len(sections)} sections)"
+        return f"{verb} report"
     if component == "grid":
         items = props.get("items")
         if isinstance(items, list):
-            return f"Rendered grid ({len(items)} items)"
-        return "Rendered grid"
+            return f"{verb} grid ({len(items)} items)"
+        return f"{verb} grid"
     if component == "tabs":
         tabs = props.get("tabs")
         if isinstance(tabs, list):
-            return f"Rendered tabs ({len(tabs)} tabs)"
-        return "Rendered tabs"
+            return f"{verb} tabs ({len(tabs)} tabs)"
+        return f"{verb} tabs"
     if component == "accordion":
         items = props.get("items")
         if isinstance(items, list):
-            return f"Rendered accordion ({len(items)} items)"
-        return "Rendered accordion"
-    return f"Rendered {component}"
+            return f"{verb} accordion ({len(items)} items)"
+        return f"{verb} accordion"
+    return f"{verb} {component}"
 
 
 @tool(desc="Request a rich UI component render (passive).", tags=["rich_output", "ui"], side_effects="pure")
 async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> RenderComponentResult:
     component, props = build_render_tool_payload("render_component", args) or (args.component, dict(args.props))
-    return await _render_component_payload(
+    return await _process_component_payload(
         component=component,
         props=props,
         ctx=ctx,
@@ -101,6 +114,8 @@ async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> Rende
         metadata=args.metadata,
         source_tool="render_component",
         dedupe_payload=args.model_dump(mode="json"),
+        emit_visible=True,
+        result_model=RenderComponentResult,
     )
 
 
@@ -111,7 +126,7 @@ async def render_component(args: RenderComponentArgs, ctx: ToolContext) -> Rende
 )
 async def render_chart_echarts(args: RenderChartEChartsArgs, ctx: ToolContext) -> RenderComponentResult:
     _, props = build_render_tool_payload("render_chart_echarts", args) or ("echarts", {})
-    return await _render_component_payload(
+    return await _process_component_payload(
         component="echarts",
         props=props,
         ctx=ctx,
@@ -120,6 +135,8 @@ async def render_chart_echarts(args: RenderChartEChartsArgs, ctx: ToolContext) -
         metadata=args.artifact_metadata,
         source_tool="render_chart_echarts",
         dedupe_payload=args.model_dump(mode="json"),
+        emit_visible=True,
+        result_model=RenderComponentResult,
     )
 
 
@@ -130,7 +147,7 @@ async def render_chart_echarts(args: RenderChartEChartsArgs, ctx: ToolContext) -
 )
 async def render_report(args: RenderReportArgs, ctx: ToolContext) -> RenderComponentResult:
     _, props = build_render_tool_payload("render_report", args) or ("report", {})
-    return await _render_component_payload(
+    return await _process_component_payload(
         component="report",
         props=props,
         ctx=ctx,
@@ -139,6 +156,8 @@ async def render_report(args: RenderReportArgs, ctx: ToolContext) -> RenderCompo
         metadata=args.artifact_metadata,
         source_tool="render_report",
         dedupe_payload=args.model_dump(mode="json"),
+        emit_visible=True,
+        result_model=RenderComponentResult,
     )
 
 
@@ -149,7 +168,7 @@ async def render_report(args: RenderReportArgs, ctx: ToolContext) -> RenderCompo
 )
 async def render_table(args: RenderTableArgs, ctx: ToolContext) -> RenderComponentResult:
     _, props = build_render_tool_payload("render_table", args) or ("datagrid", {})
-    return await _render_component_payload(
+    return await _process_component_payload(
         component="datagrid",
         props=props,
         ctx=ctx,
@@ -158,6 +177,8 @@ async def render_table(args: RenderTableArgs, ctx: ToolContext) -> RenderCompone
         metadata=args.artifact_metadata,
         source_tool="render_table",
         dedupe_payload=args.model_dump(mode="json"),
+        emit_visible=True,
+        result_model=RenderComponentResult,
     )
 
 
@@ -168,7 +189,7 @@ async def render_table(args: RenderTableArgs, ctx: ToolContext) -> RenderCompone
 )
 async def render_grid(args: RenderGridArgs, ctx: ToolContext) -> RenderComponentResult:
     _, props = build_render_tool_payload("render_grid", args) or ("grid", {})
-    return await _render_component_payload(
+    return await _process_component_payload(
         component="grid",
         props=props,
         ctx=ctx,
@@ -177,6 +198,8 @@ async def render_grid(args: RenderGridArgs, ctx: ToolContext) -> RenderComponent
         metadata=args.artifact_metadata,
         source_tool="render_grid",
         dedupe_payload=args.model_dump(mode="json"),
+        emit_visible=True,
+        result_model=RenderComponentResult,
     )
 
 
@@ -187,7 +210,7 @@ async def render_grid(args: RenderGridArgs, ctx: ToolContext) -> RenderComponent
 )
 async def render_tabs(args: RenderTabsArgs, ctx: ToolContext) -> RenderComponentResult:
     _, props = build_render_tool_payload("render_tabs", args) or ("tabs", {})
-    return await _render_component_payload(
+    return await _process_component_payload(
         component="tabs",
         props=props,
         ctx=ctx,
@@ -196,6 +219,8 @@ async def render_tabs(args: RenderTabsArgs, ctx: ToolContext) -> RenderComponent
         metadata=args.artifact_metadata,
         source_tool="render_tabs",
         dedupe_payload=args.model_dump(mode="json"),
+        emit_visible=True,
+        result_model=RenderComponentResult,
     )
 
 
@@ -206,7 +231,7 @@ async def render_tabs(args: RenderTabsArgs, ctx: ToolContext) -> RenderComponent
 )
 async def render_accordion(args: RenderAccordionArgs, ctx: ToolContext) -> RenderComponentResult:
     _, props = build_render_tool_payload("render_accordion", args) or ("accordion", {})
-    return await _render_component_payload(
+    return await _process_component_payload(
         component="accordion",
         props=props,
         ctx=ctx,
@@ -215,10 +240,118 @@ async def render_accordion(args: RenderAccordionArgs, ctx: ToolContext) -> Rende
         metadata=args.artifact_metadata,
         source_tool="render_accordion",
         dedupe_payload=args.model_dump(mode="json"),
+        emit_visible=True,
+        result_model=RenderComponentResult,
     )
 
 
-async def _render_component_payload(
+@tool(
+    desc="Build a reusable ECharts visualization without emitting it yet.",
+    tags=["rich_output", "ui", "builder"],
+    side_effects="pure",
+)
+async def build_chart_echarts(args: BuildChartEChartsArgs, ctx: ToolContext) -> BuildComponentResult:
+    _, props = build_render_tool_payload("build_chart_echarts", args) or ("echarts", {})
+    return await _process_component_payload(
+        component="echarts",
+        props=props,
+        ctx=ctx,
+        component_id=args.id,
+        title=args.title,
+        metadata=args.artifact_metadata,
+        source_tool="build_chart_echarts",
+        dedupe_payload=args.model_dump(mode="json"),
+        emit_visible=False,
+        result_model=BuildComponentResult,
+    )
+
+
+@tool(
+    desc="Build a reusable data table without emitting it yet.",
+    tags=["rich_output", "ui", "builder"],
+    side_effects="pure",
+)
+async def build_table(args: BuildTableArgs, ctx: ToolContext) -> BuildComponentResult:
+    _, props = build_render_tool_payload("build_table", args) or ("datagrid", {})
+    return await _process_component_payload(
+        component="datagrid",
+        props=props,
+        ctx=ctx,
+        component_id=args.id,
+        title=args.title,
+        metadata=args.artifact_metadata,
+        source_tool="build_table",
+        dedupe_payload=args.model_dump(mode="json"),
+        emit_visible=False,
+        result_model=BuildComponentResult,
+    )
+
+
+@tool(
+    desc="Build a reusable grid layout without emitting it yet.",
+    tags=["rich_output", "ui", "builder"],
+    side_effects="pure",
+)
+async def build_grid(args: BuildGridArgs, ctx: ToolContext) -> BuildComponentResult:
+    _, props = build_render_tool_payload("build_grid", args) or ("grid", {})
+    return await _process_component_payload(
+        component="grid",
+        props=props,
+        ctx=ctx,
+        component_id=args.id,
+        title=args.title,
+        metadata=args.artifact_metadata,
+        source_tool="build_grid",
+        dedupe_payload=args.model_dump(mode="json"),
+        emit_visible=False,
+        result_model=BuildComponentResult,
+    )
+
+
+@tool(
+    desc="Build reusable tabs without emitting them yet.",
+    tags=["rich_output", "ui", "builder"],
+    side_effects="pure",
+)
+async def build_tabs(args: BuildTabsArgs, ctx: ToolContext) -> BuildComponentResult:
+    _, props = build_render_tool_payload("build_tabs", args) or ("tabs", {})
+    return await _process_component_payload(
+        component="tabs",
+        props=props,
+        ctx=ctx,
+        component_id=args.id,
+        title=args.title,
+        metadata=args.artifact_metadata,
+        source_tool="build_tabs",
+        dedupe_payload=args.model_dump(mode="json"),
+        emit_visible=False,
+        result_model=BuildComponentResult,
+    )
+
+
+@tool(
+    desc="Build a reusable accordion without emitting it yet.",
+    tags=["rich_output", "ui", "builder"],
+    side_effects="pure",
+)
+async def build_accordion(args: BuildAccordionArgs, ctx: ToolContext) -> BuildComponentResult:
+    _, props = build_render_tool_payload("build_accordion", args) or ("accordion", {})
+    return await _process_component_payload(
+        component="accordion",
+        props=props,
+        ctx=ctx,
+        component_id=args.id,
+        title=args.title,
+        metadata=args.artifact_metadata,
+        source_tool="build_accordion",
+        dedupe_payload=args.model_dump(mode="json"),
+        emit_visible=False,
+        result_model=BuildComponentResult,
+    )
+
+
+@overload
+async def _process_component_payload(
     *,
     component: str,
     props: Mapping[str, Any] | dict[str, Any],
@@ -228,7 +361,40 @@ async def _render_component_payload(
     metadata: Mapping[str, Any] | None,
     source_tool: str,
     dedupe_payload: Any | None = None,
-) -> RenderComponentResult:
+    emit_visible: Literal[True],
+    result_model: type[RenderComponentResult],
+) -> RenderComponentResult: ...
+
+
+@overload
+async def _process_component_payload(
+    *,
+    component: str,
+    props: Mapping[str, Any] | dict[str, Any],
+    ctx: ToolContext,
+    component_id: str | None,
+    title: str | None,
+    metadata: Mapping[str, Any] | None,
+    source_tool: str,
+    dedupe_payload: Any | None = None,
+    emit_visible: Literal[False],
+    result_model: type[BuildComponentResult],
+) -> BuildComponentResult: ...
+
+
+async def _process_component_payload(
+    *,
+    component: str,
+    props: Mapping[str, Any] | dict[str, Any],
+    ctx: ToolContext,
+    component_id: str | None,
+    title: str | None,
+    metadata: Mapping[str, Any] | None,
+    source_tool: str,
+    dedupe_payload: Any | None = None,
+    emit_visible: bool,
+    result_model: type[RenderComponentResult] | type[BuildComponentResult],
+) -> RenderComponentResult | BuildComponentResult:
     runtime = get_runtime()
     if not runtime.config.enabled:
         raise RuntimeError("Rich output is disabled for this planner")
@@ -240,7 +406,8 @@ async def _render_component_payload(
         "title": title,
         "metadata": metadata,
     }
-    dedupe = _dedupe_key(dedupe_payload if dedupe_payload is not None else payload)
+    base_dedupe_payload = dedupe_payload if dedupe_payload is not None else payload
+    dedupe = _dedupe_key(_tool_dedupe_payload(source_tool, base_dedupe_payload))
 
     if not isinstance(component, str):
         raise RuntimeError(f"{source_tool} requires a component name")
@@ -249,6 +416,8 @@ async def _render_component_payload(
 
     resolved_props: Mapping[str, Any] = props
     registry = get_artifact_registry(ctx)
+    if registry is None and not emit_visible:
+        raise RuntimeError(f"{source_tool} requires an active planner run so it can return an artifact_ref")
     if has_artifact_refs(resolved_props):
         if registry is None:
             raise RuntimeError("artifact_ref usage requires an active planner run")
@@ -285,47 +454,95 @@ async def _render_component_payload(
     meta = _emit_metadata(metadata, source_tool=source_tool)
     meta.setdefault("registry_version", runtime.registry.version)
 
-    summary = _summarise_component(component, resolved_props)
+    verb = "Rendered" if emit_visible else "Built"
+    summary = _summarise_component(component, resolved_props, verb=verb)
 
     artifact_ref: str | None = None
     if registry is not None:
-        trajectory = getattr(ctx, "_trajectory", None)
-        step_index = len(getattr(trajectory, "steps", []) or [])
-        record = registry.register_tool_artifact(
-            source_tool,
-            "ui",
-            {
-                "component": component,
-                "props": dict(resolved_props),
-                "title": title,
-                "summary": summary,
-                "metadata": dict(meta),
-            },
-            step_index=step_index,
+        record = _register_component_payload(
+            ctx,
+            registry=registry,
+            source_tool=source_tool,
+            component=component,
+            props=resolved_props,
+            component_id=component_id,
+            title=title,
+            meta=meta,
+            summary=summary,
         )
         artifact_ref = record.ref
-        metadata_state = getattr(trajectory, "metadata", None)
-        if isinstance(metadata_state, dict):
-            registry.write_snapshot(metadata_state)
 
-    await ctx.emit_artifact(
-        "ui",
-        {
-            "id": component_id,
-            "component": component,
-            "props": resolved_props,
-            "title": title,
-        },
-        done=True,
-        artifact_type="ui_component",
-        meta=meta,
-    )
-    return RenderComponentResult(
+    if emit_visible:
+        await _emit_component_artifact(
+            ctx,
+            component=component,
+            props=resolved_props,
+            component_id=component_id,
+            title=title,
+            meta=meta,
+        )
+    return result_model(
         ok=True,
         component=component,
         artifact_ref=artifact_ref,
         dedupe_key=dedupe,
         summary=summary,
+    )
+
+
+def _register_component_payload(
+    ctx: ToolContext,
+    *,
+    registry: Any,
+    source_tool: str,
+    component: str,
+    props: Mapping[str, Any],
+    component_id: str | None,
+    title: str | None,
+    meta: Mapping[str, Any],
+    summary: str,
+) -> Any:
+    trajectory = getattr(ctx, "_trajectory", None)
+    step_index = len(getattr(trajectory, "steps", []) or [])
+    record = registry.register_tool_artifact(
+        source_tool,
+        "ui",
+        {
+            "id": component_id,
+            "component": component,
+            "props": dict(props),
+            "title": title,
+            "summary": summary,
+            "metadata": dict(meta),
+        },
+        step_index=step_index,
+    )
+    metadata_state = getattr(trajectory, "metadata", None)
+    if isinstance(metadata_state, dict):
+        registry.write_snapshot(metadata_state)
+    return record
+
+
+async def _emit_component_artifact(
+    ctx: ToolContext,
+    *,
+    component: str,
+    props: Mapping[str, Any],
+    component_id: str | None,
+    title: str | None,
+    meta: Mapping[str, Any],
+) -> None:
+    await ctx.emit_artifact(
+        "ui",
+        {
+            "id": component_id,
+            "component": component,
+            "props": props,
+            "title": title,
+        },
+        done=True,
+        artifact_type="ui_component",
+        meta=dict(meta),
     )
 
 
@@ -477,6 +694,11 @@ __all__ = [
     "render_grid",
     "render_tabs",
     "render_accordion",
+    "build_chart_echarts",
+    "build_table",
+    "build_grid",
+    "build_tabs",
+    "build_accordion",
     "list_artifacts",
     "ui_form",
     "ui_confirm",

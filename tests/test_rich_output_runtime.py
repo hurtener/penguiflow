@@ -35,11 +35,16 @@ def test_attach_rich_output_nodes_enabled() -> None:
     assert nodes
     assert registry.has("render_component")
     assert registry.has("render_chart_echarts")
+    assert registry.has("build_chart_echarts")
     assert registry.has("render_report")
     assert registry.has("render_table")
+    assert registry.has("build_table")
     assert registry.has("render_grid")
+    assert registry.has("build_grid")
     assert registry.has("render_tabs")
+    assert registry.has("build_tabs")
     assert registry.has("render_accordion")
+    assert registry.has("build_accordion")
     assert registry.has("list_artifacts")
 
 
@@ -50,6 +55,7 @@ def test_runtime_prompt_section() -> None:
     )
     prompt = runtime.prompt_section()
     assert "`markdown`" in prompt
+    assert "build_grid" in prompt
     assert "render_report" in prompt
     assert "render_grid" in prompt
     assert "render_tabs" in prompt
@@ -75,11 +81,16 @@ def test_attach_rich_output_nodes_omits_wrappers_for_disallowed_components() -> 
     )
     assert registry.has("render_component")
     assert not registry.has("render_chart_echarts")
+    assert not registry.has("build_chart_echarts")
     assert not registry.has("render_report")
     assert not registry.has("render_table")
+    assert not registry.has("build_table")
     assert not registry.has("render_grid")
+    assert not registry.has("build_grid")
     assert not registry.has("render_tabs")
+    assert not registry.has("build_tabs")
     assert not registry.has("render_accordion")
+    assert not registry.has("build_accordion")
 
 
 def test_rich_output_extensions_patch_registry_and_nodes() -> None:

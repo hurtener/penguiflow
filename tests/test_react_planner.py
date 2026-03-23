@@ -722,6 +722,63 @@ async def test_multi_action_sequential_does_not_enqueue_render_report_wrapper() 
 
 
 @pytest.mark.asyncio
+async def test_multi_action_sequential_can_enqueue_build_table_wrapper() -> None:
+    """Silent builder tools should be eligible for alternate-action sequencing."""
+
+    class MixedClient:
+        def __init__(self, raw_responses: list[str]) -> None:
+            self._responses = list(raw_responses)
+            self.calls: int = 0
+
+        async def complete(  # type: ignore[override]
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del messages, response_format, stream, on_stream_chunk
+            self.calls += 1
+            if not self._responses:
+                raise AssertionError("No stub responses left")
+            return self._responses.pop(0), 0.0
+
+    reset_runtime()
+    config = RichOutputConfig(enabled=True, allowlist=["datagrid"])
+    configure_rich_output(config)
+
+    registry = ModelRegistry()
+    registry.register("retrieve", Intent, Documents)
+    nodes = list(attach_rich_output_nodes(registry, config=config)) + [Node(retrieve, name="retrieve")]
+    catalog = build_catalog(nodes, registry)
+
+    events: list[PlannerEvent] = []
+    client = MixedClient(
+        [
+            '{"next_node":"retrieve","args":{"intent":"docs"}}\n'
+            '{"next_node":"build_table","args":{"columns":[{"field":"name","header":"Name"}],"rows":[{"name":"ok"}]}}',
+            '{"next_node":"final_response","args":{"answer":"ok"}}',
+        ]
+    )
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=catalog,
+        max_iters=10,
+        event_callback=events.append,
+        multi_action_sequential=True,
+        multi_action_read_only_only=True,
+        multi_action_max_tools=2,
+    )
+    result = await planner.run("prepare a reusable table")
+
+    assert result.reason == "answer_complete"
+    tool_names = [evt.extra.get("tool_name") for evt in events if evt.event_type == "tool_call_start"]
+    assert tool_names == ["retrieve", "build_table"]
+    assert any(evt.event_type == "multi_action_enqueued" for evt in events)
+
+
+@pytest.mark.asyncio
 async def test_consecutive_arg_failures_force_finish() -> None:
     """Test that consecutive arg validation failures trigger early finish."""
     registry = ModelRegistry()

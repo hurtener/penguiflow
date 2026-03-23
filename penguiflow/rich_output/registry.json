@@ -558,12 +558,16 @@
                   "type": "array",
                   "items": {
                     "type": "object",
-                    "required": ["component", "props"],
                     "properties": {
+                      "artifact_ref": {"type": "string", "description": "Reference to a previously built component"},
                       "component": {"type": "string"},
                       "props": {"type": "object"},
                       "caption": {"type": "string"}
-                    }
+                    },
+                    "anyOf": [
+                      {"required": ["artifact_ref"]},
+                      {"required": ["component", "props"]}
+                    ]
                   }
                 },
                 "subsections": {
@@ -619,14 +623,18 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["component", "props"],
               "properties": {
+                "artifact_ref": {"type": "string", "description": "Reference to a previously built component"},
                 "component": {"type": "string"},
                 "props": {"type": "object"},
                 "colSpan": {"type": "number", "default": 1},
                 "rowSpan": {"type": "number", "default": 1},
                 "title": {"type": "string"}
-              }
+              },
+              "anyOf": [
+                {"required": ["artifact_ref"]},
+                {"required": ["component", "props"]}
+              ]
             }
           },
           "equalHeight": {"type": "boolean", "default": true}
@@ -667,11 +675,17 @@
                 "id": {"type": "string"},
                 "label": {"type": "string"},
                 "icon": {"type": "string"},
+                "artifact_ref": {"type": "string", "description": "Reference to a previously built component"},
                 "component": {"type": "string"},
                 "props": {"type": "object"},
                 "content": {"type": "string"},
                 "disabled": {"type": "boolean", "default": false}
-              }
+              },
+              "anyOf": [
+                {"required": ["content"]},
+                {"required": ["artifact_ref"]},
+                {"required": ["component", "props"]}
+              ]
             }
           },
           "defaultTab": {"type": "number", "default": 0},
@@ -697,10 +711,16 @@
               "properties": {
                 "title": {"type": "string"},
                 "content": {"type": "string"},
+                "artifact_ref": {"type": "string", "description": "Reference to a previously built component"},
                 "component": {"type": "string"},
                 "props": {"type": "object"},
                 "defaultOpen": {"type": "boolean", "default": false}
-              }
+              },
+              "anyOf": [
+                {"required": ["content"]},
+                {"required": ["artifact_ref"]},
+                {"required": ["component", "props"]}
+              ]
             }
           },
           "allowMultiple": {"type": "boolean", "default": false}

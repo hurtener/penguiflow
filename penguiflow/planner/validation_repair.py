@@ -11,7 +11,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..catalog import NodeSpec
 from ..rich_output.tools import (
-    RICH_OUTPUT_RENDER_TOOL_NAMES,
+    RICH_OUTPUT_COMPONENT_TOOL_NAMES,
     build_render_tool_payload,
     get_render_tool_complex_fields,
     get_render_tool_repair_field,
@@ -570,7 +570,7 @@ async def _attempt_arg_fill(
         expected_fields = list(missing_fields)
         # Rich-output render tools often need multiple coupled fields. Preserve full top-level
         # payloads when the model returns more than the requested field subset.
-        if spec.name in RICH_OUTPUT_RENDER_TOOL_NAMES:
+        if spec.name in RICH_OUTPUT_COMPONENT_TOOL_NAMES:
             schema = spec.args_model.model_json_schema()
             for extra_field in schema.get("properties", {}):
                 if extra_field not in expected_fields:

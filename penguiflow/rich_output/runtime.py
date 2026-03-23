@@ -13,6 +13,12 @@ from penguiflow.registry import ModelRegistry
 from .prompting import generate_component_system_prompt
 from .registry import ComponentDefinition, ComponentRegistry, RegistryError, get_registry
 from .tools import (
+    BuildAccordionArgs,
+    BuildChartEChartsArgs,
+    BuildComponentResult,
+    BuildGridArgs,
+    BuildTableArgs,
+    BuildTabsArgs,
     DescribeComponentArgs,
     DescribeComponentResult,
     ListArtifactsArgs,
@@ -192,6 +198,11 @@ def attach_rich_output_nodes(registry: ModelRegistry, *, config: RichOutputConfi
     registry.register("describe_component", DescribeComponentArgs, DescribeComponentResult)
 
     from .nodes import (
+        build_accordion,
+        build_chart_echarts,
+        build_grid,
+        build_table,
+        build_tabs,
         describe_component,
         list_artifacts,
         render_accordion,
@@ -217,21 +228,31 @@ def attach_rich_output_nodes(registry: ModelRegistry, *, config: RichOutputConfi
     if not runtime.allowlist or "echarts" in runtime.allowlist:
         registry.register("render_chart_echarts", RenderChartEChartsArgs, RenderComponentResult)
         nodes.append(Node(render_chart_echarts, name="render_chart_echarts"))
+        registry.register("build_chart_echarts", BuildChartEChartsArgs, BuildComponentResult)
+        nodes.append(Node(build_chart_echarts, name="build_chart_echarts"))
     if not runtime.allowlist or "report" in runtime.allowlist:
         registry.register("render_report", RenderReportArgs, RenderComponentResult)
         nodes.append(Node(render_report, name="render_report"))
     if not runtime.allowlist or "datagrid" in runtime.allowlist:
         registry.register("render_table", RenderTableArgs, RenderComponentResult)
         nodes.append(Node(render_table, name="render_table"))
+        registry.register("build_table", BuildTableArgs, BuildComponentResult)
+        nodes.append(Node(build_table, name="build_table"))
     if not runtime.allowlist or "grid" in runtime.allowlist:
         registry.register("render_grid", RenderGridArgs, RenderComponentResult)
         nodes.append(Node(render_grid, name="render_grid"))
+        registry.register("build_grid", BuildGridArgs, BuildComponentResult)
+        nodes.append(Node(build_grid, name="build_grid"))
     if not runtime.allowlist or "tabs" in runtime.allowlist:
         registry.register("render_tabs", RenderTabsArgs, RenderComponentResult)
         nodes.append(Node(render_tabs, name="render_tabs"))
+        registry.register("build_tabs", BuildTabsArgs, BuildComponentResult)
+        nodes.append(Node(build_tabs, name="build_tabs"))
     if not runtime.allowlist or "accordion" in runtime.allowlist:
         registry.register("render_accordion", RenderAccordionArgs, RenderComponentResult)
         nodes.append(Node(render_accordion, name="render_accordion"))
+        registry.register("build_accordion", BuildAccordionArgs, BuildComponentResult)
+        nodes.append(Node(build_accordion, name="build_accordion"))
     for extension in extensions:
         if extension.register_nodes:
             nodes.extend(extension.register_nodes(registry))
