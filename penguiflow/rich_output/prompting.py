@@ -109,22 +109,36 @@ def generate_component_system_prompt(
             ]
         )
 
-    lines.extend(
-        [
-            "## Preferred Workflow for Composite Outputs",
-            "",
-            "When you need multiple complex child components:",
-            "1. Build each child first with `build_*` tools.",
-            "2. If the children are independent, use `next_node=\"parallel\"` to build them concurrently.",
-            "3. Reuse the returned `artifact_ref` values inside the parent component.",
-            "4. Emit one final visible artifact with `render_report`, `render_grid`, `render_tabs`, or",
-            "   `render_accordion`.",
-            "",
-            "Avoid one giant nested payload when the output has multiple charts, tables, tabs, or grid items.",
-            "For simple text content, inline `content` is fine. For complex reusable children, prefer `artifact_ref`.",
-            "",
-        ]
-    )
+    if build_lines:
+        lines.extend(
+            [
+                "## Preferred Workflow for Composite Outputs",
+                "",
+                "When you need multiple complex child components:",
+                "1. Build each child first with `build_*` tools.",
+                "2. If the children are independent, use `next_node=\"parallel\"` to build them concurrently.",
+                "3. Reuse the returned `artifact_ref` values inside the parent component.",
+                "4. Emit one final visible artifact with `render_report`, `render_grid`, `render_tabs`, or",
+                "   `render_accordion`.",
+                "",
+                "Avoid one giant nested payload when the output has multiple charts, tables, tabs, or grid items.",
+                "For simple text content, inline `content` is fine.",
+                "For complex reusable children, prefer `artifact_ref`.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "## Preferred Workflow for Composite Outputs",
+                "",
+                "When no typed builder tools are available in this runtime, prefer the typed `render_*` wrappers",
+                "that are available and keep nested payloads as small and simple as possible.",
+                "If rich-output schema failures repeat, call `describe_component(name=...)` and simplify the layout",
+                "instead of repeatedly retrying a giant nested payload.",
+                "",
+            ]
+        )
 
     lines.extend(
         [
@@ -205,33 +219,44 @@ def generate_component_system_prompt(
             "render_component(component='echarts', props={'option': {...}})",
             "```",
             "",
-            "### Build First, Then Render Once",
-            "When multiple child components are independent, build them in parallel and render the parent once:",
-            "```json",
-            "{",
-            '  "next_node": "parallel",',
-            '  "args": {',
-            '    "steps": [',
-            '      {"node": "build_chart_echarts", "args": {"title": "Revenue", "option": {...}}},',
-            '      {"node": "build_table", "args": {"title": "Rows", "columns": [...], "rows": [...]}}',
-            "    ]",
-            "  }",
-            "}",
-            "```",
-            "Then compose the parent with the returned refs:",
-            "```json",
-            "{",
-            '  "next_node": "render_grid",',
-            '  "args": {',
-            '    "title": "Dashboard",',
-            '    "items": [',
-            '      {"artifact_ref": "artifact_1"},',
-            '      {"artifact_ref": "artifact_2"}',
-            "    ]",
-            "  }",
-            "}",
-            "```",
-            "",
+        ]
+    )
+
+    if build_lines:
+        lines.extend(
+            [
+                "### Build First, Then Render Once",
+                "When multiple child components are independent, build them in parallel and render the parent once:",
+                "```json",
+                "{",
+                '  "next_node": "parallel",',
+                '  "args": {',
+                '    "steps": [',
+                '      {"node": "build_chart_echarts", "args": {"title": "Revenue", "option": {...}}},',
+                '      {"node": "build_table", "args": {"title": "Rows", "columns": [...], "rows": [...]}}',
+                "    ]",
+                "  }",
+                "}",
+                "```",
+                "Then compose the parent with the returned refs:",
+                "```json",
+                "{",
+                '  "next_node": "render_grid",',
+                '  "args": {',
+                '    "title": "Dashboard",',
+                '    "items": [',
+                '      {"artifact_ref": "artifact_1"},',
+                '      {"artifact_ref": "artifact_2"}',
+                "    ]",
+                "  }",
+                "}",
+                "```",
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
             "### Dashboard with Multiple Charts",
             "For a visible one-shot render, use `grid` to arrange multiple visualizations:",
             "```json",
@@ -283,17 +308,6 @@ def generate_component_system_prompt(
             "}",
             "```",
             "",
-            "### Reusable Tabs",
-            "Build complex child views first, then compose them into tabs by ref:",
-            "```json",
-            "{",
-            '  "tabs": [',
-            '    {"label": "Overview", "artifact_ref": "artifact_4"},',
-            '    {"label": "Details", "artifact_ref": "artifact_5"}',
-            "  ]",
-            "}",
-            "```",
-            "",
             "### Collecting User Input",
             "When you need user input before proceeding, call an interactive UI tool:",
             "```json",
@@ -308,6 +322,23 @@ def generate_component_system_prompt(
             "The user's response will be returned to you as the tool result.",
         ]
     )
+
+    if build_lines:
+        lines.extend(
+            [
+                "",
+                "### Reusable Tabs",
+                "Build complex child views first, then compose them into tabs by ref:",
+                "```json",
+                "{",
+                '  "tabs": [',
+                '    {"label": "Overview", "artifact_ref": "artifact_4"},',
+                '    {"label": "Details", "artifact_ref": "artifact_5"}',
+                "  ]",
+                "}",
+                "```",
+            ]
+        )
 
     return "\n".join(line.rstrip() for line in lines).strip()
 

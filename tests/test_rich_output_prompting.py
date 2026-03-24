@@ -25,3 +25,6 @@ def test_prompt_respects_allowlist() -> None:
     prompt = generate_component_system_prompt(registry, allowlist=["markdown"], include_examples=False)
     assert "`markdown`" in prompt
     assert "`echarts`" not in prompt
+    assert "build_chart_echarts" not in prompt
+    assert 'next_node="parallel"' not in prompt
+    assert "When no typed builder tools are available in this runtime" in prompt

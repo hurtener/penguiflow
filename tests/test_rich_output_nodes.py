@@ -532,7 +532,7 @@ async def test_build_artifact_refs_render_grid_cleanly_with_mixed_inline_items()
     items = ctx.emitted[0]["chunk"]["props"]["items"]
     assert items[0]["component"] == "echarts"
     assert items[1]["component"] == "datagrid"
-    assert items[1]["title"] == "Rows"
+    assert "title" not in items[1]
     assert items[2]["component"] == "markdown"
 
 

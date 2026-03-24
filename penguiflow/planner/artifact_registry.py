@@ -554,14 +554,7 @@ def _component_payload_from_tool_payload(payload: Any) -> dict[str, Any] | None:
         component = payload.get("component")
         props = payload.get("props")
         if isinstance(component, str) and isinstance(props, Mapping):
-            component_payload: dict[str, Any] = {"component": component, "props": dict(props)}
-            title = payload.get("title")
-            if isinstance(title, str):
-                component_payload["title"] = title
-            component_id = payload.get("id")
-            if isinstance(component_id, str):
-                component_payload["id"] = component_id
-            return component_payload
+            return {"component": component, "props": dict(props)}
         component_type = payload.get("type")
         if isinstance(component_type, str):
             if component_type == "echarts":

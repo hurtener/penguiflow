@@ -69,6 +69,8 @@ def test_runtime_prompt_section_include_examples_override() -> None:
     )
     prompt = runtime.prompt_section(include_examples=True)
     assert "`markdown`" in prompt
+    assert "build_chart_echarts" not in prompt
+    assert 'next_node="parallel"' not in prompt
     # With examples enabled, prompt generator may include extra example blocks.
     assert "Example" in prompt or "```json" in prompt
 
