@@ -49,8 +49,9 @@ def generate_component_system_prompt(
     lines: list[str] = [
         "# Rich Output Components",
         "",
-        "You can create rich, interactive outputs beyond plain text. Use `render_component` or the",
-        "typed `render_*` tools to emit visualizations, data displays, forms, and composite layouts.",
+        "You can create rich, interactive outputs beyond plain text. Use typed `build_*` and `render_*`",
+        "tools for structured UI work. Use `render_component` only as the advanced escape hatch when a",
+        "typed tool does not fit.",
         "",
         "## Quick Reference",
         "",
@@ -66,27 +67,75 @@ def generate_component_system_prompt(
         lines.append(f"| {need} | `{comp}` | {when} |")
 
     lines.extend([""])
+    build_lines: list[str] = []
     wrapper_lines: list[str] = []
     if "echarts" in components:
+        build_lines.append("- `build_chart_echarts(...)` to create a reusable chart ref")
         wrapper_lines.append("- `render_chart_echarts(...)` for charts")
     if "datagrid" in components:
+        build_lines.append("- `build_table(...)` to create a reusable data-grid ref")
         wrapper_lines.append("- `render_table(...)` for data grids")
     if "report" in components:
         wrapper_lines.append("- `render_report(...)` for document-style reports")
     if "grid" in components:
+        build_lines.append("- `build_grid(...)` to create a reusable dashboard/grid ref")
         wrapper_lines.append("- `render_grid(...)` for dashboard-style layouts")
     if "tabs" in components:
+        build_lines.append("- `build_tabs(...)` to create reusable tabs")
         wrapper_lines.append("- `render_tabs(...)` for related views in one artifact")
     if "accordion" in components:
+        build_lines.append("- `build_accordion(...)` to create a reusable accordion ref")
         wrapper_lines.append("- `render_accordion(...)` for collapsible structured sections")
+    if build_lines:
+        lines.extend(
+            [
+                "## Builder Tools",
+                "",
+                "For reusable or complex pieces, build them first and keep them off-screen until the",
+                "final visible render. Builder tools return `artifact_ref` values you can reuse later:",
+                *build_lines,
+                "",
+            ]
+        )
     if wrapper_lines:
         lines.extend(
             [
                 "## Convenience Render Tools",
                 "",
-                "Prefer these typed tools when they fit your goal. They are easier to call correctly than",
-                "building nested `render_component(component=..., props=...)` payloads by hand:",
+                "Use these for the final visible artifact. They are easier to call correctly than building",
+                "nested `render_component(component=..., props=...)` payloads by hand:",
                 *wrapper_lines,
+                "",
+            ]
+        )
+
+    if build_lines:
+        lines.extend(
+            [
+                "## Preferred Workflow for Composite Outputs",
+                "",
+                "When you need multiple complex child components:",
+                "1. Build each child first with `build_*` tools.",
+                "2. If the children are independent, use `next_node=\"parallel\"` to build them concurrently.",
+                "3. Reuse the returned `artifact_ref` values inside the parent component.",
+                "4. Emit one final visible artifact with `render_report`, `render_grid`, `render_tabs`, or",
+                "   `render_accordion`.",
+                "",
+                "Avoid one giant nested payload when the output has multiple charts, tables, tabs, or grid items.",
+                "For simple text content, inline `content` is fine.",
+                "For complex reusable children, prefer `artifact_ref`.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "## Preferred Workflow for Composite Outputs",
+                "",
+                "When no typed builder tools are available in this runtime, prefer the typed `render_*` wrappers",
+                "that are available and keep nested payloads as small and simple as possible.",
+                "If rich-output schema failures repeat, call `describe_component(name=...)` and simplify the layout",
+                "instead of repeatedly retrying a giant nested payload.",
                 "",
             ]
         )
@@ -170,8 +219,46 @@ def generate_component_system_prompt(
             "render_component(component='echarts', props={'option': {...}})",
             "```",
             "",
+        ]
+    )
+
+    if build_lines:
+        lines.extend(
+            [
+                "### Build First, Then Render Once",
+                "When multiple child components are independent, build them in parallel and render the parent once:",
+                "```json",
+                "{",
+                '  "next_node": "parallel",',
+                '  "args": {',
+                '    "steps": [',
+                '      {"node": "build_chart_echarts", "args": {"title": "Revenue", "option": {...}}},',
+                '      {"node": "build_table", "args": {"title": "Rows", "columns": [...], "rows": [...]}}',
+                "    ]",
+                "  }",
+                "}",
+                "```",
+                "Then compose the parent with the returned refs:",
+                "```json",
+                "{",
+                '  "next_node": "render_grid",',
+                '  "args": {',
+                '    "title": "Dashboard",',
+                '    "items": [',
+                '      {"artifact_ref": "artifact_1"},',
+                '      {"artifact_ref": "artifact_2"}',
+                "    ]",
+                "  }",
+                "}",
+                "```",
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
             "### Dashboard with Multiple Charts",
-            "Use `grid` component to arrange multiple visualizations:",
+            "For a visible one-shot render, use `grid` to arrange multiple visualizations:",
             "```json",
             "{",
             '  "component": "grid",',
@@ -186,7 +273,7 @@ def generate_component_system_prompt(
             "```",
             "",
             "### Report with Sections",
-            "Use `report` component for document-style output with text and embedded charts:",
+            "Use `report` for document-style output with text and embedded charts or reusable child refs:",
             "```json",
             "{",
             '  "component": "report",',
@@ -201,9 +288,9 @@ def generate_component_system_prompt(
             "```",
             "",
             "### Artifact References (On Demand)",
-            "Some tools emit large artifacts (charts, files) that are NOT in LLM context.",
-            "Use the `list_artifacts` tool to retrieve metadata and refs, then reference them",
-            "inside components with `artifact_ref` to avoid embedding heavy payloads.",
+            "Builder tools and some other tools return artifacts that are NOT in LLM context.",
+            "Use the returned `artifact_ref` directly, or call `list_artifacts` to retrieve metadata and refs,",
+            "then reference them inside components with `artifact_ref` to avoid embedding heavy payloads.",
             "",
             "```json",
             "{",
@@ -235,6 +322,23 @@ def generate_component_system_prompt(
             "The user's response will be returned to you as the tool result.",
         ]
     )
+
+    if build_lines:
+        lines.extend(
+            [
+                "",
+                "### Reusable Tabs",
+                "Build complex child views first, then compose them into tabs by ref:",
+                "```json",
+                "{",
+                '  "tabs": [',
+                '    {"label": "Overview", "artifact_ref": "artifact_4"},',
+                '    {"label": "Details", "artifact_ref": "artifact_5"}',
+                "  ]",
+                "}",
+                "```",
+            ]
+        )
 
     return "\n".join(line.rstrip() for line in lines).strip()
 

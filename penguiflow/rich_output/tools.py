@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 RICH_OUTPUT_RENDER_TOOL_NAMES = frozenset(
     {
@@ -18,6 +18,18 @@ RICH_OUTPUT_RENDER_TOOL_NAMES = frozenset(
     }
 )
 
+RICH_OUTPUT_BUILD_TOOL_NAMES = frozenset(
+    {
+        "build_chart_echarts",
+        "build_table",
+        "build_grid",
+        "build_tabs",
+        "build_accordion",
+    }
+)
+
+RICH_OUTPUT_COMPONENT_TOOL_NAMES = frozenset(RICH_OUTPUT_RENDER_TOOL_NAMES | RICH_OUTPUT_BUILD_TOOL_NAMES)
+
 RICH_OUTPUT_RENDER_TOOL_COMPONENTS = {
     "render_chart_echarts": "echarts",
     "render_report": "report",
@@ -25,6 +37,19 @@ RICH_OUTPUT_RENDER_TOOL_COMPONENTS = {
     "render_grid": "grid",
     "render_tabs": "tabs",
     "render_accordion": "accordion",
+}
+
+RICH_OUTPUT_BUILD_TOOL_COMPONENTS = {
+    "build_chart_echarts": "echarts",
+    "build_table": "datagrid",
+    "build_grid": "grid",
+    "build_tabs": "tabs",
+    "build_accordion": "accordion",
+}
+
+RICH_OUTPUT_TOOL_COMPONENTS = {
+    **RICH_OUTPUT_RENDER_TOOL_COMPONENTS,
+    **RICH_OUTPUT_BUILD_TOOL_COMPONENTS,
 }
 
 RICH_OUTPUT_RENDER_TOOL_COMPLEX_FIELDS = {
@@ -37,12 +62,36 @@ RICH_OUTPUT_RENDER_TOOL_COMPLEX_FIELDS = {
     "render_accordion": frozenset({"items"}),
 }
 
+RICH_OUTPUT_BUILD_TOOL_COMPLEX_FIELDS = {
+    "build_chart_echarts": frozenset({"option"}),
+    "build_table": frozenset({"columns", "rows"}),
+    "build_grid": frozenset({"items"}),
+    "build_tabs": frozenset({"tabs"}),
+    "build_accordion": frozenset({"items"}),
+}
+
+RICH_OUTPUT_TOOL_COMPLEX_FIELDS = {
+    **RICH_OUTPUT_RENDER_TOOL_COMPLEX_FIELDS,
+    **RICH_OUTPUT_BUILD_TOOL_COMPLEX_FIELDS,
+}
+
 RICH_OUTPUT_RENDER_TOOL_REPAIR_FIELDS = {
     "render_component": "props",
     "render_report": "sections",
     "render_grid": "items",
     "render_tabs": "tabs",
     "render_accordion": "items",
+}
+
+RICH_OUTPUT_BUILD_TOOL_REPAIR_FIELDS = {
+    "build_grid": "items",
+    "build_tabs": "tabs",
+    "build_accordion": "items",
+}
+
+RICH_OUTPUT_TOOL_REPAIR_FIELDS = {
+    **RICH_OUTPUT_RENDER_TOOL_REPAIR_FIELDS,
+    **RICH_OUTPUT_BUILD_TOOL_REPAIR_FIELDS,
 }
 
 
@@ -76,6 +125,26 @@ class RenderComponentResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class BuildComponentResult(BaseModel):
+    ok: bool = True
+    component: str | None = Field(default=None, description="Built component name")
+    artifact_ref: str | None = Field(
+        default=None,
+        description="Artifact registry ref for the built component payload.",
+    )
+    dedupe_key: str | None = Field(
+        default=None,
+        description="Stable hash of the built payload; useful for de-duplication.",
+    )
+    summary: str | None = Field(default=None, description="Compact description of what was built")
+    skipped: str | None = Field(
+        default=None,
+        description="If set, build was skipped (e.g. duplicate_build).",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class RenderChartEChartsArgs(BaseModel):
     option: dict[str, Any] = Field(..., description="ECharts option object")
     title: str | None = Field(default=None, description="Optional chart title convenience field")
@@ -90,11 +159,25 @@ class RenderChartEChartsArgs(BaseModel):
 
 
 class ReportComponentItem(BaseModel):
-    component: str
-    props: dict[str, Any] = Field(default_factory=dict)
+    artifact_ref: str | None = None
+    component: str | None = None
+    props: dict[str, Any] | None = None
     caption: str | None = None
 
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> ReportComponentItem:
+        modes = 0
+        if self.artifact_ref:
+            modes += 1
+        if isinstance(self.component, str) and isinstance(self.props, dict):
+            modes += 1
+        if modes == 0:
+            raise ValueError("Provide either artifact_ref or both component and props")
+        if modes > 1:
+            raise ValueError("Report components must use either artifact_ref or component+props, not both")
+        return self
 
 
 class ReportSection(BaseModel):
@@ -121,6 +204,10 @@ class RenderReportArgs(BaseModel):
     artifact_metadata: dict[str, Any] | None = Field(default=None, alias="artifactMetadata")
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
+class BuildChartEChartsArgs(RenderChartEChartsArgs):
+    pass
 
 
 class DataGridColumn(BaseModel):
@@ -152,14 +239,32 @@ class RenderTableArgs(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
+class BuildTableArgs(RenderTableArgs):
+    pass
+
+
 class GridItem(BaseModel):
-    component: str
-    props: dict[str, Any] = Field(default_factory=dict)
+    artifact_ref: str | None = None
+    component: str | None = None
+    props: dict[str, Any] | None = None
     col_span: int | None = Field(default=None, alias="colSpan")
     row_span: int | None = Field(default=None, alias="rowSpan")
     title: str | None = None
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> GridItem:
+        modes = 0
+        if self.artifact_ref:
+            modes += 1
+        if isinstance(self.component, str) and isinstance(self.props, dict):
+            modes += 1
+        if modes == 0:
+            raise ValueError("Provide either artifact_ref or both component and props")
+        if modes > 1:
+            raise ValueError("Grid items must use either artifact_ref or component+props, not both")
+        return self
 
 
 class RenderGridArgs(BaseModel):
@@ -174,16 +279,36 @@ class RenderGridArgs(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
+class BuildGridArgs(RenderGridArgs):
+    pass
+
+
 class TabItem(BaseModel):
     id: str | None = None
     label: str
     icon: str | None = None
+    artifact_ref: str | None = None
     component: str | None = None
     props: dict[str, Any] | None = None
     content: str | None = None
     disabled: bool = False
 
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> TabItem:
+        modes = 0
+        if self.artifact_ref:
+            modes += 1
+        if self.content is not None:
+            modes += 1
+        if isinstance(self.component, str) and isinstance(self.props, dict):
+            modes += 1
+        if modes == 0:
+            raise ValueError("Provide content, artifact_ref, or both component and props")
+        if modes > 1:
+            raise ValueError("Tab items must use exactly one of content, artifact_ref, or component+props")
+        return self
 
 
 class RenderTabsArgs(BaseModel):
@@ -197,14 +322,34 @@ class RenderTabsArgs(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
+class BuildTabsArgs(RenderTabsArgs):
+    pass
+
+
 class AccordionItem(BaseModel):
     title: str
     content: str | None = None
+    artifact_ref: str | None = None
     component: str | None = None
     props: dict[str, Any] | None = None
     default_open: bool = Field(default=False, alias="defaultOpen")
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> AccordionItem:
+        modes = 0
+        if self.content is not None:
+            modes += 1
+        if self.artifact_ref:
+            modes += 1
+        if isinstance(self.component, str) and isinstance(self.props, dict):
+            modes += 1
+        if modes > 1:
+            raise ValueError(
+                "Accordion items must not mix content, artifact_ref, and component+props in the same item"
+            )
+        return self
 
 
 class RenderAccordionArgs(BaseModel):
@@ -217,31 +362,37 @@ class RenderAccordionArgs(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
+class BuildAccordionArgs(RenderAccordionArgs):
+    pass
+
+
 def get_render_tool_component_name(tool_name: str) -> str | None:
     """Return the component emitted by a typed render tool, if fixed."""
 
-    return RICH_OUTPUT_RENDER_TOOL_COMPONENTS.get(tool_name)
+    return RICH_OUTPUT_TOOL_COMPONENTS.get(tool_name)
 
 
 def get_render_tool_complex_fields(tool_name: str) -> frozenset[str]:
     """Return complex fields that are safe for arg-fill on render tools."""
 
-    return RICH_OUTPUT_RENDER_TOOL_COMPLEX_FIELDS.get(tool_name, frozenset())
+    return RICH_OUTPUT_TOOL_COMPLEX_FIELDS.get(tool_name, frozenset())
 
 
 def get_render_tool_repair_field(tool_name: str) -> str | None:
     """Return the top-level field to repair after rich-output schema failures."""
 
-    return RICH_OUTPUT_RENDER_TOOL_REPAIR_FIELDS.get(tool_name)
+    return RICH_OUTPUT_TOOL_REPAIR_FIELDS.get(tool_name)
 
 
 def build_render_tool_payload(tool_name: str, args: BaseModel) -> tuple[str, Any] | None:
-    """Build the canonical component payload emitted by a render tool."""
+    """Build the canonical component payload emitted by a render/build tool."""
 
     if tool_name == "render_component" and isinstance(args, RenderComponentArgs):
         return args.component, args.props
 
-    if tool_name == "render_chart_echarts" and isinstance(args, RenderChartEChartsArgs):
+    if tool_name in {"render_chart_echarts", "build_chart_echarts"} and isinstance(
+        args, RenderChartEChartsArgs | BuildChartEChartsArgs
+    ):
         option = dict(args.option)
         if args.title and "title" not in option:
             option["title"] = {"text": args.title}
@@ -259,19 +410,21 @@ def build_render_tool_payload(tool_name: str, args: BaseModel) -> tuple[str, Any
     if tool_name == "render_report" and isinstance(args, RenderReportArgs):
         return "report", args.model_dump(by_alias=True, exclude={"id", "artifact_metadata"}, exclude_none=True)
 
-    if tool_name == "render_table" and isinstance(args, RenderTableArgs):
+    if tool_name in {"render_table", "build_table"} and isinstance(args, RenderTableArgs | BuildTableArgs):
         return (
             "datagrid",
             args.model_dump(by_alias=True, exclude={"id", "title", "artifact_metadata"}, exclude_none=True),
         )
 
-    if tool_name == "render_grid" and isinstance(args, RenderGridArgs):
+    if tool_name in {"render_grid", "build_grid"} and isinstance(args, RenderGridArgs | BuildGridArgs):
         return "grid", args.model_dump(by_alias=True, exclude={"id", "title", "artifact_metadata"}, exclude_none=True)
 
-    if tool_name == "render_tabs" and isinstance(args, RenderTabsArgs):
+    if tool_name in {"render_tabs", "build_tabs"} and isinstance(args, RenderTabsArgs | BuildTabsArgs):
         return "tabs", args.model_dump(by_alias=True, exclude={"id", "title", "artifact_metadata"}, exclude_none=True)
 
-    if tool_name == "render_accordion" and isinstance(args, RenderAccordionArgs):
+    if tool_name in {"render_accordion", "build_accordion"} and isinstance(
+        args, RenderAccordionArgs | BuildAccordionArgs
+    ):
         return (
             "accordion",
             args.model_dump(by_alias=True, exclude={"id", "title", "artifact_metadata"}, exclude_none=True),
@@ -431,24 +584,38 @@ class UIInteractionResult(BaseModel):
 
 
 __all__ = [
+    "RICH_OUTPUT_BUILD_TOOL_NAMES",
+    "RICH_OUTPUT_COMPONENT_TOOL_NAMES",
     "RICH_OUTPUT_RENDER_TOOL_NAMES",
+    "RICH_OUTPUT_BUILD_TOOL_COMPONENTS",
     "RICH_OUTPUT_RENDER_TOOL_COMPONENTS",
+    "RICH_OUTPUT_TOOL_COMPONENTS",
+    "RICH_OUTPUT_BUILD_TOOL_COMPLEX_FIELDS",
     "RICH_OUTPUT_RENDER_TOOL_COMPLEX_FIELDS",
+    "RICH_OUTPUT_TOOL_COMPLEX_FIELDS",
+    "RICH_OUTPUT_BUILD_TOOL_REPAIR_FIELDS",
     "RICH_OUTPUT_RENDER_TOOL_REPAIR_FIELDS",
+    "RICH_OUTPUT_TOOL_REPAIR_FIELDS",
     "RenderComponentArgs",
     "RenderComponentResult",
+    "BuildComponentResult",
     "RenderChartEChartsArgs",
+    "BuildChartEChartsArgs",
     "ReportComponentItem",
     "ReportSection",
     "RenderReportArgs",
     "DataGridColumn",
     "RenderTableArgs",
+    "BuildTableArgs",
     "GridItem",
     "RenderGridArgs",
+    "BuildGridArgs",
     "TabItem",
     "RenderTabsArgs",
+    "BuildTabsArgs",
     "AccordionItem",
     "RenderAccordionArgs",
+    "BuildAccordionArgs",
     "get_render_tool_component_name",
     "get_render_tool_complex_fields",
     "get_render_tool_repair_field",

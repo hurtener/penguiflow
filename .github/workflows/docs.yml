@@ -28,7 +28,7 @@ jobs:
       - name: Install docs dependencies
         run: uv pip install -e ".[docs]"
       - name: Build site
-        run: uv run mkdocs build --strict
+        run: .venv/bin/mkdocs build --strict
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
@@ -43,4 +43,3 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
-

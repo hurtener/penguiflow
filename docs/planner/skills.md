@@ -96,6 +96,19 @@ Applicability filtering is applied consistently to:
 
 This is useful for persona-style assistants where the skill should only appear when the matching capability is active, for example email skills that only surface when mail tools are allowed.
 
+### Using skills to steer rich output
+
+Skills are also a strong way to improve rich-output behavior without overloading the base prompt catalog.
+
+Typical uses:
+
+- teach the model when to choose `render_report` vs `render_grid` vs `render_tabs`
+- enforce a build-first / `artifact_ref` composition workflow for complex outputs
+- provide tenant- or persona-specific conventions for titles, captions, layout order, and chart selection
+- document how new custom renderers should be used after you add them
+
+See **[Rich output with skills](rich-output-skills.md)** for the advanced guide.
+
 ### Skill pack formats
 
 The local pack loader supports:
