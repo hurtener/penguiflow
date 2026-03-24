@@ -176,7 +176,7 @@ extend-exclude = [
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "W"]
-ignore = []
+ignore = ["UP042"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["penguiflow"]
