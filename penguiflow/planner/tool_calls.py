@@ -15,6 +15,11 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from ..rich_output.tools import (
+    RICH_OUTPUT_COMPONENT_TOOL_NAMES,
+    RICH_OUTPUT_RENDER_TOOL_NAMES,
+    get_render_tool_component_name,
+)
 from ..steering import SteeringCancelled, SteeringInbox
 from . import prompts
 from .llm import _redact_artifacts
@@ -34,6 +39,10 @@ def _dedupe_key(value: Any) -> str:
     except Exception:
         canonical = str(value)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def _component_tool_dedupe_key(tool_name: str, args_payload: Mapping[str, Any]) -> str:
+    return _dedupe_key({"tool": tool_name, "payload": args_payload})
 
 
 @dataclass(slots=True)
@@ -155,8 +164,8 @@ async def execute_tool_call(
 
     # Prevent "render_component" loops where the model re-renders the exact same UI payload in
     # the next step because it can't infer success from a minimal {"ok": true} observation.
-    if spec.name == "render_component" and isinstance(trajectory.metadata, MutableMapping):
-        dedupe = _dedupe_key(args_payload)
+    if spec.name in RICH_OUTPUT_COMPONENT_TOOL_NAMES and isinstance(trajectory.metadata, MutableMapping):
+        dedupe = _component_tool_dedupe_key(spec.name, args_payload)
         last_key = trajectory.metadata.get("_render_component_last_dedupe_key")
         last_step = trajectory.metadata.get("_render_component_last_step_index")
         if (
@@ -166,14 +175,22 @@ async def execute_tool_call(
             and last_step == step_index - 1
         ):
             component = args_payload.get("component")
+            if not isinstance(component, str):
+                component = get_render_tool_component_name(spec.name)
             last_ref = trajectory.metadata.get("_render_component_last_artifact_ref")
+            skipped_kind = "duplicate_render" if spec.name in RICH_OUTPUT_RENDER_TOOL_NAMES else "duplicate_build"
+            summary = (
+                "Duplicate render skipped"
+                if spec.name in RICH_OUTPUT_RENDER_TOOL_NAMES
+                else "Duplicate build skipped"
+            )
             result_payload = {
                 "ok": True,
                 "component": component if isinstance(component, str) else None,
                 "artifact_ref": last_ref if isinstance(last_ref, str) else None,
                 "dedupe_key": dedupe,
-                "summary": "Duplicate render skipped",
-                "skipped": "duplicate_render",
+                "summary": summary,
+                "skipped": skipped_kind,
             }
             result_json = _safe_json_dumps(result_payload)
             planner._emit_event(
@@ -335,7 +352,7 @@ async def execute_tool_call(
             streams=ctx._collect_chunks() or None,
         )
     except Exception as exc:
-        if spec.name == "render_component":
+        if spec.name in RICH_OUTPUT_COMPONENT_TOOL_NAMES:
             try:
                 count = int(getattr(planner, "_render_component_failure_history_count", 0))
             except Exception:
@@ -392,10 +409,10 @@ async def execute_tool_call(
 
     observation_json = observation_model.model_dump(mode="json")
 
-    if spec.name == "render_component" and isinstance(trajectory.metadata, MutableMapping):
+    if spec.name in RICH_OUTPUT_COMPONENT_TOOL_NAMES and isinstance(trajectory.metadata, MutableMapping):
         key = observation_json.get("dedupe_key")
         if not isinstance(key, str):
-            key = _dedupe_key(args_payload)
+            key = _component_tool_dedupe_key(spec.name, args_payload)
         ref = observation_json.get("artifact_ref")
         if not isinstance(ref, str):
             ref = None

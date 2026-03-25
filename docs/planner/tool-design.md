@@ -32,6 +32,11 @@ Use the `penguiflow.catalog.tool` decorator to annotate tools:
 - `safety_notes`: “foot-gun” warnings shown to the model
 - `examples`: input examples to improve arg quality
 
+If the tool you are designing emits UI artifacts, do not stop at generic tool design. Follow the rich-output-specific guidance in:
+
+- **[Rich output](rich-output.md)**
+- **[Rich output extensions & custom renderers](rich-output-extensions.md)**
+
 ## Runnable example: a typed, cataloged tool
 
 ```python
@@ -125,4 +130,3 @@ See **[Planner observability](observability.md)**.
 - **Tool not chosen by the model**: add `tags`, improve `desc`, provide examples, and ensure it appears in the catalog shown to the LLM.
 - **Args frequently invalid**: reduce schema surface area, add examples, and confirm JSON schema mode is enabled.
 - **Tool outputs overflow context**: enforce truncation or move payloads to artifacts.
-

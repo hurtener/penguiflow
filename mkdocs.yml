@@ -93,6 +93,8 @@ nav:
       - Parallel & joins: planner/parallel-and-joins.md
       - Tooling: planner/tooling.md
       - Rich output: planner/rich-output.md
+      - Rich output extensions: planner/rich-output-extensions.md
+      - Rich output with skills: planner/rich-output-skills.md
       - Pause/resume (HITL): planner/pause-resume-hitl.md
       - Memory: planner/memory.md
       - Steering: planner/steering.md

@@ -199,30 +199,33 @@ class OpenRouterProvider(OpenAICompatibleProvider):
         return effort not in _REASONING_OFF_VALUES
 
     def _normalize_reasoning_controls(self, extra: dict[str, Any]) -> None:
-        if not self._is_xai_route():
-            extra.pop("reasoning_enabled", None)
-            return
-
         reasoning_effort = extra.pop("reasoning_effort", None)
         reasoning_enabled = extra.pop("reasoning_enabled", None)
+        include_reasoning = extra.pop("include_reasoning", None)
+        explicit_reasoning = extra.pop("reasoning", None)
 
         raw_extra_body = extra.get("extra_body")
         extra_body = dict(raw_extra_body) if isinstance(raw_extra_body, dict) else {}
 
-        if "reasoning" in extra:
-            reasoning_payload = extra.pop("reasoning")
-            extra_body["reasoning"] = reasoning_payload
+        if explicit_reasoning is not None:
+            extra_body["reasoning"] = explicit_reasoning
+        else:
+            enabled = self._coerce_reasoning_enabled(reasoning_enabled)
+            if enabled is None and self._is_xai_route():
+                enabled = self._reasoning_enabled_from_effort(reasoning_effort)
+            if enabled is not None:
+                extra_body["reasoning"] = {"enabled": enabled}
+
+        if include_reasoning is not None:
+            extra_body["include_reasoning"] = include_reasoning
+
+        if extra_body:
             extra["extra_body"] = extra_body
-            return
+        else:
+            extra.pop("extra_body", None)
 
-        enabled = self._coerce_reasoning_enabled(reasoning_enabled)
-        if enabled is None:
-            enabled = self._reasoning_enabled_from_effort(reasoning_effort)
-        if enabled is None:
-            return
-
-        extra_body["reasoning"] = {"enabled": enabled}
-        extra["extra_body"] = extra_body
+        if not self._is_xai_route() and reasoning_effort is not None:
+            extra["reasoning_effort"] = reasoning_effort
 
     async def complete(
         self,

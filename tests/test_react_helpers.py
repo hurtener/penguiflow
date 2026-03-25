@@ -903,6 +903,21 @@ class TestRenderMultiActionGuidance:
         assert render_multi_action_guidance(5) == render_multi_action_guidance(3)
 
 
+class TestRenderComponentGuidance:
+    """Tests for render_render_component_guidance tiered guidance."""
+
+    def test_wrapper_tools_are_mentioned_in_guidance(self):
+        from penguiflow.planner.prompts import render_render_component_guidance
+
+        reminder = render_render_component_guidance(1)
+        warning = render_render_component_guidance(2)
+        critical = render_render_component_guidance(3)
+
+        assert reminder is not None and "build/render tools" in reminder
+        assert warning is not None and "build_*" in warning and 'next_node="parallel"' in warning
+        assert critical is not None and "artifact_ref" in critical and "one giant nested payload" in critical
+
+
 class TestExtractFieldDescriptions:
     """Tests for _extract_field_descriptions enhanced extraction."""
 
@@ -1180,6 +1195,66 @@ class TestIsArgFillEligible:
         spec = planner._spec_by_name["complex_tool"]
         result = planner._is_arg_fill_eligible(spec, ["items"], trajectory)
         assert result is False
+
+    def test_render_report_sections_is_eligible(self):
+        """Rich-output wrapper payload fields should be eligible for arg-fill."""
+        from penguiflow.catalog import build_catalog
+        from penguiflow.planner import ReactPlanner
+        from penguiflow.planner.react import Trajectory
+        from penguiflow.registry import ModelRegistry
+        from penguiflow.rich_output.runtime import (
+            RichOutputConfig,
+            attach_rich_output_nodes,
+            configure_rich_output,
+            reset_runtime,
+        )
+
+        reset_runtime()
+        config = RichOutputConfig(enabled=True, allowlist=["report", "markdown"])
+        configure_rich_output(config)
+        registry = ModelRegistry()
+        catalog = build_catalog(list(attach_rich_output_nodes(registry, config=config)), registry)
+        planner = ReactPlanner(
+            llm_client=MockJSONLLMClient(),
+            catalog=catalog,
+            max_iters=1,
+            arg_fill_enabled=True,
+        )
+
+        trajectory = Trajectory(query="test")
+        spec = planner._spec_by_name["render_report"]
+        result = planner._is_arg_fill_eligible(spec, ["sections"], trajectory)
+        assert result is True
+
+    def test_build_grid_items_is_eligible(self):
+        """Builder payload fields should also be eligible for schema-aware arg-fill."""
+        from penguiflow.catalog import build_catalog
+        from penguiflow.planner import ReactPlanner
+        from penguiflow.planner.react import Trajectory
+        from penguiflow.registry import ModelRegistry
+        from penguiflow.rich_output.runtime import (
+            RichOutputConfig,
+            attach_rich_output_nodes,
+            configure_rich_output,
+            reset_runtime,
+        )
+
+        reset_runtime()
+        config = RichOutputConfig(enabled=True, allowlist=["grid", "markdown"])
+        configure_rich_output(config)
+        registry = ModelRegistry()
+        catalog = build_catalog(list(attach_rich_output_nodes(registry, config=config)), registry)
+        planner = ReactPlanner(
+            llm_client=MockJSONLLMClient(),
+            catalog=catalog,
+            max_iters=1,
+            arg_fill_enabled=True,
+        )
+
+        trajectory = Trajectory(query="test")
+        spec = planner._spec_by_name["build_grid"]
+        result = planner._is_arg_fill_eligible(spec, ["items"], trajectory)
+        assert result is True
 
     def test_optional_simple_type_eligible(self):
         """Should be eligible for optional simple types (anyOf with null)."""

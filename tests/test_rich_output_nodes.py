@@ -12,17 +12,44 @@ from penguiflow.planner.trajectory import BackgroundTaskResult
 from penguiflow.rich_output.nodes import (
     _dedupe_key,
     _summarise_component,
+    build_accordion,
+    build_chart_echarts,
+    build_grid,
+    build_table,
+    build_tabs,
     describe_component,
     list_artifacts,
+    render_accordion,
+    render_chart_echarts,
     render_component,
+    render_grid,
+    render_report,
+    render_table,
+    render_tabs,
     ui_confirm,
     ui_form,
     ui_select_option,
 )
 from penguiflow.rich_output.runtime import RichOutputConfig, configure_rich_output, reset_runtime
 from penguiflow.rich_output.tools import (
+    AccordionItem,
+    BuildAccordionArgs,
+    BuildChartEChartsArgs,
+    BuildGridArgs,
+    BuildTableArgs,
+    BuildTabsArgs,
+    DataGridColumn,
+    GridItem,
     ListArtifactsArgs,
+    RenderAccordionArgs,
+    RenderChartEChartsArgs,
     RenderComponentArgs,
+    RenderGridArgs,
+    RenderReportArgs,
+    RenderTableArgs,
+    RenderTabsArgs,
+    ReportSection,
+    TabItem,
     UIConfirmArgs,
     UIFormArgs,
     UISelectOptionArgs,
@@ -102,6 +129,181 @@ async def test_render_component_emits_artifact() -> None:
     emitted = ctx.emitted[0]
     assert emitted["artifact_type"] == "ui_component"
     assert emitted["chunk"]["component"] == "markdown"
+
+
+@pytest.mark.asyncio
+async def test_render_report_emits_report_component_artifact() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["report", "markdown"], max_payload_bytes=4000, max_total_bytes=8000)
+    )
+    ctx = DummyContext()
+    args = RenderReportArgs(
+        title="Quarterly Report",
+        sections=[ReportSection(title="Summary", content="All good.")],
+    )
+    result = await render_report(args, ctx)
+    assert result.ok is True
+    emitted = ctx.emitted[0]
+    assert emitted["chunk"]["component"] == "report"
+    assert emitted["chunk"]["props"]["title"] == "Quarterly Report"
+    assert emitted["meta"]["source_tool"] == "render_report"
+
+
+@pytest.mark.asyncio
+async def test_render_chart_echarts_injects_title_when_missing() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["echarts"], max_payload_bytes=4000, max_total_bytes=8000)
+    )
+    ctx = DummyContext()
+    args = RenderChartEChartsArgs(title="Revenue", option={"series": [{"type": "line", "data": [1, 2, 3]}]})
+    result = await render_chart_echarts(args, ctx)
+    assert result.ok is True
+    emitted = ctx.emitted[0]
+    assert emitted["chunk"]["component"] == "echarts"
+    assert emitted["chunk"]["props"]["option"]["title"] == {"text": "Revenue"}
+    assert emitted["meta"]["source_tool"] == "render_chart_echarts"
+
+
+@pytest.mark.asyncio
+async def test_render_table_emits_datagrid_component_artifact() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["datagrid"], max_payload_bytes=4000, max_total_bytes=8000)
+    )
+    ctx = DummyContext()
+    args = RenderTableArgs(
+        title="Results",
+        columns=[DataGridColumn(field="name", header="Name")],
+        rows=[{"name": "PenguiFlow"}],
+    )
+    result = await render_table(args, ctx)
+    assert result.ok is True
+    emitted = ctx.emitted[0]
+    assert emitted["chunk"]["component"] == "datagrid"
+    assert emitted["chunk"]["title"] == "Results"
+    assert emitted["chunk"]["props"]["columns"][0]["field"] == "name"
+
+
+@pytest.mark.asyncio
+async def test_render_grid_emits_grid_component_artifact() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["grid", "metric"], max_payload_bytes=4000, max_total_bytes=8000)
+    )
+    ctx = DummyContext()
+    args = RenderGridArgs(
+        title="Dashboard",
+        items=[GridItem(component="metric", props={"label": "Users", "value": 42}, colSpan=2)],
+    )
+    result = await render_grid(args, ctx)
+    assert result.ok is True
+    emitted = ctx.emitted[0]
+    assert emitted["chunk"]["component"] == "grid"
+    assert emitted["chunk"]["props"]["items"][0]["colSpan"] == 2
+    assert emitted["meta"]["source_tool"] == "render_grid"
+
+
+@pytest.mark.asyncio
+async def test_render_tabs_emits_tabs_component_artifact() -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["tabs", "markdown"], max_payload_bytes=4000, max_total_bytes=8000)
+    )
+    ctx = DummyContext()
+    args = RenderTabsArgs(
+        title="Views",
+        tabs=[
+            TabItem(label="Overview", content="Hello"),
+            TabItem(label="Details", component="markdown", props={"content": "World"}),
+        ],
+        defaultTab=1,
+    )
+    result = await render_tabs(args, ctx)
+    assert result.ok is True
+    emitted = ctx.emitted[0]
+    assert emitted["chunk"]["component"] == "tabs"
+    assert emitted["chunk"]["props"]["defaultTab"] == 1
+    assert emitted["meta"]["source_tool"] == "render_tabs"
+
+
+@pytest.mark.asyncio
+async def test_render_accordion_emits_accordion_component_artifact() -> None:
+    configure_rich_output(
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["accordion", "markdown"],
+            max_payload_bytes=4000,
+            max_total_bytes=8000,
+        )
+    )
+    ctx = DummyContext()
+    args = RenderAccordionArgs(
+        title="FAQ",
+        items=[AccordionItem(title="One", content="First", defaultOpen=True)],
+        allowMultiple=True,
+    )
+    result = await render_accordion(args, ctx)
+    assert result.ok is True
+    emitted = ctx.emitted[0]
+    assert emitted["chunk"]["component"] == "accordion"
+    assert emitted["chunk"]["props"]["allowMultiple"] is True
+    assert emitted["chunk"]["props"]["items"][0]["defaultOpen"] is True
+    assert emitted["meta"]["source_tool"] == "render_accordion"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("allowlist", "builder", "args"),
+    [
+        (
+            ["echarts"],
+            build_chart_echarts,
+            BuildChartEChartsArgs(option={"series": [{"type": "line", "data": [1, 2, 3]}]}, title="Revenue"),
+        ),
+        (
+            ["datagrid"],
+            build_table,
+            BuildTableArgs(
+                title="Rows",
+                columns=[DataGridColumn(field="name", header="Name")],
+                rows=[{"name": "PenguiFlow"}],
+            ),
+        ),
+        (
+            ["grid", "markdown"],
+            build_grid,
+            BuildGridArgs(items=[GridItem(component="markdown", props={"content": "A"})]),
+        ),
+        (
+            ["tabs"],
+            build_tabs,
+            BuildTabsArgs(tabs=[TabItem(label="Overview", content="Hello")]),
+        ),
+        (
+            ["accordion"],
+            build_accordion,
+            BuildAccordionArgs(items=[AccordionItem(title="Details", content="More")]),
+        ),
+    ],
+)
+async def test_build_tools_register_artifacts_without_emitting(
+    allowlist: list[str],
+    builder,
+    args,
+) -> None:
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=allowlist, max_payload_bytes=4000, max_total_bytes=8000)
+    )
+    ctx = DummyContext()
+    registry = ArtifactRegistry()
+    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+
+    result = await builder(args, ctx)
+
+    assert result.ok is True
+    assert isinstance(result.artifact_ref, str)
+    assert result.artifact_ref.startswith("artifact_")
+    assert ctx.emitted == []
+    records = registry.list_records()
+    assert len(records) == 1
+    assert records[0]["ref"] == result.artifact_ref
 
 
 @pytest.mark.asyncio
@@ -247,6 +449,159 @@ async def test_render_component_resolves_artifact_refs() -> None:
     emitted_props = ctx.emitted[0]["chunk"]["props"]
     component = emitted_props["sections"][0]["components"][0]
     assert component["component"] == "echarts"
+
+
+@pytest.mark.asyncio
+async def test_build_artifact_refs_render_report_cleanly() -> None:
+    configure_rich_output(
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["report", "grid", "markdown"],
+            max_payload_bytes=6000,
+            max_total_bytes=12000,
+        )
+    )
+    registry = ArtifactRegistry()
+    ctx = DummyContext()
+    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+
+    built = await build_grid(
+        BuildGridArgs(items=[GridItem(component="markdown", props={"content": "Nested"})], title="Nested Grid"),
+        ctx,
+    )
+    result = await render_report(
+        RenderReportArgs(
+            title="Quarterly",
+            sections=[
+                ReportSection(
+                    title="Summary",
+                    components=[{"artifact_ref": built.artifact_ref, "caption": "Embedded grid"}],
+                )
+            ],
+        ),
+        ctx,
+    )
+
+    assert result.ok is True
+    assert len(ctx.emitted) == 1
+    component = ctx.emitted[0]["chunk"]["props"]["sections"][0]["components"][0]
+    assert component["component"] == "grid"
+    assert component["caption"] == "Embedded grid"
+
+
+@pytest.mark.asyncio
+async def test_build_artifact_refs_render_grid_cleanly_with_mixed_inline_items() -> None:
+    configure_rich_output(
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["grid", "echarts", "datagrid", "markdown"],
+            max_payload_bytes=8000,
+            max_total_bytes=16000,
+        )
+    )
+    registry = ArtifactRegistry()
+    ctx = DummyContext()
+    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+
+    chart = await build_chart_echarts(
+        BuildChartEChartsArgs(title="Revenue", option={"series": [{"type": "line", "data": [1, 2, 3]}]}),
+        ctx,
+    )
+    table = await build_table(
+        BuildTableArgs(
+            columns=[DataGridColumn(field="name", header="Name")],
+            rows=[{"name": "PenguiFlow"}],
+            title="Rows",
+        ),
+        ctx,
+    )
+    result = await render_grid(
+        RenderGridArgs(
+            title="Dashboard",
+            items=[
+                GridItem.model_validate({"artifact_ref": chart.artifact_ref, "colSpan": 2}),
+                GridItem.model_validate({"artifact_ref": table.artifact_ref}),
+                GridItem(component="markdown", props={"content": "Inline note"}),
+            ],
+        ),
+        ctx,
+    )
+
+    assert result.ok is True
+    assert len(ctx.emitted) == 1
+    items = ctx.emitted[0]["chunk"]["props"]["items"]
+    assert items[0]["component"] == "echarts"
+    assert items[1]["component"] == "datagrid"
+    assert "title" not in items[1]
+    assert items[2]["component"] == "markdown"
+
+
+@pytest.mark.asyncio
+async def test_build_artifact_refs_render_tabs_cleanly() -> None:
+    configure_rich_output(
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["tabs", "datagrid", "markdown"],
+            max_payload_bytes=6000,
+            max_total_bytes=12000,
+        )
+    )
+    registry = ArtifactRegistry()
+    ctx = DummyContext()
+    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+
+    table = await build_table(
+        BuildTableArgs(columns=[DataGridColumn(field="name")], rows=[{"name": "A"}]),
+        ctx,
+    )
+    result = await render_tabs(
+        RenderTabsArgs(
+            tabs=[
+                TabItem(label="Overview", content="Hello"),
+                TabItem.model_validate({"label": "Data", "artifact_ref": table.artifact_ref}),
+            ]
+        ),
+        ctx,
+    )
+
+    assert result.ok is True
+    tabs = ctx.emitted[0]["chunk"]["props"]["tabs"]
+    assert tabs[0]["content"] == "Hello"
+    assert tabs[1]["component"] == "datagrid"
+
+
+@pytest.mark.asyncio
+async def test_build_artifact_refs_render_accordion_cleanly() -> None:
+    configure_rich_output(
+        RichOutputConfig(
+            enabled=True,
+            allowlist=["accordion", "grid", "markdown"],
+            max_payload_bytes=6000,
+            max_total_bytes=12000,
+        )
+    )
+    registry = ArtifactRegistry()
+    ctx = DummyContext()
+    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+
+    grid = await build_grid(
+        BuildGridArgs(items=[GridItem(component="markdown", props={"content": "Nested"})]),
+        ctx,
+    )
+    result = await render_accordion(
+        RenderAccordionArgs(
+            items=[
+                AccordionItem(title="Inline", content="Text"),
+                AccordionItem.model_validate({"title": "Built", "artifact_ref": grid.artifact_ref}),
+            ]
+        ),
+        ctx,
+    )
+
+    assert result.ok is True
+    items = ctx.emitted[0]["chunk"]["props"]["items"]
+    assert items[0]["content"] == "Text"
+    assert items[1]["component"] == "grid"
 
 
 @pytest.mark.asyncio

@@ -18,9 +18,16 @@ from penguiflow.rich_output.runtime import (
 
 
 class _ArgFillAwareClient:
-    def __init__(self, *, first_action: Mapping[str, Any], final_action: Mapping[str, Any]) -> None:
+    def __init__(
+        self,
+        *,
+        first_action: Mapping[str, Any],
+        final_action: Mapping[str, Any],
+        arg_fill_responses: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> None:
         self._first_action = json.dumps(first_action, ensure_ascii=False)
         self._final_action = json.dumps(final_action, ensure_ascii=False)
+        self._arg_fill_responses = dict(arg_fill_responses or {})
         self.calls: list[list[Mapping[str, str]]] = []
         self._main_calls = 0
 
@@ -37,6 +44,9 @@ class _ArgFillAwareClient:
         last = messages[-1]["content"] if messages else ""
 
         if "FILL MISSING VALUES" in last:
+            for field_name, response in self._arg_fill_responses.items():
+                if f'"{field_name}"' in last:
+                    return json.dumps(response, ensure_ascii=False), 0.0
             if '"component"' in last:
                 return json.dumps({"component": "report"}, ensure_ascii=False), 0.0
             return (
@@ -141,3 +151,67 @@ async def test_render_component_autofill_component_then_props_in_same_step() -> 
     ]
     assert ("component",) in attempt_fields
     assert ("props",) in attempt_fields
+
+
+@pytest.mark.asyncio
+async def test_render_report_schema_invalid_triggers_sections_arg_fill() -> None:
+    _, catalog = _make_rich_output_catalog()
+    events: list[PlannerEvent] = []
+    client = _ArgFillAwareClient(
+        first_action={
+            "thought": "render report with nested markdown but forgot content",
+            "next_node": "render_report",
+            "args": {
+                "title": "Status",
+                "sections": [
+                    {
+                        "title": "Summary",
+                        "components": [{"component": "markdown", "props": {}}],
+                    }
+                ],
+            },
+        },
+        final_action={
+            "thought": "done",
+            "next_node": "final_response",
+            "args": {"raw_answer": "ok"},
+        },
+        arg_fill_responses={
+            "sections": {
+                "sections": [
+                    {
+                        "title": "Summary",
+                        "components": [
+                            {
+                                "component": "markdown",
+                                "props": {"content": "Mock report section."},
+                            }
+                        ],
+                    }
+                ]
+            }
+        },
+    )
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=catalog,
+        max_iters=3,
+        event_callback=events.append,
+    )
+    result = await planner.run("make a mock report")
+    assert result.reason == "answer_complete"
+
+    section_attempts = [
+        evt
+        for evt in events
+        if evt.event_type == "arg_fill_attempt" and evt.extra.get("missing_fields") == ["sections"]
+    ]
+    assert section_attempts, "expected arg-fill to run for render_report.sections"
+
+    tool_errors = [
+        evt
+        for evt in events
+        if evt.event_type == "tool_call_result"
+        and "Invalid props for 'markdown'" in str(evt.extra.get("result_json") or "")
+    ]
+    assert not tool_errors, "render_report should not be executed with invalid nested component props"
