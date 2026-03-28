@@ -591,7 +591,7 @@
       {#if activeTraceId}
         <Pill variant="subtle" size="small">trace {activeTraceId.slice(0, 8)}</Pill>
       {/if}
-      <button class="tag-action" aria-label="Copy trajectory text" onclick={copyCurrentTrajectory}>Copy</button>
+      <button class="compact-action-btn" aria-label="Copy trajectory text" onclick={copyCurrentTrajectory}>Copy</button>
     </div>
   </div>
   {#if hasComparisonForActive}

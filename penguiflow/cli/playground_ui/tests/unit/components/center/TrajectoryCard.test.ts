@@ -420,6 +420,7 @@ describe('TrajectoryCard', () => {
 
     render(TrajectoryCard);
     expect(screen.getByRole('button', { name: 'Copy trajectory text' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Copy trajectory text' })).toHaveClass('compact-action-btn');
     expect(screen.queryByRole('button', { name: 'Copy actual trajectory text' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Copy reference trajectory text' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Copy divergence text' })).toBeNull();

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Empty } from '$lib/components/composites';
-  import { getTrajectoryStore } from '$lib/stores';
+  import { getNotificationsStore, getTrajectoryStore } from '$lib/stores';
 
   type BackgroundTaskResultPayload = {
     task_id: string;
@@ -15,6 +15,7 @@
   };
 
   const trajectoryStore = getTrajectoryStore();
+  const notificationsStore = getNotificationsStore();
 
   let memoryExpanded = $state(true);
   let externalMemoryExpanded = $state(true);
@@ -67,7 +68,43 @@
     if (normalized === 'completed') return 'badge success';
     return 'badge';
   };
+
+  const copyContextPayload = async (): Promise<void> => {
+    if (!trajectoryStore.hasContext) {
+      return;
+    }
+    const clipboard = globalThis.navigator?.clipboard;
+    if (!clipboard || typeof clipboard.writeText !== 'function') {
+      notificationsStore.add('Clipboard is unavailable in this environment.', 'warning');
+      return;
+    }
+    const payload = {
+      llm_context: trajectoryStore.llmContext,
+      tool_context: trajectoryStore.toolContext,
+      background_results: trajectoryStore.backgroundResults,
+    };
+    try {
+      await clipboard.writeText(JSON.stringify(payload, null, 2));
+      notificationsStore.add('Copied context payload.', 'success');
+    } catch {
+      notificationsStore.add('Failed to copy context payload.', 'error');
+    }
+  };
 </script>
+
+<div class="context-header" data-testid="context-header">
+  <div class="title-small">Context</div>
+  <div class="header-actions">
+    <button
+      class="compact-action-btn context-copy-action"
+      aria-label="Copy context JSON"
+      onclick={copyContextPayload}
+      disabled={!trajectoryStore.hasContext}
+    >
+      Copy
+    </button>
+  </div>
+</div>
 
 <div class="context-body">
   {#if !trajectoryStore.hasContext}
@@ -347,6 +384,27 @@
 </div>
 
 <style>
+  .context-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 10px 0;
+  }
+
+  .title-small {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--color-text, #1f1f1f);
+  }
+
+  .header-actions {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 6px;
+  }
+
   .context-body {
     flex: 1;
     overflow-y: auto;
