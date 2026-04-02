@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import sys
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from penguiflow.artifacts import InMemoryArtifactStore
 from penguiflow.common_tools.web import BraveWebConfig, build_web_tool_specs
@@ -175,6 +177,22 @@ async def test_web_answer_accepts_singular_answers_env_alias(monkeypatch) -> Non
     out = await by_name["web_answer"].node.func(args, ctx)
     parsed = by_name["web_answer"].out_model.model_validate(out)
     assert "ok" in parsed.answer_markdown
+
+
+def test_web_answer_validation_errors_are_json_serializable() -> None:
+    specs = build_web_tool_specs(BraveWebConfig(api_key="k"))
+    by_name = {s.name: s for s in specs}
+
+    with pytest.raises(ValidationError) as exc_info:
+        by_name["web_answer"].args_model.model_validate(
+            {"query": "q", "mode": "research", "stream": False}
+        )
+
+    errors = exc_info.value.errors()
+    assert errors[0]["type"] == "invalid_web_answer_mode"
+    assert json.loads(json.dumps(errors, ensure_ascii=False))[0]["msg"] == (
+        "web_answer mode='research' requires stream=true"
+    )
 
 
 @pytest.mark.asyncio

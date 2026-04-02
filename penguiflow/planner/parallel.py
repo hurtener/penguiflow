@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -12,6 +11,7 @@ from pydantic import BaseModel, ValidationError
 
 from . import prompts
 from .models import ParallelCall, ParallelJoin, PlannerAction, PlannerPause
+from .react_utils import _serialize_validation_errors
 from .tool_calls import execute_tool_call
 from .trajectory import Trajectory, TrajectoryStep
 
@@ -91,7 +91,7 @@ async def execute_parallel_plan(
             validation_errors.append(
                 prompts.render_validation_error(
                     spec.name,
-                    json.dumps(exc.errors(), ensure_ascii=False),
+                    _serialize_validation_errors(exc),
                 )
             )
             continue
@@ -256,7 +256,7 @@ async def execute_parallel_plan(
                 except ValidationError as exc:
                     join_error = prompts.render_join_validation_error(
                         join_spec.name,
-                        json.dumps(exc.errors(), ensure_ascii=False),
+                        _serialize_validation_errors(exc),
                         suggest_inject=implicit_join_injection,
                     )
                 else:

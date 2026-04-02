@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from penguiflow.planner.models import JoinInjection, ParallelCall, ParallelJoin, PlannerAction
 from penguiflow.planner.parallel import _BranchExecutionResult, execute_parallel_plan
@@ -209,6 +209,40 @@ class TestParallelExecutionErrors:
         assert pause is None
         assert trajectory.steps
         assert trajectory.steps[-1].error is not None
+
+    @pytest.mark.asyncio
+    async def test_setup_error_handles_non_serializable_validator_context(self) -> None:
+        class BadArgs(BaseModel):
+            mode: str = "research"
+            stream: bool = False
+
+            @model_validator(mode="after")
+            def validate_mode(self) -> BadArgs:
+                if self.mode == "research" and not self.stream:
+                    raise ValueError("research requires stream=true")
+                return self
+
+        class BadOut(BaseModel):
+            ok: bool = True
+
+        async def bad_tool(args: BadArgs, ctx: object):
+            return {"ok": True}
+
+        planner, _events = _make_planner(("bad_tool", BadArgs, BadOut, bad_tool))
+        action = PlannerAction(
+            next_node="parallel",
+            args={"steps": [{"node": "bad_tool", "args": {}}]},
+            thought="bad",
+        )
+        trajectory = Trajectory(query="test")
+        tracker = _make_tracker()
+
+        observation, pause = await execute_parallel_plan(planner, action, trajectory, tracker, action_seq=1)
+
+        assert observation is None
+        assert pause is None
+        assert trajectory.steps[-1].error is not None
+        assert "research requires stream=true" in trajectory.steps[-1].error
 
 
 class _NoopLLMClient:

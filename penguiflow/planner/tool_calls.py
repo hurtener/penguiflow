@@ -26,7 +26,7 @@ from .llm import _redact_artifacts
 from .models import PlannerEvent, PlannerPause
 from .pause import _PlannerPauseSignal
 from .planner_context import _PlannerContext
-from .react_utils import _safe_json_dumps
+from .react_utils import _safe_json_dumps, _serialize_validation_errors
 from .trajectory import Trajectory
 
 _TASK_SERVICE_KEY = "task_service"
@@ -387,7 +387,7 @@ async def execute_tool_call(
     except ValidationError as exc:
         error = prompts.render_output_validation_error(
             spec.name,
-            json.dumps(exc.errors(), ensure_ascii=False),
+            _serialize_validation_errors(exc),
         )
         planner._emit_event(
             PlannerEvent(

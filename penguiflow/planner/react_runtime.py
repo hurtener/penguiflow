@@ -39,6 +39,7 @@ from .models import (
     ToolSearchConfig,
     ToolVisibilityPolicy,
 )
+from .react_utils import _serialize_validation_errors
 from .streaming import _StreamingArgsExtractor
 from .tool_aliasing import build_aliased_tool_catalog, rewrite_action_node
 from .tool_calls import execute_tool_call
@@ -1870,7 +1871,7 @@ async def run_loop(
                         except ValidationError as autofill_exc:
                             error = prompts.render_validation_error(
                                 spec.name,
-                                json.dumps(autofill_exc.errors(), ensure_ascii=False),
+                                _serialize_validation_errors(autofill_exc),
                             )
                             trajectory.steps.append(TrajectoryStep(action=action, error=error))
                             trajectory.summary = None
@@ -1878,7 +1879,7 @@ async def run_loop(
                     else:
                         error = prompts.render_validation_error(
                             spec.name,
-                            json.dumps(exc.errors(), ensure_ascii=False),
+                            _serialize_validation_errors(exc),
                         )
                         trajectory.steps.append(TrajectoryStep(action=action, error=error))
                         trajectory.summary = None
@@ -2080,7 +2081,7 @@ async def run_loop(
                                             try:
                                                 parsed_args = spec.args_model.model_validate(merged_again)
                                             except ValidationError as merge_exc:
-                                                revalidation_error = json.dumps(merge_exc.errors(), ensure_ascii=False)
+                                                revalidation_error = _serialize_validation_errors(merge_exc)
                                             else:
                                                 action.args = merged_again
                                                 revalidation_error = planner._apply_arg_validation(
@@ -2140,13 +2141,13 @@ async def run_loop(
                             # Fall through to repair message
                             repair_msg = prompts.render_arg_repair_message(
                                 spec.name,
-                                json.dumps(merge_exc.errors(), ensure_ascii=False),
+                                _serialize_validation_errors(merge_exc),
                             )
                             if isinstance(trajectory.metadata, MutableMapping):
                                 trajectory.metadata["arg_repair_message"] = repair_msg
                             error = prompts.render_validation_error(
                                 spec.name,
-                                json.dumps(merge_exc.errors(), ensure_ascii=False),
+                                _serialize_validation_errors(merge_exc),
                             )
                             trajectory.steps.append(TrajectoryStep(action=action, error=error))
                             trajectory.summary = None
