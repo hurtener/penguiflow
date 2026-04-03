@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Mapping, MutableMapping
 from typing import Any
@@ -13,6 +12,7 @@ from . import prompts
 from .llm import _coerce_llm_response, _LiteLLMJSONClient
 from .migration import normalize_action_with_debug
 from .models import PlannerAction, PlannerEvent
+from .react_utils import _serialize_validation_errors
 from .streaming import _StreamingArgsExtractor, _StreamingThoughtExtractor
 from .trajectory import Trajectory
 from .validation_repair import _salvage_action_payload
@@ -330,11 +330,11 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
             if salvaged is not None:
                 logger.info(
                     "planner_action_salvaged",
-                    extra={"errors": json.dumps(exc.errors(), ensure_ascii=False)},
+                    extra={"errors": _serialize_validation_errors(exc)},
                 )
                 _consume_steering_inputs()
                 return salvaged
-            last_error = json.dumps(exc.errors(), ensure_ascii=False)
+            last_error = _serialize_validation_errors(exc)
             continue
 
         # Attach raw LLM response for debugging (excluded from serialization)
