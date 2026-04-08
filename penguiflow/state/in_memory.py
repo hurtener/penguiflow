@@ -25,6 +25,7 @@ from penguiflow.planner import PlannerEvent, Trajectory
 from penguiflow.steering import sanitize_steering_event
 
 from .models import RemoteBinding, StateUpdate, SteeringEvent, StoredEvent, TaskState
+from .protocol import TraceRef
 
 
 def _fingerprint(value: Any) -> str:
@@ -241,6 +242,7 @@ class InMemoryStateStore:
 
         self._trajectories: dict[str, tuple[str, Trajectory]] = {}
         self._session_traces: dict[str, list[str]] = defaultdict(list)
+        self._trace_order: list[str] = []
 
         self._planner_events: dict[str, list[PlannerEvent]] = defaultdict(list)
 
@@ -418,6 +420,9 @@ class InMemoryStateStore:
             if trace_id in traces:
                 traces.remove(trace_id)
             traces.append(trace_id)
+            if trace_id in self._trace_order:
+                self._trace_order.remove(trace_id)
+            self._trace_order.append(trace_id)
 
     async def get_trajectory(self, trace_id: str, session_id: str) -> Trajectory | None:
         async with self._lock:
@@ -435,6 +440,26 @@ class InMemoryStateStore:
         if not traces:
             return []
         return list(reversed(traces))[:limit]
+
+    async def list_trace_refs(self, limit: int = 0) -> list[TraceRef]:
+        """List trace references across sessions in newest-first order.
+
+        Why: dataset export by tags often spans multiple sessions. Returning a
+        global trace list avoids forcing users to manage session-scoped exports.
+        """
+
+        async with self._lock:
+            ordered = list(reversed(self._trace_order))
+            if limit > 0:
+                ordered = ordered[:limit]
+            refs: list[TraceRef] = []
+            for trace_id in ordered:
+                session_and_trajectory = self._trajectories.get(trace_id)
+                if session_and_trajectory is None:
+                    continue
+                session_id, _ = session_and_trajectory
+                refs.append({"trace_id": trace_id, "session_id": session_id})
+        return refs
 
     # ---------------------------------------------------------------------
     # Optional - Planner events
@@ -478,6 +503,7 @@ class InMemoryStateStore:
         self._steering.clear()
         self._trajectories.clear()
         self._session_traces.clear()
+        self._trace_order.clear()
         self._planner_events.clear()
         self._artifact_store.clear()
 
@@ -491,6 +517,8 @@ class InMemoryStateStore:
         for trace_id in traces:
             self._trajectories.pop(trace_id, None)
             self._planner_events.pop(trace_id, None)
+            if trace_id in self._trace_order:
+                self._trace_order.remove(trace_id)
 
             # Also remove audit log entries keyed by trace_id if present.
             self._events.pop(trace_id, None)

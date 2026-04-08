@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict, runtime_checkable
 
 if TYPE_CHECKING:
     from penguiflow.artifacts import ArtifactStore
@@ -11,6 +11,18 @@ if TYPE_CHECKING:
     from penguiflow.state.models import StateUpdate, SteeringEvent, TaskState
 
 from .models import RemoteBinding, StoredEvent
+
+
+class TraceRef(TypedDict):
+    """Typed dictionary-like trace reference.
+
+    Why: dataset export needs to resolve trajectories across sessions. Carrying
+    ``trace_id`` and ``session_id`` together avoids accidental mismatches when
+    filtering by tags globally.
+    """
+
+    trace_id: str
+    session_id: str
 
 
 @runtime_checkable
@@ -100,6 +112,11 @@ class SupportsTrajectories(Protocol):
 
 
 @runtime_checkable
+class SupportsTraceQuery(Protocol):
+    async def list_trace_refs(self, limit: int = 0) -> list[TraceRef]: ...
+
+
+@runtime_checkable
 class SupportsPlannerEvents(Protocol):
     async def save_planner_event(self, trace_id: str, event: PlannerEvent) -> None: ...
 
@@ -134,7 +151,9 @@ __all__ = [
     "SupportsPlannerState",
     "SupportsSteering",
     "SupportsTasks",
+    "SupportsTraceQuery",
     "SupportsTrajectories",
+    "TraceRef",
     "missing_capabilities",
     "require_capabilities",
 ]

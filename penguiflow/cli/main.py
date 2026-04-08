@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+from pathlib import Path
 
 import click
 
@@ -310,6 +312,202 @@ def tools_connect(
         if e.hint:
             click.echo(f"  Hint: {e.hint}", err=True)
         sys.exit(1)
+
+
+@app.group()
+def eval() -> None:
+    """Run trace-derived dataset export and evaluation workflows."""
+
+
+def _load_env_file_values(file_path: Path) -> dict[str, str]:
+    if not file_path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for line in file_path.read_text(encoding="utf-8").splitlines():
+        raw = line.strip()
+        if not raw or raw.startswith("#") or "=" not in raw:
+            continue
+        key, _, value = raw.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def _resolve_cli_env_files(raw_paths: tuple[str, ...], *, base_dir: Path) -> list[Path]:
+    resolved: list[Path] = []
+    for raw in raw_paths:
+        candidate = Path(raw)
+        resolved.append(candidate.resolve() if candidate.is_absolute() else (base_dir / candidate).resolve())
+    return resolved
+
+
+def _apply_env_files(
+    *,
+    spec_env_files: tuple[Path, ...],
+    cli_env_files: tuple[str, ...],
+    base_dir: Path,
+) -> None:
+    ordered_env_files: list[Path] = list(spec_env_files)
+    ordered_env_files.extend(_resolve_cli_env_files(cli_env_files, base_dir=base_dir))
+    for env_path in ordered_env_files:
+        if not env_path.exists():
+            raise ValueError(f"env file does not exist: {env_path} (resolution base: {base_dir})")
+
+    for env_path in ordered_env_files:
+        for key, value in _load_env_file_values(env_path).items():
+            if key not in os.environ:
+                os.environ[key] = value
+
+
+def _render_eval_summary(result: dict[str, object]) -> str:
+    preferred_order = (
+        "mode",
+        "winner_id",
+        "passed_holdout_regression",
+        "passed_threshold",
+        "min_test_score",
+        "val_score",
+        "test_score",
+        "val_baseline_score",
+        "val_winner_score",
+        "test_baseline_score",
+        "test_winner_score",
+        "candidates",
+        "counts",
+        "workload",
+        "passed",
+        "baseline_score",
+        "winner_score",
+        "collect_trace_count",
+        "trace_count",
+        "dataset_path",
+        "manifest_path",
+        "report_path",
+    )
+    lines: list[str] = []
+    seen: set[str] = set()
+    for key in preferred_order:
+        if key in result:
+            lines.append(f"{key}: {result[key]}")
+            seen.add(key)
+
+    for key in sorted(result.keys()):
+        if key in seen:
+            continue
+        lines.append(f"{key}: {result[key]}")
+    return "\n".join(lines)
+
+
+@eval.command("collect")
+@click.option(
+    "--spec",
+    "spec_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=str),
+    help="Path to eval collect spec JSON file. Relative spec fields resolve from project_root.",
+)
+@click.option(
+    "--env-file",
+    "env_files",
+    multiple=True,
+    type=click.Path(dir_okay=False, path_type=str),
+    help="Optional environment file(s) loaded before collection (relative to project_root).",
+)
+def eval_collect(spec_path: str, env_files: tuple[str, ...]) -> None:
+    """Run collect->export workflow from spec (no evaluation)."""
+    import asyncio
+    from pathlib import Path
+
+    from penguiflow.evals.api import collect_and_export_traces, load_eval_collect_spec
+
+    path = Path(spec_path).resolve()
+
+    try:
+        collect_spec = load_eval_collect_spec(path)
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
+
+    try:
+        _apply_env_files(
+            spec_env_files=collect_spec.env_files,
+            cli_env_files=env_files,
+            base_dir=collect_spec.project_root,
+        )
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
+
+    try:
+        result = asyncio.run(
+            collect_and_export_traces(
+                project_root=collect_spec.project_root,
+                query_suite_path=collect_spec.query_suite_path,
+                output_dir=collect_spec.output_dir,
+                session_id=collect_spec.session_id,
+                dataset_tag=collect_spec.dataset_tag,
+                agent_package=collect_spec.agent_package,
+                state_store_spec=collect_spec.state_store_spec,
+            )
+        )
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(_render_eval_summary(result))
+
+
+@eval.command("evaluate")
+@click.option(
+    "--spec",
+    "spec_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=str),
+    help="Path to eval dataset spec JSON file. Relative spec fields resolve from project_root if provided.",
+)
+@click.option(
+    "--env-file",
+    "env_files",
+    multiple=True,
+    type=click.Path(dir_okay=False, path_type=str),
+    help="Optional environment file(s) loaded before evaluation (relative to project_root if set).",
+)
+def eval_evaluate(spec_path: str, env_files: tuple[str, ...]) -> None:
+    """Run evaluation against an existing dataset bundle from spec."""
+    import asyncio
+    from pathlib import Path
+
+    from penguiflow.evals.api import evaluate_dataset_from_spec_file, load_eval_dataset_spec
+
+    path = Path(spec_path).resolve()
+
+    try:
+        spec = load_eval_dataset_spec(path)
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
+
+    eval_base = spec.project_root if spec.project_root is not None else path.parent
+    try:
+        _apply_env_files(
+            spec_env_files=spec.env_files,
+            cli_env_files=env_files,
+            base_dir=eval_base,
+        )
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
+
+    try:
+        result = asyncio.run(evaluate_dataset_from_spec_file(path))
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(_render_eval_summary(result))
 
 
 @app.command()
