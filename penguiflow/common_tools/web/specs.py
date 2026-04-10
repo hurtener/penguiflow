@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
+from pydantic_core import PydanticCustomError
 
 from penguiflow.artifacts import ArtifactRef, ArtifactScope
 from penguiflow.catalog import NodeSpec, ToolLoadingMode
@@ -208,12 +209,21 @@ class WebAnswerArgs(BaseModel):
         if effective_stream is None:
             effective_stream = True if self.mode == "research" else False
         if self.mode == "research" and not effective_stream:
-            raise ValueError("web_answer mode='research' requires stream=true")
+            raise PydanticCustomError(
+                "invalid_web_answer_mode",
+                "web_answer mode='research' requires stream=true",
+            )
         if self.enable_citations:
             if self.mode != "single":
-                raise ValueError("enable_citations is only supported in mode='single'")
+                raise PydanticCustomError(
+                    "invalid_web_answer_mode",
+                    "enable_citations is only supported in mode='single'",
+                )
             if not effective_stream:
-                raise ValueError("enable_citations requires stream=true")
+                raise PydanticCustomError(
+                    "invalid_web_answer_mode",
+                    "enable_citations requires stream=true",
+                )
         self.stream = effective_stream
         return self
 

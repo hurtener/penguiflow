@@ -108,9 +108,12 @@ async def run_manual_sweep(
     report_path = out_dir / "report.candidates.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
 
+    winner_patches = winner.get("patches", {})
+    bundle_patches = dict(winner_patches) if isinstance(winner_patches, dict) else {}
+
     bundle = {
         "schema_version": "PatchBundleV1",
-        "patches": dict(winner["patches"]),
+        "patches": bundle_patches,
         "compat": {
             "planner": "ReactPlanner",
             "tool_catalog_hash": "unknown",

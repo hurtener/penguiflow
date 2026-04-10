@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
+from pydantic import BaseModel, ValidationError, model_validator
 
 from penguiflow.sessions import StreamingSession
 
@@ -41,6 +44,27 @@ class TestReactUtils:
         result = _safe_json_dumps(circular)
         # Should fall back to str() representation
         assert "self" in result
+
+    def test_serialize_validation_errors_handles_value_error_ctx(self) -> None:
+        """Validation errors with embedded ValueError instances should stay serializable."""
+        from penguiflow.planner.react_utils import _serialize_validation_errors
+
+        class ValidatorModel(BaseModel):
+            mode: str = "research"
+            stream: bool = False
+
+            @model_validator(mode="after")
+            def validate_mode(self) -> ValidatorModel:
+                if self.mode == "research" and not self.stream:
+                    raise ValueError("research requires stream=true")
+                return self
+
+        with pytest.raises(ValidationError) as exc_info:
+            ValidatorModel.model_validate({})
+
+        payload = json.loads(_serialize_validation_errors(exc_info.value))
+        assert payload[0]["type"] == "value_error"
+        assert payload[0]["ctx"]["error"] == "research requires stream=true"
 
 
 class TestSteeringModule:

@@ -1422,12 +1422,14 @@ async def _evaluate_dataset_rows(
         if _is_baseline_bundle(winner):
             winner_score = baseline_score
         else:
+            winner_bundle = winner.get("patch_bundle")
+            winner_patch_bundle = winner_bundle if isinstance(winner_bundle, dict) else None
             winner_score = await _evaluate_rows_mean(
                 test_rows,
                 run_one=run_one,
                 metric=metric,
                 pred_name="test_winner",
-                patch_bundle=winner.get("patch_bundle"),
+                patch_bundle=winner_patch_bundle,
             )
     else:
         baseline_score = None
