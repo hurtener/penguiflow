@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 from pathlib import Path
 
@@ -215,6 +217,8 @@ def test_enterprise_fail_metric_demo_flags_demo_budget_failure() -> None:
             ]
         },
     )
+    if inspect.isawaitable(result):
+        result = asyncio.run(result)
 
     assert isinstance(result, dict)
     checks = result.get("checks")
@@ -384,7 +388,7 @@ def test_load_eval_dataset_spec_resolves_relative_fields_from_project_root_when_
     assert spec.dataset_path == project_root / "bundle/dataset.jsonl"
     assert spec.candidates_path == project_root / "datasets/candidates.json"
     assert spec.min_test_score == 0.8
-    assert spec.output_dir == project_root / "artifacts/eval/rerun"
+    assert not hasattr(spec, "output_dir")
     assert spec.report_path == project_root / "reports/eval-dataset.json"
 
 
@@ -470,6 +474,25 @@ def test_load_eval_dataset_spec_allows_missing_candidates_path(tmp_path) -> None
     spec = load_eval_dataset_spec(spec_path)
 
     assert spec.candidates_path is None
+
+
+def test_load_eval_dataset_spec_allows_missing_output_dir(tmp_path) -> None:
+    spec_path = tmp_path / "evaluate.spec.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "dataset_path": "dataset.jsonl",
+                "metric_spec": "demo.metric:metric",
+                "report_path": "reports/eval-summary.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    spec = load_eval_dataset_spec(spec_path)
+
+    assert spec.dataset_path == tmp_path / "dataset.jsonl"
+    assert spec.report_path == tmp_path / "reports/eval-summary.json"
 
 
 @pytest.mark.asyncio
@@ -562,7 +585,6 @@ async def test_evaluate_dataset_from_spec_file_runs_pipeline(tmp_path, monkeypat
                 "metric_spec": "demo_pkg_specfile.hooks:metric",
                 "dataset_path": str(inputs_dir / "dataset.jsonl"),
                 "candidates_path": str(inputs_dir / "candidates.json"),
-                "output_dir": str(tmp_path / "artifacts"),
             }
         ),
         encoding="utf-8",
@@ -626,7 +648,6 @@ async def test_evaluate_dataset_from_spec_file_runs_baseline_without_candidates(
                 "run_one_spec": "demo_pkg_baseline.hooks:run_one",
                 "metric_spec": "demo_pkg_baseline.hooks:metric",
                 "dataset_path": str(inputs_dir / "dataset.jsonl"),
-                "output_dir": str(tmp_path / "artifacts"),
             }
         ),
         encoding="utf-8",

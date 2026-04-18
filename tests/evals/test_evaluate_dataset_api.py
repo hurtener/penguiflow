@@ -40,7 +40,6 @@ async def test_evaluate_dataset_runs_sweep_and_holdout(tmp_path: Path) -> None:
 
     result = await evaluate_dataset(
         dataset_path=dataset_path,
-        output_dir=tmp_path / "out",
         run_one=run_one,
         metric=metric,
         candidates=[
@@ -92,7 +91,6 @@ async def test_evaluate_dataset_baseline_only_skips_duplicate_holdout_run(tmp_pa
 
     result = await evaluate_dataset(
         dataset_path=dataset_path,
-        output_dir=tmp_path / "out",
         run_one=run_one,
         metric=metric,
         candidates=[],
@@ -137,7 +135,6 @@ async def test_evaluate_dataset_writes_single_report_when_requested(tmp_path: Pa
     report_path = tmp_path / "report.json"
     result = await evaluate_dataset(
         dataset_path=dataset_path,
-        output_dir=tmp_path / "out",
         run_one=run_one,
         metric=metric,
         candidates=[
@@ -187,7 +184,6 @@ async def test_evaluate_dataset_baseline_fails_below_min_test_score(tmp_path: Pa
     with pytest.raises(ValueError, match="min_test_score"):
         await evaluate_dataset(
             dataset_path=dataset_path,
-            output_dir=tmp_path / "out",
             run_one=run_one,
             metric=metric,
             candidates=[],
@@ -235,7 +231,6 @@ async def test_evaluate_dataset_candidate_fails_threshold_even_if_beats_baseline
     with pytest.raises(ValueError, match="min_test_score"):
         await evaluate_dataset(
             dataset_path=dataset_path,
-            output_dir=tmp_path / "out",
             run_one=run_one,
             metric=metric,
             candidates=[{"id": "winner", "patches": {}}],
@@ -267,7 +262,6 @@ async def test_evaluate_dataset_allows_val_only_dataset_for_diagnostics(tmp_path
 
     result = await evaluate_dataset(
         dataset_path=dataset_path,
-        output_dir=tmp_path / "out",
         run_one=run_one,
         metric=metric,
         candidates=[],
@@ -305,7 +299,6 @@ async def test_evaluate_dataset_rejects_test_only_dataset(tmp_path: Path) -> Non
     with pytest.raises(ValueError, match="at least one val"):
         await evaluate_dataset(
             dataset_path=dataset_path,
-            output_dir=tmp_path / "out",
             run_one=run_one,
             metric=metric,
             candidates=[],
@@ -336,7 +329,6 @@ async def test_evaluate_dataset_val_only_with_min_test_score_is_diagnostic(tmp_p
 
     result = await evaluate_dataset(
         dataset_path=dataset_path,
-        output_dir=tmp_path / "out",
         run_one=run_one,
         metric=metric,
         candidates=[],
@@ -379,7 +371,6 @@ async def test_evaluate_dataset_awaits_async_metric(tmp_path: Path) -> None:
 
     result = await evaluate_dataset(
         dataset_path=dataset_path,
-        output_dir=tmp_path / "out",
         run_one=run_one,
         metric=metric,
         candidates=[],

@@ -29,7 +29,6 @@ class EvalDatasetSpec:
     dataset_path: Path
     candidates_path: Path | None
     metric_spec: str
-    output_dir: Path
     report_path: Path | None = None
     min_test_score: float | None = None
     project_root: Path | None = None
@@ -1243,7 +1242,7 @@ def load_eval_dataset_spec(path: str | Path) -> EvalDatasetSpec:
     if not isinstance(payload, dict):
         raise ValueError("eval dataset spec must be a JSON object")
 
-    required = ["dataset_path", "metric_spec", "output_dir"]
+    required = ["dataset_path", "metric_spec"]
     missing = [key for key in required if key not in payload]
     if missing:
         raise ValueError(f"eval dataset spec missing required keys: {', '.join(sorted(missing))}")
@@ -1267,7 +1266,6 @@ def load_eval_dataset_spec(path: str | Path) -> EvalDatasetSpec:
             else None
         ),
         metric_spec=str(payload["metric_spec"]),
-        output_dir=_resolve_against(base_dir, str(payload["output_dir"])),
         report_path=(
             _resolve_against(base_dir, str(payload["report_path"])) if payload.get("report_path") is not None else None
         ),
@@ -1509,7 +1507,6 @@ async def _evaluate_dataset_rows(
 async def evaluate_dataset(
     *,
     dataset_path: str | Path,
-    output_dir: str | Path,
     run_one: Callable[[dict[str, Any], dict[str, Any] | None], Any],
     metric: Callable[[object, object, object | None, str | None, object | None], float | dict[str, object]],
     candidates: list[dict[str, Any]],
@@ -1523,7 +1520,6 @@ async def evaluate_dataset(
     checks without synthetic patch candidates.
     """
 
-    del output_dir
     val_rows, test_rows = _split_dataset_rows(Path(dataset_path))
     metric_fn = wrap_metric(metric)
     return await _evaluate_dataset_rows(
@@ -1562,7 +1558,6 @@ async def evaluate_dataset_from_spec_file(path: str | Path) -> dict[str, Any]:
 
     return await evaluate_dataset(
         dataset_path=spec.dataset_path,
-        output_dir=spec.output_dir,
         run_one=run_one,
         metric=metric,
         candidates=candidates,

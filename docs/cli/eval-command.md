@@ -137,7 +137,6 @@ Required fields:
 
 - `dataset_path`
 - `metric_spec`
-- `output_dir`
 
 At least one execution source is required:
 
@@ -157,12 +156,15 @@ Minimal example:
   "dataset_path": "artifacts/eval/collect-local/dataset.jsonl",
   "metric_spec": "my_agent.evals.metrics:policy_metric",
   "min_test_score": 0.8,
-  "output_dir": "artifacts/eval/rerun",
   "report_path": "reports/eval-dataset.json",
   "project_root": ".",
   "agent_package": "my_agent"
 }
 ```
+
+Compatibility note:
+
+- `output_dir` in dataset-eval specs is accepted for legacy specs but ignored.
 
 ## Output Contract
 
