@@ -21,12 +21,12 @@ function createMockStores() {
 
 describe('EventStreamManager', () => {
   let mockInstances: MockEventSource[];
-  let constructorSpy: ReturnType<typeof vi.fn>;
+  let constructorSpy: ReturnType<typeof vi.fn<(url: string) => void>>;
 
   beforeEach(() => {
     vi.useFakeTimers();
     mockInstances = [];
-    constructorSpy = vi.fn();
+    constructorSpy = vi.fn<(url: string) => void>();
 
     // Use a class so it can be called with `new`
     globalThis.EventSource = class FakeEventSource {
@@ -67,9 +67,9 @@ describe('EventStreamManager', () => {
     manager.start('trace-1', 'session-1', 3, 100);
 
     expect(mockInstances).toHaveLength(1);
-    mockInstances[0]._emit('event', { event: 'connected' });
+    mockInstances[0]!._emit('event', { event: 'connected' });
 
-    expect(mockInstances[0].close).not.toHaveBeenCalled();
+    expect(mockInstances[0]!.close).not.toHaveBeenCalled();
     expect(constructorSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -80,8 +80,8 @@ describe('EventStreamManager', () => {
     expect(mockInstances).toHaveLength(1);
 
     // Error before connected frame
-    mockInstances[0]._triggerError();
-    expect(mockInstances[0].close).toHaveBeenCalled();
+    mockInstances[0]!._triggerError();
+    expect(mockInstances[0]!.close).toHaveBeenCalled();
 
     // Advance timer to trigger retry (delayMs * (attempt + 1) = 100 * 1)
     vi.advanceTimersByTime(100);
@@ -93,15 +93,15 @@ describe('EventStreamManager', () => {
     manager.start('trace-1', 'session-1', 2, 100);
 
     // Initial attempt fails
-    mockInstances[0]._triggerError();
+    mockInstances[0]!._triggerError();
     vi.advanceTimersByTime(100); // retry 1
 
     // Retry 1 fails
-    mockInstances[1]._triggerError();
+    mockInstances[1]!._triggerError();
     vi.advanceTimersByTime(200); // retry 2
 
     // Retry 2 fails -- no more retries
-    mockInstances[2]._triggerError();
+    mockInstances[2]!._triggerError();
     vi.advanceTimersByTime(1000);
 
     // 1 initial + 2 retries = 3 total, no more
@@ -113,10 +113,10 @@ describe('EventStreamManager', () => {
     manager.start('trace-1', 'session-1', 3, 100);
 
     // Receive connected frame
-    mockInstances[0]._emit('event', { event: 'connected' });
+    mockInstances[0]!._emit('event', { event: 'connected' });
 
     // Error after connected
-    mockInstances[0]._triggerError();
+    mockInstances[0]!._triggerError();
     vi.advanceTimersByTime(1000);
 
     // No retry -- still only 1 instance
@@ -128,7 +128,7 @@ describe('EventStreamManager', () => {
     manager.start('trace-old', 'session-1', 3, 100);
 
     // Error schedules a retry for trace-old
-    mockInstances[0]._triggerError();
+    mockInstances[0]!._triggerError();
 
     // Immediately start a new connection with different traceId
     manager.start('trace-new', 'session-1', 3, 100);
@@ -140,7 +140,9 @@ describe('EventStreamManager', () => {
     expect(mockInstances).toHaveLength(2);
 
     // Verify the second instance used the new traceId
-    const secondCallUrl = constructorSpy.mock.calls[1][0] as string;
+    const secondCall = constructorSpy.mock.calls[1];
+    expect(secondCall).toBeTruthy();
+    const secondCallUrl = secondCall![0] as string;
     expect(secondCallUrl).toContain('trace-new');
     expect(secondCallUrl).not.toContain('trace-old');
   });
@@ -150,7 +152,7 @@ describe('EventStreamManager', () => {
     manager.start('trace-1', 'session-1', 3, 100);
 
     // Error schedules a retry
-    mockInstances[0]._triggerError();
+    mockInstances[0]!._triggerError();
 
     // Explicitly close
     manager.close();

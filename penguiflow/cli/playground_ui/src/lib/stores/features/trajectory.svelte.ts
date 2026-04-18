@@ -4,13 +4,23 @@ import type {
   TrajectoryPayload,
   LLMContext,
   ToolContext,
-  ConversationMemory
+  ConversationMemory,
+  EvalCaseComparisonResponse
 } from '$lib/types';
 
 type BackgroundResultsMap = NonNullable<TrajectoryPayload['background_results']>;
 type BackgroundTaskResultPayload = BackgroundResultsMap[string];
 
 const TRAJECTORY_STORE_KEY = Symbol('trajectory-store');
+
+export interface EvalCaseSelection {
+  exampleId: string;
+  datasetPath: string;
+  predTraceId: string;
+  predSessionId: string;
+  score: number;
+  threshold: number;
+}
 
 export interface TrajectoryStore {
   readonly steps: TimelineStep[];
@@ -29,7 +39,17 @@ export interface TrajectoryStore {
   readonly hasExternalMemory: boolean;
   readonly traceId: string | null;
   readonly sessionId: string | null;
+  readonly evalCaseSelection: EvalCaseSelection | null;
+  readonly evalComparison: EvalCaseComparisonResponse | null;
+  readonly evalComparisonLoading: boolean;
+  readonly evalComparisonError: string | null;
+  readonly trajectoryViewMode: 'actual' | 'reference' | 'divergence';
   setFromPayload(payload: TrajectoryPayload): void;
+  setEvalCaseSelection(selection: EvalCaseSelection | null): void;
+  setEvalComparison(payload: EvalCaseComparisonResponse | null): void;
+  setEvalComparisonLoading(loading: boolean): void;
+  setEvalComparisonError(error: string | null): void;
+  setTrajectoryViewMode(mode: 'actual' | 'reference' | 'divergence'): void;
   addArtifactChunk(streamId: string, chunk: unknown): void;
   clearArtifacts(): void;
   clear(): void;
@@ -44,6 +64,11 @@ export function createTrajectoryStore(): TrajectoryStore {
   let backgroundResults = $state<BackgroundResultsMap | null>(null);
   let traceId = $state<string | null>(null);
   let sessionId = $state<string | null>(null);
+  let evalCaseSelection = $state<EvalCaseSelection | null>(null);
+  let evalComparison = $state<EvalCaseComparisonResponse | null>(null);
+  let evalComparisonLoading = $state(false);
+  let evalComparisonError = $state<string | null>(null);
+  let trajectoryViewMode = $state<'actual' | 'reference' | 'divergence'>('actual');
 
   return {
     get steps() { return steps; },
@@ -54,6 +79,11 @@ export function createTrajectoryStore(): TrajectoryStore {
     get backgroundResults() { return backgroundResults; },
     get traceId() { return traceId; },
     get sessionId() { return sessionId; },
+    get evalCaseSelection() { return evalCaseSelection; },
+    get evalComparison() { return evalComparison; },
+    get evalComparisonLoading() { return evalComparisonLoading; },
+    get evalComparisonError() { return evalComparisonError; },
+    get trajectoryViewMode() { return trajectoryViewMode; },
 
     get isEmpty() { return steps.length === 0; },
     get hasArtifacts() { return Object.keys(artifactStreams).length > 0; },
@@ -92,6 +122,32 @@ export function createTrajectoryStore(): TrajectoryStore {
       sessionId = payload?.session_id ?? null;
     },
 
+    setEvalCaseSelection(selection: EvalCaseSelection | null) {
+      evalCaseSelection = selection;
+      trajectoryViewMode = 'actual';
+      if (selection == null) {
+        evalComparison = null;
+        evalComparisonLoading = false;
+        evalComparisonError = null;
+      }
+    },
+
+    setEvalComparison(payload: EvalCaseComparisonResponse | null) {
+      evalComparison = payload;
+    },
+
+    setEvalComparisonLoading(loading: boolean) {
+      evalComparisonLoading = loading;
+    },
+
+    setEvalComparisonError(error: string | null) {
+      evalComparisonError = error;
+    },
+
+    setTrajectoryViewMode(mode: 'actual' | 'reference' | 'divergence') {
+      trajectoryViewMode = mode;
+    },
+
     addArtifactChunk(streamId: string, chunk: unknown) {
       const existing = artifactStreams[streamId] ?? [];
       artifactStreams[streamId] = [...existing, chunk];
@@ -110,6 +166,11 @@ export function createTrajectoryStore(): TrajectoryStore {
       backgroundResults = null;
       traceId = null;
       sessionId = null;
+      evalCaseSelection = null;
+      evalComparison = null;
+      evalComparisonLoading = false;
+      evalComparisonError = null;
+      trajectoryViewMode = 'actual';
     }
   };
 }

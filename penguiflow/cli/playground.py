@@ -30,7 +30,10 @@ except Exception:  # pragma: no cover - optional dependency
 from penguiflow.cli.generate import run_generate
 from penguiflow.cli.spec import Spec, load_spec
 from penguiflow.cli.spec_errors import SpecValidationError
-from penguiflow.planner import PlannerEvent
+from penguiflow.evals.api import TraceSelector as EvalTraceSelector
+from penguiflow.evals.api import describe_metric, ensure_project_on_sys_path, resolve_callable, wrap_metric
+from penguiflow.evals.api import export_dataset as export_eval_dataset
+from penguiflow.planner import PlannerEvent, Trajectory
 from penguiflow.sessions import (
     MergeStrategy,
     PlannerTaskPipeline,
@@ -79,6 +82,7 @@ from .playground_wrapper import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+EVAL_RUN_HARD_MAX_CASES = 200
 
 
 class PlaygroundError(RuntimeError):
@@ -211,6 +215,119 @@ class ComponentRegistryPayload(BaseModel):
     enabled: bool
     allowlist: list[str]
     components: dict[str, Any]
+
+
+class TraceSummaryPayload(BaseModel):
+    trace_id: str
+    session_id: str
+    tags: list[str] = Field(default_factory=list)
+    query_preview: str | None = None
+    turn_index: int | None = None
+
+
+class TraceTagsRequest(BaseModel):
+    session_id: str
+    add: list[str] = Field(default_factory=list)
+    remove: list[str] = Field(default_factory=list)
+
+
+class EvalDatasetSelectorPayload(BaseModel):
+    include_tags: list[str] = Field(default_factory=list)
+    exclude_tags: list[str] = Field(default_factory=list)
+    limit: int = 0
+
+
+class EvalDatasetExportRequest(BaseModel):
+    selector: EvalDatasetSelectorPayload | None = None
+    output_dir: str | None = None
+    redaction_profile: str = "internal_safe"
+
+
+class EvalDatasetExportResponse(BaseModel):
+    trace_count: int
+    dataset_path: str
+    manifest_path: str
+
+
+class EvalDatasetLoadRequest(BaseModel):
+    dataset_path: str
+
+
+class EvalDatasetExamplePayload(BaseModel):
+    example_id: str
+    split: str
+    question: str
+
+
+class EvalDatasetLoadResponse(BaseModel):
+    dataset_path: str
+    manifest_path: str | None = None
+    counts: dict[str, Any]
+    examples: list[EvalDatasetExamplePayload]
+
+
+class EvalDatasetBrowseEntry(BaseModel):
+    path: str
+    label: str
+    is_default: bool = False
+
+
+class EvalMetricBrowseEntry(BaseModel):
+    metric_spec: str
+    label: str
+    source_spec_path: str
+    name: str | None = None
+    summary: str | None = None
+    criteria: list[dict[str, Any]] | None = None
+
+
+class EvalRunRequest(BaseModel):
+    dataset_path: str
+    metric_spec: str
+    min_test_score: float | None = None
+    max_cases: int | None = Field(default=None, ge=1)
+
+
+class EvalRunCasePayload(BaseModel):
+    example_id: str
+    split: str
+    score: float
+    feedback: str | None = None
+    checks: dict[str, Any] | None = None
+    pred_trace_id: str
+    pred_session_id: str
+    question: str
+
+
+class EvalMetricDefinitionPayload(BaseModel):
+    name: str
+    summary: str
+    criteria: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class EvalRunResponse(BaseModel):
+    run_id: str
+    counts: dict[str, int]
+    min_test_score: float | None = None
+    passed_threshold: bool | None
+    metric: EvalMetricDefinitionPayload | None = None
+    cases: list[EvalRunCasePayload]
+
+
+class EvalCaseComparisonRequest(BaseModel):
+    dataset_path: str
+    example_id: str
+    pred_trace_id: str
+    pred_session_id: str
+
+
+class EvalCaseComparisonResponse(BaseModel):
+    example_id: str
+    pred_trace_id: str
+    pred_session_id: str
+    gold_trace_id: str | None = None
+    gold_trajectory: dict[str, Any] | None = None
+    pred_trajectory: dict[str, Any] | None = None
 
 
 class AguiResumeRequest(BaseModel):
@@ -643,11 +760,51 @@ def _find_builders(module: Any) -> list[Callable[..., Any]]:
     return []
 
 
-def discover_agent(project_root: Path | None = None) -> DiscoveryResult:
+def _discover_agent_with_package(*, base_dir: Path, agent_package: str) -> DiscoveryResult:
+    modules, import_errors = _import_modules(agent_package)
+    cfg_factory = _config_factory(agent_package)
+
+    orchestrator_matches: list[DiscoveryResult] = []
+    planner_matches: list[DiscoveryResult] = []
+    for module in modules:
+        for orchestrator in _find_orchestrators(module):
+            orchestrator_matches.append(
+                DiscoveryResult(
+                    kind="orchestrator",
+                    target=orchestrator,
+                    package=agent_package,
+                    module=module.__name__,
+                    config_factory=cfg_factory,
+                )
+            )
+        for builder in _find_builders(module):
+            planner_matches.append(
+                DiscoveryResult(
+                    kind="planner",
+                    target=builder,
+                    package=agent_package,
+                    module=module.__name__,
+                    config_factory=cfg_factory,
+                )
+            )
+
+    if orchestrator_matches:
+        return orchestrator_matches[0]
+    if planner_matches:
+        return planner_matches[0]
+
+    hint = "; ".join(import_errors) if import_errors else "no orchestrator or planner entry points found"
+    raise PlaygroundError(f"Could not discover agent package {agent_package!r} in {base_dir}: {hint}")
+
+
+def discover_agent(project_root: Path | None = None, *, agent_package: str | None = None) -> DiscoveryResult:
     """Locate an agent entry point within the provided project directory."""
 
     base_dir = Path(project_root or Path.cwd()).resolve()
     _ensure_sys_path(base_dir)
+    if agent_package:
+        return _discover_agent_with_package(base_dir=base_dir, agent_package=agent_package)
+
     packages = _candidate_packages(base_dir)
     errors: list[str] = []
     orchestrators: list[DiscoveryResult] = []
@@ -759,6 +916,7 @@ def load_agent(
     *,
     state_store: PlaygroundStateStore | None = None,
     session_manager: Any | None = None,
+    agent_package: str | None = None,
 ) -> tuple[AgentWrapper, DiscoveryResult]:
     """Discover and wrap the first available agent entry point.
 
@@ -770,7 +928,7 @@ def load_agent(
             the same instance will be used for both UI endpoints and orchestrator.
     """
 
-    result = discover_agent(project_root)
+    result = discover_agent(project_root, agent_package=agent_package)
     config = result.config_factory() if result.config_factory else None
     state_store = state_store or InMemoryStateStore()
 
@@ -815,6 +973,7 @@ def create_playground_app(
     *,
     agent: AgentWrapper | None = None,
     state_store: PlaygroundStateStore | None = None,
+    agent_package: str | None = None,
 ) -> FastAPI:
     """Create the FastAPI playground app."""
 
@@ -828,7 +987,17 @@ def create_playground_app(
     # backend needs a session-scoped handle to the live ToolNode/MCP client.
     sticky_tool_nodes: dict[str, dict[str, Any]] = {}
     ui_dir = Path(__file__).resolve().parent / "playground_ui" / "dist"
-    spec_payload, parsed_spec = _load_spec_payload(Path(project_root or ".").resolve())
+    resolved_project_root = Path(project_root or ".").resolve()
+    resolved_agent_base = (
+        (resolved_project_root / "src") if (resolved_project_root / "src").exists() else resolved_project_root
+    )
+
+    def _resolve_evals_root() -> Path:
+        if agent_package:
+            return (resolved_agent_base / Path(agent_package) / "evals").resolve()
+        return (resolved_project_root / "evals").resolve()
+
+    spec_payload, parsed_spec = _load_spec_payload(resolved_project_root)
     meta_payload = _meta_from_spec(parsed_spec)
 
     # Determine session_store first so we can create SessionManager before load_agent.
@@ -850,7 +1019,12 @@ def create_playground_app(
 
     # Now load the agent, passing the shared SessionManager
     if agent_wrapper is None:
-        agent_wrapper, discovery = load_agent(project_root, state_store=store, session_manager=session_manager)
+        agent_wrapper, discovery = load_agent(
+            project_root,
+            state_store=store,
+            session_manager=session_manager,
+            agent_package=agent_package,
+        )
         planner_factory = _build_planner_factory(discovery, state_store=store)
     else:
         planner_factory = None
@@ -2106,6 +2280,564 @@ def create_playground_app(
         payload["trace_id"] = trace_id
         payload["session_id"] = session_id
         return payload
+
+    def _query_preview(value: str, *, limit: int = 160) -> str:
+        """Build concise single-line query preview for trace tables."""
+
+        collapsed = " ".join(value.split())
+        if len(collapsed) <= limit:
+            return collapsed
+        return f"{collapsed[: limit - 1].rstrip()}…"
+
+    @app.get("/traces", response_model=list[TraceSummaryPayload], response_model_exclude_none=True)
+    async def list_traces(limit: int = 50) -> list[TraceSummaryPayload]:
+        if store is None:
+            raise HTTPException(status_code=500, detail="State store is not configured")
+        list_trace_refs = getattr(store, "list_trace_refs", None)
+        if list_trace_refs is None:
+            raise HTTPException(status_code=501, detail="Trace listing is not supported")
+
+        refs = await list_trace_refs(limit=limit)
+        get_trajectory = getattr(store, "get_trajectory", None)
+
+        session_turn_counts: dict[str, int] = {}
+        turn_index_by_key: dict[tuple[str, str], int] = {}
+        for ref in reversed(refs):
+            trace_id = str(ref.get("trace_id") or "")
+            session_id = str(ref.get("session_id") or "")
+            if not trace_id or not session_id:
+                continue
+            current = session_turn_counts.get(session_id, 0) + 1
+            session_turn_counts[session_id] = current
+            turn_index_by_key[(trace_id, session_id)] = current
+
+        payloads: list[TraceSummaryPayload] = []
+        for ref in refs:
+            trace_id = str(ref.get("trace_id") or "")
+            session_id = str(ref.get("session_id") or "")
+            if not trace_id or not session_id:
+                continue
+
+            tags: list[str] = []
+            query_preview: str | None = None
+            if get_trajectory is not None:
+                trajectory = await get_trajectory(trace_id, session_id)
+                if trajectory is not None:
+                    tags_raw = trajectory.metadata.get("tags", [])
+                    if isinstance(tags_raw, list):
+                        tags = sorted({str(tag).strip() for tag in tags_raw if str(tag).strip()})
+                    query_preview = _query_preview(trajectory.query)
+
+            payloads.append(
+                TraceSummaryPayload(
+                    trace_id=trace_id,
+                    session_id=session_id,
+                    tags=tags,
+                    query_preview=query_preview,
+                    turn_index=turn_index_by_key.get((trace_id, session_id)),
+                )
+            )
+        return payloads
+
+    @app.post("/traces/{trace_id}/tags", response_model=TraceSummaryPayload, response_model_exclude_none=True)
+    async def set_trace_tags(trace_id: str, request: TraceTagsRequest) -> TraceSummaryPayload:
+        if store is None:
+            raise HTTPException(status_code=500, detail="State store is not configured")
+        list_trace_refs = getattr(store, "list_trace_refs", None)
+        if list_trace_refs is None:
+            raise HTTPException(status_code=501, detail="Trace listing is not supported")
+
+        refs = await list_trace_refs(limit=0)
+        trace_ref = next((ref for ref in refs if ref.get("trace_id") == trace_id), None)
+        if trace_ref is None:
+            raise HTTPException(status_code=404, detail="Trace not found for tagging")
+
+        trace_session_id = str(trace_ref.get("session_id") or "")
+        if trace_session_id != request.session_id:
+            raise HTTPException(status_code=404, detail="Trace not found for tagging")
+
+        get_trajectory = getattr(store, "get_trajectory", None)
+        save_trajectory = getattr(store, "save_trajectory", None)
+        if get_trajectory is None or save_trajectory is None:
+            raise HTTPException(status_code=501, detail="Trajectory tagging is not supported")
+
+        trajectory = await get_trajectory(trace_id, request.session_id)
+        if trajectory is None:
+            raise HTTPException(status_code=404, detail="Trajectory not found for tagging")
+
+        existing_raw = trajectory.metadata.get("tags", [])
+        tags = (
+            {str(tag).strip() for tag in existing_raw if str(tag).strip()} if isinstance(existing_raw, list) else set()
+        )
+        tags.update(str(tag).strip() for tag in request.add if str(tag).strip())
+        tags.difference_update(str(tag).strip() for tag in request.remove if str(tag).strip())
+        normalized_tags = sorted(tags)
+
+        trajectory.metadata["tags"] = normalized_tags
+        await save_trajectory(trace_id, request.session_id, trajectory)
+        return TraceSummaryPayload(
+            trace_id=trace_id,
+            session_id=request.session_id,
+            tags=normalized_tags,
+            query_preview=_query_preview(trajectory.query),
+        )
+
+    @app.get("/eval/datasets/browse", response_model=list[EvalDatasetBrowseEntry])
+    async def browse_eval_datasets() -> list[EvalDatasetBrowseEntry]:
+        evals_root = _resolve_evals_root()
+        if evals_root != resolved_project_root and resolved_project_root not in evals_root.parents:
+            return []
+        if not evals_root.exists() or not evals_root.is_dir():
+            return []
+
+        entries: list[EvalDatasetBrowseEntry] = []
+        for dataset_path in sorted(evals_root.rglob("*.jsonl")):
+            if not dataset_path.is_file():
+                continue
+            try:
+                rel_project = dataset_path.relative_to(resolved_project_root)
+                rel_label = dataset_path.relative_to(evals_root)
+            except ValueError:
+                continue
+            entries.append(
+                EvalDatasetBrowseEntry(
+                    path=rel_project.as_posix(),
+                    label=rel_label.as_posix(),
+                    is_default=dataset_path.name == "dataset.jsonl",
+                )
+            )
+        entries.sort(key=lambda entry: (entry.label, entry.path))
+        return entries
+
+    @app.get("/eval/metrics/browse", response_model=list[EvalMetricBrowseEntry], response_model_exclude_none=True)
+    async def browse_eval_metrics() -> list[EvalMetricBrowseEntry]:
+        ensure_project_on_sys_path(resolved_project_root)
+        evals_root = _resolve_evals_root()
+        if evals_root != resolved_project_root and resolved_project_root not in evals_root.parents:
+            return []
+        if not evals_root.exists() or not evals_root.is_dir():
+            return []
+
+        entries_by_metric: dict[str, EvalMetricBrowseEntry] = {}
+        for spec_path in sorted(evals_root.rglob("evaluate.spec.json")):
+            if not spec_path.is_file():
+                continue
+            try:
+                raw = json.loads(spec_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+            metric_spec = raw.get("metric_spec")
+            if not isinstance(metric_spec, str) or ":" not in metric_spec:
+                continue
+            try:
+                rel_spec = spec_path.relative_to(resolved_project_root)
+            except ValueError:
+                continue
+            metric_label = metric_spec.split(":")[-1]
+            if metric_spec in entries_by_metric:
+                continue
+            metric_name: str | None = None
+            metric_summary: str | None = None
+            metric_criteria: list[dict[str, Any]] | None = None
+            try:
+                module_name, _, _ = metric_spec.partition(":")
+                if module_name:
+                    importlib.invalidate_caches()
+                    sys.modules.pop(module_name, None)
+                metric_callable = resolve_callable(metric_spec)
+                metric_definition = describe_metric(metric_callable)
+                metric_name = metric_definition.name
+                metric_summary = metric_definition.summary or None
+                metric_criteria = [
+                    {
+                        "id": criterion.id,
+                        "label": criterion.label,
+                        "description": criterion.description,
+                    }
+                    for criterion in metric_definition.criteria
+                ]
+            except Exception:
+                metric_name = None
+                metric_summary = None
+                metric_criteria = None
+            entries_by_metric[metric_spec] = EvalMetricBrowseEntry(
+                metric_spec=metric_spec,
+                label=metric_label,
+                source_spec_path=rel_spec.as_posix(),
+                name=metric_name,
+                summary=metric_summary,
+                criteria=metric_criteria,
+            )
+
+        return sorted(entries_by_metric.values(), key=lambda entry: entry.label)
+
+    @app.post("/eval/datasets/export", response_model=EvalDatasetExportResponse)
+    async def export_eval_dataset_bundle(request: EvalDatasetExportRequest) -> EvalDatasetExportResponse:
+        if store is None:
+            raise HTTPException(status_code=500, detail="State store is not configured")
+
+        def _default_eval_export_dir() -> Path:
+            return (_resolve_evals_root() / "playground_export" / "dataset").resolve()
+
+        def _auto_rename_output_dir(path: Path) -> Path:
+            if not path.exists():
+                return path
+            parent = path.parent
+            stem = path.name
+            for suffix in range(2, 10_000):
+                candidate = parent / f"{stem}-{suffix}"
+                if not candidate.exists():
+                    return candidate
+            raise HTTPException(status_code=500, detail="Could not allocate dataset export directory")
+
+        output_dir = Path(request.output_dir) if request.output_dir is not None else _default_eval_export_dir()
+        if not output_dir.is_absolute():
+            output_dir = (resolved_project_root / output_dir).resolve()
+        else:
+            output_dir = output_dir.resolve()
+
+        if output_dir != resolved_project_root and resolved_project_root not in output_dir.parents:
+            raise HTTPException(status_code=400, detail="output_dir must be under project root")
+        output_dir = _auto_rename_output_dir(output_dir)
+
+        selector = request.selector or EvalDatasetSelectorPayload()
+        export_result = await export_eval_dataset(
+            state_store=store,
+            output_dir=output_dir,
+            selector=EvalTraceSelector(
+                include_tags=tuple(selector.include_tags),
+                exclude_tags=tuple(selector.exclude_tags),
+                limit=selector.limit,
+            ),
+            redaction_profile=request.redaction_profile,
+        )
+        return EvalDatasetExportResponse(
+            trace_count=int(export_result["trace_count"]),
+            dataset_path=str(export_result["dataset_path"]),
+            manifest_path=str(export_result["manifest_path"]),
+        )
+
+    @app.post("/eval/datasets/load", response_model=EvalDatasetLoadResponse)
+    async def load_eval_dataset(request: EvalDatasetLoadRequest) -> EvalDatasetLoadResponse:
+        raw_path = Path(request.dataset_path)
+        if not raw_path.is_absolute():
+            raw_path = (resolved_project_root / raw_path).resolve()
+        else:
+            raw_path = raw_path.resolve()
+
+        if raw_path != resolved_project_root and resolved_project_root not in raw_path.parents:
+            raise HTTPException(status_code=400, detail="dataset_path must be under project root")
+
+        if raw_path.is_dir():
+            dataset_path = raw_path / "dataset.jsonl"
+            manifest_path = raw_path / "manifest.json"
+        else:
+            dataset_path = raw_path
+            manifest_path = raw_path.parent / "manifest.json"
+
+        if not dataset_path.exists() or not dataset_path.is_file():
+            raise HTTPException(status_code=404, detail="dataset.jsonl not found")
+
+        rows: list[dict[str, Any]] = []
+        counts_by_split: dict[str, int] = {}
+        with dataset_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                payload = json.loads(stripped)
+                if not isinstance(payload, dict):
+                    continue
+                rows.append(payload)
+                split = str(payload.get("split") or "unknown")
+                counts_by_split[split] = counts_by_split.get(split, 0) + 1
+
+        examples = [
+            EvalDatasetExamplePayload(
+                example_id=str(row.get("example_id") or ""),
+                split=str(row.get("split") or "unknown"),
+                question=str(row.get("question") or ""),
+            )
+            for row in rows
+        ]
+
+        resolved_manifest: str | None = str(manifest_path) if manifest_path.exists() else None
+        return EvalDatasetLoadResponse(
+            dataset_path=str(dataset_path),
+            manifest_path=resolved_manifest,
+            counts={"total": len(rows), "by_split": counts_by_split},
+            examples=examples,
+        )
+
+    @app.post("/eval/run", response_model=EvalRunResponse)
+    async def run_eval(request: EvalRunRequest) -> EvalRunResponse:
+        raw_path = Path(request.dataset_path)
+        if not raw_path.is_absolute():
+            raw_path = (resolved_project_root / raw_path).resolve()
+        else:
+            raw_path = raw_path.resolve()
+
+        if raw_path != resolved_project_root and resolved_project_root not in raw_path.parents:
+            raise HTTPException(status_code=400, detail="dataset_path must be under project root")
+
+        dataset_path = (raw_path / "dataset.jsonl") if raw_path.is_dir() else raw_path
+        if not dataset_path.exists() or not dataset_path.is_file():
+            raise HTTPException(status_code=404, detail="dataset.jsonl not found")
+
+        ensure_project_on_sys_path(resolved_project_root)
+        module_name, _, _ = request.metric_spec.partition(":")
+        if module_name:
+            importlib.invalidate_caches()
+            sys.modules.pop(module_name, None)
+        metric_callable = resolve_callable(request.metric_spec)
+        metric_definition = describe_metric(metric_callable)
+        metric = wrap_metric(metric_callable)
+        declared_criterion_ids = {criterion.id for criterion in metric_definition.criteria}
+
+        rows: list[dict[str, Any]] = []
+        for line in dataset_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            payload = json.loads(stripped)
+            if isinstance(payload, dict):
+                rows.append(payload)
+
+        effective_max_cases = EVAL_RUN_HARD_MAX_CASES
+        if request.max_cases is not None:
+            effective_max_cases = min(request.max_cases, EVAL_RUN_HARD_MAX_CASES)
+        rows = rows[:effective_max_cases]
+
+        val_count = sum(1 for row in rows if str(row.get("split") or "unknown") == "val")
+        test_count = sum(1 for row in rows if str(row.get("split") or "unknown") == "test")
+        if val_count == 0:
+            raise HTTPException(status_code=400, detail="dataset must contain at least one val example")
+
+        run_id = secrets.token_hex(8)
+        pred_session_id = f"eval:{run_id}"
+        counts = {"total": len(rows), "val": val_count, "test": test_count}
+        test_scores: list[float] = []
+        cases: list[EvalRunCasePayload] = []
+
+        save_trajectory = getattr(store, "save_trajectory", None) if store is not None else None
+        get_trajectory = getattr(store, "get_trajectory", None) if store is not None else None
+        wait_for_trace_persistence = getattr(agent_wrapper, "wait_for_trace_persistence", None)
+
+        for row in rows:
+            split = str(row.get("split") or "unknown")
+
+            question = str(row.get("question") or "")
+            gold_trace = row.get("gold_trace")
+            inputs = gold_trace.get("inputs") if isinstance(gold_trace, Mapping) else {}
+            llm_context = inputs.get("llm_context") if isinstance(inputs, Mapping) else {}
+            tool_context = inputs.get("tool_context") if isinstance(inputs, Mapping) else {}
+            llm_context_dict = dict(llm_context) if isinstance(llm_context, Mapping) else {}
+            tool_context_dict = dict(tool_context) if isinstance(tool_context, Mapping) else {}
+
+            chat_result = await agent_wrapper.chat(
+                question,
+                session_id=pred_session_id,
+                llm_context=llm_context_dict,
+                tool_context=tool_context_dict,
+            )
+
+            if callable(wait_for_trace_persistence):
+                try:
+                    maybe_wait = wait_for_trace_persistence(
+                        chat_result.trace_id,
+                        pred_session_id,
+                        timeout_s=1.0,
+                    )
+                    if inspect.isawaitable(maybe_wait):
+                        await maybe_wait
+                except TimeoutError:
+                    _LOGGER.info(
+                        "eval_run_trace_persistence_wait_timeout",
+                        extra={
+                            "trace_id": chat_result.trace_id,
+                            "session_id": pred_session_id,
+                        },
+                    )
+
+            pred_trace_payload: dict[str, Any] | None = None
+            pred_record = (
+                await get_trajectory(chat_result.trace_id, pred_session_id) if get_trajectory is not None else None
+            )
+            if pred_record is None and save_trajectory is not None:
+                trajectory = Trajectory(query=question, llm_context=llm_context_dict, tool_context=tool_context_dict)
+                trajectory.metadata["answer"] = chat_result.answer
+                await save_trajectory(chat_result.trace_id, pred_session_id, trajectory)
+                pred_record = trajectory
+            if pred_record is not None and hasattr(pred_record, "serialise"):
+                pred_trace_payload = dict(pred_record.serialise())
+                pred_trace_payload["trace_id"] = chat_result.trace_id
+                pred_trace_payload["session_id"] = pred_session_id
+            pred_steps = pred_trace_payload.get("steps") if isinstance(pred_trace_payload, Mapping) else None
+            pred_step_count = len(pred_steps) if isinstance(pred_steps, list) else 0
+
+            _LOGGER.info(
+                "eval_run_metric_debug",
+                extra={
+                    "example_id": str(row.get("example_id") or ""),
+                    "metric_spec": request.metric_spec,
+                    "pred_trace_id": chat_result.trace_id,
+                    "pred_session_id": pred_session_id,
+                    "pred_trace_has_steps": bool(pred_step_count > 0),
+                    "pred_trace_step_count": pred_step_count,
+                },
+            )
+            _LOGGER.info(
+                "eval_run_metric_debug_details example_id=%s metric_spec=%s "
+                "pred_trace_id=%s pred_session_id=%s pred_trace_step_count=%d",
+                str(row.get("example_id") or ""),
+                request.metric_spec,
+                chat_result.trace_id,
+                pred_session_id,
+                pred_step_count,
+            )
+
+            raw_score = metric(
+                row,
+                chat_result.answer,
+                gold_trace,
+                "baseline",
+                pred_trace_payload,
+            )
+            if inspect.isawaitable(raw_score):
+                raw_score = await raw_score
+            score = 0.0
+            feedback: str | None = None
+            checks: dict[str, Any] | None = None
+            if isinstance(raw_score, dict):
+                score_value = raw_score.get("score", 0.0)
+                if isinstance(score_value, (int, float)) and not isinstance(score_value, bool):
+                    score = float(score_value)
+                elif isinstance(score_value, bool):
+                    score = 1.0 if score_value else 0.0
+                feedback_raw = raw_score.get("feedback")
+                feedback = str(feedback_raw) if feedback_raw is not None else None
+                checks_raw = raw_score.get("checks")
+                if isinstance(checks_raw, Mapping):
+                    checks = {str(key): value for key, value in checks_raw.items()}
+                    if declared_criterion_ids:
+                        unknown_ids = sorted(set(checks.keys()) - declared_criterion_ids)
+                        if unknown_ids:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=("unknown metric check ids: " + ", ".join(unknown_ids)),
+                            )
+            elif isinstance(raw_score, bool):
+                score = 1.0 if raw_score else 0.0
+            elif isinstance(raw_score, (int, float)):
+                score = float(raw_score)
+
+            if split == "test":
+                test_scores.append(score)
+
+            cases.append(
+                EvalRunCasePayload(
+                    example_id=str(row.get("example_id") or ""),
+                    split=split,
+                    score=score,
+                    feedback=feedback,
+                    checks=checks,
+                    pred_trace_id=chat_result.trace_id,
+                    pred_session_id=pred_session_id,
+                    question=question,
+                )
+            )
+
+        cases.sort(key=lambda item: item.score)
+
+        test_score = (sum(test_scores) / len(test_scores)) if test_scores else None
+        if request.min_test_score is None:
+            passed_threshold: bool | None = True
+        elif test_score is None:
+            passed_threshold = None
+        else:
+            passed_threshold = test_score >= request.min_test_score
+
+        return EvalRunResponse(
+            run_id=run_id,
+            counts=counts,
+            min_test_score=request.min_test_score,
+            passed_threshold=passed_threshold,
+            metric=EvalMetricDefinitionPayload(
+                name=metric_definition.name,
+                summary=metric_definition.summary,
+                criteria=[
+                    {
+                        "id": criterion.id,
+                        "label": criterion.label,
+                        "description": criterion.description,
+                    }
+                    for criterion in metric_definition.criteria
+                ],
+            ),
+            cases=cases,
+        )
+
+    @app.post("/eval/cases/compare", response_model=EvalCaseComparisonResponse)
+    async def compare_eval_case(request: EvalCaseComparisonRequest) -> EvalCaseComparisonResponse:
+        raw_path = Path(request.dataset_path)
+        if not raw_path.is_absolute():
+            raw_path = (resolved_project_root / raw_path).resolve()
+        else:
+            raw_path = raw_path.resolve()
+
+        if raw_path != resolved_project_root and resolved_project_root not in raw_path.parents:
+            raise HTTPException(status_code=400, detail="dataset_path must be under project root")
+
+        dataset_path = (raw_path / "dataset.jsonl") if raw_path.is_dir() else raw_path
+        if not dataset_path.exists() or not dataset_path.is_file():
+            raise HTTPException(status_code=404, detail="dataset.jsonl not found")
+
+        selected_row: dict[str, Any] | None = None
+        for line in dataset_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            payload = json.loads(stripped)
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("example_id") or "") == request.example_id:
+                selected_row = payload
+                break
+
+        if selected_row is None:
+            raise HTTPException(status_code=404, detail="Eval example not found")
+
+        gold_trace_raw = selected_row.get("gold_trace") if isinstance(selected_row.get("gold_trace"), Mapping) else {}
+        gold_trace = dict(gold_trace_raw) if isinstance(gold_trace_raw, Mapping) else {}
+        gold_trajectory_raw = (
+            gold_trace.get("trajectory_full") if isinstance(gold_trace.get("trajectory_full"), Mapping) else None
+        )
+        gold_trajectory = dict(gold_trajectory_raw) if isinstance(gold_trajectory_raw, Mapping) else None
+        gold_trace_id = str(gold_trace.get("trace_id") or "") or None
+
+        if store is None:
+            raise HTTPException(status_code=500, detail="State store is not configured")
+        get_trajectory = getattr(store, "get_trajectory", None)
+        if get_trajectory is None:
+            raise HTTPException(status_code=501, detail="Trajectory retrieval is not supported")
+
+        pred_record = await get_trajectory(request.pred_trace_id, request.pred_session_id)
+        pred_trajectory: dict[str, Any] | None = None
+        if pred_record is not None and hasattr(pred_record, "serialise"):
+            pred_trajectory = dict(pred_record.serialise())
+            pred_trajectory["trace_id"] = request.pred_trace_id
+            pred_trajectory["session_id"] = request.pred_session_id
+
+        return EvalCaseComparisonResponse(
+            example_id=request.example_id,
+            pred_trace_id=request.pred_trace_id,
+            pred_session_id=request.pred_session_id,
+            gold_trace_id=gold_trace_id,
+            gold_trajectory=gold_trajectory,
+            pred_trajectory=pred_trajectory,
+        )
 
     # ─── Artifact Endpoints ───────────────────────────────────────────────────
 

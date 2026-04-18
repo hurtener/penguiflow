@@ -457,6 +457,7 @@ def init_react_planner(
     planner._observation_guardrail = observation_guardrail or ObservationGuardrailConfig()
 
     planner._pause_records = {}
+    planner._pending_persistence_tasks = {}
     planner._active_trajectory = None
     planner._active_tracker = None
 

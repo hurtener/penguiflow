@@ -1,0 +1,46 @@
+{
+  "counts": {
+    "test": 2,
+    "total": 4,
+    "val": 2
+  },
+  "dataset_id": "eval-20260318032330",
+  "export_command": "export_trace_dataset",
+  "redaction_policy": "internal_safe",
+  "schema_versions": {
+    "trace": "TraceExampleV1"
+  },
+  "source": {
+    "session_id": null,
+    "source_priority": [
+      "trajectory",
+      "planner_events",
+      "history"
+    ],
+    "trace_ids": [
+      "fefbd41024eaed6e",
+      "317bcb2a59a8dd4a",
+      "c148a1e8fe13c53c",
+      "7d0d552dd321509b"
+    ],
+    "trace_refs": [
+      {
+        "session_id": "policy-compliance-v1-collect",
+        "trace_id": "fefbd41024eaed6e"
+      },
+      {
+        "session_id": "policy-compliance-v1-collect",
+        "trace_id": "317bcb2a59a8dd4a"
+      },
+      {
+        "session_id": "policy-compliance-v1-collect",
+        "trace_id": "c148a1e8fe13c53c"
+      },
+      {
+        "session_id": "policy-compliance-v1-collect",
+        "trace_id": "7d0d552dd321509b"
+      }
+    ]
+  },
+  "workload": "planner_enterprise_agent_v2"
+}

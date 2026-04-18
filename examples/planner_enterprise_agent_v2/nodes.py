@@ -102,6 +102,11 @@ class FinalAnswer(BaseModel):
     artifacts: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @property
+    def answer(self) -> str:
+        """Compatibility alias for playground wrappers expecting `answer`."""
+        return self.text
+
 
 class StatusUpdate(BaseModel):
     """Structured status update for frontend websocket."""

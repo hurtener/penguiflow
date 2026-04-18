@@ -18,6 +18,7 @@ This example demonstrates enterprise-grade patterns for building autonomous agen
 - [Architecture](#architecture)
 - [Configuration](#configuration)
 - [Running the Agent](#running-the-agent)
+- [Evaluation Walkthrough](#evaluation-walkthrough)
 - [Production Deployment](#production-deployment)
 - [Telemetry & Observability](#telemetry--observability)
 - [Extending the Agent](#extending-the-agent)
@@ -93,6 +94,21 @@ Telemetry Metrics
   flow_node_errors: 0
   flow_node_successes: 6
 ```
+
+---
+
+## Evaluation Walkthrough
+
+This example includes a minimal eval walkthrough at:
+
+- `examples/planner_enterprise_agent_v2/evals/policy_compliance_v1/README.md`
+
+Flow:
+
+- define query suite,
+- collect/pin dataset,
+- run baseline eval by omitting `candidates_path` and using `min_test_score`,
+- use Playground for dataset curation from real traces, failing-case review, and trace-linked debugging while refining metrics.
 
 ---
 
