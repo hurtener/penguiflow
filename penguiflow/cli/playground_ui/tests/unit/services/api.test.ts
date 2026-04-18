@@ -569,14 +569,15 @@ describe('api service', () => {
         output_dir: 'eval/dataset_a'
       });
 
-      expect(fetch).toHaveBeenCalledWith('/eval/datasets/export', {
+      expect(fetch).toHaveBeenCalledWith('/eval/datasets/export', expect.objectContaining({
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          selector: { include_tags: ['dataset:alpha'], exclude_tags: [], limit: 0 },
-          output_dir: 'eval/dataset_a',
-          redaction_profile: 'internal_safe'
-        })
+        headers: { 'Content-Type': 'application/json' }
+      }));
+      const requestBody = JSON.parse(vi.mocked(fetch).mock.calls[0]?.[1]?.body as string);
+      expect(requestBody).toEqual({
+        selector: { include_tags: ['dataset:alpha'], exclude_tags: [], limit: 0 },
+        output_dir: 'eval/dataset_a',
+        redaction_profile: 'internal_safe'
       });
       expect(result).toEqual(mockData);
     });

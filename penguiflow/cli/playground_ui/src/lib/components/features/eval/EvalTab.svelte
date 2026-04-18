@@ -126,6 +126,16 @@
     return metricBrowse.find((entry) => entry.metric_spec === runMetricSpec) ?? null;
   });
 
+  function metricDisplayName(metric: NonNullable<typeof selectedMetric>): string {
+    if ('name' in metric && typeof metric.name === 'string' && metric.name.trim()) {
+      return metric.name;
+    }
+    if ('label' in metric && typeof metric.label === 'string' && metric.label.trim()) {
+      return metric.label;
+    }
+    return runMetricSpec;
+  }
+
   const criterionLabelById = $derived.by(() => {
     const labels: Record<string, string> = {};
     const criteria = runResult?.metric?.criteria ?? selectedMetric?.criteria ?? [];
@@ -403,7 +413,7 @@
         <p class="status-line" data-testid="eval-status-line">{statusLine}</p>
       {/if}
       {#if selectedMetric?.summary}
-        <p class="status-line metric-summary"><strong>{selectedMetric.name ?? selectedMetric.label}</strong>: {selectedMetric.summary}</p>
+        <p class="status-line metric-summary"><strong>{metricDisplayName(selectedMetric)}</strong>: {selectedMetric.summary}</p>
       {/if}
     </section>
 

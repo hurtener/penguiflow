@@ -3,15 +3,17 @@ import { render, screen } from '@testing-library/svelte';
 import StepDetails from '$lib/components/features/trajectory/StepDetails.svelte';
 
 describe('StepDetails', () => {
-  it('renders object args/result with JSON inspector', () => {
-    render(StepDetails, {
+  it('renders object args/result as plain code blocks', () => {
+    const { container } = render(StepDetails, {
       args: { route: 'bug', confidence: 0.95 },
       result: { status: 'ok', diagnostics: { api: 'degraded' } }
     });
 
-    expect(screen.getAllByText(/Object\(/).length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText('route')).toBeTruthy();
-    expect(screen.getByText('diagnostics')).toBeTruthy();
+    expect(screen.queryByText(/Object\(/)).toBeNull();
+    const blocks = Array.from(container.querySelectorAll('pre')).map((node) => node.textContent ?? '');
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toContain('"route": "bug"');
+    expect(blocks[1]).toContain('"diagnostics": {');
     expect(screen.getByText('args')).toBeTruthy();
     expect(screen.getByText('result')).toBeTruthy();
   });

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import TrajectoryCard from '$lib/components/features/trajectory/TrajectoryCard.svelte';
 import * as api from '$lib/services/api';
+import type { TimelineStep } from '$lib/types';
 
 const sessionStoreMock = {
   activeTraceId: 'trace-1'
@@ -9,7 +10,7 @@ const sessionStoreMock = {
 
 const trajectoryStoreMock = {
   isEmpty: false,
-  steps: [],
+  steps: [] as TimelineStep[],
   traceId: 'trace-1',
   sessionId: 'session-1',
   evalCaseSelection: null,
@@ -427,7 +428,9 @@ describe('TrajectoryCard', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Copy trajectory text' }));
 
     expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1);
-    const copied = JSON.parse(clipboardWriteTextMock.mock.calls[0][0]) as {
+    const firstCall = clipboardWriteTextMock.mock.calls[0];
+    expect(firstCall).toBeTruthy();
+    const copied = JSON.parse(firstCall![0]) as {
       mode: string;
       trace_id: string;
       session_id: string;
@@ -478,7 +481,9 @@ describe('TrajectoryCard', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Copy trajectory text' }));
 
     expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1);
-    const copied = JSON.parse(clipboardWriteTextMock.mock.calls[0][0]) as {
+    const firstCall = clipboardWriteTextMock.mock.calls[0];
+    expect(firstCall).toBeTruthy();
+    const copied = JSON.parse(firstCall![0]) as {
       mode: string;
       gold_trace_id: string;
       trajectory: { steps: Array<{ action: { thought: string; next_node: string } }> };
@@ -525,7 +530,9 @@ describe('TrajectoryCard', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Copy trajectory text' }));
 
     expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1);
-    const copied = JSON.parse(clipboardWriteTextMock.mock.calls[0][0]) as {
+    const firstCall = clipboardWriteTextMock.mock.calls[0];
+    expect(firstCall).toBeTruthy();
+    const copied = JSON.parse(firstCall![0]) as {
       mode: string;
       summary: { changed_step_count: number };
       steps: Array<{

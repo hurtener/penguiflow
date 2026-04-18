@@ -56,7 +56,9 @@ describe('McpApp', () => {
     await fireEvent.load(iframe);
 
     expect(postMessage).toHaveBeenCalled();
-    const [message] = postMessage.mock.calls[0];
+    const firstCall = postMessage.mock.calls[0];
+    expect(firstCall).toBeTruthy();
+    const [message] = firstCall!;
     expect(message).toEqual({
       jsonrpc: '2.0',
       method: 'tools/result',

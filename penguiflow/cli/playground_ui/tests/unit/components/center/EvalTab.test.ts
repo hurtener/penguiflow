@@ -328,11 +328,11 @@ describe('EvalTab minimalist flow', () => {
   });
 
   it('switches run button label while evaluation is in-flight', async () => {
-    let resolveRun: (value: unknown) => void;
-    const runPromise = new Promise((resolve) => {
+    let resolveRun!: (value: Awaited<ReturnType<typeof api.runEval>>) => void;
+    const runPromise = new Promise<Awaited<ReturnType<typeof api.runEval>>>((resolve) => {
       resolveRun = resolve;
     });
-    vi.mocked(api.runEval).mockReturnValue(runPromise as Promise<any>);
+    vi.mocked(api.runEval).mockReturnValue(runPromise);
 
     render(EvalTab);
 

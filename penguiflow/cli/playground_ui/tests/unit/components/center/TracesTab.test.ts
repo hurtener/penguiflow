@@ -78,7 +78,6 @@ describe('TracesTab', () => {
     expect(api.exportEvalDataset).toHaveBeenCalledWith({
       include_tags: ['split:test', 'dataset:policy', 'tag:implicit'],
       exclude_tags: ['skip:bad'],
-      output_dir: 'examples/evals/policy_compliance_v1/dataset',
       limit: 0
     });
     expect(await screen.findByText('Exported 2 traces.')).toBeTruthy();

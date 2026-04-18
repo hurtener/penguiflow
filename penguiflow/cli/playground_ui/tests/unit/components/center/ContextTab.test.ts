@@ -57,7 +57,9 @@ describe('ContextTab copy action', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Copy context JSON' }));
 
     expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1);
-    const copied = JSON.parse(clipboardWriteTextMock.mock.calls[0][0]) as {
+    const firstCall = clipboardWriteTextMock.mock.calls[0];
+    expect(firstCall).toBeTruthy();
+    const copied = JSON.parse(firstCall![0]) as {
       llm_context: Record<string, unknown> | null;
       tool_context: Record<string, unknown> | null;
       background_results: Record<string, unknown> | null;
