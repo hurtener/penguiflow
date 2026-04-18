@@ -131,6 +131,8 @@ This example now includes both:
 - `policy_metric` for the main pass-oriented policy baseline
 - `fail_metric_demo` for intentionally mixed/failing cases during Playground UI review
 
+`policy_metric` is sync and `fail_metric_demo` is async; both are supported in `penguiflow eval evaluate --spec ...` and Playground Eval runs via `metric_spec`.
+
 The demo spec lives at `examples/planner_enterprise_agent_v2/evals/fail_metric_demo_v1/evaluate.spec.json`.
 
 ## Step 6 - Optional Playground review loop

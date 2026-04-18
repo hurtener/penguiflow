@@ -1359,7 +1359,7 @@ async def _evaluate_rows_mean(
         pred = run_output
         if isinstance(run_output, tuple) and len(run_output) == 2:
             pred, pred_trace = run_output
-        metric_raw = metric(gold, pred, gold, pred_name, pred_trace)
+        metric_raw = await _maybe_await(metric(gold, pred, gold, pred_name, pred_trace))
         score, _ = _as_score_payload(metric_raw)
         scores.append(score)
     if not scores:

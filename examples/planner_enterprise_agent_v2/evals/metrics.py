@@ -102,7 +102,7 @@ def policy_metric(
         {"id": "stays_within_demo_budget", "label": "Stays within demo budget"},
     ),
 )
-def fail_metric_demo(
+async def fail_metric_demo(
     gold: object,
     pred: object,
     trace: object | None = None,

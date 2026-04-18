@@ -346,3 +346,45 @@ async def test_evaluate_dataset_val_only_with_min_test_score_is_diagnostic(tmp_p
     assert result["test_score"] is None
     assert result["passed_threshold"] is None
     assert result["min_test_score"] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_evaluate_dataset_awaits_async_metric(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "dataset.jsonl"
+    rows = [
+        {
+            "example_id": "q1",
+            "split": "val",
+            "question": "Q1",
+            "answer": "A1",
+            "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
+        },
+        {
+            "example_id": "q2",
+            "split": "test",
+            "question": "Q2",
+            "answer": "A2",
+            "gold_trace": {"inputs": {"llm_context": {}, "tool_context": {}}},
+        },
+    ]
+    dataset_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    async def run_one(gold, patch_bundle=None):
+        del patch_bundle
+        return str(gold.get("answer"))
+
+    async def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
+        del trace, pred_name, pred_trace
+        return 1.0 if pred == gold.get("answer") else 0.0
+
+    result = await evaluate_dataset(
+        dataset_path=dataset_path,
+        output_dir=tmp_path / "out",
+        run_one=run_one,
+        metric=metric,
+        candidates=[],
+    )
+
+    assert result["mode"] == "baseline"
+    assert result["val_score"] == 1.0
+    assert result["test_score"] == 1.0

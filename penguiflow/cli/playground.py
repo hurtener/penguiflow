@@ -2705,6 +2705,8 @@ def create_playground_app(
                 "baseline",
                 pred_trace_payload,
             )
+            if inspect.isawaitable(raw_score):
+                raw_score = await raw_score
             score = 0.0
             feedback: str | None = None
             checks: dict[str, Any] | None = None

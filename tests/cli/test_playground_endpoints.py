@@ -1089,6 +1089,16 @@ class TestEvalRunEndpoint:
         )
 
     @staticmethod
+    def _write_eval_metric_async(tmp_path: Path) -> None:
+        metric_file = tmp_path / "eval_metric_async.py"
+        metric_file.write_text(
+            "async def score(gold, pred, trace=None, pred_name=None, pred_trace=None):\n"
+            "    del gold, pred, trace, pred_name, pred_trace\n"
+            "    return {'score': 0.9, 'feedback': 'async metric'}\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
     def _write_eval_metric_requiring_row_and_pred_trace(tmp_path: Path) -> None:
         metric_file = tmp_path / "eval_metric_shape.py"
         metric_file.write_text(
@@ -1177,6 +1187,34 @@ class TestEvalRunEndpoint:
         assert case["pred_session_id"].startswith("eval:")
         assert case["question"] == "what is policy"
         assert payload["passed_threshold"] is None
+
+    def test_eval_run_awaits_async_metric(self, tmp_path: Path) -> None:
+        self._write_eval_metric_async(tmp_path)
+        self._write_dataset(tmp_path, ["what is policy"])
+
+        store = InMemoryStateStore()
+        wrapper = MockAgentWrapper(
+            chat_result=ChatResult(
+                trace_id="pred-trace-1",
+                session_id="ignored-by-endpoint",
+                answer="policy answer",
+                metadata={"steps": 1},
+                pause=None,
+            )
+        )
+        app = create_playground_app(project_root=tmp_path, agent=wrapper, state_store=store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.post(
+            "/eval/run",
+            json={"dataset_path": "fixtures/dataset", "metric_spec": "eval_metric_async:score"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload["cases"]) == 1
+        assert payload["cases"][0]["score"] == 0.9
+        assert payload["cases"][0]["feedback"] == "async metric"
 
     def test_eval_run_rejects_test_only_dataset(self, tmp_path: Path) -> None:
         self._write_eval_metric(tmp_path)
