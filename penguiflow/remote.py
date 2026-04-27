@@ -8,7 +8,8 @@ import logging
 import time
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -31,6 +32,8 @@ class RemoteCallRequest:
     agent_card: Mapping[str, Any] | None = None
     metadata: Mapping[str, Any] | None = None
     timeout_s: float | None = None
+    context_id: str | None = None
+    task_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -57,6 +60,110 @@ class RemoteStreamEvent:
     result: Any | None = None
 
 
+class RemoteTaskState(str, Enum):
+    """Task lifecycle states exposed by task-oriented remote transports."""
+
+    UNSPECIFIED = "unspecified"
+    SUBMITTED = "submitted"
+    WORKING = "working"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    INPUT_REQUIRED = "input-required"
+    AUTH_REQUIRED = "auth-required"
+    REJECTED = "rejected"
+
+
+REMOTE_TERMINAL_TASK_STATES = frozenset(
+    {
+        RemoteTaskState.COMPLETED,
+        RemoteTaskState.FAILED,
+        RemoteTaskState.CANCELLED,
+        RemoteTaskState.REJECTED,
+    }
+)
+
+
+@dataclass(slots=True)
+class RemoteTaskStatus:
+    """Normalized status for a remote task."""
+
+    state: RemoteTaskState
+    message: str | None = None
+    timestamp: str | None = None
+    raw: Mapping[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class RemoteTaskSnapshot:
+    """Normalized task representation returned by task-oriented remote transports."""
+
+    task_id: str
+    context_id: str
+    status: RemoteTaskStatus
+    result: Any | None = None
+    artifacts: list[Any] | None = None
+    history: list[Any] | None = None
+    agent_url: str | None = None
+    meta: Mapping[str, Any] | None = None
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status.state in REMOTE_TERMINAL_TASK_STATES
+
+
+@dataclass(slots=True)
+class RemoteTaskEvent:
+    """Normalized event emitted by task subscriptions."""
+
+    kind: str
+    task: RemoteTaskSnapshot | None = None
+    status: RemoteTaskStatus | None = None
+    text: str | None = None
+    result: Any | None = None
+    done: bool = False
+    context_id: str | None = None
+    task_id: str | None = None
+    agent_url: str | None = None
+    meta: Mapping[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class RemoteTaskPage:
+    """Paginated task list response."""
+
+    tasks: list[RemoteTaskSnapshot]
+    next_page_token: str = ""
+    page_size: int = 0
+    total_size: int = 0
+
+
+@dataclass(slots=True)
+class RemotePushNotificationBinding:
+    """Normalized push notification config returned by remote transports."""
+
+    name: str | None
+    config: Mapping[str, Any]
+
+
+class RemoteTaskInputRequired(RuntimeError):
+    """Raised when a remote task needs user clarification before it can continue."""
+
+    def __init__(self, snapshot: RemoteTaskSnapshot) -> None:
+        detail = snapshot.status.message or "Remote agent requires more input."
+        super().__init__(detail)
+        self.snapshot = snapshot
+
+
+class RemoteTaskAuthRequired(RuntimeError):
+    """Raised when a remote task requires authorization before it can continue."""
+
+    def __init__(self, snapshot: RemoteTaskSnapshot) -> None:
+        detail = snapshot.status.message or "Remote agent requires authorization."
+        super().__init__(detail)
+        self.snapshot = snapshot
+
+
 class RemoteTransport(Protocol):
     """Protocol describing the minimal remote invocation surface."""
 
@@ -68,6 +175,77 @@ class RemoteTransport(Protocol):
 
     async def cancel(self, *, agent_url: str, task_id: str) -> None:
         """Cancel a remote task identified by ``task_id`` at ``agent_url``."""
+
+
+@runtime_checkable
+class SupportsRemoteTasks(Protocol):
+    """Optional task-oriented remote execution surface."""
+
+    async def send_task(self, request: RemoteCallRequest, *, blocking: bool = False) -> RemoteTaskSnapshot:
+        """Create or continue a remote task and return its current snapshot."""
+
+    async def get_task(
+        self,
+        *,
+        agent_url: str,
+        task_id: str,
+        history_length: int | None = None,
+    ) -> RemoteTaskSnapshot:
+        """Fetch a remote task snapshot."""
+
+    async def list_tasks(
+        self,
+        *,
+        agent_url: str,
+        context_id: str | None = None,
+        status: RemoteTaskState | str | None = None,
+        page_size: int = 100,
+        page_token: str | None = None,
+        history_length: int | None = None,
+        include_artifacts: bool = False,
+    ) -> RemoteTaskPage:
+        """List remote tasks, optionally filtered by context and status."""
+
+    def subscribe_task(self, *, agent_url: str, task_id: str) -> AsyncIterator[RemoteTaskEvent]:
+        """Subscribe to task updates."""
+
+    async def set_task_push_notification_config(
+        self,
+        *,
+        agent_url: str,
+        task_id: str,
+        config_id: str,
+        config: Mapping[str, Any],
+    ) -> RemotePushNotificationBinding:
+        """Set a push notification config for a remote task."""
+
+    async def get_task_push_notification_config(
+        self,
+        *,
+        agent_url: str,
+        task_id: str,
+        config_id: str,
+    ) -> RemotePushNotificationBinding:
+        """Fetch a push notification config for a remote task."""
+
+    async def list_task_push_notification_configs(
+        self,
+        *,
+        agent_url: str,
+        task_id: str,
+        page_size: int = 100,
+        page_token: str | None = None,
+    ) -> list[RemotePushNotificationBinding]:
+        """List push notification configs for a remote task."""
+
+    async def delete_task_push_notification_config(
+        self,
+        *,
+        agent_url: str,
+        task_id: str,
+        config_id: str,
+    ) -> None:
+        """Delete a push notification config for a remote task."""
 
 
 def _json_default(value: Any) -> Any:
@@ -101,6 +279,17 @@ def _text_bytes(text: str | None) -> int:
     if text is None:
         return 0
     return len(text.encode("utf-8"))
+
+
+def _string_meta(mapping: Mapping[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
 
 
 def _merge_remote_extra(
@@ -150,6 +339,9 @@ def RemoteNode(
         task_id: str | None,
         agent_url_override: str | None,
         base_extra: Mapping[str, Any],
+        router_session_id: str | None,
+        tenant_id: str | None,
+        user_id: str | None,
     ) -> tuple[asyncio.Task[None], asyncio.Event] | None:
         if task_id is None:
             return None
@@ -162,6 +354,12 @@ def RemoteNode(
                 context_id=context_id,
                 task_id=task_id,
                 agent_url=agent_ref,
+                router_session_id=router_session_id,
+                remote_skill=skill,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                last_remote_task_id=task_id,
+                metadata={"source": "remote_node"},
             )
             await runtime.save_remote_binding(binding)
 
@@ -263,6 +461,10 @@ def RemoteNode(
         if request_bytes is not None:
             base_extra["remote_request_bytes"] = request_bytes
 
+        router_session_id = _string_meta(message.meta, "session_id")
+        tenant_id = _string_meta(message.meta, "tenant_id", "tenant") or message.headers.tenant
+        user_id = _string_meta(message.meta, "user_id")
+
         request = RemoteCallRequest(
             message=message,
             skill=skill,
@@ -270,6 +472,8 @@ def RemoteNode(
             agent_card=agent_card,
             metadata=message.meta,
             timeout_s=node_policy.timeout_s,
+            context_id=_string_meta(message.meta, "remote_context_id", "context_id"),
+            task_id=_string_meta(message.meta, "remote_task_id"),
         )
 
         async def _ensure_binding(
@@ -299,6 +503,9 @@ def RemoteNode(
                 task_id=task_id,
                 agent_url_override=agent_url_override,
                 base_extra=base_extra,
+                router_session_id=router_session_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
             )
             if record is None:
                 return
@@ -324,7 +531,7 @@ def RemoteNode(
             async for event in transport.stream(request):
                 stream_events = stream_idx + 1
                 await _ensure_binding(
-                    context_id=event.context_id,
+                    context_id=event.context_id or remote_context_id or request.context_id,
                     task_id=event.task_id,
                     agent_url_override=event.agent_url,
                 )
@@ -408,7 +615,7 @@ def RemoteNode(
             else:
                 result = await transport.send(request)
                 await _ensure_binding(
-                    context_id=result.context_id,
+                    context_id=result.context_id or request.context_id,
                     task_id=result.task_id,
                     agent_url_override=result.agent_url,
                 )
@@ -478,9 +685,19 @@ def RemoteNode(
 
 
 __all__ = [
+    "REMOTE_TERMINAL_TASK_STATES",
     "RemoteCallRequest",
     "RemoteCallResult",
+    "RemotePushNotificationBinding",
     "RemoteStreamEvent",
+    "RemoteTaskAuthRequired",
+    "RemoteTaskEvent",
+    "RemoteTaskInputRequired",
+    "RemoteTaskPage",
+    "RemoteTaskSnapshot",
+    "RemoteTaskState",
+    "RemoteTaskStatus",
     "RemoteTransport",
     "RemoteNode",
+    "SupportsRemoteTasks",
 ]

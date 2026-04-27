@@ -44,6 +44,10 @@ def _clone_task(state: TaskState) -> TaskState:
     )
 
 
+def _clone_binding(binding: RemoteBinding) -> RemoteBinding:
+    return replace(binding, metadata=dict(binding.metadata or {}))
+
+
 def _clone_update(update: StateUpdate) -> StateUpdate:
     return update.model_copy(deep=True)
 
@@ -232,6 +236,7 @@ class InMemoryStateStore:
         self._event_seq = 0
 
         self._bindings: dict[tuple[str, str | None, str], RemoteBinding] = {}
+        self._conversation_bindings: dict[tuple[str, str, str], tuple[str, str | None, str]] = {}
         self._planner_state: dict[str, dict[str, Any]] = {}
         self._memory_state: dict[str, dict[str, Any]] = {}
 
@@ -281,8 +286,74 @@ class InMemoryStateStore:
         return [event for _, _, _, event in entries]
 
     async def save_remote_binding(self, binding: RemoteBinding) -> None:
+        primary_key = (binding.trace_id, binding.context_id, binding.task_id)
         async with self._lock:
-            self._bindings[(binding.trace_id, binding.context_id, binding.task_id)] = binding
+            previous = self._bindings.get(primary_key)
+            if previous is not None and previous.router_session_id is not None and previous.remote_skill is not None:
+                conversation_key = (previous.router_session_id, previous.agent_url, previous.remote_skill)
+                if self._conversation_bindings.get(conversation_key) == primary_key:
+                    self._conversation_bindings.pop(conversation_key, None)
+            self._bindings[primary_key] = _clone_binding(binding)
+            if binding.router_session_id is not None and binding.remote_skill is not None and not binding.is_terminal:
+                self._conversation_bindings[(binding.router_session_id, binding.agent_url, binding.remote_skill)] = (
+                    binding.trace_id,
+                    binding.context_id,
+                    binding.task_id,
+                )
+
+    async def find_binding(
+        self,
+        *,
+        router_session_id: str,
+        agent_url: str,
+        remote_skill: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> RemoteBinding | None:
+        async with self._lock:
+            primary_key = self._conversation_bindings.get((router_session_id, agent_url, remote_skill))
+            candidates: list[RemoteBinding] = []
+            if primary_key is not None:
+                indexed = self._bindings.get(primary_key)
+                if indexed is not None:
+                    candidates.append(indexed)
+            candidates.extend(
+                binding
+                for binding in self._bindings.values()
+                if binding.router_session_id == router_session_id
+                and binding.agent_url == agent_url
+                and binding.remote_skill == remote_skill
+                and not binding.is_terminal
+            )
+            for binding in reversed(candidates):
+                if (tenant_id is not None or binding.tenant_id is not None) and binding.tenant_id != tenant_id:
+                    continue
+                if (user_id is not None or binding.user_id is not None) and binding.user_id != user_id:
+                    continue
+                return _clone_binding(binding)
+            return None
+
+    async def list_bindings(self, *, router_session_id: str) -> Sequence[RemoteBinding]:
+        async with self._lock:
+            bindings = [
+                binding
+                for binding in self._bindings.values()
+                if binding.router_session_id == router_session_id
+            ]
+        return [_clone_binding(binding) for binding in bindings]
+
+    async def mark_binding_terminal(self, *, trace_id: str, context_id: str | None, task_id: str) -> None:
+        primary_key = (trace_id, context_id, task_id)
+        async with self._lock:
+            binding = self._bindings.get(primary_key)
+            if binding is None:
+                return
+            updated = replace(binding, is_terminal=True)
+            self._bindings[primary_key] = updated
+            if updated.router_session_id is not None and updated.remote_skill is not None:
+                conversation_key = (updated.router_session_id, updated.agent_url, updated.remote_skill)
+                if self._conversation_bindings.get(conversation_key) == primary_key:
+                    self._conversation_bindings.pop(conversation_key, None)
 
     # ---------------------------------------------------------------------
     # Optional - Planner pause/resume

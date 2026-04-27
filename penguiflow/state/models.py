@@ -56,6 +56,13 @@ class RemoteBinding:
     context_id: str | None
     task_id: str
     agent_url: str
+    router_session_id: str | None = None
+    remote_skill: str | None = None
+    tenant_id: str | None = None
+    user_id: str | None = None
+    last_remote_task_id: str | None = None
+    is_terminal: bool = False
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 class UpdateType(str, Enum):

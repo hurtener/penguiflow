@@ -52,6 +52,23 @@ class SupportsPlannerState(Protocol):
 
 
 @runtime_checkable
+class SupportsConversationBindings(Protocol):
+    async def find_binding(
+        self,
+        *,
+        router_session_id: str,
+        agent_url: str,
+        remote_skill: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> RemoteBinding | None: ...
+
+    async def list_bindings(self, *, router_session_id: str) -> Sequence[RemoteBinding]: ...
+
+    async def mark_binding_terminal(self, *, trace_id: str, context_id: str | None, task_id: str) -> None: ...
+
+
+@runtime_checkable
 class SupportsMemoryState(Protocol):
     async def save_memory_state(self, key: str, state: dict[str, Any]) -> None: ...
 
@@ -129,6 +146,7 @@ def require_capabilities(store: object, *, feature: str, methods: Sequence[str])
 __all__ = [
     "StateStore",
     "SupportsArtifacts",
+    "SupportsConversationBindings",
     "SupportsMemoryState",
     "SupportsPlannerEvents",
     "SupportsPlannerState",

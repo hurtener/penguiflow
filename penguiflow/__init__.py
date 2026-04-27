@@ -51,11 +51,21 @@ from .planner import (
 from .policies import DictRoutingPolicy, RoutingPolicy, RoutingRequest
 from .registry import ModelRegistry
 from .remote import (
+    REMOTE_TERMINAL_TASK_STATES,
     RemoteCallRequest,
     RemoteCallResult,
     RemoteNode,
+    RemotePushNotificationBinding,
     RemoteStreamEvent,
+    RemoteTaskAuthRequired,
+    RemoteTaskEvent,
+    RemoteTaskInputRequired,
+    RemoteTaskPage,
+    RemoteTaskSnapshot,
+    RemoteTaskState,
+    RemoteTaskStatus,
     RemoteTransport,
+    SupportsRemoteTasks,
 )
 from .sessions.models import (
     ContextPatch,
@@ -82,7 +92,7 @@ from .sessions.session import (
     TaskRuntime,
 )
 from .sessions.transport import SessionConnection, Transport
-from .state import RemoteBinding, StateStore, StoredEvent
+from .state import RemoteBinding, StateStore, StoredEvent, SupportsConversationBindings
 from .steering import SteeringCancelled, SteeringEvent, SteeringEventType, SteeringInbox
 from .streaming import (
     chunk_to_ws_json,
@@ -181,12 +191,23 @@ __all__ = [
     "Transport",
     "StateStore",
     "StoredEvent",
+    "SupportsConversationBindings",
     "RemoteBinding",
     "RemoteTransport",
     "RemoteCallRequest",
     "RemoteCallResult",
+    "RemotePushNotificationBinding",
     "RemoteStreamEvent",
+    "RemoteTaskAuthRequired",
+    "RemoteTaskEvent",
+    "RemoteTaskInputRequired",
+    "RemoteTaskPage",
+    "RemoteTaskSnapshot",
+    "RemoteTaskState",
+    "RemoteTaskStatus",
     "RemoteNode",
+    "REMOTE_TERMINAL_TASK_STATES",
+    "SupportsRemoteTasks",
     "ReactPlanner",
     "PlannerAction",
     "PlannerFinish",
@@ -206,4 +227,4 @@ __all__ = [
     "TrajectoryStep",
 ]
 
-__version__ = "3.6.3"
+__version__ = "3.7.0a5"

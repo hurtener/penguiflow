@@ -51,6 +51,146 @@ async def test_inmemory_statestore_remote_binding_upsert() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inmemory_statestore_conversation_binding_lookup_and_terminal() -> None:
+    store = InMemoryStateStore()
+    unscoped = RemoteBinding(trace_id="t0", context_id="ctx-0", task_id="task-0", agent_url="agent")
+    await store.save_remote_binding(unscoped)
+    assert await store.find_binding(router_session_id="session", agent_url="agent", remote_skill="echo") is None
+
+    binding = RemoteBinding(
+        trace_id="t1",
+        context_id="ctx-1",
+        task_id="task-1",
+        agent_url="agent",
+        router_session_id="session",
+        remote_skill="echo",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        last_remote_task_id="task-1",
+    )
+    await store.save_remote_binding(binding)
+
+    assert await store.find_binding(
+        router_session_id="session",
+        agent_url="agent",
+        remote_skill="echo",
+        tenant_id="tenant-a",
+        user_id=None,
+    ) is None
+    assert await store.find_binding(
+        router_session_id="session",
+        agent_url="agent",
+        remote_skill="echo",
+        tenant_id=None,
+        user_id="user-a",
+    ) is None
+    assert await store.find_binding(
+        router_session_id="other-session",
+        agent_url="agent",
+        remote_skill="echo",
+        tenant_id="tenant-a",
+        user_id="user-a",
+    ) is None
+    assert await store.find_binding(
+        router_session_id="session",
+        agent_url="agent",
+        remote_skill="echo",
+        tenant_id="tenant-b",
+        user_id="user-a",
+    ) is None
+    found = await store.find_binding(
+        router_session_id="session",
+        agent_url="agent",
+        remote_skill="echo",
+        tenant_id="tenant-a",
+        user_id="user-a",
+    )
+    assert found == binding
+
+    unscoped_latest = RemoteBinding(
+        trace_id="t2",
+        context_id="ctx-2",
+        task_id="task-2",
+        agent_url="agent",
+        router_session_id="session",
+        remote_skill="echo",
+        last_remote_task_id="task-2",
+    )
+    await store.save_remote_binding(unscoped_latest)
+    assert (
+        await store.find_binding(
+            router_session_id="session",
+            agent_url="agent",
+            remote_skill="echo",
+            tenant_id="tenant-a",
+            user_id="user-a",
+        )
+        == binding
+    )
+    assert await store.find_binding(
+        router_session_id="session",
+        agent_url="agent",
+        remote_skill="echo",
+        tenant_id="tenant-b",
+        user_id="user-a",
+    ) is None
+    assert (
+        await store.find_binding(router_session_id="session", agent_url="agent", remote_skill="echo")
+        == unscoped_latest
+    )
+
+    await store.mark_binding_terminal(trace_id="t1", context_id="ctx-1", task_id="task-1")
+    await store.mark_binding_terminal(trace_id="t2", context_id="ctx-2", task_id="task-2")
+    assert await store.find_binding(router_session_id="session", agent_url="agent", remote_skill="echo") is None
+
+
+@pytest.mark.asyncio
+async def test_inmemory_statestore_terminal_old_binding_preserves_latest_binding() -> None:
+    store = InMemoryStateStore()
+    first = RemoteBinding(
+        trace_id="t1",
+        context_id="ctx",
+        task_id="task-1",
+        agent_url="agent",
+        router_session_id="session",
+        remote_skill="echo",
+    )
+    second = RemoteBinding(
+        trace_id="t2",
+        context_id="ctx",
+        task_id="task-2",
+        agent_url="agent",
+        router_session_id="session",
+        remote_skill="echo",
+    )
+    await store.save_remote_binding(first)
+    await store.save_remote_binding(second)
+
+    await store.mark_binding_terminal(trace_id="t1", context_id="ctx", task_id="task-1")
+
+    found = await store.find_binding(router_session_id="session", agent_url="agent", remote_skill="echo")
+    assert found == second
+
+
+@pytest.mark.asyncio
+async def test_inmemory_statestore_saved_terminal_binding_is_not_active() -> None:
+    store = InMemoryStateStore()
+    binding = RemoteBinding(
+        trace_id="t1",
+        context_id="ctx",
+        task_id="task-1",
+        agent_url="agent",
+        router_session_id="session",
+        remote_skill="echo",
+        is_terminal=True,
+    )
+    await store.save_remote_binding(binding)
+
+    assert await store.find_binding(router_session_id="session", agent_url="agent", remote_skill="echo") is None
+    assert await store.list_bindings(router_session_id="session") == [binding]
+
+
+@pytest.mark.asyncio
 async def test_inmemory_statestore_planner_and_memory_state_roundtrip() -> None:
     store = InMemoryStateStore()
     await store.save_planner_state("token", {"a": 1})

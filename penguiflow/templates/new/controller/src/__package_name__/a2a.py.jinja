@@ -58,6 +58,20 @@ def _resolve_query(payload: Any) -> str:
     return str(payload)
 
 
+def _resolve_session_id(message: FlowMessage, payload: Any) -> str:
+    a2a_context_id = message.meta.get("a2a_context_id")
+    if a2a_context_id:
+        return str(a2a_context_id)
+    a2a_envelope = message.meta.get("a2a")
+    if isinstance(a2a_envelope, dict):
+        metadata = a2a_envelope.get("message", {}).get("metadata")
+        if isinstance(metadata, dict) and metadata.get("session_id"):
+            return str(metadata["session_id"])
+    if isinstance(payload, dict):
+        return str(payload.get("session_id") or payload.get("sessionId") or "a2a-session")
+    return "a2a-session"
+
+
 def _resolve_flow(orchestrator: Any):
     flow = getattr(orchestrator, "_flow", None)
     registry = getattr(orchestrator, "_registry", None)
@@ -70,10 +84,9 @@ def _resolve_flow(orchestrator: Any):
         if isinstance(payload, dict):
             tenant_id = payload.get("tenant_id") or payload.get("tenantId") or tenant_id
             user_id = payload.get("user_id") or payload.get("userId") or "a2a-user"
-            session_id = payload.get("session_id") or payload.get("sessionId") or "a2a-session"
         else:
             user_id = "a2a-user"
-            session_id = "a2a-session"
+        session_id = _resolve_session_id(message, payload)
         response = await orchestrator.execute(
             query=_resolve_query(payload),
             tenant_id=tenant_id,

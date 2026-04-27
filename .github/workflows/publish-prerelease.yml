@@ -1,0 +1,65 @@
+name: Publish Prerelease
+
+on:
+  push:
+    tags:
+      - "v*.*.*a*"
+      - "v*.*.*rc*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish-prerelease:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v2
+
+      - name: Verify prerelease tag matches package version
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import tomllib
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          if not re.fullmatch(r"v\d+\.\d+\.\d+(a\d+|rc\d+)", tag):
+              raise SystemExit(f"Tag {tag!r} is not an allowed prerelease tag")
+
+          expected = tag.removeprefix("v")
+          with open("pyproject.toml", "rb") as handle:
+              actual = tomllib.load(handle)["project"]["version"]
+          if actual != expected:
+              raise SystemExit(f"pyproject version {actual!r} does not match tag {tag!r}")
+          PY
+
+      - name: Create virtual environment
+        run: uv venv
+
+      - name: Install dependencies
+        run: uv pip install -e ".[dev]"
+
+      - name: Ruff
+        run: .venv/bin/ruff check .
+
+      - name: Mypy
+        run: .venv/bin/mypy
+
+      - name: Pytest
+        run: .venv/bin/pytest -q
+
+      - name: Build package
+        run: uv build
+
+      - name: Publish prerelease to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

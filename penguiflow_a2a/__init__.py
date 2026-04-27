@@ -4,6 +4,19 @@ from .bindings.http import create_a2a_http_app, create_a2a_http_router, install_
 from .config import A2AConfig, PayloadMode
 from .core import A2AService
 from .planner_tools import A2AAgentToolset
+from .registry import (
+    A2ARouterToolset,
+    AgentRegistry,
+    AgentRouteCandidate,
+    AgentRouteRequest,
+    RemoteAgentRecord,
+    RemoteSkillRecord,
+    RouterDelegationArgs,
+    RouterDelegationResult,
+    RouterPolicy,
+    fetch_agent_card,
+    load_agent_registry_config,
+)
 from .server import (
     A2AAgentCard,
     A2AMessagePayload,
@@ -29,6 +42,17 @@ __all__ = [
     "install_a2a_http",
     "A2AHttpTransport",
     "A2AAgentToolset",
+    "A2ARouterToolset",
+    "AgentRegistry",
+    "AgentRouteCandidate",
+    "AgentRouteRequest",
+    "RemoteAgentRecord",
+    "RemoteSkillRecord",
+    "RouterPolicy",
+    "RouterDelegationArgs",
+    "RouterDelegationResult",
+    "fetch_agent_card",
+    "load_agent_registry_config",
 ]
 
 try:

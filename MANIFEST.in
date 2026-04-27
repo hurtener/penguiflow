@@ -1,0 +1,9 @@
+global-exclude *.py[cod]
+global-exclude .DS_Store
+prune penguiflow/cli/playground_ui/node_modules
+prune penguiflow/cli/playground_ui/src
+prune penguiflow/templates/new/flow/.vscode
+prune penguiflow/templates/new/rag_server/.vscode
+exclude penguiflow/cli/playground_ui/package.json
+exclude penguiflow/cli/playground_ui/tsconfig.json
+exclude penguiflow/cli/playground_ui/vite.config.ts

@@ -118,16 +118,20 @@ def _message_payload(
     blocking: bool = False,
     history_length: int | None = None,
     message_id: str = "msg-1",
+    context_id: str | None = None,
 ) -> dict[str, Any]:
     config: dict[str, Any] = {"blocking": blocking}
     if history_length is not None:
         config["historyLength"] = history_length
+    message: dict[str, Any] = {
+        "messageId": message_id,
+        "role": "user",
+        "parts": [{"text": text}],
+    }
+    if context_id is not None:
+        message["contextId"] = context_id
     return {
-        "message": {
-            "messageId": message_id,
-            "role": "user",
-            "parts": [{"text": text}],
-        },
+        "message": message,
         "configuration": config,
     }
 
@@ -210,6 +214,43 @@ def test_send_message_history_length_semantics() -> None:
         )
         assert get_response.status_code == 200
         assert "history" not in get_response.json()
+
+
+def test_send_message_reuses_context_with_distinct_tasks() -> None:
+    with _build_client() as client:
+        first_response = client.post(
+            "/message:send",
+            json=_message_payload("first", blocking=True, message_id="msg-context-1"),
+            headers=_base_headers(),
+        )
+        assert first_response.status_code == 200
+        first_task = first_response.json()["task"]
+        context_id = first_task["contextId"]
+
+        second_response = client.post(
+            "/message:send",
+            json=_message_payload(
+                "second",
+                blocking=True,
+                message_id="msg-context-2",
+                context_id=context_id,
+            ),
+            headers=_base_headers(),
+        )
+        assert second_response.status_code == 200
+        second_task = second_response.json()["task"]
+
+        assert second_task["contextId"] == context_id
+        assert second_task["id"] != first_task["id"]
+
+        list_response = client.get(
+            "/tasks",
+            params={"contextId": context_id},
+            headers=_base_headers(),
+        )
+        assert list_response.status_code == 200
+        tasks = list_response.json()["tasks"]
+        assert {task["id"] for task in tasks} == {first_task["id"], second_task["id"]}
 
 
 def test_stream_message_emits_task_and_final_status() -> None:

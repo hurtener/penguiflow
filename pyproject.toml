@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "penguiflow"
-version = "3.6.3"
+version = "3.7.0a5"
 description = "Async-first orchestration library for multi-agent and data pipelines"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {file = "LICENSE"}
+license = "MIT"
 authors = [
     {name = "PenguiFlow Team"},
 ]
@@ -114,7 +114,21 @@ Homepage = "https://github.com/hurtener/penguiflow"
 [tool.setuptools]
 packages = { find = { include = ["penguiflow*", "penguiflow_a2a*", "examples*"] } }
 include-package-data = true
-exclude-package-data = { "penguiflow" = ["cli/playground_ui/src/*", "cli/playground_ui/src/**/*", "cli/playground_ui/package.json", "cli/playground_ui/tsconfig.json", "cli/playground_ui/vite.config.ts"] }
+
+[tool.setuptools.exclude-package-data]
+"penguiflow" = [
+    "**/.DS_Store",
+    "**/*.py[cod]",
+    "**/__pycache__/*",
+    "cli/playground_ui/node_modules/*",
+    "cli/playground_ui/node_modules/**/*",
+    "cli/playground_ui/package.json",
+    "cli/playground_ui/src/*",
+    "cli/playground_ui/src/**/*",
+    "cli/playground_ui/tsconfig.json",
+    "cli/playground_ui/vite.config.ts",
+    "templates/new/**/.vscode/*",
+]
 
 [tool.setuptools.package-data]
 "penguiflow" = [

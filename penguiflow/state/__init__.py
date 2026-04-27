@@ -24,6 +24,7 @@ from .models import (
 from .protocol import (
     StateStore,
     SupportsArtifacts,
+    SupportsConversationBindings,
     SupportsMemoryState,
     SupportsPlannerEvents,
     SupportsPlannerState,
@@ -47,6 +48,7 @@ __all__ = [
     "TaskStatus",
     "TaskType",
     "SupportsArtifacts",
+    "SupportsConversationBindings",
     "SupportsMemoryState",
     "SupportsPlannerEvents",
     "SupportsPlannerState",

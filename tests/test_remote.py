@@ -50,6 +50,21 @@ class UnaryTransport(RemoteTransport):
         self.cancelled.append((agent_url, task_id))
 
 
+class UnaryTaskOnlyTransport(RemoteTransport):
+    def __init__(self) -> None:
+        self.sent: list[RemoteCallRequest] = []
+
+    async def send(self, request: RemoteCallRequest) -> RemoteCallResult:
+        self.sent.append(request)
+        return RemoteCallResult(result={"answer": 42}, task_id="task-send", agent_url=request.agent_url)
+
+    async def stream(self, request: RemoteCallRequest):  # pragma: no cover - unary path
+        raise AssertionError("stream() should not be called in unary tests")
+
+    async def cancel(self, *, agent_url: str, task_id: str) -> None:
+        return None
+
+
 class StreamingTransport(RemoteTransport):
     def __init__(self) -> None:
         self.requests: list[RemoteCallRequest] = []
@@ -152,6 +167,7 @@ async def test_remote_node_unary_call_records_binding() -> None:
     flow.run()
 
     message = Message(payload={"query": "penguins"}, headers=Headers(tenant="acme"))
+    message.meta.update({"session_id": "router-session", "user_id": "user-1"})
 
     try:
         await flow.emit(message)
@@ -170,8 +186,41 @@ async def test_remote_node_unary_call_records_binding() -> None:
             context_id="ctx-send",
             task_id="task-send",
             agent_url="https://agent.example",
+            router_session_id="router-session",
+            remote_skill="SearchAgent.find",
+            tenant_id="acme",
+            user_id="user-1",
+            last_remote_task_id="task-send",
+            metadata={"source": "remote_node"},
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_remote_node_persists_explicit_context_when_result_omits_context() -> None:
+    store = RecordingStateStore()
+    transport = UnaryTaskOnlyTransport()
+    node = RemoteNode(
+        transport=transport,
+        skill="SearchAgent.find",
+        agent_url="https://agent.example",
+        name="remote-search",
+    )
+    flow = create(node.to(), state_store=store)
+    flow.run()
+
+    message = Message(payload={"query": "penguins"}, headers=Headers(tenant="acme"))
+    message.meta.update({"remote_context_id": "ctx-explicit", "session_id": "router-session"})
+
+    try:
+        await flow.emit(message)
+        result = await flow.fetch()
+    finally:
+        await flow.stop()
+
+    assert result == {"answer": 42}
+    assert transport.sent[0].context_id == "ctx-explicit"
+    assert store.bindings[0].context_id == "ctx-explicit"
 
 
 @pytest.mark.asyncio
