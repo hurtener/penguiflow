@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -415,6 +416,59 @@ class TestProviderFactory:
             assert provider.provider_name == "databricks"
             call_kwargs = mock_openai.AsyncOpenAI.call_args[1]
             assert call_kwargs["api_key"] == "factory-api-key"
+
+    def test_create_databricks_provider_does_not_override_token_provider(self) -> None:
+        """Test factory api_key does not shadow explicit dynamic Databricks auth."""
+        mock_openai = MagicMock()
+        mock_client = MagicMock()
+        mock_openai.AsyncOpenAI.return_value = mock_client
+
+        with patch.dict(sys.modules, {"openai": mock_openai}):
+            from penguiflow.llm.providers import create_provider
+
+            provider = create_provider(
+                "databricks/databricks-meta-llama-3-1-70b-instruct",
+                api_key="static-key-that-should-not-be-used",
+                host="https://my-workspace.cloud.databricks.com/serving-endpoints",
+                token_provider=lambda: "dynamic-token",
+            )
+
+            assert provider.provider_name == "databricks"
+            call_kwargs = mock_openai.AsyncOpenAI.call_args[1]
+            assert call_kwargs["api_key"] != "static-key-that-should-not-be-used"
+            assert asyncio.run(call_kwargs["api_key"]()) == "dynamic-token"
+
+    def test_create_databricks_provider_does_not_override_service_principal(self) -> None:
+        """Test factory api_key does not shadow explicit service-principal auth."""
+        mock_openai = MagicMock()
+        mock_client = MagicMock()
+        mock_openai.AsyncOpenAI.return_value = mock_client
+
+        class FakeConfig:
+            def __init__(self, **_: Any) -> None:
+                pass
+
+            def authenticate(self) -> dict[str, str]:
+                return {"Authorization": "Bearer service-principal-token"}
+
+        with (
+            patch.dict(sys.modules, {"openai": mock_openai}),
+            patch("databricks.sdk.config.Config", FakeConfig),
+        ):
+            from penguiflow.llm.providers import create_provider
+
+            provider = create_provider(
+                "databricks/databricks-meta-llama-3-1-70b-instruct",
+                api_key="static-key-that-should-not-be-used",
+                host="https://my-workspace.cloud.databricks.com/serving-endpoints",
+                client_id="client-id",
+                client_secret="client-secret",
+            )
+
+            assert provider.provider_name == "databricks"
+            call_kwargs = mock_openai.AsyncOpenAI.call_args[1]
+            assert call_kwargs["api_key"] != "static-key-that-should-not-be-used"
+            assert asyncio.run(call_kwargs["api_key"]()) == "service-principal-token"
 
     def test_create_provider_bedrock_prefix_and_heuristic(self) -> None:
         from penguiflow.llm.providers import create_provider
