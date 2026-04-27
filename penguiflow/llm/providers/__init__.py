@@ -9,6 +9,16 @@ from typing import Any
 
 from .base import OpenAICompatibleProvider, Provider
 
+_DATABRICKS_AUTH_KWARGS = frozenset(
+    {
+        "token",
+        "api_key",
+        "token_provider",
+        "client_id",
+        "client_secret",
+    }
+)
+
 __all__ = [
     "Provider",
     "OpenAICompatibleProvider",
@@ -66,8 +76,12 @@ def create_provider(
 
     # Databricks
     if model.startswith("databricks/"):
+        if api_key is not None and not any(key in kwargs for key in _DATABRICKS_AUTH_KWARGS):
+            kwargs["api_key"] = api_key
         return DatabricksProvider(model.removeprefix("databricks/"), **kwargs)
     if model.startswith("databricks-"):
+        if api_key is not None and not any(key in kwargs for key in _DATABRICKS_AUTH_KWARGS):
+            kwargs["api_key"] = api_key
         return DatabricksProvider(model, **kwargs)
 
     # Bedrock

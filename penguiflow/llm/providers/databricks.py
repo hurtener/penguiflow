@@ -16,9 +16,11 @@ Databricks SDK: https://github.com/databricks/databricks-sdk-py (v0.77.0+)
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import re
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -49,6 +51,9 @@ from .base import OpenAICompatibleProvider
 
 if TYPE_CHECKING:
     from ..types import CancelToken, StreamCallback
+
+DatabricksTokenProvider = Callable[[], str | Awaitable[str]]
+DatabricksAuthMode = str
 
 
 class DatabricksProvider(OpenAICompatibleProvider):
@@ -116,6 +121,12 @@ class DatabricksProvider(OpenAICompatibleProvider):
         *,
         host: str | None = None,
         token: str | None = None,
+        api_key: str | None = None,
+        token_provider: DatabricksTokenProvider | None = None,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        oauth_scopes: str | None = None,
+        authorization_details: str | None = None,
         profile: ModelProfile | None = None,
         timeout: float = 360.0,
     ):
@@ -127,6 +138,12 @@ class DatabricksProvider(OpenAICompatibleProvider):
             host: Databricks workspace host (uses DATABRICKS_HOST or DATABRICKS_API_BASE if not provided).
             token: Databricks access token (uses DATABRICKS_TOKEN or DATABRICKS_API_KEY if not provided).
                    OAuth tokens are recommended for production use.
+            api_key: Alias for token, for consistency with other providers.
+            token_provider: Callable that returns a fresh Databricks bearer token for each request.
+            client_id: Databricks service principal client ID (uses DATABRICKS_CLIENT_ID if not provided).
+            client_secret: Databricks service principal OAuth secret (uses DATABRICKS_CLIENT_SECRET if not provided).
+            oauth_scopes: OAuth scopes for service principal auth. Defaults to Databricks SDK behavior.
+            authorization_details: Optional OAuth authorization details for serving endpoints that require them.
             profile: Model profile override.
             timeout: Default timeout in seconds.
         """
@@ -147,17 +164,38 @@ class DatabricksProvider(OpenAICompatibleProvider):
         self._timeout = timeout
 
         host = host or os.environ.get("DATABRICKS_HOST") or os.environ.get("DATABRICKS_API_BASE")
-        token = token or os.environ.get("DATABRICKS_TOKEN") or os.environ.get("DATABRICKS_API_KEY")
+        static_token = token or api_key
+        client_id = client_id or os.environ.get("DATABRICKS_CLIENT_ID")
+        client_secret = client_secret or os.environ.get("DATABRICKS_CLIENT_SECRET")
+        oauth_scopes = oauth_scopes or os.environ.get("DATABRICKS_OAUTH_SCOPES") or os.environ.get("DATABRICKS_SCOPES")
+        authorization_details = authorization_details or os.environ.get("DATABRICKS_AUTHORIZATION_DETAILS")
 
-        if not host or not token:
+        if not host or not self._has_auth_config(static_token, token_provider, client_id, client_secret):
             raise ValueError(
-                "Databricks host and token required. Set DATABRICKS_HOST/DATABRICKS_TOKEN "
-                "or DATABRICKS_API_BASE/DATABRICKS_API_KEY environment variables, "
-                "or pass host/token explicitly."
+                "Databricks host and auth required. Set DATABRICKS_HOST or DATABRICKS_API_BASE, "
+                "plus one of DATABRICKS_TOKEN/DATABRICKS_API_KEY or "
+                "DATABRICKS_CLIENT_ID/DATABRICKS_CLIENT_SECRET, or pass host and token/api_key, "
+                "token_provider, or client_id/client_secret explicitly."
             )
 
         # Normalize host from either direct host or API base alias.
         host = self._normalize_host_from_host_or_api_base(host)
+        self._host = host
+        self._workspace_url = f"https://{host}"
+        self._static_token = static_token
+        self._token_provider = token_provider
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._oauth_scopes = oauth_scopes
+        self._authorization_details = authorization_details
+        self._databricks_config: Any | None = None
+        self._auth_mode: DatabricksAuthMode
+        if token_provider is not None:
+            self._auth_mode = "token_provider"
+        elif client_id and client_secret:
+            self._auth_mode = "service_principal"
+        else:
+            self._auth_mode = "env_token"
 
         # Databricks native API endpoint.
         #
@@ -167,8 +205,14 @@ class DatabricksProvider(OpenAICompatibleProvider):
         # Format: https://{host}/serving-endpoints/{endpoint}/invocations
         base_url = f"https://{host}/serving-endpoints/{self._endpoint}/"
 
+        api_key_arg: str | DatabricksTokenProvider
+        if static_token is not None:
+            api_key_arg = static_token
+        else:
+            api_key_arg = self._resolve_auth_token
+
         self._client = AsyncOpenAI(
-            api_key=token,
+            api_key=api_key_arg,
             base_url=base_url,
             timeout=timeout,
         )
@@ -184,6 +228,77 @@ class DatabricksProvider(OpenAICompatibleProvider):
     @property
     def model(self) -> str:
         return self._model
+
+    @staticmethod
+    def _has_auth_config(
+        static_token: str | None,
+        token_provider: DatabricksTokenProvider | None,
+        client_id: str | None,
+        client_secret: str | None,
+    ) -> bool:
+        """Return whether enough auth material exists now or can be resolved later."""
+        return bool(
+            static_token
+            or token_provider
+            or os.environ.get("DATABRICKS_TOKEN")
+            or os.environ.get("DATABRICKS_API_KEY")
+            or (client_id and client_secret)
+        )
+
+    async def _resolve_auth_token(self) -> str:
+        """Resolve a fresh bearer token for long-lived Databricks provider instances."""
+        if self._auth_mode == "token_provider":
+            if self._token_provider is None:
+                raise ValueError("Databricks token_provider auth mode is missing a token_provider")
+            token = self._token_provider()
+            if inspect.isawaitable(token):
+                token = await token
+            if not isinstance(token, str) or not token:
+                raise ValueError("Databricks token_provider returned an empty token")
+            return token
+
+        if self._auth_mode == "service_principal":
+            return await self._resolve_service_principal_token()
+
+        env_token = os.environ.get("DATABRICKS_TOKEN") or os.environ.get("DATABRICKS_API_KEY")
+        if env_token:
+            return env_token
+
+        raise ValueError(
+            "Databricks auth token unavailable. Set DATABRICKS_TOKEN/DATABRICKS_API_KEY "
+            "or DATABRICKS_CLIENT_ID/DATABRICKS_CLIENT_SECRET."
+        )
+
+    async def _resolve_service_principal_token(self) -> str:
+        """Use Databricks SDK unified auth to obtain or refresh a service-principal OAuth token."""
+        if self._databricks_config is None:
+            try:
+                from databricks.sdk.config import Config
+            except ImportError as e:
+                raise ImportError(
+                    "Databricks service-principal auth requires databricks-sdk. "
+                    "Install with: pip install databricks-sdk>=0.77.0"
+                ) from e
+
+            config_kwargs: dict[str, Any] = {
+                "host": self._workspace_url,
+                "client_id": self._client_id,
+                "client_secret": self._client_secret,
+            }
+            if self._oauth_scopes:
+                config_kwargs["scopes"] = self._oauth_scopes
+            if self._authorization_details:
+                config_kwargs["authorization_details"] = self._authorization_details
+            self._databricks_config = Config(**config_kwargs)
+
+        headers = await asyncio.to_thread(self._databricks_config.authenticate)
+        authorization = headers.get("Authorization", "")
+        if not authorization.lower().startswith("bearer "):
+            raise ValueError("Databricks SDK did not return a bearer Authorization header")
+        token = authorization[len("Bearer ") :].strip()
+        if not token:
+            raise ValueError("Databricks SDK returned an empty bearer token")
+        return token
 
     def validate_request(self, request: LLMRequest) -> None:
         """Validate request against Databricks limits."""
