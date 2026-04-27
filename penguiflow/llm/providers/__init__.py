@@ -66,8 +66,12 @@ def create_provider(
 
     # Databricks
     if model.startswith("databricks/"):
+        if api_key is not None and "token" not in kwargs and "api_key" not in kwargs:
+            kwargs["api_key"] = api_key
         return DatabricksProvider(model.removeprefix("databricks/"), **kwargs)
     if model.startswith("databricks-"):
+        if api_key is not None and "token" not in kwargs and "api_key" not in kwargs:
+            kwargs["api_key"] = api_key
         return DatabricksProvider(model, **kwargs)
 
     # Bedrock

@@ -397,6 +397,25 @@ class TestProviderFactory:
             assert provider_from_slash.provider_name == "databricks"
             assert provider_from_dash.provider_name == "databricks"
 
+    def test_create_databricks_provider_forwards_api_key_alias(self) -> None:
+        """Test factory forwards api_key to Databricks provider as PAT auth."""
+        mock_openai = MagicMock()
+        mock_client = MagicMock()
+        mock_openai.AsyncOpenAI.return_value = mock_client
+
+        with patch.dict(sys.modules, {"openai": mock_openai}):
+            from penguiflow.llm.providers import create_provider
+
+            provider = create_provider(
+                "databricks/databricks-meta-llama-3-1-70b-instruct",
+                api_key="factory-api-key",
+                host="https://my-workspace.cloud.databricks.com/serving-endpoints",
+            )
+
+            assert provider.provider_name == "databricks"
+            call_kwargs = mock_openai.AsyncOpenAI.call_args[1]
+            assert call_kwargs["api_key"] == "factory-api-key"
+
     def test_create_provider_bedrock_prefix_and_heuristic(self) -> None:
         from penguiflow.llm.providers import create_provider
 

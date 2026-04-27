@@ -59,6 +59,20 @@ class TestDatabricksProviderInit:
             assert call_kwargs["api_key"] == "dapi-token-123"
             assert "my-workspace.cloud.databricks.com" in call_kwargs["base_url"]
 
+    def test_init_with_api_key_alias(self, mock_openai_sdk: MagicMock) -> None:
+        """Test initialization with explicit api_key alias."""
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.databricks import DatabricksProvider
+
+            DatabricksProvider(
+                "databricks-claude-sonnet-4-5",
+                host="my-workspace.cloud.databricks.com",
+                api_key="dapi-api-key-123",
+            )
+
+            call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
+            assert call_kwargs["api_key"] == "dapi-api-key-123"
+
     def test_init_strips_databricks_prefix(self, mock_openai_sdk: MagicMock) -> None:
         """Test that databricks/ prefix is stripped from model name."""
         with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
@@ -128,8 +142,11 @@ class TestDatabricksProviderInit:
                 DatabricksProvider("databricks-claude-sonnet-4-5")
 
                 call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
-                assert call_kwargs["api_key"] == "env-token"
+                assert asyncio.run(call_kwargs["api_key"]()) == "env-token"
                 assert "env-workspace.databricks.com" in call_kwargs["base_url"]
+
+                os.environ["DATABRICKS_TOKEN"] = "rotated-env-token"
+                assert asyncio.run(call_kwargs["api_key"]()) == "rotated-env-token"
 
     def test_init_uses_api_base_api_key_aliases(self, mock_openai_sdk: MagicMock) -> None:
         """Test API_BASE/API_KEY aliases are accepted for host/token."""
@@ -147,10 +164,158 @@ class TestDatabricksProviderInit:
                 DatabricksProvider("databricks-claude-sonnet-4-5")
 
                 call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
-                assert call_kwargs["api_key"] == "env-api-key"
+                assert asyncio.run(call_kwargs["api_key"]()) == "env-api-key"
                 assert call_kwargs["base_url"] == (
                     "https://env-workspace.databricks.com/serving-endpoints/databricks-claude-sonnet-4-5/"
                 )
+
+    def test_init_with_token_provider(self, mock_openai_sdk: MagicMock) -> None:
+        """Test custom token_provider is resolved for each request."""
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.databricks import DatabricksProvider
+
+            tokens = iter(["provider-token-1", "provider-token-2"])
+
+            DatabricksProvider(
+                "databricks-claude-sonnet-4-5",
+                host="workspace.databricks.com",
+                token_provider=lambda: next(tokens),
+            )
+
+            call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
+            assert asyncio.run(call_kwargs["api_key"]()) == "provider-token-1"
+            assert asyncio.run(call_kwargs["api_key"]()) == "provider-token-2"
+
+    def test_init_with_async_token_provider(self, mock_openai_sdk: MagicMock) -> None:
+        """Test async custom token_provider is supported by OpenAI SDK auth callback."""
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.databricks import DatabricksProvider
+
+            async def token_provider() -> str:
+                return "async-provider-token"
+
+            DatabricksProvider(
+                "databricks-claude-sonnet-4-5",
+                host="workspace.databricks.com",
+                token_provider=token_provider,
+            )
+
+            call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
+            assert asyncio.run(call_kwargs["api_key"]()) == "async-provider-token"
+
+    def test_init_with_service_principal_auth(self, mock_openai_sdk: MagicMock) -> None:
+        """Test client_id/client_secret auth uses Databricks SDK token refresh."""
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.databricks import DatabricksProvider
+
+            instances: list[Any] = []
+
+            class FakeConfig:
+                def __init__(self, **kwargs: Any) -> None:
+                    self.kwargs = kwargs
+                    self.count = 0
+                    instances.append(self)
+
+                def authenticate(self) -> dict[str, str]:
+                    self.count += 1
+                    return {"Authorization": f"Bearer oauth-token-{self.count}"}
+
+            with patch("databricks.sdk.config.Config", FakeConfig):
+                DatabricksProvider(
+                    "databricks-claude-sonnet-4-5",
+                    host="https://workspace.databricks.com/serving-endpoints",
+                    client_id="client-id",
+                    client_secret="client-secret",
+                    oauth_scopes="all-apis",
+                    authorization_details='[{"type":"workspace_permission"}]',
+                )
+
+                call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
+                assert asyncio.run(call_kwargs["api_key"]()) == "oauth-token-1"
+                assert asyncio.run(call_kwargs["api_key"]()) == "oauth-token-2"
+
+            assert len(instances) == 1
+            assert instances[0].kwargs == {
+                "host": "https://workspace.databricks.com",
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "scopes": "all-apis",
+                "authorization_details": '[{"type":"workspace_permission"}]',
+            }
+
+    def test_init_with_service_principal_env_auth(self, mock_openai_sdk: MagicMock) -> None:
+        """Test service principal auth can be configured from deployment env vars."""
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.databricks import DatabricksProvider
+
+            instances: list[Any] = []
+
+            class FakeConfig:
+                def __init__(self, **kwargs: Any) -> None:
+                    self.kwargs = kwargs
+                    instances.append(self)
+
+                def authenticate(self) -> dict[str, str]:
+                    return {"Authorization": "Bearer env-oauth-token"}
+
+            with (
+                patch("databricks.sdk.config.Config", FakeConfig),
+                patch.dict(
+                    os.environ,
+                    {
+                        "DATABRICKS_API_BASE": "https://env-workspace.databricks.com/serving-endpoints",
+                        "DATABRICKS_CLIENT_ID": "env-client-id",
+                        "DATABRICKS_CLIENT_SECRET": "env-client-secret",
+                        "DATABRICKS_OAUTH_SCOPES": "all-apis",
+                        "DATABRICKS_AUTHORIZATION_DETAILS": '[{"type":"workspace_permission"}]',
+                    },
+                    clear=True,
+                ),
+            ):
+                DatabricksProvider("databricks-claude-sonnet-4-5")
+
+                call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
+                assert asyncio.run(call_kwargs["api_key"]()) == "env-oauth-token"
+
+            assert instances[0].kwargs == {
+                "host": "https://env-workspace.databricks.com",
+                "client_id": "env-client-id",
+                "client_secret": "env-client-secret",
+                "scopes": "all-apis",
+                "authorization_details": '[{"type":"workspace_permission"}]',
+            }
+
+    def test_service_principal_auth_not_shadowed_by_env_pat(self, mock_openai_sdk: MagicMock) -> None:
+        """Test service principal config wins over unrelated env PAT rotation."""
+        with patch.dict("sys.modules", {"openai": mock_openai_sdk}):
+            from penguiflow.llm.providers.databricks import DatabricksProvider
+
+            class FakeConfig:
+                def authenticate(self) -> dict[str, str]:
+                    return {"Authorization": "Bearer service-principal-token"}
+
+                def __init__(self, **_: Any) -> None:
+                    pass
+
+            with (
+                patch("databricks.sdk.config.Config", FakeConfig),
+                patch.dict(
+                    os.environ,
+                    {
+                        "DATABRICKS_API_KEY": "unrelated-env-pat",
+                    },
+                    clear=True,
+                ),
+            ):
+                DatabricksProvider(
+                    "databricks-claude-sonnet-4-5",
+                    host="workspace.databricks.com",
+                    client_id="client-id",
+                    client_secret="client-secret",
+                )
+
+                call_kwargs = mock_openai_sdk.AsyncOpenAI.call_args[1]
+                assert asyncio.run(call_kwargs["api_key"]()) == "service-principal-token"
 
     def test_init_api_base_with_endpoint_suffix_is_normalized(self, mock_openai_sdk: MagicMock) -> None:
         """Test API_BASE including endpoint path still resolves correctly."""
@@ -182,7 +347,7 @@ class TestDatabricksProviderInit:
                 os.environ.pop("DATABRICKS_HOST", None)
                 os.environ.pop("DATABRICKS_TOKEN", None)
 
-                with pytest.raises(ValueError, match="Databricks host and token required"):
+                with pytest.raises(ValueError, match="Databricks host and auth required"):
                     DatabricksProvider("databricks-claude-sonnet-4-5")
 
     def test_init_with_custom_profile(self, mock_openai_sdk: MagicMock) -> None:
