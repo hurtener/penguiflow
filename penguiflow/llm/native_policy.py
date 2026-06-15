@@ -12,6 +12,28 @@ from typing import Literal
 StructuredMode = Literal["json_schema", "json_object", "text"]
 
 
+def _is_structured_mode(mode: StructuredMode) -> bool:
+    return mode in {"json_schema", "json_object"}
+
+
+def _databricks_supports_structured_reasoning(model: str) -> bool:
+    """Whether Databricks model family supports structured output + native reasoning.
+
+    Why: Databricks-backed Claude and Gemini 2.5 reject requests that effectively
+    combine structured output with forced tool use and thinking/reasoning.
+    Keep this family logic centralized to avoid scattering model checks.
+    """
+    model_norm = model.strip().lower()
+    if model_norm.startswith("databricks/"):
+        model_norm = model_norm.removeprefix("databricks/")
+
+    incompatible_prefixes = (
+        "databricks-claude-",
+        "databricks-gemini-2-5-",
+    )
+    return not model_norm.startswith(incompatible_prefixes)
+
+
 @dataclass(frozen=True)
 class NativeRequestPolicy:
     """Resolved policy for a single request attempt."""
@@ -100,8 +122,11 @@ def resolve_policy(
 
     inject_reasoning_effort = use_native_reasoning
     emit_reasoning_callbacks = True
-    is_structured = requested_mode in {"json_schema", "json_object"}
+    is_structured = _is_structured_mode(requested_mode)
     if provider_name == "nim" and is_structured and structured_reasoning_fallback_off:
+        inject_reasoning_effort = False
+        emit_reasoning_callbacks = False
+    if provider_name == "databricks" and is_structured and not _databricks_supports_structured_reasoning(model):
         inject_reasoning_effort = False
         emit_reasoning_callbacks = False
 
