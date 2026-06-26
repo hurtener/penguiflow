@@ -99,3 +99,76 @@ uv run pytest tests/ -k "rich_output or artifact" -q
 
 uv run ruff check . && uv run mypy
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-06-26
+
+### Summary of Changes
+- `penguiflow/rich_output/nodes.py` — `_process_component_payload`:
+  - Hoisted the `delivery` read into a single local computed once before the register/emit blocks:
+    `delivery = getattr(getattr(ctx, "_planner", None), "_ui_component_delivery", "inline")`.
+  - Reused that local for the `_register_component_payload(..., delivery=delivery)` call (previously the value was
+    inlined directly into the call site).
+  - Initialised `record = None` before the `if registry is not None:` block so `record` is always bound for the
+    emit guard (it was only assigned inside that branch before).
+  - Changed the emit guard from `if emit_visible:` to `if emit_visible and delivery in {"inline", "both"}:`.
+  - In `both` mode, when `record` exists with a truthy `record.artifact_id`, copy-on-write threads the store id into
+    `meta` (`meta = {**meta, "artifact_id": record.artifact_id}`) before calling `_emit_component_artifact`.
+- `_emit_component_artifact` left untouched (signature unchanged); it already forwards `meta=dict(meta)` to
+  `ctx.emit_artifact`, so the threaded `artifact_id` flows into the inline `artifact_chunk` meta with no signature change.
+
+### Key Considerations
+- The diff matches the phase's "Required Code" block essentially verbatim. The only structural addition relative to
+  the prior code was initialising `record = None` before the registry branch — the phase's required code implies this
+  (it references `record` in the emit guard) but the pre-Phase-003 code only declared `record` inside the
+  `if registry is not None:` branch. Without the `record = None` init, the `record is not None` check in the emit
+  guard would raise `NameError` whenever `registry is None` (the direct/test invocation path). mypy also requires it.
+- Copy-on-write `meta` (`{**meta, ...}`) is used rather than mutating in place, per the phase note, so the dict passed
+  to `_register_component_payload` (and any other reference) is not retroactively mutated; only the inline emit path
+  sees the threaded id. Register runs first, so this ordering is safe.
+- The store-write (and therefore `record.artifact_id` assignment) only happens for `delivery in {"both", "artifact"}`
+  inside `_register_component_payload` (Phase 002). In `both` the assignment has already occurred by the time the emit
+  guard runs, so `record.artifact_id` is populated. The `record.artifact_id` truthiness guard also protects against a
+  store that returns a falsy/None id.
+
+### Assumptions
+- `record.artifact_id` is set synchronously by the time `_register_component_payload` returns in `both` mode (true per
+  Phase 002, which assigns `record.artifact_id = ref.id` before returning).
+- The `registry is None` path (direct/test invocation without `_planner`) is expected to fall through to `delivery ==
+  "inline"` and still emit the inline chunk for `emit_visible=True`. With `delivery` defaulting to `"inline"` this holds
+  and the new guard (`delivery in {"inline", "both"}`) does not change that path's behavior.
+- No existing test currently exercises the `both`/`artifact` UI-component delivery modes (grep of `tests/` found only an
+  unrelated `test_push_delivery_*` in `tests/a2a/`). The default `inline` path is what the existing suite covers, and it
+  passes unchanged. End-to-end assertions for the new exit criteria are presumed to be added/validated downstream
+  (verifier or a later phase); this phase's tasks are strictly the code change.
+
+### Deviations from Plan
+None. The implementation follows the phase's Required Code exactly. The `record = None` initialisation is implied by
+that block (it references `record` in the emit guard) and is required for correctness/typing; not treated as a
+deviation.
+
+### Potential Risks & Reviewer Attention Points
+- The single behavioral surface change for the default (`inline`) path is that the emit guard now also evaluates
+  `delivery in {"inline", "both"}`. Since `delivery` defaults to `"inline"`, default behavior is preserved. Verified by
+  the full `rich_output`/`artifact` test slice passing.
+- `artifact` mode now suppresses the inline chunk (guard excludes `"artifact"`). There is intentionally NO mid-stream
+  raise and NO inline fallback for `artifact` mode (decision 6) — confirm the reviewer agrees this silent suppression is
+  the intended contract.
+- Dedup is keyed strictly on the opaque store `artifact_id` (decision 7), never on `id`/`component_id`. The inline
+  chunk's `meta["artifact_id"]` is sourced from the same `record.artifact_id` that Phase 002 copies from `ref.id` and
+  that the `artifact_stored` event carries in `extra["artifact_id"]`, so the two channels share one id in `both` mode.
+- AG-UI adapter (`agui_adapter/penguiflow.py`, maps `artifact_chunk`) is unaffected: `inline`/`both` still emit the
+  chunk; only `artifact` suppresses it, which is the intended new mode.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/rich_output/nodes.py`
+
+### Verification Results
+- `uv run pytest tests/ -k "rich_output or artifact" -q` — passed (95 tests, 0 failures).
+- `uv run ruff check .` — All checks passed.
+- `uv run mypy` — Success: no issues found in 228 source files (only a pre-existing informational `annotation-unchecked`
+  note in `penguiflow_a2a/bindings/http.py`, unrelated to this change).

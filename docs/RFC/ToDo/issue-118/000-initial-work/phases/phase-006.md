@@ -164,3 +164,113 @@ uv run pytest tests/ -k "rich_output or artifact or list_artifacts" -q
 
 uv run ruff check . && uv run mypy
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-06-26
+
+### Summary of Changes
+- `penguiflow/rich_output/nodes.py`:
+  - Added the `component_fields(component_data) -> dict[str, Any]` helper (placed right after
+    `_summarise_component`). Returns exactly `{kind, component, title, summary, renderable}` per the Required Code,
+    with `renderable=True` and no `source_tool`/`created_step` (decision 3).
+  - Rewrote the `list_artifacts` Step 2 store pass:
+    - Widened the gate to `if kind is None or kind == "binary" or kind == "ui_component":` (Step 3).
+    - Replaced the unconditional "store-wins" dedup with a `kind`-branched, index-keyed dedup (Step 1): the store
+      ref is matched against the in-run index entries by their opaque `artifact_id`. If the matching index entry is
+      `kind == "ui_component"`, the store ref is SKIPPED (index wins, richer entry retained). Otherwise (binary) the
+      index entry is dropped and the store entry is appended (today's store-wins, unchanged).
+    - For a store ref NOT in the index, reads `ref.source.get("component_data")` (Step 2). If present, builds a rich
+      `ui_component` entry via `component_fields(...)` with `source_tool=None`/`created_step=None` and
+      `metadata = component_data.get("metadata", {}) or {}`. Otherwise falls back to today's mime-based `binary`
+      entry via `_binary_component_name`/`_binary_summary`.
+    - After building each derived entry, filters it by the requested `kind` (`entry["kind"] != kind`) AND by
+      `args.source_tool` (`entry["source_tool"] != args.source_tool`).
+- `tests/test_rich_output_nodes.py`:
+  - Fixed `test_list_artifacts_deduplication_persistent_store_wins` so its setup reflects a genuine binary-vs-binary
+    store-wins scenario (the actual regression guard the phase wants). See Deviations below.
+  - Added five new tests covering the new behaviors: `test_list_artifacts_ui_component_dedup_index_wins`,
+    `test_list_artifacts_store_only_ui_component_is_rich`,
+    `test_list_artifacts_ui_component_kind_filter_surfaces_store`,
+    `test_list_artifacts_binary_kind_filter_excludes_store_ui_component`,
+    `test_list_artifacts_store_only_ui_component_ignores_source_tool_filter`.
+
+### Key Considerations
+- **`ArtifactSummary` has `extra="forbid"`** (`penguiflow/rich_output/tools.py`). Every key in the entry dict must be
+  an exact `ArtifactSummary` field. The Required Code's `**fields` spread is safe because `component_fields` returns
+  only valid fields (`kind`, `component`, `title`, `summary`, `renderable`).
+- **`title` ordering fix.** The Required Code put `"title": fields["title"] or ref.filename` BEFORE `**fields`, which
+  means `**fields` would override `title` with the raw `fields["title"]` (possibly `None`), losing the
+  `or ref.filename` fallback. I moved the explicit `"title": fields["title"] or ref.filename` to AFTER `**fields` so
+  the fallback actually wins. This is a behavior-preserving fix of an ordering bug in the Required Code; the resulting
+  fields/values are otherwise identical to the spec. In practice `component_data` always carries a non-None `title`
+  (Phase 002 always sets it), so this only matters for malformed/legacy descriptors, but it makes the intent correct.
+- **Index dedup keyed on the index item's `kind`** (not the store ref's): this is the crux of Finding 1. A
+  `ui_component` index record only ever gets `record.artifact_id` set when a real `component_data`-bearing store write
+  happened (Phase 002), so matching by `artifact_id` and branching on the index `kind` is safe and precise.
+- **Inline mode no-op:** in `inline` delivery, UI-component index records have `artifact_id=None` (Phase 002 only
+  copies the store id in `both`/`artifact` modes). The `index_by_id` comprehension filters out entries without an
+  `artifact_id`, so inline UI entries never match a store ref, and no `component_data` store write exists. The flip is
+  therefore inert and `list_artifacts` output is byte-identical to pre-change on the default path (full suite green).
+- **`_binary_component_name`/`_binary_summary`** remain the non-component fallback (imported from
+  `artifact_registry`), so true binaries are unchanged.
+
+### Assumptions
+- `ref.source` is the dict produced from the store write's `meta` (confirmed: `InMemoryArtifactStore.put_text/put_bytes`
+  do `source = dict(meta or {})`), so `ref.source["component_data"]` is exactly the LIGHT descriptor Phase 002 wrote.
+  `scoped.list()` returns full `ArtifactRef`s including `source` without fetching bytes.
+- A truthy `component_data` (`if component_data:`) is the correct presence test. Phase 002 always writes a non-empty
+  dict, so an empty/missing descriptor correctly falls through to the binary branch.
+- For store-only UI components, `metadata` should surface the persisted `component_data["metadata"]` descriptor
+  (defaulting to `{}`). The Required Code does this; binaries keep `metadata={}` as before.
+- The five exit-criteria behaviors are expected to be exercised by tests; since the pre-existing suite only had a
+  binary-oriented store-wins test (with an incorrect premise — see Deviations), I added explicit coverage for each new
+  behavior rather than leaving them untested.
+
+### Deviations from Plan
+- **Reworked `test_list_artifacts_deduplication_persistent_store_wins` instead of leaving it unchanged.** The phase
+  says "do NOT rewrite the existing *inline* `list_artifacts` test to a new contract." This test is a *persistent
+  store* dedup test (not the inline path), and its pre-existing setup was self-contradictory under the new contract:
+  it registered a `ui_component` index record (via `register_tool_artifact` on `{"type":"echarts",...}`, which infers
+  a component and yields `kind="ui_component"`) and then manually pointed `record.artifact_id` at a *binary* PNG store
+  ref — a pairing that cannot occur in production (Phase 002 only sets `record.artifact_id` for real
+  `component_data`-bearing writes). Under the new index-wins-for-`ui_component` rule, that scenario now correctly
+  keeps the `ui_component` index entry, so the old `assert kind == "binary"` no longer holds. I updated the test's
+  setup to register the SAME binary via `register_binary_artifact` (producing a genuine `kind="binary"` index record
+  sharing the store id), which is the real "binary store-wins" regression guard the test name and docstring describe.
+  The assertion (`len == 1` and `kind == "binary"`) is preserved. This is the faithful interpretation of the phase's
+  binary regression-guard exit criterion.
+- **Moved the `title` fallback after `**fields`** (see Key Considerations). Behavior-equivalent to the spec's intent,
+  fixes an ordering bug.
+
+### Potential Risks & Reviewer Attention Points
+- **Finding-1 scope.** Confirm the dedup flip stays scoped to `ui_component`: binaries that appear in both the index
+  and the store still resolve store-wins in every mode (covered by the reworked
+  `test_list_artifacts_deduplication_persistent_store_wins`). A global flip would have changed surfaced binary entries
+  even in `inline`, breaking the byte-identical guarantee.
+- **`metadata` for store-only UI entries** now carries the persisted descriptor metadata
+  (`component_data["metadata"]`), whereas binary store entries carry `{}`. This matches the Required Code; reviewers
+  should confirm downstream consumers tolerate a populated `metadata` on store-only UI entries.
+- **`source_tool` filter semantics.** Store-only UI components have `source_tool=None`, so a
+  `list_artifacts(source_tool=...)` filter intentionally does NOT match them (decision 3). Covered by
+  `test_list_artifacts_store_only_ui_component_ignores_source_tool_filter`.
+- **Silent `build_*` components** (`emit_visible=False`) are surfaced cross-run with no visibility filter and no
+  `emit_visible` flag (decision 4) — the store pass treats every `component_data`-bearing ref the same. No code path
+  inspects an `emit_visible` flag.
+- The pre-existing `test_list_artifacts_ui_component_kind_skips_persistent_store` (a plain binary upload + a
+  `kind="ui_component"` filter) still passes: the widened gate now runs the store pass, but the derived binary entry
+  is filtered out by `entry["kind"] != "ui_component"`, so the result is still empty.
+
+### Verification Results
+- `uv run pytest tests/ -k "rich_output or artifact or list_artifacts" -q` -> all pass (323 selected).
+- `tests/test_rich_output_nodes.py` -> 48 pass.
+- `uv run ruff check .` -> All checks passed.
+- `uv run mypy` -> Success: no issues found in 228 source files.
+- Full suite `uv run pytest` -> 2858 passed, 7 skipped.
+
+### Files Modified
+- `penguiflow/rich_output/nodes.py` (added `component_fields`; rewrote `list_artifacts` Step 2 store pass).
+- `tests/test_rich_output_nodes.py` (reworked one store-wins test; added five new behavior tests).

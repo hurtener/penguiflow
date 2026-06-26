@@ -191,4 +191,52 @@ describe('chatStreamManager (AG-UI)', () => {
     expect(interactionsStore.artifacts[0]?.props.namespace).toBe('pengui_slides');
     expect(interactionsStore.artifacts[0]?.props.artifact_url).toBe('/artifacts/pengui_slides_app_123');
   });
+
+  it('fetches + renders a store-backed ui_component from an artifact_stored custom event (Phase 008)', async () => {
+    const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+    const stored = {
+      id: 'comp-1',
+      component: 'report',
+      props: { title: 'Stored' },
+      title: 'Stored Report',
+      metadata: { namespace: 'penguiflow_ui_component', artifact_id: 'artifact-1' }
+    };
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(stored)
+    });
+
+    runAgentMock.mockReturnValueOnce({
+      subscribe: ({ next, complete }: { next: (e: BaseEvent) => void; complete: () => void }) => {
+        next({
+          type: 'CUSTOM',
+          name: 'artifact_stored',
+          value: {
+            artifact: {
+              id: 'artifact-1',
+              mime_type: 'application/json',
+              size_bytes: 10,
+              filename: 'artifact-1',
+              source: { namespace: 'penguiflow_ui_component' }
+            }
+          }
+        } as BaseEvent);
+        complete();
+        return { unsubscribe: vi.fn() };
+      }
+    });
+
+    chatStore.addUserMessage('Make a report');
+    chatStreamManager.start('Make a report', 'session-1', {}, {}, { onDone: () => {}, onError: () => {} }, 'agui');
+
+    await flush();
+
+    expect(fetch).toHaveBeenCalledWith('/artifacts/artifact-1', {
+      headers: { 'X-Session-ID': 'session-1' }
+    });
+    expect(interactionsStore.artifacts.length).toBe(1);
+    expect(interactionsStore.artifacts[0]?.component).toBe('report');
+    // UI component is rendered, not added to the download-only artifacts store.
+    expect(artifactsStore.count).toBe(0);
+  });
 });

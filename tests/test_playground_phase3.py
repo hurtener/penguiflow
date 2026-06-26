@@ -238,6 +238,90 @@ class TestSSEEventFrames:
         assert b'"size_bytes":1024' in frame
         assert b'"filename":"chart.png"' in frame
         assert b'"source":"tableau"' in frame
+        # String source (binary/MCP) must not gain a UI render slot.
+        assert b'"message_id"' not in frame
+        assert b'"default_message_id"' not in frame
+
+    def test_artifact_stored_ui_component_carries_message_id(self) -> None:
+        """artifact-mode UI components get message_id/default_message_id (decision 10, option a)."""
+        from penguiflow.cli.playground import _event_frame
+
+        event = PlannerEvent(
+            event_type="artifact_stored",
+            ts=1234567890.0,
+            trajectory_step=1,
+            extra={
+                "artifact_id": "art_ui_123",
+                "mime_type": "application/json",
+                "size_bytes": 256,
+                "artifact_filename": "component.json",
+                "source": {"namespace": "penguiflow_ui_component"},
+            },
+        )
+
+        frame = _event_frame(
+            event,
+            "trace_123",
+            "session_456",
+            default_message_id="msg_active",
+        )
+
+        assert frame is not None
+        assert b"event: artifact_stored" in frame
+        assert b'"artifact_id":"art_ui_123"' in frame
+        assert b'"namespace":"penguiflow_ui_component"' in frame
+        assert b'"message_id":"msg_active"' in frame
+        assert b'"default_message_id":"msg_active"' in frame
+
+    def test_artifact_stored_ui_component_without_active_message_id(self) -> None:
+        """No message id available -> no render slot injected (avoids null placement)."""
+        from penguiflow.cli.playground import _event_frame
+
+        event = PlannerEvent(
+            event_type="artifact_stored",
+            ts=1234567890.0,
+            trajectory_step=1,
+            extra={
+                "artifact_id": "art_ui_123",
+                "mime_type": "application/json",
+                "source": {"namespace": "penguiflow_ui_component"},
+            },
+        )
+
+        frame = _event_frame(event, "trace_123", "session_456")
+
+        assert frame is not None
+        assert b"event: artifact_stored" in frame
+        assert b'"message_id"' not in frame
+        assert b'"default_message_id"' not in frame
+
+    def test_artifact_stored_non_ui_namespace_no_message_id(self) -> None:
+        """Binary/MCP namespaces keep their existing shape (no message-id injection)."""
+        from penguiflow.cli.playground import _event_frame
+
+        event = PlannerEvent(
+            event_type="artifact_stored",
+            ts=1234567890.0,
+            trajectory_step=1,
+            extra={
+                "artifact_id": "art_bin_123",
+                "mime_type": "image/png",
+                "source": {"namespace": "tableau"},
+            },
+        )
+
+        frame = _event_frame(
+            event,
+            "trace_123",
+            "session_456",
+            default_message_id="msg_active",
+        )
+
+        assert frame is not None
+        assert b"event: artifact_stored" in frame
+        assert b'"namespace":"tableau"' in frame
+        assert b'"message_id"' not in frame
+        assert b'"default_message_id"' not in frame
 
     def test_resource_updated_event_frame(self) -> None:
         """_event_frame should handle resource_updated event type."""

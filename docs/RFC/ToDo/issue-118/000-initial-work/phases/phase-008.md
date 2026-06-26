@@ -94,3 +94,175 @@ cd /Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/cli/playground_
 # Backend suite still green
 cd /Users/martin.alonso/Documents/lg/repos/penguiflow && uv run pytest tests/ -k "playground or rich_output or artifact" -q
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-06-26
+
+### Summary of Changes
+
+- **`src/lib/services/api.ts`**
+  - Added `fetchArtifactJson(artifactId, sessionId?)`: `GET /artifacts/{id}` (id URL-encoded), parses the
+    `application/json` body, returns the parsed record or `null` (logs and swallows errors via the existing
+    `fetchWithErrorHandling`). Sends `X-Session-ID` only when a session id is supplied (so access control works
+    for the SSE/AG-UI/session paths, and unscoped fetches still work for backward-compat).
+  - Added `storedComponentToArtifactChunk(stored, artifactId)`: converts the stored UI-component JSON
+    (`{ id, component, props, title, summary, metadata }`) into the same `ArtifactChunkPayload` shape the inline
+    path feeds to `addArtifactChunk` (`{ artifact_type: 'ui_component', chunk: { id, component, props, title }, meta }`).
+    It reuses `stored.metadata` as the chunk `meta` and **always** stamps `meta.artifact_id = artifactId` (the opaque
+    store id) so dedupe keys strictly on the store id. Returns `null` when the payload has no `component`.
+  - Added a tiny private `asPlainRecord` helper (record coercion) to keep `storedComponentToArtifactChunk` under the
+    lint complexity threshold.
+- **`src/lib/stores/features/interactions.svelte.ts`**
+  - Added a single-point dedupe set `renderedArtifactIds: Set<string>` inside `createInteractionsStore`.
+    `addArtifactChunk` now reads `payload.meta.artifact_id` (the opaque store id) and skips the insert if that id was
+    already rendered, recording it otherwise. Inline-only (`inline` mode) chunks carry no `meta.artifact_id` and are
+    therefore never deduped — existing behavior preserved exactly. `clear()` also clears the set.
+  - This is the **single dedupe point** for decision 7: because both the inline (`both`-mode) chunk and the
+    store-backed (`artifact`/`both`) frame funnel through `addArtifactChunk` and both carry the same
+    `meta.artifact_id`, dedupe survives either arrival order automatically.
+- **`src/lib/services/chat-stream.ts`** (SSE + AG-UI)
+  - Imported `fetchArtifactJson` / `storedComponentToArtifactChunk`.
+  - Added a `sessionId` instance field set in `start()` (SSE), `startAgui()`, and `resumeAgui()`, and cleared in
+    `close()`, used to scope the store-backed JSON fetch.
+  - `handleArtifactStored` (SSE) and the AG-UI `CUSTOM` `artifact_stored` branch now: if the event's
+    `source.namespace === "penguiflow_ui_component"`, fetch the JSON by id and render via `addArtifactChunk`
+    (placement via backend `message_id`/`default_message_id`, falling back to the active agent message);
+    otherwise keep the existing download-only `artifactsStore.addArtifact` path for binary/MCP artifacts.
+  - Added a shared `renderStoredUiComponent(artifactId, messageId?)` private method + an
+    `isUiComponentArtifactStored(stored)` module helper.
+  - The inline `artifact_chunk` -> `ui_component` branches are unchanged.
+- **`src/lib/services/event-stream.ts`**
+  - Same `artifact_stored` ui_component branch (fetch + render) + `renderStoredUiComponent` method +
+    `isUiComponentArtifactStored` helper. Uses the `sessionId` already in `_connect` scope and reads the
+    backend `message_id`/`default_message_id` for placement.
+- **`src/lib/services/session-stream.ts`**
+  - Proactive `RESULT` updates: store-backed UI-component artifacts (namespace `penguiflow_ui_component`) carried in
+    `content.artifacts` are now fetched by id and rendered under the proactive agent message (via
+    `renderStoredUiComponent`) instead of being added as download-only entries; they are also excluded from the
+    message's downloadable `artifacts` refs. Binary artifacts keep the existing download path. The inline
+    `content.ui_components` rendering is unchanged (dedupe collapses any overlap with the store-backed frames).
+- **Tests (added/updated under `tests/`)**
+  - `tests/unit/services/api.test.ts`: `fetchArtifactJson` (header on/off, id encoding, error paths) and
+    `storedComponentToArtifactChunk` (shape conversion, strict `meta.artifact_id` override, defaults, null-on-no-component).
+  - `tests/unit/stores/interactions.test.ts` (new file): dedupe keyed strictly on store `artifact_id`, both arrival
+    orders, distinct ids render separately, inline-only chunks NOT deduped, `clear()` resets the set.
+  - `tests/unit/services/chat-stream-sse.test.ts`: store-backed render (artifact mode) with backend-supplied
+    placement, plus dedupe in BOTH arrival orders (inline-first->stored, stored-first->inline) rendering once.
+  - `tests/unit/services/chat-stream-agui.test.ts`: store-backed render from the `CUSTOM` `artifact_stored` event.
+  - `tests/unit/services/event-stream.test.ts`: store-backed render (fetch + placement) and binary-artifact
+    download path unchanged (no fetch). Fixed the local FakeEventSource `_emit` to only fire `onmessage` for the
+    default `message` event (matching the browser), so a single named frame isn't double-processed.
+  - `tests/unit/services/session-stream.test.ts`: proactive RESULT with a `penguiflow_ui_component` artifact is
+    fetched + rendered as a component (not a download), while the binary artifact stays downloadable.
+- **`dist/`**: rebuilt with `npm run build` (vite). New `index.html` entry chunk (`index-CHCoV4W0.js`) contains the
+  `penguiflow_ui_component` handler. Many hashed asset filenames changed (vite content-hashing); this is expected.
+
+### Key Considerations
+
+- **One render code path, one dedupe point.** Rather than scatter dedupe across the three stream services, all
+  store-backed frames are converted to the inline `ArtifactChunkPayload` shape and pushed through
+  `interactionsStore.addArtifactChunk`, which owns the dedupe. This guarantees decision 7 holds regardless of which
+  frame arrives first and keeps each service handler thin.
+- **Strict keying on the opaque store id.** Conversion always stamps `meta.artifact_id = <store id>` and the store
+  dedupes only on that value, never on the component's `id`/`component_id`. In `both` mode the backend already stamps
+  the same opaque id onto the inline chunk's `meta.artifact_id` (Phase 003, `rich_output/nodes.py:~500`), so the two
+  channels collapse to one render.
+- **Placement via backend frames (Phase 007), not a frontend guess.** The handlers read the backend-injected
+  `message_id`/`default_message_id` first; the active-agent-message fallback only applies when the backend did not
+  inject one (e.g. non-`penguiflow_ui_component` frames never reach this branch). For SSE/AG-UI this matches the
+  inline path; for proactive results it attaches to the freshly-created proactive agent message.
+- **Backward compatibility.** Binary/MCP `artifact_stored` events are untouched (still added to `artifactsStore` for
+  download). Inline `artifact_chunk` -> `ui_component` rendering is untouched. `inline`-mode chunks have no store id
+  so they are never deduped. All 413 pre-existing frontend tests stay green.
+- **Plain `Set` vs `SvelteSet`.** The Svelte MCP autofixer reported `issues: []` (no correctness problems) but
+  advised `SvelteSet`. I deliberately kept a plain `Set`: `renderedArtifactIds` is internal gating state never read in
+  any template/`$derived`/`$effect`, so reactivity is unnecessary and would be wasteful. This matches the established
+  codebase convention (e.g. `events.svelte.ts` uses a plain `new Set<string>()` for the same kind of non-reactive
+  bookkeeping). This is the only autofixer suggestion not applied, and it is advisory only.
+
+### Assumptions
+
+- **Stored JSON shape.** `GET /artifacts/{id}` for a UI component returns the bytes written by
+  `rich_output/nodes.py::_register_component_payload`: `{ id, component, props, title, summary, metadata }`, where
+  `metadata` is the component `meta` dict (which contains `artifact_id` in `both` mode). The converter is defensive
+  (coerces missing/wrong-typed fields), so minor shape drift degrades gracefully rather than throwing.
+- **Namespace gate.** Store-backed UI components are identified by `source.namespace === "penguiflow_ui_component"`,
+  matching the backend (`rich_output/nodes.py:557` and the playground emit gate `playground.py:~451`).
+- **Session id is optional for the fetch.** The backend route allows unscoped access for backward-compat and
+  validates when a session id is present; I pass the session id when the manager has one. For `event-stream` the
+  trace-follow `sessionId` is used; for `session-stream` the `update.session_id` is used.
+- **Proactive store-backed UI components arrive in `content.artifacts`** (with the `penguiflow_ui_component`
+  namespace), since that is the only place session-stream sees stored artifacts; inline ones still arrive in
+  `content.ui_components`. If a component is delivered via both in `both` mode, the store dedupe collapses them.
+
+### Deviations from Plan
+
+- **session-stream.ts**: the phase text says "same `artifact_stored` branch + dedupe", but session-stream does not
+  process raw `artifact_stored` SSE frames — it processes proactive `state_update` RESULT updates whose
+  `content.artifacts` may include store-backed UI components. I implemented the equivalent behavior there (fetch +
+  render store-backed UI components, exclude them from downloadable refs), which is the faithful adaptation of the
+  intent to that stream's actual shape.
+- Added a small `asPlainRecord` helper in `api.ts` purely to keep the converter under the repo's lint complexity
+  threshold (no behavior change). Correction (per subphase 008.2, re-measured authoritatively with
+  `npx eslint <file> -f json | jq '.[0].warningCount'` on the pristine HEAD checkout vs the working tree): this
+  phase added **+1** net-new advisory eslint warning in `session-stream.ts` (HEAD baseline **10** -> working tree
+  **11**) and **0** net-new in `interactions.svelte.ts` (HEAD baseline **7** -> working tree **7**) — all warn-only
+  rules: `complexity`, `max-depth`, `explicit-function-return-type`, `max-lines-per-function`. `eslint .` still
+  exits 0 (these are warnings, not errors), so the gate is not failed by them. (Both 008's original "net new
+  warnings: 0" claim and 008.1's "2 -> 12 / 2 -> 8 / +10 / +6" correction were inaccurate; the +10/+6 figures
+  came from counting with `grep -c warning`, which also matches the trailing eslint summary line. The true
+  net-new is +1 / 0.)
+- Otherwise none.
+
+### Potential Risks & Reviewer Attention Points
+
+- **Async render ordering.** The store-backed render is async (fetch then `addArtifactChunk`). If, in `both` mode, the
+  inline chunk and the `artifact_stored` frame arrive close together, the inline (synchronous) path will usually win
+  and the later `artifact_stored` will be skipped by dedupe. If the `artifact_stored` is processed first, its async
+  fetch resolves and renders, and the later inline chunk is skipped. Either way exactly one render results; only the
+  *placement message id* differs by which path won (inline uses the active agent message; store-backed uses the
+  backend frame id — which for SSE/AG-UI is the same active message). Worth a quick reviewer sanity check.
+- **dist/ churn.** The vite rebuild rewrote ~135 hashed asset files. This is normal content-hashing, but the diff is
+  large; the load-bearing change is the new `index-*.js` entry chunk referenced by `dist/index.html`.
+- **Pre-existing `svelte-check` errors.** The pre-phase baseline (HEAD) is **14** `svelte-check` errors, all in
+  pre-existing test files (`tests/unit/services/event-stream.test.ts`, `tests/unit/renderers/McpApp.test.ts`) from
+  `noUncheckedIndexedAccess` on array indexing in tests. Correction (per subphase 008.1): the new Phase 008 test
+  blocks originally added **2 net-new** such errors (working-tree count was 16, not 14, as the original note
+  claimed). Those two `mockInstances[0]` accesses in `event-stream.test.ts` are now guarded with
+  `const es = mockInstances[0]!;`, restoring the count to the **14** baseline (net-new = 0). The modified source
+  files remain error-free under `svelte-check`, and `eslint` reports 0 errors.
+- **Access control on unscoped fetch.** When no session id is available, the JSON fetch is unscoped (the backend
+  allows it for backward-compat). This mirrors the existing `downloadArtifact` behavior and is not a regression.
+
+### Files Modified
+
+- `penguiflow/cli/playground_ui/src/lib/services/api.ts` (modified)
+- `penguiflow/cli/playground_ui/src/lib/stores/features/interactions.svelte.ts` (modified)
+- `penguiflow/cli/playground_ui/src/lib/services/chat-stream.ts` (modified)
+- `penguiflow/cli/playground_ui/src/lib/services/event-stream.ts` (modified)
+- `penguiflow/cli/playground_ui/src/lib/services/session-stream.ts` (modified)
+- `penguiflow/cli/playground_ui/tests/unit/services/api.test.ts` (modified)
+- `penguiflow/cli/playground_ui/tests/unit/services/chat-stream-sse.test.ts` (modified)
+- `penguiflow/cli/playground_ui/tests/unit/services/chat-stream-agui.test.ts` (modified)
+- `penguiflow/cli/playground_ui/tests/unit/services/event-stream.test.ts` (modified)
+- `penguiflow/cli/playground_ui/tests/unit/services/session-stream.test.ts` (modified)
+- `penguiflow/cli/playground_ui/tests/unit/stores/interactions.test.ts` (created)
+- `penguiflow/cli/playground_ui/dist/**` (rebuilt via `npm run build`; new `index.html` entry + hashed assets)
+
+### Verification Results
+
+- `npm test` (playground_ui): **435 passed** (40 files); was 413 before -> +22 new tests, 0 failures.
+- `npm run build` (vite): **success** (`dist/` rebuilt; new entry chunk contains the handler).
+- `npx eslint <modified source files>`: **0 errors** (warn-only advisory rules; correction per subphase 008.2,
+  measured via `npx eslint <file> -f json | jq '.[0].warningCount'` on HEAD vs working tree: net-new advisory
+  warnings are `session-stream.ts` **10 -> 11** (net-new **+1**) and `interactions.svelte.ts` **7 -> 7**
+  (net-new **0**) — `eslint .` still exits 0 since these are warnings, not errors).
+- Svelte MCP autofixer on `interactions.svelte.ts`: **`issues: []`** (only the advisory `SvelteSet` suggestion,
+  intentionally not applied — see Key Considerations).
+- Backend: `uv run pytest tests/ -k "playground or rich_output or artifact"` -> **487 passed**, 0 failed.
+- `uv run ruff check .` -> **All checks passed**; `uv run mypy` -> **Success: no issues found in 228 source files**
+  (no Python changes; run for safety).

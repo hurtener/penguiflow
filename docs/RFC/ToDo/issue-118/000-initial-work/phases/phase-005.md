@@ -99,3 +99,87 @@ uv run pytest tests/ -k "rich_output or artifact or cross_run or namespace" -q
 
 uv run ruff check . && uv run mypy
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-06-26
+
+### Summary of Changes
+- `penguiflow/planner/artifact_registry.py` — `ArtifactRegistry.resolve_ref_async`: replaced the bare
+  `if record is None: return None` early-return with the namespace-gated cross-run store-fallback (Required Code,
+  verbatim except for ruff E262 comment-spacing normalization — `#` instead of `#  `). The record lookup
+  (`self._records_by_ref.get(ref)`) is still attempted first, so every in-run/resumed `artifact_N` continues to
+  resolve through the unchanged record-based path (binary fast-path + Phase 004 hydration). Only a genuine record
+  miss now falls through to the new branch.
+
+### Key Considerations
+- **Surgical edit.** The change is confined to the single record-ABSENT branch in `resolve_ref_async`. No other code
+  paths, signatures, exports, or the synchronous `resolve_ref` were touched.
+- **`resolve_ref` (sync) intentionally left unchanged.** The phase scopes the fallback to `resolve_ref_async` only —
+  cross-run hydration requires an `await get_metadata(...)` / `await download(...)` round-trip, which the sync method
+  cannot perform. The sync method keeps its original `if record is None: return None`, so a store-id ref passed to the
+  sync path still raises `Unknown artifact_ref` (the async resolver is the one wired through
+  `resolve_artifact_refs_async`, which is what receives a store id from `list_artifacts`).
+- **Gate value confirmed against Phase 002.** The literal `"penguiflow_ui_component"` matches exactly the `namespace=`
+  argument used by `_register_component_payload` in `penguiflow/rich_output/nodes.py:543` (the only writer of this
+  namespace in the package — verified via grep). A drift between the two would silently break cross-run resolution, so
+  this is the single load-bearing string.
+- **`get_metadata` is the gate, not just metadata.** Verified in `penguiflow/artifacts.py:329-336` that
+  `ScopedArtifacts.get_metadata` is itself `_check_scope`-protected: it returns `None` for refs outside the facade's
+  tenant/user/session scope. This means the scope boundary AND the namespace gate are both enforced by the single
+  `meta_ref is None or meta_ref.namespace != "penguiflow_ui_component"` check — a cross-session id yields
+  `meta_ref is None` and is refused before any byte download.
+- **`getattr(meta_ref, "namespace", None)` defensive access.** `ArtifactRef.namespace` is a declared
+  `str | None` field (`artifacts.py:83`), so a plain `.namespace` would suffice for the real type, but `getattr`
+  with a default keeps the gate robust against duck-typed/mock metadata objects and mirrors the Required Code exactly.
+
+### Assumptions
+- The store passed as `artifact_store` to `resolve_ref_async` is a `ScopedArtifacts`-like facade (already scope-bound
+  to the current tenant/user/session) when running through the planner's `resolve_artifact_refs_async` plumbing. This
+  is consistent with how Phase 004's resume hydration already uses the same `artifact_store` argument and
+  `_maybe_hydrate_stored_payload`.
+- Raw / NoOp stores (the `inline` path) do not expose a callable `get_metadata`; therefore
+  `callable(get_meta)` is `False`, `meta_ref` is `None`, and the branch returns `None` — keeping the fallback inert in
+  `inline` exactly as the exit criteria require. (No store-id refs are produced in `inline` mode in the first place,
+  so this branch is doubly unreachable there.)
+- `_maybe_hydrate_stored_payload({"artifact": {"id": ref}}, ...)` returns the parsed JSON component payload (full
+  payload incl. `props`, written by Phase 002 as the store source-of-truth), and
+  `_component_payload_from_tool_payload` converts it to the `{"component", "props"}` render shape. Both helpers are
+  pre-existing and unchanged.
+
+### Deviations from Plan
+- None functionally. The only textual difference from the Required Code block is comment formatting: the Required Code
+  used `#   not ours...` / `#   genuine miss...` / `#   may be None...` with multiple spaces after `#`, which trips
+  ruff's E262 (inline-comment style). I normalized these to a single space after `#`. Logic, control flow, and the
+  gate literal are identical to the spec.
+- The optional ephemeral-record cache (Implementation Notes bullet in the phase, "NOT required") was intentionally
+  omitted, as instructed. Each cross-run reference performs a fresh `get_metadata` + `download`; this is a pure
+  round-trip cost, not a correctness issue, and can be added later if profiling warrants it.
+
+### Potential Risks & Reviewer Attention Points
+- **Lookup-order safety.** A store id and an `artifact_N` never contend: the record lookup wins whenever a record
+  exists, so the new branch is reached only on a true record miss. Worth a reviewer's quick confirmation that no code
+  path expects `resolve_ref_async` to return `None` for a store-id ref that this branch will now resolve (i.e. callers
+  that previously relied on the miss to raise `Unknown artifact_ref` for legitimately-ours refs). I found none — the
+  sole caller, `resolve_artifact_refs_async`, treats `None` as "raise" and a dict as "render", which is the intended
+  new behavior.
+- **Namespace is the only forgery defense.** A same-session JSON artifact whose bytes happen to parse as
+  `{"component","props"}` but was written under a different namespace will be refused (gate returns `None`). This is
+  Finding 3's whole point; reviewers should confirm no legitimate UI component is ever written under a different
+  namespace (only `nodes.py:543` writes `penguiflow_ui_component`, so this holds today).
+- **No new identifier minted.** Confirmed the `_next_ref` / `_counter` per-run counter is untouched and never reused
+  cross-run; the cross-run ref is the opaque store id surfaced verbatim by `list_artifacts` (`nodes.py` list path).
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/planner/artifact_registry.py` (modified)
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/docs/RFC/ToDo/issue-118/000-initial-work/phases/phase-005.md` (this notes section appended)
+
+### Verification Results
+- `uv run pytest tests/ -k "rich_output or artifact or cross_run or namespace" -q` — all pass (113 selected).
+- `uv run pytest tests/ -k "planner or rich_output or artifact or resolve or resume"` — 547 passed, 1 skipped,
+  0 failed (backwards-compat on the default `inline` path confirmed).
+- `uv run ruff check .` — All checks passed.
+- `uv run mypy` — Success: no issues found in 228 source files.

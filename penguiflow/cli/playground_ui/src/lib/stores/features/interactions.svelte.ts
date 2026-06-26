@@ -23,6 +23,12 @@ export function createInteractionsStore(): InteractionsStore {
   let artifacts = $state<ComponentArtifact[]>([]);
   let pendingInteraction = $state<PendingInteraction | null>(null);
   let lastArtifact = $state<ComponentArtifact | null>(null);
+  // Dedupe state (decision 7, Phase 008): track rendered components by the opaque store
+  // `artifact_id` so a `both`-mode component delivered via BOTH the inline `artifact_chunk` and the
+  // `artifact_stored` frame renders ONCE, regardless of which arrives first. Keyed STRICTLY on the
+  // store id (carried in `meta.artifact_id`), never on the component's own `id`/`component_id`.
+  // Not reactive: it gates inserts but is never read by the UI.
+  const renderedArtifactIds = new Set<string>();
 
   function addArtifactChunk(
     payload: ArtifactChunkPayload,
@@ -38,6 +44,17 @@ export function createInteractionsStore(): InteractionsStore {
     const component = typeof chunk.component === 'string' ? chunk.component : undefined;
     const props = (chunk.props as Record<string, unknown>) || {};
     if (!component) return;
+
+    // Strict dedupe on the opaque store artifact_id (decision 7). Survives both arrival orders
+    // because the inline (`both`) chunk and the store-backed frame both carry the same id in
+    // `meta.artifact_id`. Inline-only (`inline` mode) chunks have no store id, so they are never
+    // deduped here and keep their existing behavior.
+    const storeArtifactId =
+      typeof payload.meta?.artifact_id === 'string' ? payload.meta.artifact_id : undefined;
+    if (storeArtifactId) {
+      if (renderedArtifactIds.has(storeArtifactId)) return;
+      renderedArtifactIds.add(storeArtifactId);
+    }
 
     const artifact: ComponentArtifact = {
       id: (typeof chunk.id === 'string' ? chunk.id : undefined) || `ui_${Date.now()}`,
@@ -88,6 +105,7 @@ export function createInteractionsStore(): InteractionsStore {
       artifacts = [];
       pendingInteraction = null;
       lastArtifact = null;
+      renderedArtifactIds.clear();
     }
   };
 }

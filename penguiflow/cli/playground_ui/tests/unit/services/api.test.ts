@@ -7,7 +7,9 @@ import {
   fetchTrajectory,
   extractFilename,
   downloadArtifact,
-  getArtifactMeta
+  getArtifactMeta,
+  fetchArtifactJson,
+  storedComponentToArtifactChunk
 } from '$lib/services/api';
 
 describe('api service', () => {
@@ -459,6 +461,114 @@ describe('api service', () => {
       const result = await getArtifactMeta('artifact-123', 'session-456');
 
       expect(result).toBeNull();
+    });
+  });
+
+  describe('fetchArtifactJson', () => {
+    it('fetches and parses stored UI-component JSON with session header', async () => {
+      const stored = { id: 'c1', component: 'report', props: { title: 'Hi' }, title: 'Hi' };
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(stored)
+      });
+
+      const result = await fetchArtifactJson('artifact-abc', 'session-1');
+
+      expect(fetch).toHaveBeenCalledWith('/artifacts/artifact-abc', {
+        headers: { 'X-Session-ID': 'session-1' }
+      });
+      expect(result).toEqual(stored);
+    });
+
+    it('omits the session header when no session id is supplied', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ component: 'report' })
+      });
+
+      await fetchArtifactJson('artifact-abc');
+
+      // No options object => single-arg fetch call.
+      expect(fetch).toHaveBeenCalledWith('/artifacts/artifact-abc');
+    });
+
+    it('encodes the artifact id', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ component: 'report' })
+      });
+
+      await fetchArtifactJson('a/b c');
+
+      expect(fetch).toHaveBeenCalledWith('/artifacts/a%2Fb%20c');
+    });
+
+    it('returns null on error response', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 404 });
+
+      const result = await fetchArtifactJson('artifact-abc', 'session-1');
+
+      expect(result).toBeNull();
+    });
+
+    it('returns null on network failure', async () => {
+      globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
+
+      const result = await fetchArtifactJson('artifact-abc', 'session-1');
+
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('storedComponentToArtifactChunk', () => {
+    it('converts a stored payload into a ui_component ArtifactChunkPayload', () => {
+      const stored = {
+        id: 'comp-1',
+        component: 'report',
+        props: { title: 'Quarterly' },
+        title: 'Quarterly Report',
+        summary: 'A report',
+        metadata: { namespace: 'penguiflow_ui_component', source_tool: 'render_report' }
+      };
+
+      const payload = storedComponentToArtifactChunk(stored, 'artifact-xyz');
+
+      expect(payload).not.toBeNull();
+      expect(payload?.artifact_type).toBe('ui_component');
+      expect(payload?.stream_id).toBe('artifact-xyz');
+      expect(payload?.done).toBe(true);
+      const chunk = payload?.chunk as Record<string, unknown>;
+      expect(chunk.id).toBe('comp-1');
+      expect(chunk.component).toBe('report');
+      expect(chunk.props).toEqual({ title: 'Quarterly' });
+      expect(chunk.title).toBe('Quarterly Report');
+      // Opaque store id is STRICTLY stamped onto meta.artifact_id for dedupe (decision 7).
+      expect(payload?.meta?.artifact_id).toBe('artifact-xyz');
+      expect(payload?.meta?.source_tool).toBe('render_report');
+    });
+
+    it('always uses the supplied artifact id as the dedupe key, overriding any embedded id', () => {
+      const stored = {
+        component: 'report',
+        props: {},
+        metadata: { artifact_id: 'STALE' }
+      };
+
+      const payload = storedComponentToArtifactChunk(stored, 'artifact-true');
+
+      expect(payload?.meta?.artifact_id).toBe('artifact-true');
+    });
+
+    it('defaults props and meta when missing', () => {
+      const payload = storedComponentToArtifactChunk({ component: 'report' }, 'artifact-1');
+
+      const chunk = payload?.chunk as Record<string, unknown>;
+      expect(chunk.props).toEqual({});
+      expect(payload?.meta).toEqual({ artifact_id: 'artifact-1' });
+    });
+
+    it('returns null when the payload has no component', () => {
+      expect(storedComponentToArtifactChunk({ id: 'x' }, 'artifact-1')).toBeNull();
     });
   });
 });

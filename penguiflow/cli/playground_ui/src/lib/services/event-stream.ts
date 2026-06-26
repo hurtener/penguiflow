@@ -1,6 +1,7 @@
 import { safeParse } from '$lib/utils';
 import type { ArtifactChunkPayload, ArtifactStoredEvent } from '$lib/types';
 import type { AppStores } from '$lib/stores';
+import { fetchArtifactJson, storedComponentToArtifactChunk } from './api';
 
 type EventStreamStores = Pick<
   AppStores,
@@ -63,10 +64,19 @@ class EventStreamManager {
         }
       }
 
-      // Handle artifact_stored - add to artifacts store for download
+      // Handle artifact_stored
       if (incomingEvent === 'artifact_stored') {
         const stored = toArtifactStoredEvent(data);
-        if (stored) {
+        // Store-backed UI components (Phase 008): fetch the JSON by id and render through the same
+        // inline code path. Dedupe (decision 7) is handled by interactionsStore.addArtifactChunk on
+        // the opaque store artifact_id.
+        if (stored && isUiComponentArtifactStored(stored)) {
+          const messageId =
+            (typeof data.message_id === 'string' ? data.message_id : undefined) ??
+            (typeof data.default_message_id === 'string' ? data.default_message_id : undefined);
+          void this.renderStoredUiComponent(stored.artifact_id, sessionId, messageId);
+        } else if (stored) {
+          // Binary/MCP artifacts: add to artifacts store for download.
           this.stores.artifactsStore.addArtifact(stored);
         }
       }
@@ -95,6 +105,21 @@ class EventStreamManager {
     };
   }
 
+  private async renderStoredUiComponent(
+    artifactId: string,
+    sessionId: string,
+    messageId?: string
+  ): Promise<void> {
+    const stored = await fetchArtifactJson(artifactId, sessionId);
+    if (!stored) return;
+    const payload = storedComponentToArtifactChunk(stored, artifactId);
+    if (!payload) return;
+    this.stores.interactionsStore.addArtifactChunk(
+      payload,
+      messageId ? { message_id: messageId } : {}
+    );
+  }
+
   /**
    * Close the EventSource connection
    */
@@ -108,6 +133,14 @@ class EventStreamManager {
       this.eventSource = null;
     }
   }
+}
+
+/**
+ * Whether an `artifact_stored` event describes a store-backed UI component (Phase 007/008).
+ */
+function isUiComponentArtifactStored(stored: ArtifactStoredEvent): boolean {
+  const namespace = stored.source?.namespace;
+  return typeof namespace === 'string' && namespace === 'penguiflow_ui_component';
 }
 
 function toArtifactChunkPayload(data: Record<string, unknown>): ArtifactChunkPayload {

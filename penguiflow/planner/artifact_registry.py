@@ -380,13 +380,29 @@ class ArtifactRegistry:
         """
         record = self._records_by_ref.get(ref)
         if record is None:
-            return None
+            # Cross-run (record ABSENT): the ref the LLM was handed by list_artifacts IS the opaque store id.
+            # GATE (Finding 3): only resolve refs we wrote under the penguiflow_ui_component namespace, so a
+            # same-session non-UI JSON artifact shaped like {"component","props"} cannot be silently rendered.
+            # get_metadata is itself scope-checked (tenant/user/session).
+            get_meta = getattr(artifact_store, "get_metadata", None)
+            meta_ref = await get_meta(ref) if callable(get_meta) else None
+            if meta_ref is None or getattr(meta_ref, "namespace", None) != "penguiflow_ui_component":
+                return None  # not ours / out of scope -> caller raises "Unknown artifact_ref"
+            hydrated = await _maybe_hydrate_stored_payload({"artifact": {"id": ref}}, artifact_store=artifact_store)
+            if hydrated is None:
+                return None  # genuine miss -> caller raises "Unknown artifact_ref"
+            return _component_payload_from_tool_payload(hydrated)  # may be None if bytes aren't a component
         if record.kind == "binary":
             return _binary_component_payload(record, session_id=session_id)
 
         payload = self._payloads.get(ref)
         if payload is None and trajectory is not None:
             payload = _payload_from_trajectory(trajectory, record)
+        if payload is None and record.artifact_id:
+            # Resume path: the in-run payload cache was lost across from_snapshot, but
+            # the persisted record carries an artifact_id. Synthesize an ephemeral
+            # pointer so the full payload can be rehydrated from the store below.
+            payload = {"artifact": {"id": record.artifact_id}}
         if payload is None:
             return None
 

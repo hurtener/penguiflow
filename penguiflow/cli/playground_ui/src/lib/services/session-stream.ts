@@ -1,5 +1,5 @@
 import { safeParse } from '$lib/utils';
-import { listTasks, listArtifacts } from './api';
+import { listTasks, listArtifacts, fetchArtifactJson, storedComponentToArtifactChunk } from './api';
 import type { AppStores } from '$lib/stores';
 import type { NotificationLevel } from '$lib/stores/ui/notifications.svelte';
 import type { BackgroundTaskInfo } from '$lib/stores/features/tasks.svelte';
@@ -149,7 +149,14 @@ class SessionStreamManager {
               ? String(text)
               : (groupId ? 'Background tasks completed.' : 'Background task completed.');
             const agentMsg = this.stores.chatStore.addAgentMessage();
-            const artifactRefs = artifacts.length ? artifacts.map(toArtifactRef) : undefined;
+            // UI-component artifacts (Phase 008) render as components, not downloadable files, so
+            // exclude them from the message's downloadable artifact refs.
+            const downloadArtifacts = artifacts.filter(
+              artifact => !isUiComponentArtifactStored(artifact)
+            );
+            const artifactRefs = downloadArtifacts.length
+              ? downloadArtifacts.map(toArtifactRef)
+              : undefined;
             const uiComponents = toArtifactChunkPayloads(
               (content as Record<string, unknown>).ui_components
             );
@@ -164,11 +171,23 @@ class SessionStreamManager {
             });
             if (artifacts.length) {
               for (const artifact of artifacts) {
+                // Store-backed UI components (Phase 008): fetch the JSON by id and render through the
+                // same inline code path instead of adding a download-only entry. Dedupe (decision 7)
+                // is enforced by interactionsStore.addArtifactChunk on the opaque store artifact_id,
+                // so overlap with the inline `ui_components` payloads collapses to one render.
+                if (isUiComponentArtifactStored(artifact)) {
+                  void this.renderStoredUiComponent(
+                    artifact.artifact_id,
+                    update.session_id,
+                    agentMsg.id
+                  );
+                  continue;
+                }
                 this.stores.artifactsStore.addArtifact(artifact);
               }
             }
 
-            // Render any ui_component artifacts under this proactive message.
+            // Render any inline ui_component artifacts under this proactive message.
             if (uiComponents.length) {
               for (const payload of uiComponents) {
                 this.stores.interactionsStore.addArtifactChunk(payload, { message_id: agentMsg.id });
@@ -203,6 +222,18 @@ class SessionStreamManager {
     this.eventSource.addEventListener('state_update', handler);
     this.eventSource.onmessage = handler;
     this.eventSource.onerror = () => this.close();
+  }
+
+  private async renderStoredUiComponent(
+    artifactId: string,
+    sessionId: string | undefined,
+    messageId: string
+  ): Promise<void> {
+    const stored = await fetchArtifactJson(artifactId, sessionId);
+    if (!stored) return;
+    const payload = storedComponentToArtifactChunk(stored, artifactId);
+    if (!payload) return;
+    this.stores.interactionsStore.addArtifactChunk(payload, { message_id: messageId });
   }
 
   close(): void {
@@ -299,6 +330,13 @@ function toArtifactStoredEvent(raw: unknown, update: StateUpdate): ArtifactStore
     session_id: update.session_id,
     ts: Date.now()
   };
+}
+
+/**
+ * Whether an `artifact_stored` event describes a store-backed UI component (Phase 007/008).
+ */
+function isUiComponentArtifactStored(stored: ArtifactStoredEvent): boolean {
+  return getString(stored.source?.namespace) === 'penguiflow_ui_component';
 }
 
 function toArtifactRef(stored: ArtifactStoredEvent): ArtifactRef {

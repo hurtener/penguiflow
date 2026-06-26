@@ -176,3 +176,103 @@ uv run pytest tests/ -k "rich_output or artifact" -q
 
 uv run ruff check . && uv run mypy
 ```
+
+---
+
+## Implementation Notes
+
+**Implemented by:** phase-implementer agent
+**Date:** 2026-06-26
+
+### Summary of Changes
+All changes are confined to `penguiflow/rich_output/nodes.py`:
+
+- **Imports.** Added `TYPE_CHECKING` and `cast` to the `typing` import line, and a `TYPE_CHECKING`-guarded
+  `from penguiflow.planner.artifact_handling import _EventEmittingArtifactStoreProxy` import (used only as the
+  `cast` string target, so no runtime import cycle is introduced). `json` was already imported at the top.
+- **Call site (in `_process_component_payload`).** Changed the call to `_register_component_payload(...)` to
+  `await _register_component_payload(...)` and added two new keyword args:
+  - `emit_visible=emit_visible` (already in scope in the caller).
+  - `delivery=getattr(getattr(ctx, "_planner", None), "_ui_component_delivery", "inline")` — reads the Phase 000
+    planner flag, defaulting to `"inline"` when there is no `_planner` (direct/test invocation).
+- **`_register_component_payload`.** Converted from `def` to `async def`; added `emit_visible: bool` and
+  `delivery: str` keyword params. The dict previously built inline for `register_tool_artifact` is now hoisted to a
+  named `payload` local so the exact same dict (`{"id","component","props","title","summary","metadata"}`) is reused
+  for both the index registration and the store write (single source of truth). Added a mode-gated store write
+  (`delivery in {"both","artifact"}`) through `cast("_EventEmittingArtifactStoreProxy", ctx._artifacts).put_text(...)`
+  with `json.dumps(payload, default=str)`, `mime_type="application/json"`, `namespace="penguiflow_ui_component"`, the
+  light `component_data` descriptor in `meta`, `emit=emit_visible`, `register=False`. After the write, copies
+  `ref.id`/`ref.mime_type`/`ref.size_bytes` onto the record. The existing `write_snapshot(metadata_state)` call was
+  **moved below** the mutation so the persisted snapshot carries `record.artifact_id` (mandatory for resume).
+
+### Key Considerations
+- **Single snapshot, correctly ordered.** The plan allows either "move the existing `write_snapshot` below the
+  mutation" or "add a second `write_snapshot`". I chose to **move** the single existing call below the mutation
+  rather than add a second one. Rationale: the store write passes `register=False`, so the proxy never writes its
+  own snapshot; there is no competing snapshot to preserve. In `inline` mode the mutation block is skipped, so the
+  (now relocated) single snapshot fires exactly once and is byte-identical in effect to today's pre-mutation
+  snapshot (nothing between `register_tool_artifact` and the snapshot mutates the record in `inline` mode). In
+  store-backed modes it fires once, after `artifact_id` is set. This avoids a redundant double snapshot write while
+  satisfying the "snapshot must carry `artifact_id`" requirement. This matches the exact code given in the phase
+  file's "Required Code" block (which also uses a single, post-mutation snapshot).
+- **`cast` over protocol widening.** Per the plan's mandatory typing decision, the public `ArtifactStore` protocol is
+  left untouched; the proxy-only `emit`/`register` kwargs are reached via `cast(...)` at the single call site. mypy
+  is satisfied and no third-party `ArtifactStore` implementer is forced to grow the new kwargs.
+- **`json.dumps(payload, default=str)`.** Used the `default=str` fallback (not bare `json.dumps`) so store-backed
+  modes tolerate the same `datetime`/`Decimal`/custom values that inline emission tolerates, per the JSON-parity note.
+- **`props` only in bytes.** The full `payload` (incl. `props`) is the stored bytes; only the light `component_data`
+  descriptor (`kind`/`component`/`title`/`summary`/`metadata`, no `props`) goes into `meta` → `ArtifactRef.source`.
+
+### Assumptions
+- **`ctx._artifacts` is always the proxy at runtime in store-backed modes.** Confirmed via
+  `planner_context.py:_PlannerContext._artifacts`, which returns the `_EventEmittingArtifactStoreProxy`. The `cast`
+  is sound because store-backed `delivery` only occurs inside a planner run (decision 6), where `ctx` is a
+  `_PlannerContext`. In direct/test invocation `delivery` reads its `"inline"` default and the store-write branch is
+  never entered, so the `cast` is never exercised against a non-proxy object.
+- **`register_tool_artifact` returns a mutable `ArtifactRecord`** with assignable `artifact_id`/`mime_type`/
+  `size_bytes` fields. Confirmed in `artifact_registry.py` (`ArtifactRecord` dataclass, lines ~20-65).
+- **`ArtifactRef` exposes `.id`, `.mime_type`, `.size_bytes`.** Confirmed in `artifacts.py` (lines 58-71).
+- **`InMemoryArtifactStore.put_text` records `namespace` and `scope` on the returned `ArtifactRef`, and `meta`
+  becomes `ref.source` verbatim.** Confirmed by the ad-hoc verification harness (see below): `ref.namespace ==
+  "penguiflow_ui_component"`, `ref.source["component_data"]` round-trips, `ref.scope.session_id == "s1"`.
+
+### Deviations from Plan
+None. The implementation matches the phase file's "Required Code" block exactly, adapted only to the current
+line numbers (the call site and function had drifted by ~1 line vs. the plan's references). Minor cosmetic
+formatting of the `meta={...}` literal was applied to satisfy ruff line-length (120) — semantically identical.
+
+### Potential Risks & Reviewer Attention Points
+- **Snapshot relocation is the load-bearing correctness change.** The single `write_snapshot` now runs *after* the
+  record mutation. If a future edit reintroduces an early snapshot or skips the relocated one, resume hydration
+  (Phase 004) would see `artifact_id=None`. A pause/resume test asserting the snapshot carries `artifact_id` (called
+  out in the broader plan's verification list, but **not** part of this phase's scope) should guard this in a later
+  phase.
+- **Downstream phases not yet implemented.** This phase only adds the store *write* and id-copy. The read/hydration
+  side (`resolve_ref_async` store fallback — plan changes 3/3a) and `list_artifacts` index-wins dedup (plan change 4)
+  are *not* in this phase. Consequently, in `artifact` mode a freshly-built component is persisted and its id is on
+  the record, but cross-run resolution and rich store-only `list_artifacts` rendering still behave as pre-change
+  until their phases land. This is expected per the phase decomposition; nothing in this phase regresses the
+  `inline` default.
+- **`emit=emit_visible` for `both` mode.** This phase fires `artifact_stored` for `render_*` in both `both` and
+  `artifact` modes. The `both`-mode inline-chunk id-threading (plan change 2c / decision 7) and the inline-vs-store
+  emit gating (`if emit_visible and delivery in {"inline","both"}:`) are **not** part of this phase — they belong to
+  a later phase. `_emit_component_artifact`'s guard is still `if emit_visible:` (unchanged here).
+
+### Verification Results
+- `uv run pytest tests/ -k "rich_output or artifact" -q` → **311 passed, 2542 deselected**.
+- `uv run pytest tests/test_rich_output_nodes.py tests/test_rich_output_tools.py` → **63 passed**.
+- Full suite `uv run pytest tests/` → **2846 passed, 7 skipped** (backwards-compat headline: existing `inline`
+  suite green, unchanged).
+- `uv run ruff check .` → **All checks passed!**
+- `uv run mypy` → **Success: no issues found in 228 source files** (the `cast` resolves the proxy-vs-protocol typing).
+- Ad-hoc behavioral harness (temporary, since this phase ships no new tests) asserted every store-backed exit
+  criterion and was then removed:
+  - `delivery="artifact"`, `build_table`: FULL payload incl. `props` in stored bytes; `component_data` (incl.
+    `kind`, NO `props`) in `ArtifactRef.source`; `record.artifact_id == ref.id`; `mime_type=="application/json"` and
+    `size_bytes` copied; no phantom `kind="binary"` index record; write scoped (`scope.session_id=="s1"`);
+    `emit=False` so **no** `artifact_stored` event for silent `build_*`.
+  - `delivery="artifact"`, `render_table`: exactly **one** `artifact_stored` event (`emit=True`).
+  - `delivery="inline"`, `build_table`: **nothing** written to the store, `record.artifact_id is None`, no event.
+
+### Files Modified
+- `/Users/martin.alonso/Documents/lg/repos/penguiflow/penguiflow/rich_output/nodes.py`

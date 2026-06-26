@@ -24,8 +24,8 @@ Rich output now has three distinct authoring modes:
 
 - Rich output does not ship a frontend. Your app must render `artifact_chunk` events.
 - Rich output is not a free-form UI framework. The backend owns validation and the frontend owns renderer implementations.
-- Rich output does not replace binary artifacts/resources. Large or opaque payloads should still live in the artifact store.
-- `build_*` tools are not general persistence APIs. They are in-run reusable component builders backed by the planner’s artifact registry.
+- Rich output does not replace binary artifacts/resources. Large or opaque payloads should still live in the artifact store. *(True for the default `inline` delivery mode. The opt-in store-backed modes described in [UI-component delivery modes](#ui-component-delivery-ui_component_delivery) persist UI-component payloads to the `ArtifactStore` as well, but that is opt-in and does not change this default.)*
+- `build_*` tools are not general persistence APIs. They are in-run reusable component builders backed by the planner’s artifact registry. *(True for the default `inline` mode. In the opt-in `both`/`artifact` modes, `build_*` payloads are additionally persisted to the `ArtifactStore` so they can be resolved across resume and across runs in the same session — see [UI-component delivery modes](#ui-component-delivery-ui_component_delivery). The default behavior is unchanged.)*
 
 ## Contract surface
 
@@ -54,6 +54,98 @@ Visible UI still reaches the frontend only through planner artifact streaming:
 That is the only contract the frontend must implement for visible rich output.
 
 Builder tools do **not** emit any visible frontend artifact. They only register reusable component payloads in the in-run artifact registry and return an `artifact_ref`.
+
+### UI-component delivery (`ui_component_delivery`)
+
+By default, visible UI components are delivered to the frontend **only** as inline `artifact_chunk` events — exactly as described above. This is unchanged and remains the default.
+
+`ReactPlanner` also accepts an **opt-in** flag that lets visible UI-component payloads additionally (or exclusively) persist to the `ArtifactStore`, so they can be delivered **by id** (the frontend fetches the full payload from the store) and resolved reliably across HITL pause/resume and across runs within the same session.
+
+```python
+from penguiflow.artifacts import InMemoryArtifactStore
+from penguiflow.planner import ReactPlanner
+
+planner = ReactPlanner(
+    llm_client=llm,
+    catalog=catalog,
+    ui_component_delivery="both",            # "inline" (default) | "both" | "artifact"
+    artifact_store=InMemoryArtifactStore(),  # required for "both" / "artifact"
+)
+```
+
+The flag is `ui_component_delivery: Literal["inline", "both", "artifact"]`, default `"inline"`.
+
+#### The three modes
+
+| Mode | Inline `artifact_chunk` | Persist to store | `artifact_stored` event |
+|------|:-:|:-:|:-:|
+| **`inline`** (default) | **yes (today's behavior)** | no | no |
+| `both` | yes (legacy frontends keep working) | yes | yes (for `render_*`) |
+| `artifact` | no (inline suppressed) | yes | yes (for `render_*`) |
+
+- **`inline`** — exactly today. No store writes for UI components, no new events. The default `NoOpArtifactStore` fallback is preserved; nothing about the default code path changes.
+- **`both`** — a migration runway. Old frontends keep rendering from the inline `artifact_chunk`; new frontends can switch to `artifact_stored` + fetch-by-id. The new `artifact_stored` event is additive — consumers that don't know about it simply ignore it.
+- **`artifact`** — id-based delivery only. The inline `artifact_chunk` is suppressed; visible components arrive solely as `artifact_stored` events that the frontend resolves by id.
+
+In every mode, "visible" (`render_*`, `emit_visible=True`) vs. "silent intermediate" (`build_*`, `emit_visible=False`) is unchanged: only `render_*` is delivered to the frontend. In the store-backed modes, **both** `render_*` and `build_*` payloads are persisted (so a later `render_*` can compose a prior `build_*`), but only the visible `render_*` writes fire an `artifact_stored` event.
+
+#### Id-based delivery contract
+
+In store-backed modes the `artifact_stored` event carries an **opaque** artifact id (`extra["artifact_id"]`). The frontend uses that id to fetch the full payload from the store (e.g. the Playground exposes `GET /artifacts/{id}`).
+
+- Store ids are **opaque**. Callers and frontends must never predict, construct, or parse them — always round-trip the id you were handed.
+- In `both` mode the inline `artifact_chunk` and the `artifact_stored` event carry the **same** opaque `artifact_id` (threaded into the inline chunk's `meta`). The frontend should dedupe **strictly** on that opaque store id — never on the component's own `id`/`component_id` — so the same component renders once regardless of which channel arrives first.
+
+#### Where it's stored: namespace + `component_data` descriptor
+
+Store-backed UI components are written under the namespace **`penguiflow_ui_component`**.
+
+- The **full** payload — including the heavy `props` (table rows, chart series, etc.) — lives in the stored **bytes** (JSON). This is the source of truth that is hydrated back when a component is resolved.
+- A **light** descriptor is attached as `meta` and surfaces on `ArtifactRef.source["component_data"]`, so the component can be listed and rendered without downloading the bytes. The descriptor shape is:
+
+  ```python
+  {
+      "component_data": {
+          "kind": "ui_component",
+          "component": "datagrid",      # the component name
+          "title": "Q4 revenue",        # or None
+          "summary": "Built datagrid",  # or None
+          "metadata": {...},            # emit metadata
+      }
+  }
+  ```
+
+  Note: `props` is intentionally **not** in the descriptor. It would make every `list_artifacts` call drag back every component's full dataset. `props` lives only in the bytes.
+
+#### Store-backed modes require a real `ArtifactStore`
+
+`both` and `artifact` need somewhere to persist to. If you select either mode without a real store (i.e. the resolved store is `None` or the default `NoOpArtifactStore`), `ReactPlanner` raises a `ValueError` **at construction** — it fails fast, never mid-stream:
+
+```python
+# Raises ValueError at init: store-backed mode with the NoOp default store.
+ReactPlanner(llm_client=llm, catalog=catalog, ui_component_delivery="artifact")
+
+# Correct: pass a real store.
+ReactPlanner(
+    llm_client=llm,
+    catalog=catalog,
+    ui_component_delivery="artifact",
+    artifact_store=InMemoryArtifactStore(),
+)
+```
+
+The `inline` default never raises — it makes no store writes, so the `NoOpArtifactStore` fallback is fine.
+
+#### Cross-run composition is session-scoped
+
+In store-backed modes, persisted UI components — including silently-built `build_*` components — become **reusable building blocks**: a fresh `planner.run()` in the **same** session can take a store id surfaced by `list_artifacts` and reference it as an `artifact_ref`, and the planner will hydrate the component from the store.
+
+This composition is **scope-checked**. Hydration goes through the scoped store (`ScopedArtifacts.download`), which enforces the tenant/user/**session** boundary. So:
+
+- Store-only components resolve as building blocks **within** the same tenant/user/session.
+- Resolution is **refused across sessions** — the same id under a different session scope does not resolve. This is the intended boundary: reusable building blocks within a session, not a global artifact lake.
+
+A genuinely unknown or hallucinated `artifact_ref` still fails loudly with `Unknown artifact_ref`, and cross-run resolution is additionally gated to the `penguiflow_ui_component` namespace, so an unrelated same-session JSON artifact that merely *looks* like a component cannot be rendered.
 
 ### Enabling rich output
 
@@ -308,6 +400,7 @@ Recommended decision rule:
 
 - keep build and render steps within the same planner run
 - call `list_artifacts(...)` if you need to inspect currently available refs
+- in the default `inline` mode, `artifact_ref`s do **not** survive across runs. If you need cross-run composition within a session, opt into a store-backed delivery mode (`ui_component_delivery="both"`/`"artifact"`) with a real `ArtifactStore`; then `list_artifacts(...)` surfaces store ids you can reference in a later run **within the same session** (see [UI-component delivery modes](#ui-component-delivery-ui_component_delivery))
 
 ### Duplicate suppression when you did not expect it
 

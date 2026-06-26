@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Mapping
-from typing import Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from penguiflow.catalog import tool
 from penguiflow.planner import ToolContext
@@ -17,6 +17,9 @@ from penguiflow.planner.artifact_registry import (
     has_artifact_refs,
     resolve_artifact_refs_async,
 )
+
+if TYPE_CHECKING:
+    from penguiflow.planner.artifact_handling import _EventEmittingArtifactStoreProxy
 
 from .runtime import get_runtime
 from .tools import (
@@ -100,6 +103,20 @@ def _summarise_component(component: str, props: Mapping[str, Any], *, verb: str 
             return f"{verb} accordion ({len(items)} items)"
         return f"{verb} accordion"
     return f"{verb} {component}"
+
+
+def component_fields(component_data: Mapping[str, Any]) -> dict[str, Any]:
+    """Rich fields for a store-only ui_component entry, derived from ArtifactRef.source['component_data'].
+
+    Per decision 3 (minimal descriptor): no source_tool, no created_step.
+    """
+    return {
+        "kind": component_data.get("kind", "ui_component"),
+        "component": component_data.get("component"),
+        "title": component_data.get("title"),
+        "summary": component_data.get("summary"),
+        "renderable": True,
+    }
 
 
 @tool(desc="Request a rich UI component render (passive).", tags=["rich_output", "ui"], side_effects="pure")
@@ -457,9 +474,12 @@ async def _process_component_payload(
     verb = "Rendered" if emit_visible else "Built"
     summary = _summarise_component(component, resolved_props, verb=verb)
 
+    delivery = getattr(getattr(ctx, "_planner", None), "_ui_component_delivery", "inline")
+
     artifact_ref: str | None = None
+    record = None
     if registry is not None:
-        record = _register_component_payload(
+        record = await _register_component_payload(
             ctx,
             registry=registry,
             source_tool=source_tool,
@@ -469,10 +489,15 @@ async def _process_component_payload(
             title=title,
             meta=meta,
             summary=summary,
+            emit_visible=emit_visible,
+            delivery=delivery,
         )
         artifact_ref = record.ref
 
-    if emit_visible:
+    if emit_visible and delivery in {"inline", "both"}:
+        if delivery == "both" and record is not None and record.artifact_id:
+            # decision 7: share the opaque store id across both channels for frontend dedup.
+            meta = {**meta, "artifact_id": record.artifact_id}
         await _emit_component_artifact(
             ctx,
             component=component,
@@ -490,7 +515,7 @@ async def _process_component_payload(
     )
 
 
-def _register_component_payload(
+async def _register_component_payload(
     ctx: ToolContext,
     *,
     registry: Any,
@@ -501,22 +526,52 @@ def _register_component_payload(
     title: str | None,
     meta: Mapping[str, Any],
     summary: str,
+    emit_visible: bool,
+    delivery: str,
 ) -> Any:
     trajectory = getattr(ctx, "_trajectory", None)
     step_index = len(getattr(trajectory, "steps", []) or [])
+    payload = {
+        "id": component_id,
+        "component": component,
+        "props": dict(props),
+        "title": title,
+        "summary": summary,
+        "metadata": dict(meta),
+    }
     record = registry.register_tool_artifact(
         source_tool,
         "ui",
-        {
-            "id": component_id,
-            "component": component,
-            "props": dict(props),
-            "title": title,
-            "summary": summary,
-            "metadata": dict(meta),
-        },
+        payload,
         step_index=step_index,
     )
+
+    if delivery in {"both", "artifact"}:
+        # Plumbing write: scope is stamped by the proxy; event gated by emit; we own the index entry (register=False).
+        # cast() because ctx._artifacts is statically the public ArtifactStore protocol (no emit/register params),
+        # but the concrete runtime object is _EventEmittingArtifactStoreProxy. Do NOT widen the public protocol.
+        proxy = cast("_EventEmittingArtifactStoreProxy", ctx._artifacts)
+        ref = await proxy.put_text(
+            json.dumps(payload, default=str),  # FULL payload incl. props -> stored bytes (source of truth)
+            mime_type="application/json",
+            namespace="penguiflow_ui_component",
+            meta={
+                "component_data": {  # LIGHT descriptor (decision 3) -> ref.source
+                    "kind": "ui_component",
+                    "component": component,
+                    "title": title,
+                    "summary": summary,
+                    "metadata": dict(meta),
+                }
+            },
+            emit=emit_visible,  # render_* -> artifact_stored fires; build_* -> silent
+            register=False,  # proxy must NOT auto-register a phantom binary
+        )
+        record.artifact_id = ref.id
+        record.mime_type = ref.mime_type
+        record.size_bytes = ref.size_bytes
+
+    # MANDATORY: snapshot AFTER the mutation so record.artifact_id persists for resume (Phase 004 depends on it).
     metadata_state = getattr(trajectory, "metadata", None)
     if isinstance(metadata_state, dict):
         registry.write_snapshot(metadata_state)
@@ -578,34 +633,65 @@ async def list_artifacts(args: ListArtifactsArgs, ctx: ToolContext) -> ListArtif
         items.extend(registry.list_records(kind=kind, source_tool=args.source_tool))
 
     # -- Step 2: Query persistent ArtifactStore (appended after registry) --
-    if kind is None or kind == "binary":
+    if kind is None or kind == "binary" or kind == "ui_component":
         scoped = getattr(ctx, "artifacts", None)
         if scoped is not None:
             try:
                 refs = await scoped.list()
-                # Build set of IDs already in items (from registry) for dedup
-                seen_ids = {item.get("artifact_id") for item in items if item.get("artifact_id")}
+                # Index entries (from the in-run registry) keyed by their opaque artifact_id.
+                index_by_id = {
+                    item.get("artifact_id"): item
+                    for item in items
+                    if item.get("artifact_id")
+                }
                 for ref in refs:
-                    # Persistent store wins dedup: replace registry entry if same ID
-                    if ref.id in seen_ids:
-                        items = [item for item in items if item.get("artifact_id") != ref.id]
+                    existing = index_by_id.get(ref.id)
+                    if existing is not None:
+                        # ui_component: index wins (richer entry) -> skip the store ref (Finding 1).
+                        # binary: store wins (today's behavior) -> drop the index entry, append store entry.
+                        if existing.get("kind") == "ui_component":
+                            continue
+                        items = [it for it in items if it.get("artifact_id") != ref.id]
+
                     source_tool = ref.source.get("tool")
-                    if args.source_tool and source_tool != args.source_tool:
+                    component_data = ref.source.get("component_data")
+                    entry: dict[str, Any]
+                    if component_data:
+                        # Self-describing store entry (resume / cross-run): no byte fetch, no parsing.
+                        fields = component_fields(component_data)
+                        entry = {
+                            "ref": ref.id,
+                            "source_tool": None,  # decision 3: store-only entries have no source_tool
+                            "artifact_id": ref.id,
+                            "mime_type": ref.mime_type,
+                            "size_bytes": ref.size_bytes,
+                            "created_step": None,  # decision 3
+                            "metadata": component_data.get("metadata", {}) or {},
+                            **fields,
+                            "title": fields["title"] or ref.filename,
+                        }
+                    else:
+                        entry = {
+                            "ref": ref.id,
+                            "kind": "binary",
+                            "source_tool": source_tool,
+                            "component": _binary_component_name(ref.mime_type),
+                            "title": ref.filename,
+                            "summary": _binary_summary(ref),
+                            "artifact_id": ref.id,
+                            "mime_type": ref.mime_type,
+                            "size_bytes": ref.size_bytes,
+                            "created_step": None,
+                            "renderable": True,
+                            "metadata": {},
+                        }
+
+                    # Filter derived entry by the requested kind and source_tool.
+                    if kind is not None and entry["kind"] != kind:
                         continue
-                    items.append({
-                        "ref": ref.id,
-                        "kind": "binary",
-                        "source_tool": source_tool,
-                        "component": _binary_component_name(ref.mime_type),
-                        "title": ref.filename,
-                        "summary": _binary_summary(ref),
-                        "artifact_id": ref.id,
-                        "mime_type": ref.mime_type,
-                        "size_bytes": ref.size_bytes,
-                        "created_step": None,
-                        "renderable": True,
-                        "metadata": {},
-                    })
+                    if args.source_tool and entry["source_tool"] != args.source_tool:
+                        continue
+                    items.append(entry)
             except Exception as e:
                 logger.debug("Failed to list persistent artifacts: %s", e, exc_info=True)
 

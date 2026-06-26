@@ -162,3 +162,105 @@ describe('EventStreamManager', () => {
     expect(mockInstances).toHaveLength(1);
   });
 });
+
+const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+
+describe('EventStreamManager artifact_stored handling (Phase 008)', () => {
+  let mockInstances: MockEventSource[];
+
+  beforeEach(() => {
+    mockInstances = [];
+    globalThis.EventSource = class FakeEventSource {
+      addEventListener: ReturnType<typeof vi.fn>;
+      close: ReturnType<typeof vi.fn>;
+      onmessage: ((evt: MessageEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      private _listeners: Record<string, ((evt: MessageEvent) => void)[]> = {};
+
+      constructor() {
+        this.addEventListener = vi.fn((type: string, fn: (evt: MessageEvent) => void) => {
+          (this._listeners[type] ??= []).push(fn);
+        });
+        this.close = vi.fn();
+        mockInstances.push(this as unknown as MockEventSource);
+      }
+
+      _emit(type: string, data: Record<string, unknown>) {
+        // Mirror the browser: a named-event listener fires for addEventListener(type);
+        // onmessage only fires for the default unnamed `message` event.
+        const evt = { type, data: JSON.stringify(data) } as unknown as MessageEvent;
+        (this._listeners[type] ?? []).forEach(fn => fn(evt));
+        if (type === 'message' && this.onmessage) this.onmessage(evt);
+      }
+
+      _triggerError() {
+        if (this.onerror) this.onerror();
+      }
+    } as unknown as typeof EventSource;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('fetches the stored JSON and renders a ui_component for penguiflow_ui_component namespace', async () => {
+    const stored = {
+      id: 'comp-1',
+      component: 'report',
+      props: { title: 'Hi' },
+      title: 'Report',
+      metadata: { namespace: 'penguiflow_ui_component' }
+    };
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(stored)
+    });
+
+    const stores = createMockStores();
+    const manager = createEventStreamManager(stores);
+    manager.start('trace-1', 'session-1', 3, 100);
+
+    const es = mockInstances[0]!;
+    es._emit('artifact_stored', {
+      event: 'artifact_stored',
+      artifact_id: 'artifact-1',
+      source: { namespace: 'penguiflow_ui_component' },
+      message_id: 'msg-7'
+    });
+
+    await flush();
+
+    expect(fetch).toHaveBeenCalledWith('/artifacts/artifact-1', {
+      headers: { 'X-Session-ID': 'session-1' }
+    });
+    const addArtifactChunk = stores.interactionsStore.addArtifactChunk as ReturnType<typeof vi.fn>;
+    expect(addArtifactChunk).toHaveBeenCalledTimes(1);
+    const [payload, options] = addArtifactChunk.mock.calls[0];
+    expect(payload.artifact_type).toBe('ui_component');
+    expect(payload.meta.artifact_id).toBe('artifact-1');
+    expect(options).toEqual({ message_id: 'msg-7' });
+    // UI component is NOT added to the download-only artifacts store.
+    expect(stores.artifactsStore.addArtifact).not.toHaveBeenCalled();
+  });
+
+  it('keeps binary artifacts on the download path (does not fetch JSON)', async () => {
+    globalThis.fetch = vi.fn();
+    const stores = createMockStores();
+    const manager = createEventStreamManager(stores);
+    manager.start('trace-1', 'session-1', 3, 100);
+
+    const es = mockInstances[0]!;
+    es._emit('artifact_stored', {
+      event: 'artifact_stored',
+      artifact_id: 'bin-1',
+      mime_type: 'application/pdf',
+      source: { namespace: 'tools' }
+    });
+
+    await flush();
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(stores.artifactsStore.addArtifact).toHaveBeenCalledTimes(1);
+    expect(stores.interactionsStore.addArtifactChunk).not.toHaveBeenCalled();
+  });
+});
