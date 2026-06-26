@@ -81,6 +81,23 @@ These were the open choices; an implementing agent must follow the resolved form
    carry the same `artifact_id`; the frontend dedupes strictly on that opaque id (never on the component's
    `id`/`component_id`). In `inline` mode there is no store write, so no id is threaded and nothing changes.
 
+These were resolved during a second verification pass (2026-06-26):
+8. **Template wiring = all 7 rich-output `ReactPlanner` templates.** Surface the flag in **every** `new/*` template
+   that constructs a `ReactPlanner` with rich-output tools: **`react`, `analyst`, `parallel`, `wayfinder`,
+   `rag_server`, `minimal`, `enterprise`**. The earlier draft's enumerated list (`minimal`, `parallel`, `analyst`,
+   `wayfinder`, `rag_server`, + `react`) **omitted `enterprise`**, which `src/__package_name__/planner.py.jinja`
+   confirms also builds a rich-output `ReactPlanner`. Verified set: `grep -rl "ReactPlanner(" templates/new` ∩
+   rich-output usage = exactly these 7 (`minimal` wires it via `orchestrator.py.jinja`; the rest via
+   `planner.py.jinja`). Do **not** skip `enterprise`. (Templates default to `"inline"`, so any un-wired template
+   still works — this decision is about consistency, not correctness.)
+9. **Spec-driven generation = in scope.** Wire the flag into `penguiflow/cli/templates/planner.py.jinja` (the
+   separate spec-driven root, distinct from `templates/new/*`) using the same `config`/env/kwarg pattern, so the
+   feature is consistent across **both** generation surfaces. Not a deliberate omission.
+10. **Playground message placement = backend.** Resolve change 7 sub-task 2 (and change 6) with **option (a)**: the
+   backend includes `message_id`/`default_message_id` on `penguiflow_ui_component` `artifact_stored` frames (mirror
+   the stream-chunk path at `playground.py:1622-1628`), so an `artifact`-only UI component arrives with a render
+   slot. Do **not** rely on the frontend attaching to the active `agentMsgId` (option b).
+
 "Visible" (`render_*`, `emit_visible=True`) vs "silent intermediate" (`build_*`, `emit_visible=False`) is
 unchanged: `build_*` never emits `artifact_chunk` today (`nodes.py:475` guards on `emit_visible`) and never
 fires `artifact_stored` (persists silently so `render_*` can compose it); only `render_*` is delivered.
@@ -434,14 +451,14 @@ below — this is load-bearing for the non-breaking guarantee):
      convert it into the same `ArtifactChunkPayload`/`ComponentArtifact` shape the inline path feeds to
      `interactionsStore.addArtifactChunk(...)` (`interactions.svelte.ts:27-55`), so both paths render through one
      code path.
-  2. **Message placement.** Inline component rendering is keyed to a message: `Message.svelte:31-37` filters
-     component artifacts by `message_id`. But the live `/chat/stream` backend only injects `default_message_id`
-     into **stream chunks**, **not** `artifact_stored` frames (`playground.py:386-414` vs `:430-443`). So an
-     `artifact`-only component arrives with **no `message_id`** and has no slot to render in. **Pick one and state
-     it:** (a) backend — include `message_id`/`default_message_id` on `artifact_stored` frames for the
-     `penguiflow_ui_component` namespace (mirror the stream-chunk path at `playground.py:1622-1628`); or (b)
-     frontend — attach the fetched component to the active `agentMsgId`. Option (a) is cleaner (the backend already
-     knows the active message id) and is the recommended default.
+  2. **Message placement (RESOLVED — decision 10: backend, option a).** Inline component rendering is keyed to a
+     message: `Message.svelte:31-37` filters component artifacts by `message_id`. But the live `/chat/stream`
+     backend only injects `default_message_id` into **stream chunks**, **not** `artifact_stored` frames
+     (`playground.py:386-414` vs `:430-443`). So an `artifact`-only component arrives with **no `message_id`** and
+     has no slot to render in. **Resolution: backend — include `message_id`/`default_message_id` on `artifact_stored`
+     frames for the `penguiflow_ui_component` namespace** (mirror the stream-chunk path at
+     `playground.py:1622-1628`); the backend already knows the active message id. Do **not** use the frontend-side
+     option (attaching to the active `agentMsgId`).
   3. **Dedupe state** keyed on the opaque store `artifact_id` (per decision 7 above), surviving across the inline
      and `artifact_stored` arrival order.
 - **In scope (decision 1: full end-to-end).** Required so store-backed modes are usable end-to-end in the
@@ -521,22 +538,24 @@ Matches the existing pattern (`config.py.jinja` field → env in `from_env` → 
 `planner.py.jinja`). Because the flag defaults to `"inline"`, **un-wired templates keep working unchanged** — this
 section only decides *which scaffolded projects expose the knob*, not correctness.
 
-**Scope decision (resolve the react-vs-analyst inconsistency).** The earlier draft named only
+**Scope decision (RESOLVED — decision 8: all 7 rich-output templates).** The earlier draft named only
 `penguiflow/templates/new/react/`, but `penguiflow new` loads every template under `penguiflow.templates.new`
-(`cli/new.py:123-131`) and several already wire a rich-output planner — `minimal`, `parallel`, `analyst`,
-`wayfinder`, `rag_server` — and this plan's own Verification step scaffolds **`react`/`analyst`**. Surface the flag
-consistently across **all `new/*` templates that construct a `ReactPlanner` with rich-output tools**, not just
-`react`, so the knob isn't silently missing from `analyst` etc. For each:
+(`cli/new.py:123-131`). Surface the flag consistently across **all 7 `new/*` templates that construct a
+`ReactPlanner` with rich-output tools**: **`react`, `analyst`, `parallel`, `wayfinder`, `rag_server`, `minimal`,
+`enterprise`** (verified: `grep -rl "ReactPlanner(" templates/new` ∩ rich-output usage). `minimal` wires it via
+`orchestrator.py.jinja`; the other six via `planner.py.jinja`. **Do NOT omit `enterprise`** — the earlier draft's
+list dropped it even though it builds a rich-output `ReactPlanner`. The knob must not be silently missing from any
+of these. For each:
 - `config.py.jinja`: add `ui_component_delivery: str = "inline"`; in `from_env`,
   `ui_component_delivery=os.getenv("UI_COMPONENT_DELIVERY", "inline")`. Add to `.env.example`.
 - `planner.py.jinja` (or `orchestrator.py.jinja` for `minimal`) `build_planner`: pass
   `ui_component_delivery=config.ui_component_delivery` into `ReactPlanner(...)` (alongside `multi_action_*`).
 
-**Spec-driven generation** uses a *separate* template root: `penguiflow/cli/generate.py:822-835` renders
-`penguiflow/cli/templates/planner.py.jinja` (which constructs `ReactPlanner(...)` at `:293-318`), **not**
-`templates/new/*`. Decide explicitly: either surface the flag there too (same `config`/env/kwarg pattern) or state
-that spec-driven projects are out of scope for this change. Recommended: include it, so the feature is consistent
-across both generation surfaces. If excluded, say so here so it's a deliberate omission rather than an oversight.
+**Spec-driven generation (RESOLVED — decision 9: in scope).** This uses a *separate* template root:
+`penguiflow/cli/generate.py:822-835` renders `penguiflow/cli/templates/planner.py.jinja` (which constructs
+`ReactPlanner(...)` at `:293-318`), **not** `templates/new/*`. **Surface the flag there too** (same
+`config`/env/kwarg pattern) so the feature is consistent across both generation surfaces. This is in scope, not a
+deliberate omission.
 
 ## Critical files
 - `penguiflow/planner/react.py` — thread `ui_component_delivery` through `ReactPlanner.__init__` signature,
@@ -559,13 +578,15 @@ across both generation surfaces. If excluded, say so here so it's a deliberate o
 - `docs/planner/rich-output.md` (+ siblings), `docs/tools/artifacts-guide.md` — additive: document the flag and
   the opt-in store-backed model.
 - `penguiflow/cli/playground.py` — verify `artifact_stored` + GET endpoints serve UI components by id; no default
-  flip. **Decide message placement:** include `message_id` on `penguiflow_ui_component` `artifact_stored` frames
-  (recommended) or handle placement frontend-side (change 7, sub-task 2).
+  flip. **Message placement (decision 10): include `message_id`/`default_message_id` on `penguiflow_ui_component`
+  `artifact_stored` frames** (backend; mirror `playground.py:1622-1628`) — not frontend-side (change 7, sub-task 2).
 - `penguiflow/cli/playground_ui/src/` (Svelte) — **add** `artifact_stored` + fetch-by-id (JSON fetch helper +
   payload conversion + dedupe on opaque `artifact_id` + message placement); **keep** the inline path; rebuild
   `dist/`.
-- `penguiflow/templates/new/*/src/__package_name__/{config,planner}.py.jinja` (+ `.env.example`) — surface the flag
-  across all rich-output templates (not just `react`); decide whether `penguiflow/cli/templates/` spec-driven
-  generation is in scope (change "Template wiring").
+- `penguiflow/templates/new/*/src/__package_name__/{config,planner,orchestrator}.py.jinja` (+ `.env.example`) —
+  surface the flag across **all 7** rich-output templates (`react`, `analyst`, `parallel`, `wayfinder`, `rag_server`,
+  `minimal`, `enterprise`; decision 8 — incl. `enterprise`, `minimal` via `orchestrator.py.jinja`). **Also wire
+  `penguiflow/cli/templates/planner.py.jinja`** — spec-driven generation is in scope (decision 9) (change
+  "Template wiring").
 - `tests/` + `penguiflow/cli/playground_ui/tests/` — existing suite green on `inline`; new tests for store-backed
   modes, proxy flags, dedup, resume (incl. **`artifact_id` survives snapshot/restore**), init raise.
