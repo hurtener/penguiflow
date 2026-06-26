@@ -97,6 +97,7 @@ def init_react_planner(
     multi_action_sequential: bool = False,
     multi_action_read_only_only: bool = True,
     multi_action_max_tools: int = 2,
+    ui_component_delivery: str = "inline",
     auto_seq_enabled: bool = False,
     auto_seq_execute: bool = False,
     auto_seq_read_only_only: bool = True,
@@ -154,6 +155,11 @@ def init_react_planner(
         multi_action_sequential: Execute multiple actions sequentially.
         multi_action_read_only_only: Only allow read-only actions in parallel.
         multi_action_max_tools: Maximum tools per multi-action.
+        ui_component_delivery: Delivery mode for rich-output UI components, one of
+            "inline" (default — emit the inline ``artifact_chunk`` exactly as today,
+            no store writes), "both" (inline plus persist to the ArtifactStore), or
+            "artifact" (persist to the store only). Store-backed modes require a real
+            ArtifactStore and raise at construction if only the NoOp default is set.
         use_native_llm: When True, use the native LLM layer (penguiflow.llm)
             instead of LiteLLM. The native layer provides type-safe requests,
             provider-specific adapters, and integrated cost tracking.
@@ -438,6 +444,13 @@ def init_react_planner(
     planner._pause_enabled = pause_enabled
     planner._state_store = state_store
 
+    if ui_component_delivery not in {"inline", "both", "artifact"}:
+        raise ValueError(
+            "ui_component_delivery must be one of 'inline', 'both', 'artifact'; "
+            f"got {ui_component_delivery!r}"
+        )
+    planner._ui_component_delivery = ui_component_delivery
+
     # Artifact store resolution:
     # 1. Explicit parameter (highest priority)
     # 2. Discovered from state_store
@@ -455,6 +468,19 @@ def init_react_planner(
         planner._artifact_store = NoOpArtifactStore()
 
     planner._artifact_registry = ArtifactRegistry()
+
+    # Store-backed UI-component delivery requires a real ArtifactStore. Fail fast at
+    # construction (never mid-stream) so downstream code in store-backed modes can assume
+    # a usable store without an isinstance check.
+    if ui_component_delivery in {"both", "artifact"} and (
+        planner._artifact_store is None
+        or isinstance(planner._artifact_store, NoOpArtifactStore)
+    ):
+        raise ValueError(
+            f"ui_component_delivery={ui_component_delivery!r} requires a real ArtifactStore. "
+            "Pass artifact_store=InMemoryArtifactStore() (or another ArtifactStore) to ReactPlanner; "
+            "the default NoOpArtifactStore cannot persist UI components."
+        )
 
     # Observation guardrail (enabled by default)
     planner._observation_guardrail = observation_guardrail or ObservationGuardrailConfig()

@@ -34,6 +34,9 @@ When adding new visible renderers, the frontend contract should remain:
 
 If you preserve that shape, existing renderer dispatch code can stay stable while the backend grows richer authoring tools.
 
+!!! note "Opt-in store-backed delivery"
+    The `artifact_chunk` contract above is the default (`ui_component_delivery="inline"`) and is unchanged. `ReactPlanner` also supports opt-in store-backed delivery modes (`"both"` / `"artifact"`) that additionally persist UI-component payloads to the `ArtifactStore` and deliver them **by id** via an additive `artifact_stored` event. New renderers do not need to do anything special to participate — the canonical `{component, props, title?}` payload is what gets persisted and hydrated. If your frontend opts into id-based delivery, fetch the payload by the opaque `artifact_id` and render it through the same renderer dispatch. See **[UI-component delivery modes](rich-output.md#ui-component-delivery-ui_component_delivery)**.
+
 ### The extension layers
 
 Rich output has three layers that must stay aligned:

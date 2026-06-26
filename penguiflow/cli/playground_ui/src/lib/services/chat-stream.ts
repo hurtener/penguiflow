@@ -7,6 +7,7 @@ import type {
 } from '$lib/types';
 import { safeParse } from '$lib/utils';
 import { ANSWER_GATE_SENTINEL } from '$lib/utils/constants';
+import { fetchArtifactJson, storedComponentToArtifactChunk } from './api';
 import type { AppStores } from '$lib/stores';
 import type { NotificationLevel } from '$lib/stores/ui/notifications.svelte';
 import { HttpAgent } from '@ag-ui/client';
@@ -64,6 +65,8 @@ class ChatStreamManager {
   constructor(private stores: ChatStreamStores) {}
   private eventSource: EventSource | null = null;
   private agentMsgId: string | null = null;
+  // Session id for the current run (SSE + AG-UI), used to scope store-backed artifact fetches.
+  private sessionId: string | null = null;
   private aguiSubscription: { unsubscribe: () => void } | null = null;
   private aguiMessageMap: Map<string, string> = new Map();
   private aguiMappedPlaceholder = false;
@@ -100,6 +103,7 @@ class ChatStreamManager {
     // Create agent message placeholder
     const agentMsg = this.stores.chatStore.addAgentMessage();
     this.agentMsgId = agentMsg.id;
+    this.sessionId = sessionId;
 
     // Build URL
     const url = new URL('/chat/stream', window.location.origin);
@@ -154,6 +158,7 @@ class ChatStreamManager {
       this.eventSource = null;
     }
     this.agentMsgId = null;
+    this.sessionId = null;
     if (this.aguiSubscription) {
       this.aguiSubscription.unsubscribe();
       this.aguiSubscription = null;
@@ -421,11 +426,34 @@ class ChatStreamManager {
 
   private handleArtifactStored(data: Record<string, unknown>): void {
     const stored = toArtifactStoredEvent(data);
-    if (stored) {
+    // Store-backed UI components (Phase 008): fetch the JSON by id and render through the same
+    // inline code path. Dedupe (decision 7) is enforced by interactionsStore.addArtifactChunk on
+    // the opaque store artifact_id, so `both`-mode duplicates collapse to a single render.
+    if (stored && isUiComponentArtifactStored(stored)) {
+      // Prefer the backend-supplied message_id/default_message_id (Phase 007) for placement; fall
+      // back to the active agent message if the backend did not inject one.
+      const messageId =
+        getString(data.message_id) ??
+        getString(data.default_message_id) ??
+        this.agentMsgId ??
+        undefined;
+      void this.renderStoredUiComponent(stored.artifact_id, messageId);
+    } else if (stored) {
       this.stores.artifactsStore.addArtifact(stored);
     }
     // Also add to events for visibility
     this.stores.eventsStore.addEvent(data, 'artifact_stored');
+  }
+
+  private async renderStoredUiComponent(
+    artifactId: string,
+    messageId?: string
+  ): Promise<void> {
+    const stored = await fetchArtifactJson(artifactId, this.sessionId ?? undefined);
+    if (!stored) return;
+    const payload = storedComponentToArtifactChunk(stored, artifactId);
+    if (!payload) return;
+    this.stores.interactionsStore.addArtifactChunk(payload, { message_id: messageId });
   }
 
   private handleStepEvent(
@@ -642,6 +670,7 @@ class ChatStreamManager {
 
     this.aguiRunId = input.runId;
     this.aguiSessionId = sessionId;
+    this.sessionId = sessionId;
     console.log('[AG-UI] Sending request:', JSON.stringify(input, null, 2));
     const agent = new HttpAgent({ url: url.toString() });
     // Use run() not runAgent() - run() returns Observable<BaseEvent>
@@ -698,6 +727,7 @@ class ChatStreamManager {
 
     this.aguiRunId = input.run_id;
     this.aguiSessionId = sessionId;
+    this.sessionId = sessionId;
 
     const agent = new HttpAgent({ url: url.toString() });
     const observable = agent.run(input as unknown as RunAgentInput);
@@ -874,7 +904,17 @@ class ChatStreamManager {
           const stored = artifactRecord
             ? toArtifactStoredEventFromCustom(artifactRecord, this.aguiRunId, this.aguiSessionId)
             : null;
-          if (stored) {
+          if (stored && isUiComponentArtifactStored(stored)) {
+            // Store-backed UI component (Phase 008): fetch + render through the inline path. Prefer
+            // the backend-injected message_id/default_message_id (Phase 007) for placement.
+            const messageId =
+              getString(record.message_id) ??
+              getString(record.default_message_id) ??
+              (artifactRecord ? getString(artifactRecord.message_id) : undefined) ??
+              this.agentMsgId ??
+              undefined;
+            void this.renderStoredUiComponent(stored.artifact_id, messageId);
+          } else if (stored) {
             this.stores.artifactsStore.addArtifact(stored);
           }
         }
@@ -1074,6 +1114,14 @@ function toArtifactStoredEvent(data: Record<string, unknown>): ArtifactStoredEve
     session_id,
     ts
   };
+}
+
+/**
+ * Whether an `artifact_stored` event describes a store-backed UI component (Phase 007/008).
+ * Keyed on the namespace the backend stamps for store-backed component artifacts.
+ */
+function isUiComponentArtifactStored(stored: ArtifactStoredEvent): boolean {
+  return getString(stored.source?.namespace) === 'penguiflow_ui_component';
 }
 
 function toArtifactStoredEventFromCustom(

@@ -397,6 +397,7 @@ class ReactPlanner:
     _multi_action_sequential: bool
     _multi_action_read_only_only: bool
     _multi_action_max_tools: int
+    _ui_component_delivery: str
     _auto_seq_enabled: bool
     _auto_seq_execute: bool
     _auto_seq_read_only_only: bool
@@ -456,6 +457,7 @@ class ReactPlanner:
         multi_action_sequential: bool = False,
         multi_action_read_only_only: bool = True,
         multi_action_max_tools: int = 2,
+        ui_component_delivery: str = "inline",
         auto_seq_enabled: bool = False,
         auto_seq_execute: bool = False,
         auto_seq_read_only_only: bool = True,
@@ -521,6 +523,7 @@ class ReactPlanner:
             "multi_action_sequential": multi_action_sequential,
             "multi_action_read_only_only": multi_action_read_only_only,
             "multi_action_max_tools": multi_action_max_tools,
+            "ui_component_delivery": ui_component_delivery,
             "auto_seq_enabled": auto_seq_enabled,
             "auto_seq_execute": auto_seq_execute,
             "auto_seq_read_only_only": auto_seq_read_only_only,
@@ -575,6 +578,7 @@ class ReactPlanner:
             multi_action_sequential=multi_action_sequential,
             multi_action_read_only_only=multi_action_read_only_only,
             multi_action_max_tools=multi_action_max_tools,
+            ui_component_delivery=ui_component_delivery,
             auto_seq_enabled=auto_seq_enabled,
             auto_seq_execute=auto_seq_execute,
             auto_seq_read_only_only=auto_seq_read_only_only,

@@ -63,6 +63,9 @@ Use a skill when you want to enforce the new preferred workflow:
 
 This is useful when the model still tends to emit one giant nested payload.
 
+!!! note "Build-first works the same with store-backed delivery"
+    Build-first composition is unchanged in the default `inline` delivery mode. If you opt into a store-backed delivery mode (`ui_component_delivery="both"`/`"artifact"`), persisted `build_*` components additionally become reusable **across runs within the same session** — a later run can reference a prior run's component by the store id surfaced from `list_artifacts`. A build-first skill does not need to change for this; cross-run references are resolved (and scope-checked) by the planner. See **[UI-component delivery modes](rich-output.md#ui-component-delivery-ui_component_delivery)**.
+
 #### Pattern C: renderer-specific authoring skill
 
 Use a skill when you add a new renderer and need to teach:

@@ -430,16 +430,29 @@ def _event_frame(
     if event.event_type == "artifact_stored":
         # Emit when a binary artifact is stored (e.g., from MCP tool output)
         # Note: Use artifact_filename in extra to avoid LogRecord reserved key conflict
+        source = extra.get("source")
         payload.update(
             {
                 "artifact_id": extra.get("artifact_id"),
                 "mime_type": extra.get("mime_type"),
                 "size_bytes": extra.get("size_bytes"),
                 "filename": extra.get("artifact_filename") or extra.get("filename"),
-                "source": extra.get("source"),
+                "source": source,
                 "event": "artifact_stored",
             }
         )
+        # Decision 10 (option a): a store-backed UI component (delivery=artifact) arrives only
+        # as an artifact_stored frame with no inline chunk, so the frontend has no render slot.
+        # Mirror the stream-chunk path and attach the active message id so the frame can be
+        # placed against the current agent message. Only the penguiflow_ui_component namespace
+        # is affected; binary/MCP artifacts keep their existing shape unchanged.
+        if (
+            isinstance(source, Mapping)
+            and source.get("namespace") == "penguiflow_ui_component"
+            and message_id is not None
+        ):
+            payload.setdefault("message_id", message_id)
+            payload.setdefault("default_message_id", message_id)
         return format_sse("artifact_stored", payload)
 
     if event.event_type == "resource_updated":

@@ -819,7 +819,7 @@ async def test_list_artifacts_persistent_store_fallback() -> None:
 
 @pytest.mark.asyncio
 async def test_list_artifacts_deduplication_persistent_store_wins() -> None:
-    """When registry and persistent store have the same artifact_id, persistent store wins."""
+    """A BINARY present in both index and store dedupes STORE-WINS (regression guard, Finding 1)."""
     configure_rich_output(
         RichOutputConfig(enabled=True, allowlist=["report", "echarts"], max_payload_bytes=5000, max_total_bytes=10000)
     )
@@ -831,22 +831,169 @@ async def test_list_artifacts_deduplication_persistent_store_wins() -> None:
         filename="chart.png",
         meta={"tool": "gather_data"},
     )
-    # Register an artifact in the in-run registry, then manually set its artifact_id
-    # to match the persistent store entry (register_tool_artifact does not accept artifact_id).
+    # Register the SAME binary in the in-run registry (kind="binary", artifact_id == ref.id).
+    # This mirrors production: the proxy calls register_binary_artifact on every put_* with
+    # register=True, so binaries always traverse BOTH registry and store.
     registry = ArtifactRegistry()
-    record = registry.register_tool_artifact(
-        "gather_data",
-        "chart_artifacts",
-        {"type": "echarts", "config": {}},
-        step_index=0,
-    )
-    record.artifact_id = ref.id
+    registry.register_binary_artifact(ref, source_tool="gather_data", step_index=0)
     ctx._planner = SimpleNamespace(_artifact_registry=registry)
     result = await list_artifacts(ListArtifactsArgs(), ctx)
     # The persistent store entry should replace the registry entry with the same artifact_id.
     matching = [a for a in result.artifacts if a.artifact_id == ref.id]
     assert len(matching) == 1
     assert matching[0].kind == "binary"
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_ui_component_dedup_index_wins() -> None:
+    """A ui_component in BOTH index and store lists ONCE, with the richer index entry winning."""
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["report", "echarts"], max_payload_bytes=5000, max_total_bytes=10000)
+    )
+    ctx = DummyContext()
+    # Persist a ui_component to the store with a component_data descriptor (Phase 002 shape).
+    ref = await ctx.artifacts.upload(
+        json.dumps({"component": "echarts", "props": {}}),
+        mime_type="application/json",
+        namespace="penguiflow_ui_component",
+        meta={
+            "component_data": {
+                "kind": "ui_component",
+                "component": "echarts",
+                "title": "Revenue",
+                "summary": "Built echarts",
+                "metadata": {"source_tool": "build_chart_echarts"},
+            }
+        },
+    )
+    # Register the matching ui_component index record and copy the store id onto it (Phase 002).
+    registry = ArtifactRegistry()
+    record = registry.register_tool_artifact(
+        "build_chart_echarts",
+        "chart_artifacts",
+        {"type": "echarts", "config": {"title": {"text": "Revenue"}}},
+        step_index=0,
+    )
+    record.artifact_id = ref.id
+    ctx._planner = SimpleNamespace(_artifact_registry=registry)
+    result = await list_artifacts(ListArtifactsArgs(), ctx)
+    matching = [a for a in result.artifacts if a.artifact_id == ref.id]
+    # Listed exactly once, and it is the richer index entry (carries source_tool/created_step).
+    assert len(matching) == 1
+    assert matching[0].kind == "ui_component"
+    assert matching[0].source_tool == "build_chart_echarts"
+    assert matching[0].created_step == 0
+    assert matching[0].ref == record.ref
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_store_only_ui_component_is_rich() -> None:
+    """Cross-run: a store-only ui_component lists as a RICH ui_component entry from component_data."""
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["report", "echarts"], max_payload_bytes=5000, max_total_bytes=10000)
+    )
+    ctx = DummyContext()
+    # No registry -> store-only (resume / cross-run).
+    ref = await ctx.artifacts.upload(
+        json.dumps({"component": "echarts", "props": {}}),
+        mime_type="application/json",
+        namespace="penguiflow_ui_component",
+        meta={
+            "component_data": {
+                "kind": "ui_component",
+                "component": "echarts",
+                "title": "Revenue",
+                "summary": "Built echarts",
+                "metadata": {"source_tool": "build_chart_echarts"},
+            }
+        },
+    )
+    result = await list_artifacts(ListArtifactsArgs(), ctx)
+    matching = [a for a in result.artifacts if a.artifact_id == ref.id]
+    assert len(matching) == 1
+    entry = matching[0]
+    assert entry.kind == "ui_component"
+    assert entry.component == "echarts"
+    assert entry.title == "Revenue"
+    assert entry.summary == "Built echarts"
+    assert entry.renderable is True
+    # decision 3: store-only entries carry no source_tool / created_step.
+    assert entry.source_tool is None
+    assert entry.created_step is None
+    assert entry.metadata == {"source_tool": "build_chart_echarts"}
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_ui_component_kind_filter_surfaces_store() -> None:
+    """A kind='ui_component' filter on resume surfaces store-backed UI components (widened gate)."""
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["echarts"], max_payload_bytes=5000, max_total_bytes=10000)
+    )
+    ctx = DummyContext()
+    ref = await ctx.artifacts.upload(
+        json.dumps({"component": "echarts", "props": {}}),
+        mime_type="application/json",
+        namespace="penguiflow_ui_component",
+        meta={
+            "component_data": {
+                "kind": "ui_component",
+                "component": "echarts",
+                "title": "Revenue",
+                "summary": "Built echarts",
+            }
+        },
+    )
+    result = await list_artifacts(ListArtifactsArgs(kind="ui_component"), ctx)
+    assert [a.artifact_id for a in result.artifacts] == [ref.id]
+    assert result.artifacts[0].kind == "ui_component"
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_binary_kind_filter_excludes_store_ui_component() -> None:
+    """A kind='binary' filter does NOT pick up store-backed UI components."""
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["echarts"], max_payload_bytes=5000, max_total_bytes=10000)
+    )
+    ctx = DummyContext()
+    await ctx.artifacts.upload(
+        json.dumps({"component": "echarts", "props": {}}),
+        mime_type="application/json",
+        namespace="penguiflow_ui_component",
+        meta={
+            "component_data": {
+                "kind": "ui_component",
+                "component": "echarts",
+                "title": "Revenue",
+                "summary": "Built echarts",
+            }
+        },
+    )
+    result = await list_artifacts(ListArtifactsArgs(kind="binary"), ctx)
+    assert result.artifacts == []
+
+
+@pytest.mark.asyncio
+async def test_list_artifacts_store_only_ui_component_ignores_source_tool_filter() -> None:
+    """decision 3: a source_tool filter does NOT match store-only UI components (source_tool=None)."""
+    configure_rich_output(
+        RichOutputConfig(enabled=True, allowlist=["echarts"], max_payload_bytes=5000, max_total_bytes=10000)
+    )
+    ctx = DummyContext()
+    await ctx.artifacts.upload(
+        json.dumps({"component": "echarts", "props": {}}),
+        mime_type="application/json",
+        namespace="penguiflow_ui_component",
+        meta={
+            "component_data": {
+                "kind": "ui_component",
+                "component": "echarts",
+                "title": "Revenue",
+                "summary": "Built echarts",
+            }
+        },
+    )
+    result = await list_artifacts(ListArtifactsArgs(sourceTool="build_chart_echarts"), ctx)
+    assert result.artifacts == []
 
 
 @pytest.mark.asyncio

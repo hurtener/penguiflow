@@ -555,6 +555,45 @@ component = registry.resolve_ref("artifact_0", session_id="sess_123")
 | Mermaid diagram | `mermaid` | `code` |
 | Other binary | `markdown` | `content` (download link) |
 
+### Opt-in: persisting UI components to the ArtifactStore
+
+By default, the `ArtifactRegistry` is a per-run, **inline** index: rich-output `build_*`/`render_*` tools register `ui_component` payloads in memory and visible components reach the frontend only as inline `artifact_chunk` events. Nothing is written to the `ArtifactStore`.
+
+`ReactPlanner` accepts an **opt-in** flag, `ui_component_delivery` (`"inline"` default / `"both"` / `"artifact"`), that additionally — or exclusively — persists UI-component payloads to the `ArtifactStore`, so they can be delivered **by id** and resolved across HITL pause/resume and across runs within the same session.
+
+```python
+from penguiflow.artifacts import InMemoryArtifactStore
+from penguiflow.planner import ReactPlanner
+
+planner = ReactPlanner(
+    llm_client=llm,
+    ui_component_delivery="both",            # "inline" (default) | "both" | "artifact"
+    artifact_store=InMemoryArtifactStore(),  # required for "both"/"artifact"
+    # ...
+)
+```
+
+| Mode | Inline `artifact_chunk` | Persist to store | `artifact_stored` event |
+|------|:-:|:-:|:-:|
+| **`inline`** (default) | yes (today) | no | no |
+| `both` | yes | yes | yes (for `render_*`) |
+| `artifact` | no (suppressed) | yes | yes (for `render_*`) |
+
+**How persistence works:**
+
+- The store write goes through the **plumbing** (`ctx._artifacts`, the `_EventEmittingArtifactStoreProxy`) so tenant/user/session/trace scope is stamped and the `artifact_stored` event is gated to visible (`render_*`) writes.
+- UI components are stored under the namespace **`penguiflow_ui_component`**.
+- The **full** payload (including the heavy `props`) lives in the stored bytes (JSON) — the source of truth. A **light** `component_data` descriptor (`kind`/`component`/`title`/`summary`/`metadata`, **no** `props`) is attached as `meta` and surfaces on `ArtifactRef.source["component_data"]`, so components can be listed and rendered without downloading the bytes.
+
+**Id-based fetch contract:** in store-backed modes the `artifact_stored` event carries the **opaque** `artifact_id`; the frontend fetches the full payload by that id (e.g. `GET /artifacts/{id}` in the Playground). Store ids are opaque — never predict or construct them. In `both` mode the inline `artifact_chunk` and the `artifact_stored` event share the same opaque id so the frontend can dedupe on it.
+
+**Store required:** `both`/`artifact` raise a `ValueError` at planner construction if only the default `NoOpArtifactStore` is available — pass a real `artifact_store=` (e.g. `InMemoryArtifactStore()`).
+
+**Session scope:** cross-run resolution of store-backed UI components is scope-checked through `ScopedArtifacts.download` — reusable within the same tenant/user/session, refused across sessions.
+
+!!! note "This is opt-in; the inline default is unchanged"
+    In the default `inline` mode the registry remains a purely in-run index and **no** UI components are written to the `ArtifactStore`. The statements elsewhere that rich output's `build_*` tools "are not persistence APIs" and that "rich output does not replace binary artifacts" remain true for the default mode. See **[UI-component delivery modes](../planner/rich-output.md#ui-component-delivery-ui_component_delivery)** for the full contract.
+
 ---
 
 ## External Nodes (A2A)

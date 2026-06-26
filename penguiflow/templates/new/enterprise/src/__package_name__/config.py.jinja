@@ -75,6 +75,9 @@ class Config:
     rich_output_include_prompt_examples: bool = False
     rich_output_max_payload_bytes: int = 250000
     rich_output_max_total_bytes: int = 2000000
+    # Rich-output UI component delivery: "inline" (default) | "both" | "artifact".
+    # Store-backed modes ("both"/"artifact") require a real ArtifactStore.
+    ui_component_delivery: str = "inline"
 {% if with_background_tasks %}
     # Background tasks configuration
     background_tasks_enabled: bool = True
@@ -139,6 +142,7 @@ class Config:
             rich_output_include_prompt_examples=_env_flag("RICH_OUTPUT_INCLUDE_PROMPT_EXAMPLES", False),
             rich_output_max_payload_bytes=_env_int("RICH_OUTPUT_MAX_PAYLOAD_BYTES", 250000),
             rich_output_max_total_bytes=_env_int("RICH_OUTPUT_MAX_TOTAL_BYTES", 2000000),
+            ui_component_delivery=os.getenv("UI_COMPONENT_DELIVERY", "inline"),
 {% if with_background_tasks %}
             # Background tasks configuration
             background_tasks_enabled=_env_flag("BACKGROUND_TASKS_ENABLED", True),

@@ -69,8 +69,10 @@ class _EventEmittingArtifactStoreProxy:
         namespace: str | None = None,
         scope: ArtifactScope | None = None,
         meta: dict[str, Any] | None = None,
+        emit: bool = True,
+        register: bool = True,
     ) -> ArtifactRef:
-        """Store binary data and emit artifact_stored event."""
+        """Store binary data and (optionally) register + emit artifact_stored event."""
         resolved_scope = self._resolve_scope(scope)
         ref = await self._store.put_bytes(
             data,
@@ -80,7 +82,7 @@ class _EventEmittingArtifactStoreProxy:
             scope=resolved_scope,
             meta=meta,
         )
-        self._emit_artifact_stored_event(ref, len(data), namespace)
+        self._emit_artifact_stored_event(ref, len(data), namespace, emit=emit, register=register)
         return ref
 
     async def put_text(
@@ -92,8 +94,10 @@ class _EventEmittingArtifactStoreProxy:
         namespace: str | None = None,
         scope: ArtifactScope | None = None,
         meta: dict[str, Any] | None = None,
+        emit: bool = True,
+        register: bool = True,
     ) -> ArtifactRef:
-        """Store large text and emit artifact_stored event."""
+        """Store large text and (optionally) register + emit artifact_stored event."""
         resolved_scope = self._resolve_scope(scope)
         ref = await self._store.put_text(
             text,
@@ -103,7 +107,7 @@ class _EventEmittingArtifactStoreProxy:
             scope=resolved_scope,
             meta=meta,
         )
-        self._emit_artifact_stored_event(ref, len(text.encode("utf-8")), namespace)
+        self._emit_artifact_stored_event(ref, len(text.encode("utf-8")), namespace, emit=emit, register=register)
         return ref
 
     def _emit_artifact_stored_event(
@@ -111,9 +115,16 @@ class _EventEmittingArtifactStoreProxy:
         ref: ArtifactRef,
         size_bytes: int,
         namespace: str | None,
+        *,
+        emit: bool = True,
+        register: bool = True,
     ) -> None:
-        """Emit artifact_stored event for real-time UI updates."""
-        if self._registry is not None:
+        """Register a binary index record (if register) and/or emit artifact_stored (if emit).
+
+        The two concerns are independent: rich-output UI writes pass register=False (they own
+        their index entry via register_tool_artifact) and emit=emit_visible.
+        """
+        if register and self._registry is not None:
             source_tool = namespace or self._namespace
             self._registry.register_binary_artifact(
                 ref,
@@ -122,20 +133,21 @@ class _EventEmittingArtifactStoreProxy:
             )
             if isinstance(self._trajectory.metadata, MutableMapping):
                 self._registry.write_snapshot(self._trajectory.metadata)
-        self._emit_event(
-            PlannerEvent(
-                event_type="artifact_stored",
-                ts=self._time_source(),
-                trajectory_step=len(self._trajectory.steps),
-                extra={
-                    "artifact_id": ref.id,
-                    "mime_type": ref.mime_type,
-                    "size_bytes": size_bytes,
-                    "artifact_filename": ref.filename,  # Use artifact_filename to avoid LogRecord conflict
-                    "source": {"namespace": namespace or self._namespace},
-                },
+        if emit:
+            self._emit_event(
+                PlannerEvent(
+                    event_type="artifact_stored",
+                    ts=self._time_source(),
+                    trajectory_step=len(self._trajectory.steps),
+                    extra={
+                        "artifact_id": ref.id,
+                        "mime_type": ref.mime_type,
+                        "size_bytes": size_bytes,
+                        "artifact_filename": ref.filename,  # Use artifact_filename to avoid LogRecord conflict
+                        "source": {"namespace": namespace or self._namespace},
+                    },
+                )
             )
-        )
 
     # Delegate all other methods to the underlying store
     async def get(self, artifact_id: str) -> bytes | None:

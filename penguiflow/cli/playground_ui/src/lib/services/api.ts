@@ -4,6 +4,7 @@ import type {
   ValidationResult,
   TrajectoryPayload,
   ArtifactRef,
+  ArtifactChunkPayload,
   ComponentRegistryPayload,
   TaskState
 } from '$lib/types';
@@ -211,6 +212,89 @@ export async function getArtifactMeta(
     return null;
   }
   return result.data;
+}
+
+/**
+ * Fetch a store-backed UI-component artifact as parsed JSON.
+ *
+ * Phase 008 (issue-118): store-backed UI components (delivery `artifact`/`both`) are persisted by the
+ * backend and served by `GET /artifacts/{id}` as `application/json`. This fetches that JSON so the
+ * frontend can render it through the same code path as inline `artifact_chunk` components.
+ *
+ * @param artifactId - The opaque store artifact ID to fetch.
+ * @param sessionId - Optional session ID for scope authentication.
+ * @returns The parsed JSON payload, or null on failure.
+ */
+export async function fetchArtifactJson(
+  artifactId: string,
+  sessionId?: string
+): Promise<Record<string, unknown> | null> {
+  const headers: Record<string, string> = {};
+  if (sessionId) {
+    headers['X-Session-ID'] = sessionId;
+  }
+  const result = await fetchWithErrorHandling<Record<string, unknown>>(
+    `${BASE_URL}/artifacts/${encodeURIComponent(artifactId)}`,
+    Object.keys(headers).length ? { headers } : undefined
+  );
+  if (!result.ok) {
+    console.error('artifact json fetch failed', result.error);
+    return null;
+  }
+  return result.data;
+}
+
+/** Coerce a value to a plain (non-array) object record, or an empty record. */
+function asPlainRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+/**
+ * Convert a stored UI-component JSON payload into the same `ArtifactChunkPayload`/`ComponentArtifact`
+ * shape the inline `artifact_chunk` path feeds to `interactionsStore.addArtifactChunk(...)`.
+ *
+ * The stored bytes are the source of truth produced by the backend
+ * (`rich_output/nodes.py::_register_component_payload`) with the shape
+ * `{ id, component, props, title, summary, metadata }`. The inline emit path
+ * (`_emit_component_artifact`) produces a chunk of `{ id, component, props, title }` with a sibling
+ * `meta`. We reuse `stored.metadata` as the chunk `meta` and STRICTLY stamp the opaque store
+ * `artifactId` onto `meta.artifact_id` so dedupe (decision 7) keys on the store id regardless of
+ * arrival order.
+ *
+ * @param stored - The parsed JSON returned by `fetchArtifactJson`.
+ * @param artifactId - The opaque store artifact ID (dedupe key).
+ * @returns A `ui_component` `ArtifactChunkPayload`, or null if the payload is not a UI component.
+ */
+export function storedComponentToArtifactChunk(
+  stored: Record<string, unknown>,
+  artifactId: string
+): ArtifactChunkPayload | null {
+  const component = typeof stored.component === 'string' ? stored.component : undefined;
+  if (!component) {
+    return null;
+  }
+  const props = asPlainRecord(stored.props);
+  const title = typeof stored.title === 'string' ? stored.title : undefined;
+  const id = typeof stored.id === 'string' ? stored.id : undefined;
+  const metadata = asPlainRecord(stored.metadata);
+  // STRICT dedupe key (decision 7): always stamp the opaque store id onto meta.artifact_id so the
+  // inline (`both`) and store-backed frames collapse to a single render keyed on the store id.
+  const meta: Record<string, unknown> = { ...metadata, artifact_id: artifactId };
+  return {
+    stream_id: artifactId,
+    seq: 0,
+    done: true,
+    artifact_type: 'ui_component',
+    chunk: {
+      id,
+      component,
+      props,
+      title
+    },
+    meta
+  };
 }
 
 /**

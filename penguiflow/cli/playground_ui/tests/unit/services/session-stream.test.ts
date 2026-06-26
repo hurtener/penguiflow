@@ -84,4 +84,80 @@ describe('sessionStreamManager', () => {
     expect(interactionsStore.artifacts[0]?.props.title).toBe('Hello');
     expect(interactionsStore.artifacts[0]?.message_id).toBe(chatStore.messages[0]?.id);
   });
+
+  it('fetches and renders store-backed UI-component artifacts from proactive results (Phase 008)', async () => {
+    const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+    const stored = {
+      id: 'comp-1',
+      component: 'metric',
+      props: { value: 42 },
+      title: 'Metric',
+      metadata: { namespace: 'penguiflow_ui_component', artifact_id: 'ui-artifact-1' }
+    };
+    // listTasks + listArtifacts (called in start) return [], the artifact JSON fetch returns the payload.
+    globalThis.fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve([]) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve([]) })
+      .mockResolvedValue({ ok: true, json: () => Promise.resolve(stored) });
+
+    const tasksStore = createTasksStore();
+    const notificationsStore = createNotificationsStore();
+    const chatStore = createChatStore();
+    const artifactsStore = createArtifactsStore();
+    const interactionsStore = createInteractionsStore();
+    const setupStore = createSetupStore();
+    const manager = createSessionStreamManager({
+      tasksStore,
+      notificationsStore,
+      chatStore,
+      artifactsStore,
+      interactionsStore,
+      setupStore
+    });
+
+    manager.start('session-1');
+    const eventSource = (manager as unknown as { eventSource: MockEventSource }).eventSource;
+
+    eventSource.simulateEvent('state_update', {
+      session_id: 'session-1',
+      task_id: 'task-1',
+      update_id: 'u1',
+      update_type: 'RESULT',
+      content: {
+        proactive: true,
+        text: 'Background metric ready.',
+        background_task_id: 'task-1',
+        artifacts: [
+          {
+            id: 'ui-artifact-1',
+            mime_type: 'application/json',
+            size_bytes: 10,
+            filename: 'ui-artifact-1',
+            source: { namespace: 'penguiflow_ui_component' }
+          },
+          {
+            id: 'binary-1',
+            mime_type: 'text/plain',
+            size_bytes: 4,
+            filename: 'note.txt',
+            source: { namespace: 'tools' }
+          }
+        ]
+      },
+      created_at: new Date().toISOString()
+    });
+
+    await flush();
+
+    // The UI-component artifact is fetched and rendered as a component...
+    expect(interactionsStore.artifacts.length).toBe(1);
+    expect(interactionsStore.artifacts[0]?.component).toBe('metric');
+    expect(interactionsStore.artifacts[0]?.message_id).toBe(chatStore.messages[0]?.id);
+    // ...and is NOT added to the download-only artifacts store, while the binary one is.
+    expect(artifactsStore.has('ui-artifact-1')).toBe(false);
+    expect(artifactsStore.has('binary-1')).toBe(true);
+    // The chat message only lists the downloadable (binary) artifact.
+    expect(chatStore.messages[0]?.artifacts?.length).toBe(1);
+    expect(chatStore.messages[0]?.artifacts?.[0]?.id).toBe('binary-1');
+  });
 });
