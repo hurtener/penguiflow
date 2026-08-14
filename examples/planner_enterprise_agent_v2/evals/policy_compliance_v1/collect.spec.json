@@ -1,0 +1,12 @@
+{
+  "project_root": "examples",
+  "query_suite_path": "planner_enterprise_agent_v2/evals/policy_compliance_v1/query_suite.json",
+  "output_dir": "planner_enterprise_agent_v2/evals/policy_compliance_v1/dataset",
+  "session_id": "policy-compliance-v1-collect",
+  "dataset_tag": "dataset:policy_compliance_v1",
+  "agent_package": "planner_enterprise_agent_v2",
+  "env_files": [
+    "planner_enterprise_agent_v2/.env",
+    "planner_enterprise_agent_v2/evals/policy_compliance_v1/.env.eval"
+  ]
+}

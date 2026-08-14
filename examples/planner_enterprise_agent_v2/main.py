@@ -17,6 +17,7 @@ import asyncio
 import logging
 import sys
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
 
@@ -50,6 +51,25 @@ from penguiflow.registry import ModelRegistry
 # Global buffers for demonstration (in production: use message queue/websocket)
 STATUS_BUFFER: defaultdict[str, list[StatusUpdate]] = defaultdict(list)
 EXECUTION_LOGS: list[str] = []
+
+
+def _coerce_final_answer(payload: Any, planner_meta: Mapping[str, Any]) -> FinalAnswer:
+    """Coerce planner payloads into FinalAnswer for resilient eval runs.
+
+    Why: provider/model payloads can vary (`raw_answer`, `answer`, `text`), and
+    the example should stay runnable without requiring provider-specific glue.
+    """
+
+    if isinstance(payload, Mapping):
+        text_value = payload.get("text") or payload.get("answer") or payload.get("raw_answer")
+        if text_value is not None:
+            return FinalAnswer(
+                text=str(text_value),
+                route=str(payload.get("route") or planner_meta.get("route") or "general"),
+                artifacts=dict(payload.get("artifacts", {})) if isinstance(payload.get("artifacts"), Mapping) else {},
+                metadata=dict(payload.get("metadata", {})) if isinstance(payload.get("metadata"), Mapping) else {},
+            )
+    return FinalAnswer.model_validate(payload)
 
 
 class EnterpriseAgentOrchestrator:
@@ -204,11 +224,9 @@ class EnterpriseAgentOrchestrator:
         """
         catalog = build_catalog(self._nodes, self._registry)
 
-        # Use DSPy for better structured output handling across providers
-        # DSPy is especially beneficial for models that don't support native
-        # JSON schema mode (like Databricks, Cerebras), but works well with all providers
-        # Can be explicitly enabled via DSPY_CLIENT=true env var
-        use_dspy = self.config.use_dspy_client or self.config.llm_model.startswith("databricks/")
+        # Keep DSPy opt-in so eval/CLI flows can run with the native client for
+        # providers that expose OpenAI-compatible endpoints.
+        use_dspy = self.config.use_dspy_client
 
         # Configure LLM client
         llm_client = None
@@ -468,9 +486,9 @@ When context is provided, use it appropriately to enhance your responses.
                     },
                 )
             elif planner_result.reason == "answer_complete":
-                final_answer = FinalAnswer.model_validate(planner_result.payload)
-                metadata = dict(final_answer.metadata)
                 planner_meta = dict(planner_result.metadata)
+                final_answer = _coerce_final_answer(planner_result.payload, planner_meta)
+                metadata = dict(final_answer.metadata)
                 metadata.setdefault("trace_id", trace_id)
                 if planner_meta:
                     metadata.setdefault("planner", planner_meta)
