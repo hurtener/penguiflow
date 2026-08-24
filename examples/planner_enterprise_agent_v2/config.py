@@ -101,47 +101,28 @@ class AgentConfig:
             # Planner settings
             planner_max_iters=int(os.getenv("PLANNER_MAX_ITERS", "15")),
             planner_token_budget=int(os.getenv("PLANNER_TOKEN_BUDGET", "8000")),
-            planner_deadline_s=_parse_optional_float(
-                os.getenv("PLANNER_DEADLINE_S")
-            ),
+            planner_deadline_s=_parse_optional_float(os.getenv("PLANNER_DEADLINE_S")),
             planner_hop_budget=_parse_optional_int(os.getenv("PLANNER_HOP_BUDGET")),
-            planner_absolute_max_parallel=int(
-                os.getenv("PLANNER_ABSOLUTE_MAX_PARALLEL", "50")
-            ),
+            planner_absolute_max_parallel=int(os.getenv("PLANNER_ABSOLUTE_MAX_PARALLEL", "50")),
             planner_repair_attempts=int(os.getenv("PLANNER_REPAIR_ATTEMPTS", "3")),
             # Summarizer
             summarizer_model=os.getenv("SUMMARIZER_MODEL", "gpt-4o-mini"),
             # Reflection (v2 FLAGSHIP)
-            reflection_enabled=os.getenv("REFLECTION_ENABLED", "true").lower()
-            == "true",
+            reflection_enabled=os.getenv("REFLECTION_ENABLED", "true").lower() == "true",
             reflection_llm=os.getenv("REFLECTION_LLM", "gpt-4o-mini"),
-            reflection_quality_threshold=float(
-                os.getenv("REFLECTION_QUALITY_THRESHOLD", "0.80")
-            ),
+            reflection_quality_threshold=float(os.getenv("REFLECTION_QUALITY_THRESHOLD", "0.80")),
             reflection_max_revisions=int(os.getenv("REFLECTION_MAX_REVISIONS", "2")),
-            reflection_use_separate_llm=os.getenv(
-                "REFLECTION_USE_SEPARATE_LLM", "false"
-            ).lower()
-            == "true",
+            reflection_use_separate_llm=os.getenv("REFLECTION_USE_SEPARATE_LLM", "false").lower() == "true",
             # Tool Policy (v2)
-            tool_policy_enabled=os.getenv("TOOL_POLICY_ENABLED", "false").lower()
-            == "true",
-            tool_policy_allowed_tools=_parse_tool_list(
-                os.getenv("TOOL_POLICY_ALLOWED_TOOLS")
-            ),
-            tool_policy_denied_tools=_parse_tool_set(
-                os.getenv("TOOL_POLICY_DENIED_TOOLS", "")
-            ),
-            tool_policy_require_tags=_parse_tool_set(
-                os.getenv("TOOL_POLICY_REQUIRE_TAGS", "")
-            ),
+            tool_policy_enabled=os.getenv("TOOL_POLICY_ENABLED", "false").lower() == "true",
+            tool_policy_allowed_tools=_parse_tool_list(os.getenv("TOOL_POLICY_ALLOWED_TOOLS")),
+            tool_policy_denied_tools=_parse_tool_set(os.getenv("TOOL_POLICY_DENIED_TOOLS", "")),
+            tool_policy_require_tags=_parse_tool_set(os.getenv("TOOL_POLICY_REQUIRE_TAGS", "")),
             # Planning Hints (v2)
-            planning_hints_enabled=os.getenv("PLANNING_HINTS_ENABLED", "false").lower()
-            == "true",
+            planning_hints_enabled=os.getenv("PLANNING_HINTS_ENABLED", "false").lower() == "true",
             planning_hints=_parse_planning_hints(os.getenv("PLANNING_HINTS")),
             # State Store (v2)
-            state_store_enabled=os.getenv("STATE_STORE_ENABLED", "false").lower()
-            == "true",
+            state_store_enabled=os.getenv("STATE_STORE_ENABLED", "false").lower() == "true",
             state_store_backend=os.getenv("STATE_STORE_BACKEND", "memory"),  # type: ignore
             # Observability
             log_level=os.getenv("LOG_LEVEL", "INFO"),  # type: ignore
@@ -154,6 +135,15 @@ class AgentConfig:
             environment=os.getenv("AGENT_ENVIRONMENT", "development"),  # type: ignore
             agent_name=os.getenv("AGENT_NAME", "enterprise_agent_v2"),
         )
+
+
+class Config(AgentConfig):
+    """Compatibility alias used by auto-discovery loaders.
+
+    Why: `penguiflow dev` and eval discovery look for a `Config` class in the
+    project package. Keeping this alias preserves the example's public
+    `AgentConfig` name while making CLI discovery work out of the box.
+    """
 
 
 def _parse_optional_float(value: str | None) -> float | None:

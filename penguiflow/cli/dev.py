@@ -57,7 +57,14 @@ def _ensure_ui_assets(base_dir: Path) -> None:
         )
 
 
-def run_dev(*, project_root: Path, host: str, port: int, open_browser: bool) -> DevServerInfo:
+def run_dev(
+    *,
+    project_root: Path,
+    host: str,
+    port: int,
+    open_browser: bool,
+    agent_package: str | None = None,
+) -> DevServerInfo:
     """Create the playground app and run uvicorn."""
 
     base_dir = Path(__file__).parent
@@ -71,7 +78,7 @@ def run_dev(*, project_root: Path, host: str, port: int, open_browser: bool) -> 
             os.environ[key] = value
 
     try:
-        app = create_playground_app(project_root=project_root)
+        app = create_playground_app(project_root=project_root, agent_package=agent_package)
     except PlaygroundError as exc:
         raise CLIError(str(exc)) from exc
 

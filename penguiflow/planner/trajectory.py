@@ -326,6 +326,20 @@ class Trajectory:
     resume_user_input: str | None = None
     steering_inputs: list[str] = field(default_factory=list)
     background_results: dict[str, BackgroundTaskResult] = field(default_factory=dict)
+    finish_reason: str | None = None
+    """Why the run ended (``answer_complete`` / ``no_path`` / ``budget_exhausted``).
+
+    Why: without it a trace that exhausted its budget is indistinguishable from
+    one that answered, since a run can end early with every individual step
+    succeeding.
+    """
+    final_answer: str | None = None
+    """Answer text the run terminated with, recorded by the planner at finish.
+
+    Why: the terminal action is not appended to ``steps``, so without this the
+    answer never reaches a persisted trajectory and offline evaluation can only
+    score the route taken, never the answer given.
+    """
 
     def to_history(self) -> list[dict[str, Any]]:
         """Return the dumped history of all steps.
@@ -409,6 +423,8 @@ class Trajectory:
             "resume_user_input": self.resume_user_input,
             "steering_inputs": list(self.steering_inputs),
             "background_results": {task_id: result.to_payload() for task_id, result in self.background_results.items()},
+            "final_answer": self.final_answer,
+            "finish_reason": self.finish_reason,
         }
 
     @classmethod
@@ -471,6 +487,10 @@ class Trajectory:
         background_payloads = payload.get("background_results")
         if background_payloads:
             trajectory.background_results.update(coerce_background_results(background_payloads))
+        final_answer = payload.get("final_answer")
+        trajectory.final_answer = final_answer if isinstance(final_answer, str) else None
+        finish_reason = payload.get("finish_reason")
+        trajectory.finish_reason = finish_reason if isinstance(finish_reason, str) else None
         return trajectory
 
     def compress(self) -> TrajectorySummary:

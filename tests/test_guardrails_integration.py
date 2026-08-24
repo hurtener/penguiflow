@@ -181,3 +181,47 @@ async def test_guardrail_secret_redaction_on_tool_result() -> None:
     assert steps
     observation = steps[0].get("observation") or {}
     assert "OPENAI_KEY" in str(observation.get("result"))
+
+
+@pytest.mark.asyncio
+async def test_guardrail_stop_records_user_facing_answer_on_trajectory() -> None:
+    """A guardrail STOP finishes as ``no_path`` but still answers the user.
+
+    The reason gate on ``final_answer`` must not discard messages the planner
+    deliberately produced for the user; only raw tool observations.
+    """
+    import asyncio
+
+    from penguiflow.state.in_memory import InMemoryStateStore
+
+    registry = ModelRegistry()
+    registry.register("demo", ToolArgs, ToolOut)
+    catalog = build_catalog([Node(demo_tool, name="demo")], registry)
+
+    guard_registry = RuleRegistry()
+    guard_registry.register(ToolAllowlistRule(denied_tools=frozenset({"demo"})))
+    gateway = GuardrailGateway(
+        registry=guard_registry,
+        guard_inbox=InMemoryGuardInbox(AsyncRuleEvaluator(guard_registry)),
+    )
+
+    store = InMemoryStateStore()
+    planner = ReactPlanner(
+        llm_client=_StubClient([{"thought": "call demo", "next_node": "demo", "args": {"value": "hi"}}]),
+        catalog=catalog,
+        max_iters=1,
+        guardrail_gateway=gateway,
+        state_store=store,
+    )
+
+    result = await planner.run("hi", tool_context={"session_id": "s1", "trace_id": "t1"})
+    assert result.reason == "no_path"
+    expected = str(result.payload["raw_answer"])
+
+    tasks = [t for t in asyncio.all_tasks() if t.get_name().startswith("penguiflow-persist")]
+    if tasks:
+        await asyncio.gather(*tasks)
+
+    traj = await store.get_trajectory("t1", "s1")
+    assert traj is not None
+    assert traj.final_answer == expected
