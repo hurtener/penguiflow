@@ -62,6 +62,8 @@ class ModelProfile:
     # Reasoning configuration
     reasoning_effort_param: str | None = None  # Parameter name if supported
     thinking_tags: tuple[str, str] | None = None  # e.g., ("<think>", "</think>")
+    # Controls visibility of adaptive-thinking summaries.
+    reasoning_display_default: Literal["summarized", "omitted"] | None = None
     # How a reasoning-effort request is expressed for this model:
     # - "adaptive_effort": thinking={"type": "adaptive"} + output_config.effort
     #   (e.g. Databricks Claude Opus 4.7/4.8)
@@ -81,6 +83,7 @@ class ModelProfile:
     strict_mode_default: bool = True  # Default for strict JSON schema
     supports_system_role: bool = True  # Some models need user role for system
     drop_unsupported_params: bool = True  # Silently drop unknown params
+    unsupported_request_params: frozenset[str] = frozenset()  # Parameters rejected by this model route
     max_tools: int | None = None  # Maximum number of tools allowed
     max_schema_keys: int | None = None  # Maximum schema keys (e.g., Databricks: 64)
 

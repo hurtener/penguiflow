@@ -89,7 +89,26 @@ class SpawnDecision(BaseModel):
 
 
 class SpawnGuard(Protocol):
-    async def decide(self, request: SpawnRequest) -> SpawnDecision: ...
+    """Extension point that governs/vetoes background task and job spawns.
+
+    Implement this protocol to enforce tenant-specific policy (quotas, cost limits,
+    allow/deny lists, etc.) before a background subagent or tool job is spawned.
+    ``InProcessTaskService`` calls ``decide`` on every ``spawn``/``spawn_tool_job``
+    request before creating the task.
+    """
+
+    async def decide(self, request: SpawnRequest) -> SpawnDecision:
+        """Decide whether a spawn request should be allowed.
+
+        Args:
+            request: Details of the spawn being requested (session, mode, query/tool
+                name, priority, merge strategy).
+
+        Returns:
+            A :class:`SpawnDecision` indicating whether the spawn is allowed, with an
+            optional reason (used as the error message when denied) and estimated cost.
+        """
+        ...
 
 
 class NoOpSpawnGuard:
@@ -99,7 +118,16 @@ class NoOpSpawnGuard:
 
 
 class TaskService(Protocol):
-    """Background task orchestration service for tasks.* meta-tools."""
+    """Background task orchestration service for tasks.* meta-tools.
+
+    This protocol is the documented extension contract between the planner-facing
+    ``tasks.*`` meta-tools and whatever backs task orchestration at runtime. The
+    default implementation, :class:`InProcessTaskService`, delegates to an in-process
+    :class:`SessionManager`/:class:`StreamingSession`. Downstream products may provide
+    their own implementation to route spawns through distributed queues, external
+    job schedulers, databases, or multi-tenant governance layers, as long as they
+    honor the method contracts below.
+    """
 
     async def spawn(
         self,
@@ -123,14 +151,65 @@ class TaskService(Protocol):
         group_merge_strategy: MergeStrategy | None = None,
         group_report: GroupReportStrategy | None = None,
         turn_id: str | None = None,
-    ) -> TaskSpawnResult: ...
+    ) -> TaskSpawnResult:
+        """Spawn a background subagent to answer ``query`` on behalf of the session.
+
+        Implementations should be idempotent when ``idempotency_key`` or ``task_id`` is
+        supplied: a repeated call with the same key/ID for the same session should return
+        the existing task's result rather than spawning a duplicate. If ``group``/``group_id``
+        is given, the new task should be resolved/joined into that task group (creating it
+        if needed), optionally sealing it (``group_sealed``) and, if ``retain_turn`` is set,
+        waiting for the group to complete before returning.
+
+        Args:
+            session_id: The session the task belongs to.
+            query: The natural-language query the subagent should answer.
+            parent_task_id: The task that triggered this spawn, if any.
+            priority: Scheduling priority hint.
+            merge_strategy: Strategy used to merge the task's resulting context patch
+                back into the session.
+            propagate_on_cancel: Whether cancelling this task cascades to its children.
+            notify_on_complete: Whether to emit a default completion notification.
+            context_depth: How much of the session context to snapshot for the subagent:
+                ``"full"``, ``"summary"``, or ``"none"``.
+            task_id: Explicit task ID; a new one is generated if omitted.
+            idempotency_key: Key used to deduplicate repeated spawn requests.
+            context_tool_context: Extra tool-context entries to merge into the task's snapshot.
+            group: Name of the task group to join/create (turn-scoped resolution).
+            group_id: Explicit task group ID to join.
+            group_sealed: Whether to seal the group immediately after joining.
+            retain_turn: Whether to keep the foreground turn open, waiting for the
+                (sealed) group to complete before returning.
+            group_merge_strategy: Merge strategy to use for the group as a whole.
+            group_report: Reporting strategy for the group's aggregate report.
+            turn_id: The current turn ID, used for turn-scoped group name resolution.
+
+        Returns:
+            A :class:`TaskSpawnResult` describing the spawned task (and, if applicable,
+            the group it joined and its completion state).
+
+        Raises:
+            RuntimeError: If the spawn is blocked by a :class:`SpawnGuard`, or if
+                background subagent support is unavailable.
+        """
+        ...
 
     async def list(
         self,
         *,
         session_id: str,
         status: TaskStatus | None = None,
-    ) -> builtins.list[TaskSummary]: ...
+    ) -> builtins.list[TaskSummary]:
+        """List tasks for a session, optionally filtered by status.
+
+        Args:
+            session_id: The session whose tasks should be listed.
+            status: If provided, only include tasks with this status.
+
+        Returns:
+            A list of :class:`TaskSummary` objects for the matching tasks.
+        """
+        ...
 
     async def get(
         self,
@@ -138,7 +217,18 @@ class TaskService(Protocol):
         session_id: str,
         task_id: str,
         include_result: bool = False,
-    ) -> TaskDetails | None: ...
+    ) -> TaskDetails | None:
+        """Fetch detailed information about a single task.
+
+        Args:
+            session_id: The session the task belongs to.
+            task_id: The task to fetch.
+            include_result: Whether to populate ``result_digest`` from the task's result.
+
+        Returns:
+            A :class:`TaskDetails` for the task, or ``None`` if no such task exists.
+        """
+        ...
 
     async def cancel(
         self,
@@ -146,7 +236,18 @@ class TaskService(Protocol):
         session_id: str,
         task_id: str,
         reason: str | None = None,
-    ) -> bool: ...
+    ) -> bool:
+        """Request cancellation of a running or pending task.
+
+        Args:
+            session_id: The session the task belongs to.
+            task_id: The task to cancel.
+            reason: Optional human-readable reason recorded on the cancellation.
+
+        Returns:
+            ``True`` if the cancellation was accepted, ``False`` otherwise.
+        """
+        ...
 
     async def prioritize(
         self,
@@ -154,7 +255,18 @@ class TaskService(Protocol):
         session_id: str,
         task_id: str,
         priority: int,
-    ) -> bool: ...
+    ) -> bool:
+        """Change the scheduling priority of an existing task.
+
+        Args:
+            session_id: The session the task belongs to.
+            task_id: The task whose priority should change.
+            priority: The new priority value.
+
+        Returns:
+            ``True`` if the priority change was accepted, ``False`` otherwise.
+        """
+        ...
 
     async def apply_patch(
         self,
@@ -163,14 +275,39 @@ class TaskService(Protocol):
         patch_id: str,
         action: Literal["apply", "reject"],
         strategy: MergeStrategy | None = None,
-    ) -> bool: ...
+    ) -> bool:
+        """Approve or reject a pending, human-gated context patch.
+
+        Args:
+            session_id: The session the patch belongs to.
+            patch_id: The ID of the pending patch (as previously surfaced to the user).
+            action: ``"apply"`` to merge the patch into the session context, or
+                ``"reject"`` to discard it.
+            strategy: Merge strategy to use when applying; implementations may fall back
+                to a default (e.g. ``APPEND``) when omitted.
+
+        Returns:
+            ``True`` if the patch was found and the requested action was performed,
+            ``False`` otherwise.
+        """
+        ...
 
     async def acknowledge_background(
         self,
         *,
         session_id: str,
         task_ids: builtins.list[str],
-    ) -> int: ...
+    ) -> int:
+        """Mark background task results as consumed so they stop appearing as pending.
+
+        Args:
+            session_id: The session the tasks belong to.
+            task_ids: The task IDs whose background results should be acknowledged.
+
+        Returns:
+            The number of background results actually removed/acknowledged.
+        """
+        ...
 
     async def spawn_tool_job(
         self,
@@ -193,7 +330,43 @@ class TaskService(Protocol):
         group_merge_strategy: MergeStrategy | None = None,
         group_report: GroupReportStrategy | None = None,
         turn_id: str | None = None,
-    ) -> TaskSpawnResult: ...
+    ) -> TaskSpawnResult:
+        """Spawn a background job that runs a single tool call, rather than a subagent.
+
+        Semantics mirror :meth:`spawn` (idempotency, task groups, ``retain_turn``), but
+        the task's work is a single tool invocation (``tool_name``/``tool_args``) instead
+        of an open-ended subagent query.
+
+        Args:
+            session_id: The session the job belongs to.
+            tool_name: The name of the tool to invoke in the background.
+            tool_args: The arguments to pass to the tool.
+            parent_task_id: The task that triggered this spawn, if any.
+            priority: Scheduling priority hint.
+            merge_strategy: Strategy used to merge the job's resulting context patch
+                back into the session.
+            propagate_on_cancel: Whether cancelling this job cascades to its children.
+            notify_on_complete: Whether to emit a default completion notification.
+            task_id: Explicit task ID; a new one is generated if omitted.
+            context_tool_context: Extra tool-context entries to merge into the job's snapshot.
+            group: Name of the task group to join/create (turn-scoped resolution).
+            group_id: Explicit task group ID to join.
+            group_sealed: Whether to seal the group immediately after joining.
+            retain_turn: Whether to keep the foreground turn open, waiting for the
+                (sealed) group to complete before returning.
+            group_merge_strategy: Merge strategy to use for the group as a whole.
+            group_report: Reporting strategy for the group's aggregate report.
+            turn_id: The current turn ID, used for turn-scoped group name resolution.
+
+        Returns:
+            A :class:`TaskSpawnResult` describing the spawned job (and, if applicable,
+            the group it joined and its completion state).
+
+        Raises:
+            RuntimeError: If the spawn is blocked by a :class:`SpawnGuard`, or if
+                background tool-job support is unavailable.
+        """
+        ...
 
     # Task Group Methods
 
@@ -204,7 +377,21 @@ class TaskService(Protocol):
         group_id: str | None = None,
         group_name: str | None = None,
         turn_id: str | None = None,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """Seal a task group so no further tasks may join it.
+
+        Args:
+            session_id: The session the group belongs to.
+            group_id: Direct lookup of the group by ID.
+            group_name: Name-based lookup of the group (see ``turn_id``).
+            turn_id: Turn ID used to disambiguate name-based lookup.
+
+        Returns:
+            A result dict with at least ``"ok"``; on success it includes ``"group_id"``,
+            ``"status"``, and ``"sealed_task_count"``. On failure it includes ``"error"``
+            (e.g. ``"group_not_found"``).
+        """
+        ...
 
     async def cancel_group(
         self,
@@ -213,7 +400,22 @@ class TaskService(Protocol):
         group_id: str,
         reason: str | None = None,
         propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """Cancel a task group, optionally cancelling its member tasks.
+
+        Args:
+            session_id: The session the group belongs to.
+            group_id: The group to cancel.
+            reason: Optional human-readable reason recorded on the cancellation.
+            propagate_on_cancel: ``"cascade"`` to also cancel the group's pending tasks,
+                ``"isolate"`` to leave them running.
+
+        Returns:
+            A result dict with at least ``"ok"``; on success it includes ``"group_id"``,
+            ``"cancelled_task_count"``, and ``"total_tasks"``. On failure it includes
+            ``"error"`` (e.g. ``"group_not_found"``).
+        """
+        ...
 
     async def apply_group(
         self,
@@ -222,14 +424,40 @@ class TaskService(Protocol):
         group_id: str,
         action: Literal["apply", "reject"] = "apply",
         strategy: MergeStrategy | None = None,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """Apply or reject all pending, human-gated context patches for a completed group.
+
+        Args:
+            session_id: The session the group belongs to.
+            group_id: The group whose patches should be applied/rejected.
+            action: ``"apply"`` to merge all pending patches, ``"reject"`` to discard them.
+            strategy: Merge strategy to use when applying; implementations may fall back
+                to a default (e.g. ``APPEND``) when omitted.
+
+        Returns:
+            A result dict with at least ``"ok"``; on success it includes ``"group_id"``,
+            ``"action"``, ``"applied_patch_count"``, ``"rejected_patch_count"``, and
+            ``"total_patches"``. On failure it includes ``"error"`` (e.g.
+            ``"group_not_found"`` or ``"group_not_complete"``).
+        """
+        ...
 
     async def list_groups(
         self,
         *,
         session_id: str,
         status: GroupStatus | None = None,
-    ) -> builtins.list[TaskGroup]: ...
+    ) -> builtins.list[TaskGroup]:
+        """List task groups for a session, optionally filtered by status.
+
+        Args:
+            session_id: The session whose groups should be listed.
+            status: If provided, only include groups with this status.
+
+        Returns:
+            A list of matching :class:`TaskGroup` objects.
+        """
+        ...
 
     async def get_group(
         self,
@@ -238,7 +466,19 @@ class TaskService(Protocol):
         group_id: str | None = None,
         group_name: str | None = None,
         turn_id: str | None = None,
-    ) -> TaskGroup | None: ...
+    ) -> TaskGroup | None:
+        """Look up a single task group by ID or by name (optionally scoped to a turn).
+
+        Args:
+            session_id: The session the group belongs to.
+            group_id: Direct lookup of the group by ID.
+            group_name: Name-based lookup of the group (see ``turn_id``).
+            turn_id: Turn ID used to disambiguate name-based lookup.
+
+        Returns:
+            The matching :class:`TaskGroup`, or ``None`` if no such group exists.
+        """
+        ...
 
 
 def _digest_from_result(result: Any) -> list[str]:

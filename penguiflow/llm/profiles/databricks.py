@@ -201,6 +201,7 @@ PROFILES: dict[str, ModelProfile] = {
     # ==========================================================================
     "databricks-claude-opus-4-8": ModelProfile(
         supports_temperature=False,  # Databricks route rejects the temperature param
+        unsupported_request_params=frozenset({"temperature", "top_p", "top_k"}),
         supports_schema_guided_output=True,
         supports_json_only_output=False,  # Only schema-guided, not json_object
         supports_tools=True,
@@ -211,6 +212,7 @@ PROFILES: dict[str, ModelProfile] = {
         native_structured_kind="databricks_constrained_decoding",
         schema_transformer_name="DatabricksJsonSchemaTransformer",
         reasoning_request_style="adaptive_effort",
+        reasoning_display_default="omitted",
         preferred_transport="native",  # generic transport cannot parse reasoning content blocks
         strict_mode_default=True,
         max_tools=MAX_TOOLS,
@@ -220,6 +222,7 @@ PROFILES: dict[str, ModelProfile] = {
     ),
     "databricks-claude-opus-4-7": ModelProfile(
         supports_temperature=False,  # Databricks route rejects the temperature param
+        unsupported_request_params=frozenset({"temperature", "top_p", "top_k"}),
         supports_schema_guided_output=True,
         supports_json_only_output=False,  # Only schema-guided, not json_object
         supports_tools=True,
@@ -230,12 +233,32 @@ PROFILES: dict[str, ModelProfile] = {
         native_structured_kind="databricks_constrained_decoding",
         schema_transformer_name="DatabricksJsonSchemaTransformer",
         reasoning_request_style="adaptive_effort",
+        reasoning_display_default="omitted",
         preferred_transport="native",  # generic transport cannot parse reasoning content blocks
         strict_mode_default=True,
         max_tools=MAX_TOOLS,
         max_schema_keys=MAX_SCHEMA_KEYS,
         max_context_tokens=200000,
         max_output_tokens=64000,
+    ),
+    "databricks-claude-sonnet-5": ModelProfile(
+        supports_temperature=False,  # Databricks route rejects the temperature param
+        unsupported_request_params=frozenset({"temperature", "top_p", "top_k"}),
+        supports_schema_guided_output=True,
+        supports_json_only_output=False,  # Only schema-guided, not json_object
+        supports_tools=True,
+        supports_reasoning=True,
+        supports_streaming=True,
+        supports_image_input=True,
+        default_output_mode="native",
+        native_structured_kind="databricks_constrained_decoding",
+        schema_transformer_name="DatabricksJsonSchemaTransformer",
+        reasoning_request_style="adaptive_effort",
+        reasoning_display_default="omitted",
+        preferred_transport="native",  # generic transport cannot parse reasoning content blocks
+        strict_mode_default=True,
+        max_tools=MAX_TOOLS,
+        max_schema_keys=MAX_SCHEMA_KEYS,
     ),
     "databricks-claude-opus-4-5": ModelProfile(
         supports_schema_guided_output=True,

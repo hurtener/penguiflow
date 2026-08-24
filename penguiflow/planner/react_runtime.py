@@ -939,24 +939,63 @@ def _fire_persistence_tasks(planner: Any, trajectory: Trajectory, result: Any | 
     trace_id = ctx.get("trace_id")
     session_id = ctx.get("session_id")
 
+    persistence_tasks: list[asyncio.Task[None]] = []
+
     # Trajectory -- on PlannerFinish and PlannerPause
     if isinstance(result, (PlannerFinish, PlannerPause)) and trace_id and session_id:
-        loop.create_task(
-            _persist_trajectory(planner, trajectory),
-            name="penguiflow-persist-trajectory",
+        persistence_tasks.append(
+            loop.create_task(
+                _persist_trajectory(planner, trajectory),
+                name="penguiflow-persist-trajectory",
+            )
         )
 
     # Events -- on any exit path (finish/pause/error/cancel)
     buf = getattr(planner, "_event_buffer", None)
     if buf and trace_id:
         events = list(buf)  # snapshot
-        buf.clear()          # clear immediately so planner can reuse
-        loop.create_task(
-            _persist_events(events, planner, trace_id),
-            name="penguiflow-persist-events",
+        buf.clear()  # clear immediately so planner can reuse
+        persistence_tasks.append(
+            loop.create_task(
+                _persist_events(events, planner, trace_id),
+                name="penguiflow-persist-events",
+            )
         )
     elif buf:
         buf.clear()  # no trace_id -> discard, but still clear to avoid unbounded growth
+
+    if trace_id and persistence_tasks:
+        _register_trace_persistence_task(planner, trace_id, persistence_tasks)
+
+
+def _register_trace_persistence_task(planner: Any, trace_id: str, tasks: list[asyncio.Task[None]]) -> None:
+    pending = getattr(planner, "_pending_persistence_tasks", None)
+    if not isinstance(pending, dict):
+        pending = {}
+        planner._pending_persistence_tasks = pending
+
+    async def _wait_all() -> None:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    combined = asyncio.create_task(_wait_all(), name="penguiflow-persist-complete")
+    pending[trace_id] = combined
+
+    def _clear(done: asyncio.Task[None]) -> None:
+        if pending.get(trace_id) is done:
+            pending.pop(trace_id, None)
+
+    combined.add_done_callback(_clear)
+
+
+async def wait_for_trace_persistence(planner: Any, trace_id: str, timeout_s: float = 1.0) -> bool:
+    pending = getattr(planner, "_pending_persistence_tasks", None)
+    if not isinstance(pending, dict):
+        return False
+    task = pending.get(trace_id)
+    if task is None:
+        return False
+    await asyncio.wait_for(task, timeout=timeout_s)
+    return True
 
 
 async def run(
@@ -2256,13 +2295,15 @@ async def run_loop(
                         stop_info = guardrail_payload.get("stop")
                         if isinstance(stop_info, Mapping):
                             stop_message = stop_info.get("user_message")
+                        stop_answer = stop_message or "Unable to complete the request."
                         return planner._finish(
                             trajectory,
                             reason="no_path",
                             payload={
-                                "raw_answer": stop_message or "Unable to complete the request.",
+                                "raw_answer": stop_answer,
                                 "guardrail": dict(guardrail_payload),
                             },
+                            user_facing_answer=stop_answer,
                             thought=str(guardrail_payload.get("reason") or "guardrail_stop"),
                             constraints=tracker,
                             error=outcome.error,

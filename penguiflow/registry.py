@@ -56,10 +56,8 @@ class ModelRegistry:
     def models(self, node_name: str) -> tuple[type[BaseModel], type[BaseModel]]:
         """Return the registered models for ``node_name``.
 
-        Raises
-        ------
-        KeyError
-            If the node has not been registered.
+        Raises:
+            KeyError: If the node has not been registered.
         """
 
         try:

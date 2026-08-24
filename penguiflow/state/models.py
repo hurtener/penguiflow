@@ -25,7 +25,16 @@ def _utc_now() -> datetime:
 
 @dataclass(slots=True)
 class StoredEvent:
-    """Representation of a runtime event persisted by a state store."""
+    """Representation of a runtime event persisted by a state store.
+
+    Attributes:
+        trace_id: Trace id the event belongs to, if any.
+        ts: Unix timestamp (seconds) when the event occurred.
+        kind: Event type/kind, mirrors `FlowEvent.event_type`.
+        node_name: Name of the node that emitted the event, if applicable.
+        node_id: Id of the node instance that emitted the event, if applicable.
+        payload: Event-specific payload data.
+    """
 
     trace_id: str | None
     ts: float
@@ -50,7 +59,22 @@ class StoredEvent:
 
 @dataclass(slots=True)
 class RemoteBinding:
-    """Association between a trace and a remote worker/agent."""
+    """Association between a trace and a remote worker/agent.
+
+    Attributes:
+        trace_id: Local trace id the binding is scoped to.
+        context_id: Remote context id, if the remote protocol uses one.
+        task_id: Remote task id assigned by the remote agent.
+        agent_url: URL of the remote agent handling the task.
+        router_session_id: Local session id that initiated the remote call, if any.
+        remote_skill: Name of the remote skill/capability invoked, if any.
+        tenant_id: Optional tenant scope for the binding.
+        user_id: Optional user scope for the binding.
+        last_remote_task_id: Most recent remote task id seen for follow-up turns, if any.
+        is_terminal: Whether the binding has reached a terminal state and should no
+            longer be reused.
+        metadata: Additional free-form metadata about the binding.
+    """
 
     trace_id: str
     context_id: str | None
@@ -66,6 +90,19 @@ class RemoteBinding:
 
 
 class UpdateType(str, Enum):
+    """Kind of a `StateUpdate` emitted while a task runs.
+
+    Members:
+        THINKING: Intermediate reasoning/plan content.
+        PROGRESS: Free-form progress notification.
+        TOOL_CALL: A tool invocation was made.
+        RESULT: Final result content for a task.
+        ERROR: An error occurred.
+        CHECKPOINT: A resumable checkpoint was recorded.
+        STATUS_CHANGE: The task's status changed.
+        NOTIFICATION: A user-facing notification.
+    """
+
     THINKING = "THINKING"
     PROGRESS = "PROGRESS"
     TOOL_CALL = "TOOL_CALL"
@@ -110,15 +147,25 @@ class TaskContextSnapshot(BaseModel):
 
 
 class StateUpdate(BaseModel):
-    session_id: str
-    task_id: str
-    trace_id: str | None = None
-    update_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
-    update_type: UpdateType
-    content: Any
-    step_index: int | None = None
-    total_steps: int | None = None
-    created_at: datetime = Field(default_factory=_utc_now)
+    """An incremental update about a task's progress, persisted for later retrieval.
+
+    Used to stream status, tool-call, and result information for a task independent of
+    the main event log, so clients can poll or subscribe to task-scoped updates.
+    """
+
+    session_id: str = Field(description="Session id the update belongs to.")
+    task_id: str = Field(description="Task id the update belongs to.")
+    trace_id: str | None = Field(default=None, description="Trace id associated with the update, if any.")
+    update_id: str = Field(
+        default_factory=lambda: uuid.uuid4().hex, description="Unique identifier for this update."
+    )
+    update_type: UpdateType = Field(description="Kind of update being recorded.")
+    content: Any = Field(description="Update payload; shape depends on `update_type`.")
+    step_index: int | None = Field(
+        default=None, description="Zero-based index of this step, if the task reports progress by step."
+    )
+    total_steps: int | None = Field(default=None, description="Total number of steps expected, if known.")
+    created_at: datetime = Field(default_factory=_utc_now, description="Timestamp the update was created.")
 
 
 @dataclass(slots=True)

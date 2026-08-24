@@ -44,43 +44,115 @@ def _coerce_steps(value: Any) -> list[str]:
 
 
 class SkillPackConfig(BaseModel):
-    name: str
-    path: str
-    format: SkillPackFormat | None = None
-    scope_mode: SkillScopeMode = "project"
-    enabled: bool = True
-    update_existing_pack_skills: bool = True
-    prune_missing_pack_skills: bool = True
-    pinned_skill_names: list[str] = Field(default_factory=list)
+    """Configuration for a single skill pack loaded into the skills subsystem.
+
+    A skill pack is a file or directory of skill definitions (see
+    :class:`SkillDefinition`) ingested into the local skill store on load. Each pack is
+    tracked by ``name`` so it can be updated or pruned independently of other packs.
+    """
+
+    name: str = Field(description="Unique identifier for this pack, used for provenance tracking and pruning.")
+    path: str = Field(description="Filesystem path to the pack source (file or directory); interpreted per `format`.")
+    format: SkillPackFormat | None = Field(
+        default=None,
+        description="Serialization format of the pack contents (md/yaml/json/jsonl). None auto-detects from `path`.",
+    )
+    scope_mode: SkillScopeMode = Field(
+        default="project",
+        description="Visibility scope applied to skills loaded from this pack: project, tenant, or global.",
+    )
+    enabled: bool = Field(default=True, description="Whether this pack is actively loaded and kept in the store.")
+    update_existing_pack_skills: bool = Field(
+        default=True,
+        description="Whether to overwrite already-stored skills from this pack with updated pack content on reload.",
+    )
+    prune_missing_pack_skills: bool = Field(
+        default=True,
+        description="Whether to delete stored skills from this pack no longer present in the pack source.",
+    )
+    pinned_skill_names: list[str] = Field(
+        default_factory=list,
+        description="Skill names from this pack to always surface first in the skills directory listing.",
+    )
 
 
 class SkillsDirectoryConfig(BaseModel):
-    enabled: bool = True
-    max_entries: int = Field(default=30, ge=1, le=200)
-    include_fields: list[SkillDirectoryField] = Field(default_factory=_default_directory_fields)
-    selection_strategy: Literal["pinned_then_recent", "pinned_then_top"] = "pinned_then_recent"
+    """Configuration for the always-available skills directory listing.
+
+    The directory is a lightweight summary of skills (pinned entries plus recent/top
+    ones) surfaced to callers without requiring a search query.
+    """
+
+    enabled: bool = Field(default=True, description="Whether the skills directory listing is generated at all.")
+    max_entries: int = Field(
+        default=30, ge=1, le=200, description="Maximum number of entries returned in the directory."
+    )
+    include_fields: list[SkillDirectoryField] = Field(
+        default_factory=_default_directory_fields,
+        description="Which skill fields to include per directory entry.",
+    )
+    selection_strategy: Literal["pinned_then_recent", "pinned_then_top"] = Field(
+        default="pinned_then_recent",
+        description=(
+            "How to fill directory slots beyond pinned skills: by most recently used "
+            "(pinned_then_recent) or by highest use count (pinned_then_top)."
+        ),
+    )
 
 
 class SkillProposalConfig(BaseModel):
-    enabled: bool = False
+    """Configuration for the skill-proposal (learn-a-skill) feature."""
+
+    enabled: bool = Field(default=False, description="Whether skill proposal drafting is enabled.")
 
 
 class SkillsConfig(BaseModel):
-    enabled: bool = False
-    cache_dir: str = ".penguiflow"
-    max_tokens: int = Field(default=2000, ge=200, le=10000)
-    summarize: bool = False
-    redact_pii: bool = True
-    scope_mode: SkillScopeMode = "project"
-    skill_packs: list[SkillPackConfig] = Field(default_factory=list)
-    directory: SkillsDirectoryConfig = Field(default_factory=SkillsDirectoryConfig)
-    proposal: SkillProposalConfig = Field(default_factory=SkillProposalConfig)
-    fts_fallback_to_regex: bool = True
-    top_k: int = Field(default=6, ge=1, le=20)
+    """Top-level configuration for the skills subsystem.
+
+    Controls whether skills are enabled, where they are cached, how retrieval results
+    are budgeted/redacted, and which packs feed the local skill store.
+    """
+
+    enabled: bool = Field(default=False, description="Whether the skills subsystem is active.")
+    cache_dir: str = Field(default=".penguiflow", description="Directory used to store the local skills database.")
+    max_tokens: int = Field(
+        default=2000,
+        ge=200,
+        le=10000,
+        description="Token budget for formatted skill context injected into prompts.",
+    )
+    summarize: bool = Field(
+        default=False, description="Whether to summarize skill content when it exceeds the token budget."
+    )
+    redact_pii: bool = Field(
+        default=True, description="Whether to redact PII from skill text before returning it to callers."
+    )
+    scope_mode: SkillScopeMode = Field(
+        default="project", description="Default visibility scope for skills without an explicit scope."
+    )
+    skill_packs: list[SkillPackConfig] = Field(
+        default_factory=list, description="Skill packs to load into the local store."
+    )
+    directory: SkillsDirectoryConfig = Field(
+        default_factory=SkillsDirectoryConfig,
+        description="Configuration for the always-available skills directory listing.",
+    )
+    proposal: SkillProposalConfig = Field(
+        default_factory=SkillProposalConfig,
+        description="Configuration for the skill-proposal (learn-a-skill) feature.",
+    )
+    fts_fallback_to_regex: bool = Field(
+        default=True,
+        description="Whether to fall back to regex search when full-text search (FTS) is unavailable.",
+    )
+    top_k: int = Field(default=6, ge=1, le=20, description="Default number of skills returned by relevance retrieval.")
 
     # If enabled, remove pack-origin skills for packs that are no longer present
     # (or are disabled) in the current config.
-    prune_packs_not_in_config: bool = True
+    prune_packs_not_in_config: bool = Field(
+        default=True,
+        description="Whether to remove pack-origin skills for packs no longer present (or disabled) in this config.",
+    )
 
 
 class SkillDefinition(BaseModel):
@@ -269,6 +341,20 @@ class SkillDirectoryEntry(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class SkillCapabilityContext:
+    """Snapshot of which tools/namespaces/tags a caller is currently allowed to use.
+
+    Used to filter and redact skills that reference tools the caller cannot invoke
+    (e.g. because a tool was disabled or scoped out for this request). Typically built
+    via :func:`penguiflow.skills.provider.build_skill_capability_context`.
+
+    Attributes:
+        all_tool_names: Every tool name known in the current execution context.
+        allowed_tool_names: Subset of `all_tool_names` the caller is permitted to invoke.
+        allowed_namespaces: Tool namespaces (prefix before the first '.') derived from
+            `allowed_tool_names`.
+        allowed_tool_tags: Tags declared on tools in `allowed_tool_names`.
+    """
+
     all_tool_names: set[str] = field(default_factory=set)
     allowed_tool_names: set[str] = field(default_factory=set)
     allowed_namespaces: set[str] = field(default_factory=set)
@@ -276,19 +362,47 @@ class SkillCapabilityContext:
 
 
 class SkillProposalDraft(BaseModel):
-    skill: SkillDefinition
-    warnings: list[str] = Field(default_factory=list)
-    assumptions: list[str] = Field(default_factory=list)
+    """A candidate skill produced by the proposal pipeline, pending review.
+
+    Callers typically show the draft to a human (or a higher-level agent) for approval
+    before persisting ``skill`` as a real, usable skill.
+    """
+
+    skill: SkillDefinition = Field(description="The proposed skill definition, ready to persist if approved.")
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Non-fatal issues detected while drafting the skill (e.g. missing detail).",
+    )
+    assumptions: list[str] = Field(
+        default_factory=list,
+        description="Assumptions made when the source material was ambiguous or incomplete.",
+    )
 
 
 class SkillProposeRequest(BaseModel):
-    source_material: str
-    task_type: SkillTaskType | None = None
-    title_hint: str | None = None
-    trigger_hint: str | None = None
-    required_tool_names: list[str] = Field(default_factory=list)
-    required_namespaces: list[str] = Field(default_factory=list)
-    required_tags: list[str] = Field(default_factory=list)
+    """Request to draft a new skill from unstructured source material.
+
+    ``source_material`` is the raw text (e.g. a transcript, log, or write-up) that the
+    proposal pipeline analyzes to synthesize a :class:`SkillDefinition`.
+    """
+
+    source_material: str = Field(description="Raw text analyzed to synthesize the skill draft. Must be non-empty.")
+    task_type: SkillTaskType | None = Field(
+        default=None, description="Optional hint for the skill's task_type classification."
+    )
+    title_hint: str | None = Field(default=None, description="Optional suggested title for the drafted skill.")
+    trigger_hint: str | None = Field(
+        default=None, description="Optional suggested trigger phrase for the drafted skill."
+    )
+    required_tool_names: list[str] = Field(
+        default_factory=list, description="Tool names the drafted skill should declare as required."
+    )
+    required_namespaces: list[str] = Field(
+        default_factory=list, description="Tool namespaces the drafted skill should declare as required."
+    )
+    required_tags: list[str] = Field(
+        default_factory=list, description="Tool tags the drafted skill should declare as required."
+    )
 
     @model_validator(mode="after")
     def _validate_fields(self) -> SkillProposeRequest:
@@ -306,7 +420,11 @@ class SkillProposeRequest(BaseModel):
 
 
 class SkillProposeResponse(BaseModel):
-    draft: SkillProposalDraft
+    """Response wrapping a drafted skill proposal."""
+
+    draft: SkillProposalDraft = Field(
+        description="The drafted skill, warnings, and assumptions produced by the pipeline."
+    )
 
 
 class RetrievalResponse(BaseModel):

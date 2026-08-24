@@ -144,6 +144,9 @@ PRICING: dict[str, tuple[float, float]] = {
     "databricks-claude-sonnet-4": (0.003, 0.015),
     "databricks-claude-sonnet-4-5": (0.003, 0.015),
     "databricks-claude-sonnet-4-6": (0.003, 0.015),
+    # Anthropic introductory Sonnet 5 rate through 2026-08-31;
+    # update to $3/$15 per MTok on 2026-09-01.
+    "databricks-claude-sonnet-5": (0.002, 0.01),
     "databricks-claude-opus-4-5": (0.005, 0.025),
     "databricks-claude-opus-4-6": (0.005, 0.025),
     "databricks-claude-opus-4-7": (0.005, 0.025),
