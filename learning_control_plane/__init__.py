@@ -5,4 +5,14 @@ providers and evaluation backends live behind explicit contracts so an unavailab
 control plane cannot interrupt an agent serving a customer.
 """
 
-__all__: list[str] = []
+from .contracts import EvidenceContext, EvidenceEvent
+from .evidence import CompositeEvidenceSink, EvidenceSink, MlflowEvidenceSink, OpenTelemetryEvidenceSink
+
+__all__ = [
+    "CompositeEvidenceSink",
+    "EvidenceContext",
+    "EvidenceEvent",
+    "EvidenceSink",
+    "MlflowEvidenceSink",
+    "OpenTelemetryEvidenceSink",
+]
