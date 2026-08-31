@@ -121,7 +121,7 @@ penguiflow = "penguiflow.cli.main:app"
 Homepage = "https://github.com/hurtener/penguiflow"
 
 [tool.setuptools]
-packages = { find = { include = ["penguiflow*", "penguiflow_a2a*", "examples*"] } }
+packages = { find = { include = ["penguiflow*", "penguiflow_a2a*", "learning_control_plane*", "examples*"] } }
 include-package-data = true
 
 [tool.setuptools.exclude-package-data]
