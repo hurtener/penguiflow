@@ -35,6 +35,7 @@ async def test_local_end_to_end_loop_mines_evaluates_reviews_and_delivers_a_skil
             successful=True,
             pattern_key="billing-refund",
             safe_summary="Verified the refund status with the billing system.",
+            investigation_digest=f"sha256:investigation-{index}",
         )
         for index in range(5)
     )
@@ -45,6 +46,11 @@ async def test_local_end_to_end_loop_mines_evaluates_reviews_and_delivers_a_skil
     ).mine(cohorts.mining_records)
     assert len(mined) == 1
     candidate = mined[0].candidate
+    assert candidate.source_investigation_digests == (
+        "sha256:investigation-0",
+        "sha256:investigation-1",
+        "sha256:investigation-2",
+    )
 
     dataset = EvaluationDataset(
         dataset_id="refund-heldout",
@@ -55,6 +61,7 @@ async def test_local_end_to_end_loop_mines_evaluates_reviews_and_delivers_a_skil
                 inputs={"query": record.safe_summary},
                 expected="verified",
                 source_trace_id=record.trace_id,
+                source_investigation_digest=record.investigation_digest,
             )
             for record in cohorts.held_out_records
         ),
@@ -84,6 +91,15 @@ async def test_local_end_to_end_loop_mines_evaluates_reviews_and_delivers_a_skil
 
     worker_result = await OfflineEvaluationWorker(plane, run_one=run_one, metric=metric).run_pending()
     assert worker_result.ready_for_review_job_ids == (job.job_id,)
+    evaluated_job = plane.get_job(job.job_id)
+    assert evaluated_job.decision is not None
+    assert evaluated_job.decision.investigation_digests == (
+        "sha256:investigation-0",
+        "sha256:investigation-1",
+        "sha256:investigation-2",
+        "sha256:investigation-3",
+        "sha256:investigation-4",
+    )
 
     plane.review_job(
         job.job_id,
@@ -104,6 +120,12 @@ async def test_local_end_to_end_loop_mines_evaluates_reviews_and_delivers_a_skil
     )
     plane.record_activation_receipt(receipt)
 
+    audit_record = plane.get_job_audit_record(job.job_id)
+    assert audit_record.job.review is not None
+    assert audit_record.job.review.investigation_digests == evaluated_job.decision.investigation_digests
+    assert authorization.investigation_digests == evaluated_job.decision.investigation_digests
+    assert receipt.investigation_digests == evaluated_job.decision.investigation_digests
+
     restarted = LearningControlPlane(
         policy=PromotionPolicy(
             policy_version="policy-v1",
@@ -114,4 +136,6 @@ async def test_local_end_to_end_loop_mines_evaluates_reviews_and_delivers_a_skil
         repository=SQLiteControlPlaneRepository(tmp_path / "control-plane.db"),
     )
     assert restarted.get_job(job.job_id).state == "approved"
+    assert restarted.get_job(job.job_id).decision is not None
+    assert restarted.get_job(job.job_id).decision.investigation_digests == evaluated_job.decision.investigation_digests
     assert len(restarted.list_jobs(state="approved")) == 1

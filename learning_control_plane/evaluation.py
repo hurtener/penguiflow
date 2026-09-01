@@ -56,9 +56,16 @@ class EvaluationCase:
     inputs: Mapping[str, Any]
     expected: Any = None
     source_trace_id: str | None = None
+    source_investigation_digest: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "case_id", _non_empty(self.case_id, "case_id"))
+        if self.source_investigation_digest is not None:
+            object.__setattr__(
+                self,
+                "source_investigation_digest",
+                _non_empty(self.source_investigation_digest, "source_investigation_digest"),
+            )
 
 
 @dataclass(frozen=True, slots=True)

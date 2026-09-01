@@ -27,7 +27,7 @@ from learning_control_plane.worker import OfflineEvaluationWorker
 from penguiflow.skills.local_store import LocalSkillStore
 
 
-async def run_demo(db_directory: Path) -> dict[str, str]:
+async def run_demo(db_directory: Path) -> dict[str, str | list[str]]:
     """Execute the full local learning loop and return its durable identifiers."""
 
     db_directory.mkdir(parents=True, exist_ok=True)
@@ -45,6 +45,7 @@ async def run_demo(db_directory: Path) -> dict[str, str]:
             successful=True,
             pattern_key="billing-refund",
             safe_summary="Verified the refund status with the billing system.",
+            investigation_digest=f"sha256:investigation-{index}",
         )
         for index in range(5)
     )
@@ -63,6 +64,7 @@ async def run_demo(db_directory: Path) -> dict[str, str]:
                 inputs={"query": record.safe_summary},
                 expected="verified",
                 source_trace_id=record.trace_id,
+                source_investigation_digest=record.investigation_digest,
             )
             for record in cohorts.held_out_records
         ),
@@ -112,11 +114,16 @@ async def run_demo(db_directory: Path) -> dict[str, str]:
         skill,
     )
     plane.record_activation_receipt(receipt)
+    audit_record = plane.get_job_audit_record(job.job_id)
+    if audit_record.job.decision is None:
+        raise RuntimeError("demo job has no gate decision")
+
     return {
         "candidate_id": candidate.candidate_id,
         "job_id": job.job_id,
         "authorization_id": authorization.authorization_id,
         "receipt_id": receipt.receipt_id,
+        "investigation_digests": list(audit_record.job.decision.investigation_digests),
         "control_plane_db": str(control_plane_db),
         "skills_db": str(skills_db),
     }

@@ -28,11 +28,18 @@ class TraceLearningRecord:
     successful: bool
     pattern_key: str
     safe_summary: str
+    investigation_digest: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "trace_id", _non_empty(self.trace_id, "trace_id"))
         object.__setattr__(self, "pattern_key", _non_empty(self.pattern_key, "pattern_key"))
         object.__setattr__(self, "safe_summary", _non_empty(self.safe_summary, "safe_summary"))
+        if self.investigation_digest is not None:
+            object.__setattr__(
+                self,
+                "investigation_digest",
+                _non_empty(self.investigation_digest, "investigation_digest"),
+            )
         if self.recorded_at.tzinfo is None:
             raise ValueError("recorded_at must be timezone-aware")
 
@@ -53,6 +60,7 @@ class TracePattern:
     deployment_digest: str
     pattern_key: str
     source_trace_ids: tuple[str, ...]
+    source_investigation_digests: tuple[str, ...]
     safe_summaries: tuple[str, ...]
 
 
@@ -118,6 +126,11 @@ class CandidateMiner:
                 deployment_digest=key[1],
                 pattern_key=key[2],
                 source_trace_ids=tuple(record.trace_id for record in matching_records),
+                source_investigation_digests=tuple(
+                    record.investigation_digest
+                    for record in matching_records
+                    if record.investigation_digest is not None
+                ),
                 safe_summaries=tuple(record.safe_summary for record in matching_records),
             )
             advisory_skill = _non_empty(self._drafter(pattern), "drafted advisory skill")
@@ -125,6 +138,7 @@ class CandidateMiner:
                 candidate_id=_candidate_id(pattern),
                 advisory_skill=advisory_skill,
                 source_trace_ids=pattern.source_trace_ids,
+                source_investigation_digests=pattern.source_investigation_digests,
             )
             candidates.append(MinedCandidate(candidate=candidate, pattern=pattern))
         return tuple(candidates)

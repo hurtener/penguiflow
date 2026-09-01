@@ -44,12 +44,17 @@ class AdvisorySkillCandidate:
     candidate_id: str
     advisory_skill: str
     source_trace_ids: Sequence[str] = ()
+    source_investigation_digests: Sequence[str] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "candidate_id", _non_empty(self.candidate_id, "candidate_id"))
         object.__setattr__(self, "advisory_skill", _non_empty(self.advisory_skill, "advisory_skill"))
         source_trace_ids = tuple(_non_empty(trace_id, "source_trace_id") for trace_id in self.source_trace_ids)
         object.__setattr__(self, "source_trace_ids", source_trace_ids)
+        investigation_digests = tuple(
+            _non_empty(digest, "source_investigation_digest") for digest in self.source_investigation_digests
+        )
+        object.__setattr__(self, "source_investigation_digests", investigation_digests)
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +93,13 @@ class GateDecision:
     reasons: tuple[str, ...]
     baseline_metrics: Mapping[str, float]
     candidate_metrics: Mapping[str, float]
+    investigation_digests: Sequence[str] = ()
+
+    def __post_init__(self) -> None:
+        investigation_digests = tuple(
+            _non_empty(digest, "investigation_digest") for digest in self.investigation_digests
+        )
+        object.__setattr__(self, "investigation_digests", investigation_digests)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,12 +110,18 @@ class ReviewDecision:
     approved: bool
     reason: str
     decided_at: datetime
+    investigation_digests: Sequence[str] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "reviewer_id", _non_empty(self.reviewer_id, "reviewer_id"))
         object.__setattr__(self, "reason", _non_empty(self.reason, "review reason"))
         if self.decided_at.tzinfo is None:
             raise ValueError("decided_at must be timezone-aware")
+        object.__setattr__(
+            self,
+            "investigation_digests",
+            tuple(_non_empty(digest, "investigation_digest") for digest in self.investigation_digests),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +136,7 @@ class DeliveryAuthorization:
     expires_at: datetime
     revoked_at: datetime | None = None
     revocation_reason: str | None = None
+    investigation_digests: Sequence[str] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "authorization_id", _non_empty(self.authorization_id, "authorization_id"))
@@ -129,6 +148,11 @@ class DeliveryAuthorization:
             raise ValueError("expires_at must be timezone-aware")
         if self.revoked_at is not None and self.revoked_at.tzinfo is None:
             raise ValueError("revoked_at must be timezone-aware")
+        object.__setattr__(
+            self,
+            "investigation_digests",
+            tuple(_non_empty(digest, "investigation_digest") for digest in self.investigation_digests),
+        )
 
     def is_active(self, now: datetime) -> bool:
         """Return whether this authorization is still valid at the supplied time."""
@@ -148,6 +172,7 @@ class ActivationReceipt:
     scope_ref: str
     provider_ref: str
     delivered_at: datetime
+    investigation_digests: Sequence[str] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "receipt_id", _non_empty(self.receipt_id, "receipt_id"))
@@ -157,6 +182,11 @@ class ActivationReceipt:
         object.__setattr__(self, "provider_ref", _non_empty(self.provider_ref, "provider_ref"))
         if self.delivered_at.tzinfo is None:
             raise ValueError("delivered_at must be timezone-aware")
+        object.__setattr__(
+            self,
+            "investigation_digests",
+            tuple(_non_empty(digest, "investigation_digest") for digest in self.investigation_digests),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +270,7 @@ class LearningControlPlane:
                 context=candidate_context,
                 attributes={
                     "source_trace_count": len(candidate.source_trace_ids),
+                    "source_investigation_count": len(candidate.source_investigation_digests),
                     "advisory_skill_char_count": len(candidate.advisory_skill),
                 },
             )
@@ -370,7 +401,7 @@ class LearningControlPlane:
             self._persist()
             return job
 
-        decision = self._apply_gate(evaluation)
+        decision = self._apply_gate(evaluation, candidate=self._candidates[job.candidate_id])
         gate_event_id = self._emit_gate(job, evaluation, decision)
         event_ids = job.evidence_event_ids
         if gate_event_id is not None:
@@ -413,13 +444,18 @@ class LearningControlPlane:
             approved=approved,
             reason=reason,
             decided_at=datetime.now(UTC),
+            investigation_digests=job.decision.investigation_digests if job.decision else (),
         )
         state: JobState = "approved" if approved else "rejected"
         review_event_id = self._emit(
             EvidenceEvent(
                 event_type="review.decided",
                 context=job.evaluation_request.evidence_context,
-                attributes={"approved": approved, "reviewer_id": reviewer_id},
+                attributes={
+                    "approved": approved,
+                    "reviewer_id": reviewer_id,
+                    "investigation_digest_count": len(review.investigation_digests),
+                },
             )
         )
         event_ids = job.evidence_event_ids
@@ -455,13 +491,18 @@ class LearningControlPlane:
             scope_ref=scope_ref,
             authorized_by=job.review.reviewer_id,
             expires_at=expires_at,
+            investigation_digests=job.decision.investigation_digests if job.decision else (),
         )
         self._authorizations[authorization.authorization_id] = authorization
         self._emit(
             EvidenceEvent(
                 event_type="delivery.authorized",
                 context=replace(job.evaluation_request.evidence_context, scope_ref=scope_ref),
-                attributes={"authorization_id": authorization.authorization_id, "expires_at": expires_at.isoformat()},
+                attributes={
+                    "authorization_id": authorization.authorization_id,
+                    "expires_at": expires_at.isoformat(),
+                    "investigation_digest_count": len(authorization.investigation_digests),
+                },
             )
         )
         self._persist()
@@ -479,6 +520,8 @@ class LearningControlPlane:
             raise ValueError("delivery authorization is expired or revoked")
         if receipt.candidate_id != authorization.candidate_id or receipt.scope_ref != authorization.scope_ref:
             raise ValueError("activation receipt does not match delivery authorization")
+        if receipt.investigation_digests != authorization.investigation_digests:
+            raise ValueError("activation receipt does not match delivery authorization evidence")
 
         self._receipts[receipt.receipt_id] = receipt
         job = self.get_job(authorization.job_id)
@@ -486,7 +529,11 @@ class LearningControlPlane:
             EvidenceEvent(
                 event_type="delivery.receipted",
                 context=replace(job.evaluation_request.evidence_context, scope_ref=receipt.scope_ref),
-                attributes={"authorization_id": receipt.authorization_id, "provider_ref": receipt.provider_ref},
+                attributes={
+                    "authorization_id": receipt.authorization_id,
+                    "provider_ref": receipt.provider_ref,
+                    "investigation_digest_count": len(receipt.investigation_digests),
+                },
             )
         )
         self._persist()
@@ -536,7 +583,12 @@ class LearningControlPlane:
             )
         )
 
-    def _apply_gate(self, evaluation: PairedEvaluationResult) -> GateDecision:
+    def _apply_gate(
+        self,
+        evaluation: PairedEvaluationResult,
+        *,
+        candidate: AdvisorySkillCandidate,
+    ) -> GateDecision:
         reasons: list[str] = []
         complete_pairs = self._complete_pairs(evaluation.case_results)
         failed_case_count = len(evaluation.case_results) - len(complete_pairs)
@@ -567,11 +619,11 @@ class LearningControlPlane:
 
         for metric_name in self._policy.protected_metrics:
             baseline = baseline_metrics.get(metric_name)
-            candidate = candidate_metrics.get(metric_name)
-            if baseline is None or candidate is None:
+            candidate_value = candidate_metrics.get(metric_name)
+            if baseline is None or candidate_value is None:
                 reasons.append(f"missing protected metric: {metric_name}")
-            elif candidate < baseline:
-                reasons.append(f"protected metric regressed: {metric_name} {baseline} -> {candidate}")
+            elif candidate_value < baseline:
+                reasons.append(f"protected metric regressed: {metric_name} {baseline} -> {candidate_value}")
 
         return GateDecision(
             approved=not reasons,
@@ -579,6 +631,7 @@ class LearningControlPlane:
             reasons=tuple(reasons),
             baseline_metrics=baseline_metrics,
             candidate_metrics=candidate_metrics,
+            investigation_digests=_investigation_digests(candidate, evaluation),
         )
 
     @staticmethod
@@ -637,6 +690,7 @@ class LearningControlPlane:
                 "reason_count": len(decision.reasons),
                 "dataset_digest": evaluation.request.dataset.manifest_digest,
                 "case_count": len(evaluation.case_results),
+                "investigation_digest_count": len(decision.investigation_digests),
             },
             metrics=metrics,
         )
@@ -651,6 +705,21 @@ class LearningControlPlane:
             logger.warning("Learning-control-plane evidence emission failed", exc_info=True)
             return None
         return event.event_id if delivered else None
+
+
+def _investigation_digests(
+    candidate: AdvisorySkillCandidate,
+    evaluation: PairedEvaluationResult,
+) -> tuple[str, ...]:
+    """Return the ordered, unique investigation evidence behind one gate decision."""
+
+    digests = list(candidate.source_investigation_digests)
+    digests.extend(
+        case.source_investigation_digest
+        for case in evaluation.request.dataset.cases
+        if case.source_investigation_digest is not None
+    )
+    return tuple(dict.fromkeys(digests))
 
 
 __all__ = [

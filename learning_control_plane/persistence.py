@@ -111,6 +111,7 @@ def _candidate_payload(candidate: AdvisorySkillCandidate) -> dict[str, object]:
         "candidate_id": candidate.candidate_id,
         "advisory_skill": candidate.advisory_skill,
         "source_trace_ids": list(candidate.source_trace_ids),
+        "source_investigation_digests": list(candidate.source_investigation_digests),
     }
 
 
@@ -174,6 +175,7 @@ def _request_payload(request: EvaluationRequest) -> dict[str, object]:
                     "inputs": dict(case.inputs),
                     "expected": case.expected,
                     "source_trace_id": case.source_trace_id,
+                    "source_investigation_digest": case.source_investigation_digest,
                 }
                 for case in request.dataset.cases
             ],
@@ -247,6 +249,7 @@ def _decision_payload(decision: GateDecision) -> dict[str, object]:
         "reasons": list(decision.reasons),
         "baseline_metrics": dict(decision.baseline_metrics),
         "candidate_metrics": dict(decision.candidate_metrics),
+        "investigation_digests": list(decision.investigation_digests),
     }
 
 
@@ -260,6 +263,7 @@ def _review_payload(review: ReviewDecision) -> dict[str, object]:
         "approved": review.approved,
         "reason": review.reason,
         "decided_at": review.decided_at.isoformat(),
+        "investigation_digests": list(review.investigation_digests),
     }
 
 
@@ -270,6 +274,7 @@ def _review_from_payload(payload: Any) -> ReviewDecision:
         approved=bool(review["approved"]),
         reason=str(review["reason"]),
         decided_at=datetime.fromisoformat(str(review["decided_at"])),
+        investigation_digests=tuple(review.get("investigation_digests", [])),
     )
 
 
@@ -283,6 +288,7 @@ def _authorization_payload(authorization: DeliveryAuthorization) -> dict[str, ob
         "expires_at": authorization.expires_at.isoformat(),
         "revoked_at": authorization.revoked_at.isoformat() if authorization.revoked_at else None,
         "revocation_reason": authorization.revocation_reason,
+        "investigation_digests": list(authorization.investigation_digests),
     }
 
 
@@ -298,6 +304,7 @@ def _authorization_from_payload(payload: Any) -> DeliveryAuthorization:
         expires_at=datetime.fromisoformat(str(authorization["expires_at"])),
         revoked_at=datetime.fromisoformat(str(revoked_at)) if revoked_at else None,
         revocation_reason=authorization.get("revocation_reason"),
+        investigation_digests=tuple(authorization.get("investigation_digests", [])),
     )
 
 
@@ -309,6 +316,7 @@ def _receipt_payload(receipt: ActivationReceipt) -> dict[str, object]:
         "scope_ref": receipt.scope_ref,
         "provider_ref": receipt.provider_ref,
         "delivered_at": receipt.delivered_at.isoformat(),
+        "investigation_digests": list(receipt.investigation_digests),
     }
 
 
@@ -321,6 +329,7 @@ def _receipt_from_payload(payload: Any) -> ActivationReceipt:
         scope_ref=str(receipt["scope_ref"]),
         provider_ref=str(receipt["provider_ref"]),
         delivered_at=datetime.fromisoformat(str(receipt["delivered_at"])),
+        investigation_digests=tuple(receipt.get("investigation_digests", [])),
     )
 
 

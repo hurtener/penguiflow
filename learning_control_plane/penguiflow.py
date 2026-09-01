@@ -319,6 +319,7 @@ class ScopedSkillActivationAdapter:
             scope_ref=authorization.scope_ref,
             provider_ref=f"penguiflow.skills:{stored[0].id}",
             delivered_at=delivered_at,
+            investigation_digests=authorization.investigation_digests,
         )
 
 

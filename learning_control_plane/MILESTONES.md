@@ -224,6 +224,11 @@ cohorts, gate evidence, approval records, delivery, and receipts.
 to scoped delivery receipt while the evaluation, gate, and approval contracts
 remain unchanged.
 
+**Implementation:** investigation digests now travel from mining records and
+held-out evaluation cases through candidates, gate decisions, review decisions,
+delivery authorizations, and activation receipts. SQLite persists the complete
+chain, and the local demo prints it. See `investigation_lineage.md`.
+
 ## Post-MVP
 
 Auto-sequence edges, automated candidate mining, canary rollout, multi-framework

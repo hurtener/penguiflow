@@ -31,6 +31,8 @@ versioned policy and recorded human approval.
   evaluation data, and metric version.
 - The promotion cohort is held out from candidate selection.
 - Every decision records candidate, evidence, policy, scope, reviewer, and result.
+- Every candidate, evaluation cohort, gate decision, approval, authorization, and
+  receipt retains the digest references for its investigation evidence.
 - Delivery is scope-specific and must return a receipt. Invalid, expired, or
   revoked authorization must be rejected by the provider.
 - The LCP is allowed to fail closed: it may decline to deliver a candidate, but it

@@ -32,6 +32,7 @@ continue to serve requests with their last valid configuration.
 | `investigation_publisher.py` | Idempotent MLflow trace-attachment publisher for investigation documents. |
 | `investigation_dual_export.md` | Verified MLflow/OTLP dual-export result and MVP storage decision. |
 | `penguiflow_investigation_projector.md` | PenguiFlow's redaction-first investigation projection contract. |
+| `investigation_lineage.md` | Digest lineage from investigation evidence to delivery receipt. |
 | `mlflow_lineage.md` | MLflow tag, metric, and artifact-path convention. |
 | `evaluation.py` | Standalone baseline-versus-advisory-skill local evaluator. |
 | `evaluation.md` | The evaluator's fixed-data and complete-evidence contract. |
