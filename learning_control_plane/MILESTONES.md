@@ -70,6 +70,10 @@ expiry/revocation, delivery request, and immutable activation receipt.
 **Done when:** only a human-approved passing candidate can be delivered to an
 authorized tenant/project scope, and every delivery can be revoked.
 
+**Implementation:** human review moves a gate-passing job to `approved` or
+`rejected`. Approved jobs can create one expiring authorization per scope; matching
+provider receipts are recorded and authorizations can be revoked.
+
 ## Milestone 5 — PenguiFlow provider and optional learning hook
 
 **Goal:** integrate PenguiFlow without moving learning into the request path.

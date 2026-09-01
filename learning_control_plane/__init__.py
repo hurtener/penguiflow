@@ -6,12 +6,15 @@ control plane cannot interrupt an agent serving a customer.
 """
 
 from .control_plane import (
+    ActivationReceipt,
     AdvisorySkillCandidate,
+    DeliveryAuthorization,
     GateDecision,
     JobState,
     LearningControlPlane,
     LearningJob,
     PromotionPolicy,
+    ReviewDecision,
 )
 from .evaluation import (
     EvaluationBackend,
@@ -37,8 +40,10 @@ from .evidence import (
 )
 
 __all__ = [
+    "ActivationReceipt",
     "AdvisorySkillCandidate",
     "CompositeEvidenceSink",
+    "DeliveryAuthorization",
     "EvidenceContext",
     "EvidenceEvent",
     "EvidenceSink",
@@ -59,6 +64,7 @@ __all__ = [
     "PairedCaseResult",
     "PairedEvaluationResult",
     "PromotionPolicy",
+    "ReviewDecision",
     "RunOne",
     "VariantCaseResult",
 ]

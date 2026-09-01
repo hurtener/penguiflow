@@ -21,5 +21,7 @@ An evaluator infrastructure error moves a job to `failed`; it creates no decisio
 Evaluation case failures stay in the evaluation result and cause the gate to fail
 closed by default (`maximum_failed_cases=0`).
 
-A passing job stops at `ready_for_review`. Human approval, scoped authorization,
-delivery, receipts, expiry, and revocation are Milestone 4 responsibilities.
+An approved reviewer decision enables a scope-bound, expiring delivery authorization.
+The host/provider applies it and sends an `ActivationReceipt` back to the control
+plane. The control plane accepts only matching, active receipts and can revoke an
+authorization. It still never changes an agent itself.

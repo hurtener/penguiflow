@@ -6,6 +6,7 @@ import logging
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import uuid4
 
@@ -23,7 +24,7 @@ from .evidence import EvidenceContext, EvidenceEvent, EvidenceSink
 
 logger = logging.getLogger("learning_control_plane.control_plane")
 
-JobState = Literal["draft", "evaluating", "ready_for_review", "rejected", "failed"]
+JobState = Literal["draft", "evaluating", "ready_for_review", "approved", "rejected", "failed"]
 
 
 def _non_empty(value: str, field_name: str) -> str:
@@ -87,6 +88,75 @@ class GateDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewDecision:
+    """A human decision on a passing candidate before it can be authorized."""
+
+    reviewer_id: str
+    approved: bool
+    reason: str
+    decided_at: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "reviewer_id", _non_empty(self.reviewer_id, "reviewer_id"))
+        object.__setattr__(self, "reason", _non_empty(self.reason, "review reason"))
+        if self.decided_at.tzinfo is None:
+            raise ValueError("decided_at must be timezone-aware")
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryAuthorization:
+    """A human-approved, scope-bound right for a host to activate one candidate."""
+
+    authorization_id: str
+    job_id: str
+    candidate_id: str
+    scope_ref: str
+    authorized_by: str
+    expires_at: datetime
+    revoked_at: datetime | None = None
+    revocation_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "authorization_id", _non_empty(self.authorization_id, "authorization_id"))
+        object.__setattr__(self, "job_id", _non_empty(self.job_id, "job_id"))
+        object.__setattr__(self, "candidate_id", _non_empty(self.candidate_id, "candidate_id"))
+        object.__setattr__(self, "scope_ref", _non_empty(self.scope_ref, "scope_ref"))
+        object.__setattr__(self, "authorized_by", _non_empty(self.authorized_by, "authorized_by"))
+        if self.expires_at.tzinfo is None:
+            raise ValueError("expires_at must be timezone-aware")
+        if self.revoked_at is not None and self.revoked_at.tzinfo is None:
+            raise ValueError("revoked_at must be timezone-aware")
+
+    def is_active(self, now: datetime) -> bool:
+        """Return whether this authorization is still valid at the supplied time."""
+
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        return self.revoked_at is None and now < self.expires_at
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationReceipt:
+    """A provider's immutable confirmation that it delivered an authorized skill."""
+
+    receipt_id: str
+    authorization_id: str
+    candidate_id: str
+    scope_ref: str
+    provider_ref: str
+    delivered_at: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "receipt_id", _non_empty(self.receipt_id, "receipt_id"))
+        object.__setattr__(self, "authorization_id", _non_empty(self.authorization_id, "authorization_id"))
+        object.__setattr__(self, "candidate_id", _non_empty(self.candidate_id, "candidate_id"))
+        object.__setattr__(self, "scope_ref", _non_empty(self.scope_ref, "scope_ref"))
+        object.__setattr__(self, "provider_ref", _non_empty(self.provider_ref, "provider_ref"))
+        if self.delivered_at.tzinfo is None:
+            raise ValueError("delivered_at must be timezone-aware")
+
+
+@dataclass(frozen=True, slots=True)
 class LearningJob:
     """One offline attempt to evaluate and gate a registered candidate."""
 
@@ -97,6 +167,7 @@ class LearningJob:
     attempt_count: int = 0
     evaluation: PairedEvaluationResult | None = None
     decision: GateDecision | None = None
+    review: ReviewDecision | None = None
     error: str | None = None
     evidence_event_ids: tuple[str, ...] = ()
 
@@ -116,6 +187,8 @@ class LearningControlPlane:
         self._evidence_sink = evidence_sink
         self._candidates: dict[str, AdvisorySkillCandidate] = {}
         self._jobs: dict[str, LearningJob] = {}
+        self._authorizations: dict[str, DeliveryAuthorization] = {}
+        self._receipts: dict[str, ActivationReceipt] = {}
 
     def register_candidate(self, candidate: AdvisorySkillCandidate, context: EvidenceContext) -> AdvisorySkillCandidate:
         """Register one immutable advisory-skill candidate for offline evaluation."""
@@ -240,6 +313,121 @@ class LearningControlPlane:
         job = replace(job, state="draft", error=None)
         self._jobs[job_id] = job
         return job
+
+    def review_job(self, job_id: str, *, reviewer_id: str, approved: bool, reason: str) -> LearningJob:
+        """Record the required human decision for a candidate that passed the gate."""
+
+        job = self.get_job(job_id)
+        if job.state != "ready_for_review":
+            raise ValueError("only gate-passing jobs can be reviewed")
+
+        review = ReviewDecision(
+            reviewer_id=reviewer_id,
+            approved=approved,
+            reason=reason,
+            decided_at=datetime.now(UTC),
+        )
+        state: JobState = "approved" if approved else "rejected"
+        review_event_id = self._emit(
+            EvidenceEvent(
+                event_type="review.decided",
+                context=job.evaluation_request.evidence_context,
+                attributes={"approved": approved, "reviewer_id": reviewer_id},
+            )
+        )
+        event_ids = job.evidence_event_ids
+        if review_event_id is not None:
+            event_ids += (review_event_id,)
+        job = replace(job, state=state, review=review, evidence_event_ids=event_ids)
+        self._jobs[job_id] = job
+        return job
+
+    def authorize_delivery(self, job_id: str, *, scope_ref: str, expires_at: datetime) -> DeliveryAuthorization:
+        """Authorize one reviewed candidate for one scope; the host performs delivery."""
+
+        job = self.get_job(job_id)
+        if job.state != "approved" or job.review is None or not job.review.approved:
+            raise ValueError("only human-approved jobs can be authorized for delivery")
+        if expires_at.tzinfo is None:
+            raise ValueError("expires_at must be timezone-aware")
+        if expires_at <= datetime.now(UTC):
+            raise ValueError("expires_at must be in the future")
+        if any(
+            authorization.job_id == job_id
+            and authorization.scope_ref == scope_ref
+            and authorization.is_active(datetime.now(UTC))
+            for authorization in self._authorizations.values()
+        ):
+            raise ValueError("an active delivery authorization already exists for this job and scope")
+
+        authorization = DeliveryAuthorization(
+            authorization_id=f"auth_{uuid4().hex}",
+            job_id=job_id,
+            candidate_id=job.candidate_id,
+            scope_ref=scope_ref,
+            authorized_by=job.review.reviewer_id,
+            expires_at=expires_at,
+        )
+        self._authorizations[authorization.authorization_id] = authorization
+        self._emit(
+            EvidenceEvent(
+                event_type="delivery.authorized",
+                context=replace(job.evaluation_request.evidence_context, scope_ref=scope_ref),
+                attributes={"authorization_id": authorization.authorization_id, "expires_at": expires_at.isoformat()},
+            )
+        )
+        return authorization
+
+    def record_activation_receipt(self, receipt: ActivationReceipt) -> ActivationReceipt:
+        """Record a host/provider receipt only when it matches an active authorization."""
+
+        if receipt.receipt_id in self._receipts:
+            raise ValueError(f"activation receipt already exists: {receipt.receipt_id}")
+        authorization = self._authorizations.get(receipt.authorization_id)
+        if authorization is None:
+            raise ValueError(f"unknown delivery authorization: {receipt.authorization_id}")
+        if not authorization.is_active(receipt.delivered_at):
+            raise ValueError("delivery authorization is expired or revoked")
+        if receipt.candidate_id != authorization.candidate_id or receipt.scope_ref != authorization.scope_ref:
+            raise ValueError("activation receipt does not match delivery authorization")
+
+        self._receipts[receipt.receipt_id] = receipt
+        job = self.get_job(authorization.job_id)
+        self._emit(
+            EvidenceEvent(
+                event_type="delivery.receipted",
+                context=replace(job.evaluation_request.evidence_context, scope_ref=receipt.scope_ref),
+                attributes={"authorization_id": receipt.authorization_id, "provider_ref": receipt.provider_ref},
+            )
+        )
+        return receipt
+
+    def revoke_delivery(self, authorization_id: str, *, revoked_by: str, reason: str) -> DeliveryAuthorization:
+        """Revoke a delivery authorization so no later receipt can be accepted."""
+
+        authorization = self._authorizations.get(authorization_id)
+        if authorization is None:
+            raise ValueError(f"unknown delivery authorization: {authorization_id}")
+        if authorization.revoked_at is not None:
+            raise ValueError("delivery authorization is already revoked")
+
+        revoked_by = _non_empty(revoked_by, "revoked_by")
+        reason = _non_empty(reason, "revocation reason")
+        authorization = replace(
+            authorization,
+            revoked_at=datetime.now(UTC),
+            revocation_reason=reason,
+        )
+        self._authorizations[authorization_id] = authorization
+        job = self.get_job(authorization.job_id)
+        self._emit(
+            EvidenceEvent(
+                event_type="delivery.revoked",
+                context=replace(job.evaluation_request.evidence_context, scope_ref=authorization.scope_ref),
+                attributes={"authorization_id": authorization_id, "revoked_by": revoked_by},
+            )
+        )
+        return authorization
 
     def _apply_gate(self, evaluation: PairedEvaluationResult) -> GateDecision:
         reasons: list[str] = []
