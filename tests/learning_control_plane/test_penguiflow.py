@@ -9,15 +9,20 @@ import pytest
 from learning_control_plane.control_plane import AdvisorySkillCandidate, DeliveryAuthorization
 from learning_control_plane.evaluation import EvaluationCase, EvaluationVariant
 from learning_control_plane.evidence import EvidenceContext, EvidenceEvent
+from learning_control_plane.investigation import SourceTraceRef
 from learning_control_plane.penguiflow import (
     PenguiFlowEvaluationRunner,
+    PenguiFlowInvestigationContext,
+    PenguiFlowInvestigationProjector,
+    PenguiFlowInvestigationPublicationHook,
     PenguiFlowTracePublicationHook,
     PenguiFlowTracePublisher,
     ScopedSkillActivationAdapter,
     compile_advisory_skill,
     project_trajectory,
 )
-from penguiflow.planner.trajectory import Trajectory
+from penguiflow.planner.models import PlannerAction
+from penguiflow.planner.trajectory import Trajectory, TrajectoryStep
 from penguiflow.skills.local_store import LocalSkillStore
 
 
@@ -45,6 +50,119 @@ def test_projection_and_trace_publisher_exclude_trajectory_content() -> None:
         "finish_reason": "answer_complete",
         "has_final_answer": True,
     }
+
+
+def _investigation_context() -> PenguiFlowInvestigationContext:
+    return PenguiFlowInvestigationContext(
+        source_trace_ref=SourceTraceRef(
+            tracking_store_ref="mlflow://local",
+            experiment_id="42",
+            mlflow_trace_id="tr-source-42",
+            deployment_ref="sha256:planner-v2",
+            native_trace_id="penguiflow-run-42",
+        ),
+        agent_ref="planner_enterprise_agent_v2",
+        scope_ref="tenant:acme",
+        execution_fingerprint="sha256:planner-v2",
+        started_at=datetime(2026, 9, 1, 12, tzinfo=UTC),
+        allowed_node_names=frozenset({"search_docs"}),
+    )
+
+
+def test_investigation_projector_redacts_raw_trajectory_content_before_document_creation() -> None:
+    secret = "customer-secret-must-not-leak"
+    trajectory = Trajectory(
+        query=secret,
+        llm_context={"prompt": secret},
+        tool_context={"api_key": secret},
+        artifacts={"report": secret},
+        sources=[{"content": secret}],
+        metadata={"private": secret},
+        final_answer=secret,
+        finish_reason="answer_complete",
+        steps=[
+            TrajectoryStep(
+                action=PlannerAction(next_node="search_docs", args={"query": secret}, thought=secret),
+                observation={"content": secret},
+                llm_observation=secret,
+                streams={"updates": ({"content": secret},)},
+            ),
+            TrajectoryStep(
+                action=PlannerAction(next_node=secret, args={"credential": secret}),
+                error=secret,
+                failure={"message": secret},
+            ),
+        ],
+    )
+
+    document = PenguiFlowInvestigationProjector(_investigation_context()).project(
+        trajectory,
+        completed_at=datetime(2026, 9, 1, 12, 1, tzinfo=UTC),
+    )
+
+    assert document.status == "completed"
+    assert document.request == {"has_text": True, "input_part_count": 0}
+    assert document.steps == [
+        {
+            "index": 0,
+            "node": "search_docs",
+            "status": "completed",
+            "has_observation": True,
+            "has_streams": True,
+        },
+        {
+            "index": 1,
+            "node": "redacted_node",
+            "status": "failed",
+            "has_observation": False,
+            "has_streams": False,
+        },
+    ]
+    assert document.step_signature == "search_docs>redacted_node"
+    assert secret not in document.canonical_bytes().decode()
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "expected_status", "expected_termination_reason"),
+    [
+        ("no_path", "failed", "no_path"),
+        ("budget_exhausted", "timed_out", "budget_exhausted"),
+        ("paused", "interrupted", "paused"),
+        ("cancelled", "cancelled", "cancelled"),
+    ],
+)
+def test_investigation_projector_preserves_safe_terminal_states(
+    finish_reason: str,
+    expected_status: str,
+    expected_termination_reason: str,
+) -> None:
+    trajectory = Trajectory(query="customer question", finish_reason=finish_reason)
+
+    document = PenguiFlowInvestigationProjector(_investigation_context()).project(trajectory)
+
+    assert document.status == expected_status
+    assert document.termination_reason == expected_termination_reason
+
+
+def test_investigation_hook_only_gives_a_redacted_document_to_the_publisher() -> None:
+    secret = "raw-answer-must-not-reach-publisher"
+    published = Event()
+    documents = []
+
+    class Publisher:
+        def publish(self, document: object) -> str:
+            documents.append(document)
+            published.set()
+            return "sha256:test"
+
+    hook = PenguiFlowInvestigationPublicationHook(
+        PenguiFlowInvestigationProjector(_investigation_context()),
+        Publisher(),
+    )
+    hook(Trajectory(query=secret, final_answer=secret, finish_reason="answer_complete"))
+
+    assert published.wait(timeout=1)
+    assert secret not in documents[0].canonical_bytes().decode()
 
 
 def test_trace_publication_hook_publishes_on_a_background_thread_with_the_tool_trace_id() -> None:

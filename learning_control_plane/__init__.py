@@ -56,6 +56,11 @@ from .mining import (
     TracePattern,
     reserve_later_held_out_cohort,
 )
+from .penguiflow import (
+    PenguiFlowInvestigationContext,
+    PenguiFlowInvestigationProjector,
+    PenguiFlowInvestigationPublicationHook,
+)
 from .persistence import PersistedControlPlaneState, SQLiteControlPlaneRepository
 from .worker import OfflineEvaluationWorker, WorkerRun
 
@@ -95,6 +100,9 @@ __all__ = [
     "PairedEvaluationResult",
     "PromotionPolicy",
     "PersistedControlPlaneState",
+    "PenguiFlowInvestigationContext",
+    "PenguiFlowInvestigationProjector",
+    "PenguiFlowInvestigationPublicationHook",
     "ReviewDecision",
     "ReviewQueueItem",
     "RunOne",

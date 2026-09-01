@@ -207,6 +207,11 @@ compatible until this projector replaces it.
 **Done when:** tests prove forbidden fields cannot reach canonical bytes or the
 publisher, including failed, paused, and cancelled runs.
 
+**Implementation:** `PenguiFlowInvestigationProjector` creates an allowlisted,
+redacted document before the publisher is called. `PenguiFlowInvestigationPublicationHook`
+keeps publication outside the agent request path; the existing metadata-only hook
+remains compatible. See `penguiflow_investigation_projector.md`.
+
 ## Milestone 16 — Digest-reference downstream integration
 
 **Goal:** link the new evidence documents to the existing evaluation and

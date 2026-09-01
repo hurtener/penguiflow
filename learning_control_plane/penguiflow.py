@@ -6,6 +6,7 @@ import logging
 import re
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from hashlib import sha256
 from threading import Thread
 from typing import Any, Protocol
 from uuid import uuid4
@@ -17,6 +18,8 @@ from penguiflow.skills.models import SkillDefinition, SkillScopeMode, SkillTaskT
 from .control_plane import ActivationReceipt, AdvisorySkillCandidate, DeliveryAuthorization
 from .evaluation import EvaluationCase, EvaluationVariant
 from .evidence import EvidenceContext, EvidenceEvent, EvidenceSink
+from .investigation import InvestigationStatus, InvestigationTrajectoryV1, SourceTraceRef
+from .investigation_publisher import InvestigationPublisher
 
 logger = logging.getLogger("learning_control_plane.penguiflow")
 
@@ -29,6 +32,121 @@ class TrajectoryProjection:
     failed_step_count: int
     finish_reason: str | None
     has_final_answer: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PenguiFlowInvestigationContext:
+    """Trusted run identity needed to project one PenguiFlow trajectory safely."""
+
+    source_trace_ref: SourceTraceRef
+    agent_ref: str
+    scope_ref: str
+    execution_fingerprint: str
+    started_at: datetime
+    provider_ref: str = "penguiflow"
+    redaction_profile: str = "penguiflow-investigation-safe:v1"
+    allowed_node_names: frozenset[str] = frozenset()
+
+
+class PenguiFlowInvestigationProjector:
+    """Project a native trajectory into a redacted investigation document."""
+
+    def __init__(self, context: PenguiFlowInvestigationContext) -> None:
+        self._context = context
+
+    def project(
+        self,
+        trajectory: Trajectory,
+        *,
+        completed_at: datetime | None = None,
+        investigation_id: str | None = None,
+    ) -> InvestigationTrajectoryV1:
+        """Create a document without copying content-bearing trajectory fields."""
+
+        projected_steps = [
+            {
+                "index": index,
+                "node": self._safe_node_name(step.action.next_node),
+                "status": "failed" if step.error or step.failure else "completed",
+                "has_observation": step.observation is not None,
+                "has_streams": bool(step.streams),
+            }
+            for index, step in enumerate(trajectory.steps)
+        ]
+        step_signature = ">".join(str(step["node"]) for step in projected_steps) or "no_steps"
+        finish_reason = trajectory.finish_reason or "unknown"
+
+        return InvestigationTrajectoryV1(
+            investigation_id=investigation_id or self._investigation_id(),
+            source_trace_ref=self._context.source_trace_ref,
+            agent_ref=self._context.agent_ref,
+            provider_ref=self._context.provider_ref,
+            scope_ref=self._context.scope_ref,
+            started_at=self._context.started_at,
+            completed_at=completed_at,
+            status=_investigation_status(finish_reason),
+            execution_fingerprint=self._context.execution_fingerprint,
+            request={
+                "has_text": bool(trajectory.query),
+                "input_part_count": len(trajectory.input_parts),
+            },
+            steps=projected_steps,
+            redaction_profile=self._context.redaction_profile,
+            step_signature=step_signature,
+            execution_context={
+                "step_count": len(projected_steps),
+                "failed_step_count": sum(step["status"] == "failed" for step in projected_steps),
+                "has_final_answer": trajectory.final_answer is not None,
+            },
+            termination_reason=_safe_termination_reason(finish_reason),
+        )
+
+    def _investigation_id(self) -> str:
+        source_trace_ref = self._context.source_trace_ref
+        identity = ":".join(
+            (
+                source_trace_ref.tracking_store_ref,
+                source_trace_ref.experiment_id,
+                source_trace_ref.mlflow_trace_id,
+            )
+        )
+        return f"investigation_{sha256(identity.encode()).hexdigest()[:24]}"
+
+    def _safe_node_name(self, value: str) -> str:
+        """Keep only node names explicitly declared safe by the integration."""
+
+        if value in self._context.allowed_node_names:
+            return value
+        return "redacted_node"
+
+
+class PenguiFlowInvestigationPublicationHook:
+    """Publish a projected investigation after a completed PenguiFlow trajectory."""
+
+    def __init__(
+        self,
+        projector: PenguiFlowInvestigationProjector,
+        publisher: InvestigationPublisher,
+    ) -> None:
+        self._projector = projector
+        self._publisher = publisher
+
+    def __call__(self, trajectory: Trajectory) -> None:
+        """Publish in the background so an unavailable control plane cannot delay an agent."""
+
+        try:
+            Thread(target=self._publish, args=(trajectory,), daemon=True).start()
+        except Exception:
+            logger.warning("PenguiFlow investigation publication hook failed", exc_info=True)
+
+    def _publish(self, trajectory: Trajectory) -> None:
+        """Project before calling the publisher, so raw trajectory content cannot escape."""
+
+        try:
+            document = self._projector.project(trajectory, completed_at=datetime.now(UTC))
+            self._publisher.publish(document)
+        except Exception:
+            logger.warning("PenguiFlow investigation publication failed", exc_info=True)
 
 
 def project_trajectory(trajectory: Trajectory) -> TrajectoryProjection:
@@ -223,6 +341,38 @@ def _scoped_skill_name(name: str | None, scope_ref: str) -> str:
     return f"{name}.{_slug(scope_ref)}"
 
 
+def _investigation_status(finish_reason: str) -> InvestigationStatus:
+    """Map PenguiFlow's terminal reason to the portable investigation status."""
+
+    statuses: dict[str, InvestigationStatus] = {
+        "answer_complete": "completed",
+        "budget_exhausted": "timed_out",
+        "cancelled": "cancelled",
+        "pause": "interrupted",
+        "paused": "interrupted",
+        "interrupted": "interrupted",
+        "no_path": "failed",
+    }
+    return statuses.get(finish_reason, "unknown")
+
+
+def _safe_termination_reason(value: str) -> str:
+    """Keep only known terminal reason labels from a native trajectory."""
+
+    allowed = {
+        "answer_complete",
+        "budget_exhausted",
+        "cancelled",
+        "pause",
+        "paused",
+        "interrupted",
+        "no_path",
+    }
+    if value in allowed:
+        return value
+    return "unknown"
+
+
 def _slug(value: str) -> str:
     """Return a stable identifier fragment accepted by the skills store."""
 
@@ -231,6 +381,9 @@ def _slug(value: str) -> str:
 
 __all__ = [
     "PenguiFlowEvaluationRunner",
+    "PenguiFlowInvestigationContext",
+    "PenguiFlowInvestigationProjector",
+    "PenguiFlowInvestigationPublicationHook",
     "PenguiFlowTracePublisher",
     "PenguiFlowTracePublicationHook",
     "ScopedSkillActivationAdapter",
