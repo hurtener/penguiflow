@@ -13,10 +13,6 @@ def test_milestone_zero_structure_is_present() -> None:
         "README.md",
         "MILESTONES.md",
         "architecture.md",
-        "contracts/__init__.py",
-        "control_plane/__init__.py",
-        "evaluation/__init__.py",
-        "providers/__init__.py",
-        "integrations/penguiflow/__init__.py",
+        "evidence.py",
     ]
     assert all((package_root / path).is_file() for path in expected_paths)

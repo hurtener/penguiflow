@@ -1,19 +1,131 @@
-"""Best-effort OpenTelemetry and MLflow evidence publishers.
+"""Redacted evidence records and best-effort OpenTelemetry/MLflow publishers.
 
 Publishers never make an LCP decision and never raise into an agent workload.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
-
-from .contracts.evidence import EvidenceEvent
+from uuid import uuid4
 
 logger = logging.getLogger("learning_control_plane.evidence")
+
+_SENSITIVE_ATTRIBUTE_PARTS = frozenset(
+    {
+        "api_key",
+        "authorization",
+        "content",
+        "cookie",
+        "credential",
+        "input",
+        "message",
+        "output",
+        "password",
+        "prompt",
+        "secret",
+        "token",
+    }
+)
+
+
+def _require_non_empty(value: str, field_name: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"{field_name} must be non-empty")
+    return cleaned
+
+
+def redact_attributes(attributes: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove content and credential fields from evidence metadata."""
+
+    redacted: dict[str, Any] = {}
+    for raw_key, value in attributes.items():
+        key = str(raw_key).strip()
+        normalized_key = key.lower().replace("-", "_")
+
+        if not key or any(part in normalized_key for part in _SENSITIVE_ATTRIBUTE_PARTS):
+            continue
+
+        try:
+            json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            redacted[key] = str(value)
+        else:
+            redacted[key] = value
+    return redacted
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceContext:
+    """Identify the exact agent, deployment, and evaluation evidence belongs to."""
+
+    agent_id: str
+    deployment_digest: str
+    trace_id: str | None = None
+    evaluation_id: str | None = None
+    candidate_id: str | None = None
+    dataset_version: str | None = None
+    metric_version: str | None = None
+    policy_version: str | None = None
+    scope_ref: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "agent_id", _require_non_empty(self.agent_id, "agent_id"))
+        object.__setattr__(self, "deployment_digest", _require_non_empty(self.deployment_digest, "deployment_digest"))
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceEvent:
+    """Record one offline learning-plane event and its redacted metadata."""
+
+    event_type: str
+    context: EvidenceContext
+    attributes: Mapping[str, Any] = field(default_factory=dict)
+    event_id: str = field(default_factory=lambda: f"ev_{uuid4().hex}")
+    occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "event_type", _require_non_empty(self.event_type, "event_type"))
+        object.__setattr__(self, "event_id", _require_non_empty(self.event_id, "event_id"))
+        if self.occurred_at.tzinfo is None:
+            raise ValueError("occurred_at must be timezone-aware")
+        object.__setattr__(self, "attributes", redact_attributes(self.attributes))
+
+    def record(self) -> dict[str, Any]:
+        """Return the JSON-safe record stored by evidence systems."""
+
+        record = asdict(self.context)
+        record.update(
+            {
+                "event_id": self.event_id,
+                "event_type": self.event_type,
+                "occurred_at": self.occurred_at.isoformat(),
+                "attributes": dict(self.attributes),
+            }
+        )
+        return record
+
+    def telemetry_attributes(self) -> dict[str, str | bool | float | int]:
+        """Return flat scalar attributes accepted by OpenTelemetry."""
+
+        attributes: dict[str, str | bool | float | int] = {
+            "lcp.event_id": self.event_id,
+            "lcp.event_type": self.event_type,
+            "lcp.occurred_at": self.occurred_at.isoformat(),
+        }
+        for key, value in asdict(self.context).items():
+            if value is not None:
+                attributes[f"lcp.{key}"] = str(value)
+        for key, value in self.attributes.items():
+            if isinstance(value, (str, bool, float, int)):
+                attributes[f"lcp.attr.{key}"] = value
+        return attributes
 
 
 @runtime_checkable
@@ -130,4 +242,12 @@ class MlflowEvidenceSink:
             return False
 
 
-__all__ = ["CompositeEvidenceSink", "EvidenceSink", "MlflowEvidenceSink", "OpenTelemetryEvidenceSink"]
+__all__ = [
+    "CompositeEvidenceSink",
+    "EvidenceContext",
+    "EvidenceEvent",
+    "EvidenceSink",
+    "MlflowEvidenceSink",
+    "OpenTelemetryEvidenceSink",
+    "redact_attributes",
+]

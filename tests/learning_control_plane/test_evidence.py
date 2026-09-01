@@ -3,8 +3,13 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any
 
-from learning_control_plane.contracts import EvidenceContext, EvidenceEvent
-from learning_control_plane.evidence import CompositeEvidenceSink, MlflowEvidenceSink, OpenTelemetryEvidenceSink
+from learning_control_plane.evidence import (
+    CompositeEvidenceSink,
+    EvidenceContext,
+    EvidenceEvent,
+    MlflowEvidenceSink,
+    OpenTelemetryEvidenceSink,
+)
 
 
 def _event(**attributes: Any) -> EvidenceEvent:

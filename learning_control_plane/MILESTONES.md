@@ -5,14 +5,16 @@
 **Goal:** create the standalone package, document responsibility boundaries, and
 make the package discoverable by the repository build.
 
-**Includes:** this directory structure, MVP scope, architecture, and a package
-layout test.
+**Includes:** the package, MVP scope, architecture, and a package layout test.
 
 **Does not include:** runtime behavior, background jobs, telemetry setup, MLflow,
 candidate generation, or delivery.
 
 **Done when:** the package imports, the package layout is tested, and the remaining
 milestones have explicit completion criteria.
+
+**Implementation note:** Do not create empty future packages. Add a module or folder
+only when it owns behavior delivered by its milestone.
 
 ## Milestone 1 — Evidence plumbing: OpenTelemetry and MLflow
 

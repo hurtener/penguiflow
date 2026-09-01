@@ -26,12 +26,12 @@ continue to serve requests with their last valid configuration.
 
 | Path | Responsibility |
 |---|---|
-| `contracts/` | Stable, framework-neutral data and protocol contracts. |
-| `control_plane/` | Job orchestration, gates, review, ledger, and delivery decisions. |
-| `evaluation/` | Standalone evaluation-backend contract and implementations. |
-| `providers/` | Framework adapters; no provider logic belongs in the LCP core. |
-| `integrations/penguiflow/` | Optional PenguiFlow provider and offline learning hook. |
+| `evidence.py` | The current Milestone 1 evidence records and optional telemetry sinks. |
 | `architecture.md` | Boundaries and evidence flow for the MVP. |
 | `MILESTONES.md` | Ordered delivery plan and completion criteria. |
+
+Future code folders are intentionally not scaffolded yet. They will be created when
+their milestone introduces a real evaluation backend, control-plane workflow, or
+PenguiFlow provider.
 
 See [the milestones](MILESTONES.md) before adding production behavior.
