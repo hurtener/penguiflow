@@ -29,6 +29,7 @@ continue to serve requests with their last valid configuration.
 | `evidence.py` | The current Milestone 1 evidence records and optional telemetry sinks. |
 | `investigation.py` | Portable investigation document, canonical JSON bytes, digest, and discovery index. |
 | `investigation_trajectory.md` | InvestigationTrajectoryV1 contract and canonicalization rules. |
+| `investigation_publisher.py` | Idempotent MLflow trace-attachment publisher for investigation documents. |
 | `mlflow_lineage.md` | MLflow tag, metric, and artifact-path convention. |
 | `evaluation.py` | Standalone baseline-versus-advisory-skill local evaluator. |
 | `evaluation.md` | The evaluator's fixed-data and complete-evidence contract. |

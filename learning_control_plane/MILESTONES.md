@@ -173,6 +173,12 @@ and tests prove the source reference locates a native run without reading it.
 **Done when:** retries return the original digest and do not create a second
 attachment or index entry.
 
+**Implementation:** `MlflowAttachmentPublisher` searches the source experiment
+by `investigation_id`, writes canonical document bytes as an `application/json`
+trace attachment only when absent, and records the digest plus discovery index as
+trace tags. Matching retries return the existing digest; different bytes fail.
+MLflow is pinned to 3.12.0, the first project version with this attachment API.
+
 ## Milestone 14 — MLflow and OpenTelemetry dual-export spike
 
 **Goal:** answer whether MLflow attachments survive dual export and whether the

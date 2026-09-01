@@ -46,6 +46,7 @@ from .investigation import (
     InvestigationTrajectoryV1,
     SourceTraceRef,
 )
+from .investigation_publisher import InvestigationPublisher, MlflowAttachmentPublisher
 from .mining import (
     CandidateDrafter,
     CandidateMiner,
@@ -77,6 +78,7 @@ __all__ = [
     "INVESTIGATION_TRAJECTORY_SCHEMA_VERSION",
     "InvestigationStatus",
     "InvestigationTrajectoryV1",
+    "InvestigationPublisher",
     "JobState",
     "JobAuditRecord",
     "LearningControlPlane",
@@ -84,6 +86,7 @@ __all__ = [
     "LocalEvaluationBackend",
     "MLFLOW_LINEAGE_SCHEMA_VERSION",
     "MlflowEvidenceSink",
+    "MlflowAttachmentPublisher",
     "OpenTelemetryEvidenceSink",
     "OfflineEvaluationWorker",
     "Metric",
