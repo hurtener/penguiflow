@@ -47,6 +47,7 @@ dev = [
     "grpcio-tools>=1.70.0",
     "googleapis-common-protos>=1.66.0",
     "protobuf>=5.26.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.39.0,<2",
     # LLM provider SDKs for testing native LLM layer
     "openai>=2.0.0",
     "anthropic>=0.75.0",
@@ -180,6 +181,7 @@ dev = [
     "grpcio-tools>=1.70.0",
     "googleapis-common-protos>=1.66.0",
     "protobuf>=5.26.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.39.0,<2",
     # LLM provider SDKs for native LLM layer tests
     "openai>=2.0.0",
     "anthropic>=0.75.0",

@@ -191,6 +191,11 @@ versions, a recorded pass/fail result, and no object-store implementation.
 adequate OTLP representation, or the exact failure is recorded as the decision
 for a later storage design.
 
+**Implementation:** passed locally with MLflow 3.12.0 and the OTLP/HTTP protobuf
+exporter. MLflow retained each attachment as a separate artifact; OTLP carried
+the attachment reference, digest, experiment ID, and trace ID, but not canonical
+document bytes. See `investigation_dual_export.md`.
+
 ## Milestone 15 — PenguiFlow investigation projector
 
 **Goal:** turn a native PenguiFlow run into a redacted `InvestigationTrajectoryV1`.
