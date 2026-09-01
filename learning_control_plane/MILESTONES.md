@@ -141,6 +141,16 @@ safe-summary mining, held-out evaluation, SQLite persistence, offline worker,
 human approval, scoped skill activation, and receipt recording. The matching
 integration test proves the same workflow without external services.
 
+## Operational Milestone 11 — Human review queue and audit records
+
+**Goal:** give a reviewer read-only evidence for an explicit approval or rejection.
+
+**Implementation:** `list_review_queue()` returns only gate-passing jobs awaiting
+review, with their advisory candidate. `get_job_audit_record()` returns the job,
+candidate, evaluation/gate/review state, and all matching delivery authorizations
+and receipts. Reviewers still use the existing durable `review_job()` command to
+make the decision.
+
 ## Post-MVP
 
 Auto-sequence edges, automated candidate mining, canary rollout, multi-framework

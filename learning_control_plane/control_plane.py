@@ -175,6 +175,24 @@ class LearningJob:
     evidence_event_ids: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class ReviewQueueItem:
+    """A gate-passing candidate waiting for a human approval decision."""
+
+    job: LearningJob
+    candidate: AdvisorySkillCandidate
+
+
+@dataclass(frozen=True, slots=True)
+class JobAuditRecord:
+    """The complete decision and delivery history for one learning job."""
+
+    job: LearningJob
+    candidate: AdvisorySkillCandidate
+    authorizations: tuple[DeliveryAuthorization, ...]
+    receipts: tuple[ActivationReceipt, ...]
+
+
 class LearningControlPlane:
     """Own offline candidate state and deterministic promotion-to-review decisions."""
 
@@ -282,6 +300,47 @@ class LearningControlPlane:
         if state is None:
             return jobs
         return tuple(job for job in jobs if job.state == state)
+
+    def list_review_queue(self) -> tuple[ReviewQueueItem, ...]:
+        """Return every gate-passing job that still requires a human decision."""
+
+        return tuple(
+            ReviewQueueItem(job=job, candidate=self._candidates[job.candidate_id])
+            for job in self.list_jobs(state="ready_for_review")
+        )
+
+    def get_job_audit_record(self, job_id: str) -> JobAuditRecord:
+        """Return a job's candidate, decision, approval, delivery, and receipt history."""
+
+        job = self.get_job(job_id)
+        candidate = self._candidates[job.candidate_id]
+        authorizations = tuple(
+            sorted(
+                (
+                    authorization
+                    for authorization in self._authorizations.values()
+                    if authorization.job_id == job_id
+                ),
+                key=lambda authorization: authorization.authorization_id,
+            )
+        )
+        authorization_ids = {authorization.authorization_id for authorization in authorizations}
+        receipts = tuple(
+            sorted(
+                (
+                    receipt
+                    for receipt in self._receipts.values()
+                    if receipt.authorization_id in authorization_ids
+                ),
+                key=lambda receipt: receipt.receipt_id,
+            )
+        )
+        return JobAuditRecord(
+            job=job,
+            candidate=candidate,
+            authorizations=authorizations,
+            receipts=receipts,
+        )
 
     async def run_job(self, job_id: str, run_one: RunOne, metric: Metric) -> LearningJob:
         """Run one draft job offline and advance it only to review or rejection."""
