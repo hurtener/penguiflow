@@ -17,7 +17,7 @@ import asyncio
 import logging
 import sys
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 from uuid import uuid4
 
@@ -46,7 +46,9 @@ from penguiflow.planner import (
     ReflectionCriteria,
     ToolPolicy,
 )
+from penguiflow.planner.trajectory import Trajectory
 from penguiflow.registry import ModelRegistry
+from penguiflow.skills import SkillProvider, SkillsConfig
 
 # Global buffers for demonstration (in production: use message queue/websocket)
 STATUS_BUFFER: defaultdict[str, list[StatusUpdate]] = defaultdict(list)
@@ -97,10 +99,16 @@ class EnterpriseAgentOrchestrator:
         *,
         telemetry: AgentTelemetry | None = None,
         state_store: Any | None = None,
+        skills: SkillsConfig | None = None,
+        skills_provider: SkillProvider | None = None,
+        on_trajectory_complete: Callable[[Trajectory], None] | None = None,
     ) -> None:
         self.config = config
         self.telemetry = telemetry or AgentTelemetry(config)
         self._state_store = state_store
+        self._skills = skills
+        self._skills_provider = skills_provider
+        self._on_trajectory_complete = on_trajectory_complete
 
         # Configure logging
         logging.basicConfig(
@@ -360,8 +368,11 @@ When context is provided, use it appropriately to enhance your responses.
             tool_policy=tool_policy,
             planning_hints=planning_hints,
             state_store=state_store,
+            skills=self._skills,
+            skills_provider=self._skills_provider,
             # Wire up telemetry callback
             event_callback=self.telemetry.record_planner_event,
+            on_trajectory_complete=self._on_trajectory_complete,
         )
 
         self.telemetry.logger.info(
