@@ -121,6 +121,17 @@ with `PenguiFlowTracePublicationHook`, which starts best-effort publication on a
 daemon thread and never changes the planner's result when the evidence backend is
 unavailable.
 
+## Operational Milestone 9 — Conservative candidate mining
+
+**Goal:** turn repeated successful, pre-redacted trace summaries into auditable
+advisory-skill drafts without training on the cases used for evaluation.
+
+**Implementation:** `reserve_later_held_out_cohort` reserves newest traces before
+mining. `CandidateMiner` groups earlier successful records by agent deployment and
+host-supplied pattern key, requires a minimum cohort size, and calls a host-provided
+offline drafter. The resulting candidate remains subject to the existing offline
+evaluation and human approval workflow.
+
 ## Post-MVP
 
 Auto-sequence edges, automated candidate mining, canary rollout, multi-framework

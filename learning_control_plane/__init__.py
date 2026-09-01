@@ -38,12 +38,23 @@ from .evidence import (
     MlflowEvidenceSink,
     OpenTelemetryEvidenceSink,
 )
+from .mining import (
+    CandidateDrafter,
+    CandidateMiner,
+    MinedCandidate,
+    TraceCohorts,
+    TraceLearningRecord,
+    TracePattern,
+    reserve_later_held_out_cohort,
+)
 from .persistence import PersistedControlPlaneState, SQLiteControlPlaneRepository
 from .worker import OfflineEvaluationWorker, WorkerRun
 
 __all__ = [
     "ActivationReceipt",
     "AdvisorySkillCandidate",
+    "CandidateDrafter",
+    "CandidateMiner",
     "CompositeEvidenceSink",
     "DeliveryAuthorization",
     "EvidenceContext",
@@ -64,6 +75,7 @@ __all__ = [
     "OpenTelemetryEvidenceSink",
     "OfflineEvaluationWorker",
     "Metric",
+    "MinedCandidate",
     "PairedCaseResult",
     "PairedEvaluationResult",
     "PromotionPolicy",
@@ -71,6 +83,10 @@ __all__ = [
     "ReviewDecision",
     "RunOne",
     "SQLiteControlPlaneRepository",
+    "TraceCohorts",
+    "TraceLearningRecord",
+    "TracePattern",
     "VariantCaseResult",
     "WorkerRun",
+    "reserve_later_held_out_cohort",
 ]
