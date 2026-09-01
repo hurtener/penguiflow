@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from examples.planner_enterprise_agent_v2 import learning_control_plane_local_host
 from examples.planner_enterprise_agent_v2.config import AgentConfig
 from examples.planner_enterprise_agent_v2.learning_control_plane import (
     EnterpriseEvaluationOutput,
@@ -147,3 +148,27 @@ def test_real_held_out_dataset_uses_the_host_loader_and_preserves_digest_lineage
     assert dataset.cases[0].inputs["query"] == "Approved lookup result"
     assert dataset.cases[0].source_trace_id == "trace-42"
     assert dataset.cases[0].source_investigation_digest == "sha256:investigation-42"
+
+
+def test_local_end_to_end_host_keeps_raw_inputs_outside_the_mining_record() -> None:
+    record = TraceLearningRecord(
+        trace_id="trace-42",
+        context=EvidenceContext(agent_id="planner_enterprise_agent_v2", deployment_digest="sha256:planner"),
+        recorded_at=datetime(2026, 9, 1, tzinfo=UTC),
+        successful=True,
+        pattern_key="triage>answer",
+        safe_summary="step_signature=triage>answer",
+        investigation_digest="sha256:investigation-42",
+    )
+    output = EnterpriseEvaluationOutput(
+        answer={"text": "A plan"},
+        latency_ms=100.0,
+        trace={"tool_context": {"trace_id": "lcp-eval-case-candidate_123"}, "steps": []},
+    )
+
+    case = learning_control_plane_local_host.build_case(record)
+    metrics = learning_control_plane_local_host.outcome_provider.metrics_for(case, output)
+
+    assert "raw" not in record.safe_summary
+    assert case.inputs["query"] == "Create a concise dependency-aware plan."
+    assert metrics["task_success"] == 1.0
