@@ -271,6 +271,20 @@ through a read-only boundary, fails closed on invalid evidence, and projects saf
 an explicit callback, preserving digest lineage without giving those inputs to the
 miner. See `investigation_mining.md`.
 
+## Milestone 20 — Planner Enterprise V2 real offline outcomes
+
+**Goal:** run the first provider against approved held-out production inputs and
+score real runtime and outcome evidence without touching the serving request path.
+
+**Done when:** every case uses a fresh isolated Planner V2 instance; the host owns
+real input and outcome lookup; and paired evaluation can score policy, task,
+feedback, cost, latency, and tool-error metrics when they are available.
+
+**Implementation:** `PlannerEnterpriseV2EvaluationRunner` isolates each run and
+measures latency. `EnterpriseOutcomeScorer` combines deterministic policy and
+trajectory metrics with a host-provided outcome provider. The existing Planner
+demo now uses the multi-metric scorer. See `planner_enterprise_v2.md`.
+
 ## Post-MVP
 
 Auto-sequence edges, automated candidate mining, canary rollout, multi-framework

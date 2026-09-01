@@ -35,6 +35,7 @@ continue to serve requests with their last valid configuration.
 | `investigation_lineage.md` | Digest lineage from investigation evidence to delivery receipt. |
 | `investigation_mining.py` | Read-only verified MLflow attachment reader for safe candidate mining. |
 | `investigation_mining.md` | MLflow verification, redaction boundary, and held-out cohort contract. |
+| `planner_enterprise_v2.md` | Real held-out Planner V2 inputs, outcome metrics, and isolation contract. |
 | `skill_drafting.py` | Provider-neutral, validated LLM advisory-skill drafter. |
 | `skill_drafting.md` | Drafting input, output, validation, and local demo contract. |
 | `mlflow_lineage.md` | MLflow tag, metric, and artifact-path convention. |

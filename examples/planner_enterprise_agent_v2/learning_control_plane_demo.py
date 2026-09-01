@@ -10,12 +10,12 @@ from pathlib import Path
 
 from examples.planner_enterprise_agent_v2.config import AgentConfig
 from examples.planner_enterprise_agent_v2.learning_control_plane import (
-    EnterprisePolicyComplianceRunner,
-    enterprise_policy_metric,
+    EnterpriseOutcomeScorer,
+    PlannerEnterpriseV2EvaluationRunner,
     load_policy_compliance_dataset,
 )
 from learning_control_plane.control_plane import AdvisorySkillCandidate, LearningControlPlane, PromotionPolicy
-from learning_control_plane.evaluation import LocalEvaluationBackend
+from learning_control_plane.evaluation import LocalEvaluationBackend, MetricSpecification
 from learning_control_plane.evidence import EvidenceContext
 from learning_control_plane.persistence import SQLiteControlPlaneRepository
 from learning_control_plane.worker import OfflineEvaluationWorker
@@ -40,7 +40,13 @@ async def evaluate_candidate(args: argparse.Namespace) -> dict[str, object]:
         policy=PromotionPolicy(
             policy_version="enterprise-policy-v1",
             primary_metric="policy_compliance",
+            metric_specifications=(
+                MetricSpecification("policy_compliance"),
+                MetricSpecification("latency_ms", direction="lower_is_better"),
+                MetricSpecification("tool_error_rate", direction="lower_is_better"),
+            ),
             minimum_primary_improvement=0.0,
+            protected_metrics=("latency_ms", "tool_error_rate"),
             minimum_complete_cases=len(dataset.cases),
         ),
         evaluation_backend=LocalEvaluationBackend(),
@@ -55,11 +61,11 @@ async def evaluate_candidate(args: argparse.Namespace) -> dict[str, object]:
         dataset=dataset,
     )
 
-    runner = EnterprisePolicyComplianceRunner(AgentConfig.from_env())
+    runner = PlannerEnterpriseV2EvaluationRunner(AgentConfig.from_env())
     worker_result = await OfflineEvaluationWorker(
         plane,
         run_one=runner,
-        metric=enterprise_policy_metric,
+        metric=EnterpriseOutcomeScorer(),
     ).run_pending()
     completed_job = plane.get_job(job.job_id)
     audit = plane.get_job_audit_record(job.job_id)
