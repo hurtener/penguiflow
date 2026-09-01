@@ -50,6 +50,14 @@ from .investigation import (
     InvestigationTrajectoryV1,
     SourceTraceRef,
 )
+from .investigation_mining import (
+    EvaluationCaseBuilder,
+    InvestigationSelection,
+    MlflowInvestigationReader,
+    MlflowTraceAttachmentStore,
+    TraceAttachmentDownloader,
+    build_held_out_evaluation_cases,
+)
 from .investigation_publisher import InvestigationPublisher, MlflowAttachmentPublisher
 from .mining import (
     CandidateDrafter,
@@ -87,6 +95,7 @@ __all__ = [
     "EvidenceContext",
     "EvidenceEvent",
     "EvidenceSink",
+    "EvaluationCaseBuilder",
     "EvaluationBackend",
     "EvaluationCase",
     "EvaluationDataset",
@@ -95,6 +104,7 @@ __all__ = [
     "GateDecision",
     "INVESTIGATION_TRAJECTORY_SCHEMA_VERSION",
     "InvestigationStatus",
+    "InvestigationSelection",
     "InvestigationTrajectoryV1",
     "InvestigationPublisher",
     "JobState",
@@ -106,6 +116,8 @@ __all__ = [
     "MLFLOW_LINEAGE_SCHEMA_VERSION",
     "MlflowEvidenceSink",
     "MlflowAttachmentPublisher",
+    "MlflowInvestigationReader",
+    "MlflowTraceAttachmentStore",
     "OpenTelemetryEvidenceSink",
     "OfflineEvaluationWorker",
     "Metric",
@@ -128,10 +140,12 @@ __all__ = [
     "SourceTraceRef",
     "SkillDraftingProvider",
     "TraceCohorts",
+    "TraceAttachmentDownloader",
     "TraceLearningRecord",
     "TracePattern",
     "VariantCaseResult",
     "WorkerRun",
     "build_skill_drafting_prompt",
+    "build_held_out_evaluation_cases",
     "reserve_later_held_out_cohort",
 ]

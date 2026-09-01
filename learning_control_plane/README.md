@@ -33,6 +33,8 @@ continue to serve requests with their last valid configuration.
 | `investigation_dual_export.md` | Verified MLflow/OTLP dual-export result and MVP storage decision. |
 | `penguiflow_investigation_projector.md` | PenguiFlow's redaction-first investigation projection contract. |
 | `investigation_lineage.md` | Digest lineage from investigation evidence to delivery receipt. |
+| `investigation_mining.py` | Read-only verified MLflow attachment reader for safe candidate mining. |
+| `investigation_mining.md` | MLflow verification, redaction boundary, and held-out cohort contract. |
 | `skill_drafting.py` | Provider-neutral, validated LLM advisory-skill drafter. |
 | `skill_drafting.md` | Drafting input, output, validation, and local demo contract. |
 | `mlflow_lineage.md` | MLflow tag, metric, and artifact-path convention. |

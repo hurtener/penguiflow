@@ -256,6 +256,21 @@ gate applies its primary and protected checks against those normalized values.
 mean, median, minimum, and maximum improvement. `GateDecision` persists those
 summaries alongside direction-normalized mean improvements. See `scoring.md`.
 
+## Milestone 19 — Verified MLflow investigation mining
+
+**Goal:** let the existing candidate miner consume real production investigation
+evidence without exposing raw request or trajectory content to mining or drafting.
+
+**Done when:** MLflow attachments are verified against their canonical bytes,
+digest, and discovery index; only allowlisted safe records are emitted; and the
+newest records are reserved as held-out cases before candidate mining.
+
+**Implementation:** `MlflowInvestigationReader` reads published MLflow attachments
+through a read-only boundary, fails closed on invalid evidence, and projects safe
+`TraceLearningRecord` values. The host builds real held-out evaluation inputs via
+an explicit callback, preserving digest lineage without giving those inputs to the
+miner. See `investigation_mining.md`.
+
 ## Post-MVP
 
 Auto-sequence edges, automated candidate mining, canary rollout, multi-framework

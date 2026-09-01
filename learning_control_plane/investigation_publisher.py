@@ -8,9 +8,9 @@ from typing import Any, Protocol
 
 from .investigation import InvestigationTrajectoryV1
 
-_INVESTIGATION_ID_TAG = "learning.investigation.id"
-_INVESTIGATION_DIGEST_TAG = "learning.investigation.digest"
-_ATTACHMENT_OUTPUT_KEY = "learning.investigation_trajectory"
+INVESTIGATION_ID_TAG = "learning.investigation.id"
+INVESTIGATION_DIGEST_TAG = "learning.investigation.digest"
+INVESTIGATION_ATTACHMENT_OUTPUT_KEY = "learning.investigation_trajectory"
 
 
 class InvestigationPublisher(Protocol):
@@ -63,8 +63,8 @@ class MlflowAttachmentPublisher:
         )
         tags = {
             **document.query_index(),
-            _INVESTIGATION_ID_TAG: document.investigation_id,
-            _INVESTIGATION_DIGEST_TAG: digest,
+            INVESTIGATION_ID_TAG: document.investigation_id,
+            INVESTIGATION_DIGEST_TAG: digest,
         }
         with mlflow.start_span(
             name="learning.investigation.publish",
@@ -74,7 +74,7 @@ class MlflowAttachmentPublisher:
             mlflow.update_current_trace(tags=tags)
             span.set_outputs(
                 {
-                    _ATTACHMENT_OUTPUT_KEY: attachment,
+                    INVESTIGATION_ATTACHMENT_OUTPUT_KEY: attachment,
                     "learning.investigation_digest": digest,
                 }
             )
@@ -104,7 +104,7 @@ class MlflowAttachmentPublisher:
 
     @staticmethod
     def _existing_digest(mlflow: Any, document: InvestigationTrajectoryV1) -> str | None:
-        filter_string = f'tags.`{_INVESTIGATION_ID_TAG}` = "{document.investigation_id}"'
+        filter_string = f'tags.`{INVESTIGATION_ID_TAG}` = "{document.investigation_id}"'
         traces = mlflow.search_traces(
             locations=[document.source_trace_ref.experiment_id],
             filter_string=filter_string,
@@ -116,10 +116,16 @@ class MlflowAttachmentPublisher:
             raise RuntimeError(f"multiple MLflow traces use investigation_id {document.investigation_id!r}")
 
         tags = dict(traces[0].info.tags)
-        existing_digest = tags.get(_INVESTIGATION_DIGEST_TAG)
+        existing_digest = tags.get(INVESTIGATION_DIGEST_TAG)
         if not isinstance(existing_digest, str) or not existing_digest:
             raise RuntimeError(f"existing investigation {document.investigation_id!r} has no digest tag")
         return existing_digest
 
 
-__all__ = ["InvestigationPublisher", "MlflowAttachmentPublisher"]
+__all__ = [
+    "INVESTIGATION_ATTACHMENT_OUTPUT_KEY",
+    "INVESTIGATION_DIGEST_TAG",
+    "INVESTIGATION_ID_TAG",
+    "InvestigationPublisher",
+    "MlflowAttachmentPublisher",
+]
