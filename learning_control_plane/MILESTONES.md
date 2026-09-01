@@ -111,6 +111,16 @@ job is saved through `LearningControlPlane` as `ready_for_review`, `rejected`, o
 `failed`; a scheduler can invoke `run_pending()` later without changing this
 contract.
 
+## Operational Milestone 8 — PenguiFlow post-run publication hook
+
+**Goal:** make metadata-only trace publication opt-in and automatic after a
+terminal PenguiFlow run.
+
+**Implementation:** `ReactPlanner` accepts `on_trajectory_complete`. Configure it
+with `PenguiFlowTracePublicationHook`, which starts best-effort publication on a
+daemon thread and never changes the planner's result when the evidence backend is
+unavailable.
+
 ## Post-MVP
 
 Auto-sequence edges, automated candidate mining, canary rollout, multi-framework

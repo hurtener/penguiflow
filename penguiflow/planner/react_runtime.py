@@ -2387,5 +2387,11 @@ async def run_loop(
             constraints=tracker,
         )
     finally:
+        on_trajectory_complete = getattr(planner, "_on_trajectory_complete", None)
+        if on_trajectory_complete is not None and trajectory.finish_reason is not None:
+            try:
+                on_trajectory_complete(trajectory)
+            except Exception:
+                logger.exception("trajectory_completion_callback_error")
         planner._active_trajectory = None
         planner._active_tracker = None

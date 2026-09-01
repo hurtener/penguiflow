@@ -2606,6 +2606,7 @@ async def test_react_planner_event_callback_receives_events() -> None:
     """Event callback should receive all planner events."""
 
     events: list[PlannerEvent] = []
+    completed_trajectories: list[Trajectory] = []
 
     def callback(event: PlannerEvent) -> None:
         events.append(event)
@@ -2628,6 +2629,7 @@ async def test_react_planner_event_callback_receives_events() -> None:
         llm_client=client,
         catalog=build_catalog([Node(triage, name="triage")], registry),
         event_callback=callback,
+        on_trajectory_complete=completed_trajectories.append,
     )
 
     await planner.run("Test events")
@@ -2640,6 +2642,8 @@ async def test_react_planner_event_callback_receives_events() -> None:
     assert "step_start" in event_types
     assert "step_complete" in event_types
     assert "finish" in event_types
+    assert len(completed_trajectories) == 1
+    assert completed_trajectories[0].finish_reason == "answer_complete"
 
 
 @pytest.mark.asyncio()

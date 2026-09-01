@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from threading import Thread
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -124,6 +125,40 @@ class PenguiFlowTracePublisher:
             return False
 
 
+class PenguiFlowTracePublicationHook:
+    """Attach this callback to ``ReactPlanner`` for safe post-run evidence publication."""
+
+    def __init__(self, publisher: PenguiFlowTracePublisher, context: EvidenceContext) -> None:
+        self._publisher = publisher
+        self._context = context
+
+    def __call__(self, trajectory: Trajectory) -> None:
+        """Start best-effort evidence publication without delaying the planner result."""
+
+        try:
+            Thread(target=self._publish, args=(trajectory,), daemon=True).start()
+        except Exception:
+            logger.warning("PenguiFlow trace publication hook failed", exc_info=True)
+
+    def _publish(self, trajectory: Trajectory) -> None:
+        """Publish from a daemon thread after the planner has completed."""
+
+        try:
+            context = self._context_with_trace_id(trajectory)
+            self._publisher.publish(trajectory, context)
+        except Exception:
+            logger.warning("PenguiFlow trace publication hook failed", exc_info=True)
+
+    def _context_with_trace_id(self, trajectory: Trajectory) -> EvidenceContext:
+        if self._context.trace_id is not None:
+            return self._context
+        tool_context = trajectory.tool_context or {}
+        trace_id = tool_context.get("trace_id")
+        if trace_id is None:
+            return self._context
+        return replace(self._context, trace_id=str(trace_id))
+
+
 class ScopedSkillActivationAdapter:
     """Deliver an authorized advisory skill to PenguiFlow's scoped local store."""
 
@@ -197,6 +232,7 @@ def _slug(value: str) -> str:
 __all__ = [
     "PenguiFlowEvaluationRunner",
     "PenguiFlowTracePublisher",
+    "PenguiFlowTracePublicationHook",
     "ScopedSkillActivationAdapter",
     "TrajectoryProjection",
     "compile_advisory_skill",

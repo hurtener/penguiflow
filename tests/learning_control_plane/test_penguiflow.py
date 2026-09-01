@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -10,6 +11,7 @@ from learning_control_plane.evaluation import EvaluationCase, EvaluationVariant
 from learning_control_plane.evidence import EvidenceContext, EvidenceEvent
 from learning_control_plane.penguiflow import (
     PenguiFlowEvaluationRunner,
+    PenguiFlowTracePublicationHook,
     PenguiFlowTracePublisher,
     ScopedSkillActivationAdapter,
     compile_advisory_skill,
@@ -43,6 +45,27 @@ def test_projection_and_trace_publisher_exclude_trajectory_content() -> None:
         "finish_reason": "answer_complete",
         "has_final_answer": True,
     }
+
+
+def test_trace_publication_hook_publishes_on_a_background_thread_with_the_tool_trace_id() -> None:
+    trajectory = Trajectory(query="customer question", tool_context={"trace_id": "trace-from-tool-context"})
+    delivered = Event()
+    events: list[EvidenceEvent] = []
+
+    class Sink:
+        def emit(self, event: EvidenceEvent) -> bool:
+            events.append(event)
+            delivered.set()
+            return True
+
+    hook = PenguiFlowTracePublicationHook(
+        PenguiFlowTracePublisher(Sink()),
+        EvidenceContext(agent_id="agent", deployment_digest="sha256:bundle"),
+    )
+    hook(trajectory)
+
+    assert delivered.wait(timeout=1)
+    assert events[0].context.trace_id == "trace-from-tool-context"
 
 
 @pytest.mark.asyncio

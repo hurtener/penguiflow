@@ -348,6 +348,7 @@ class ReactPlanner:
     _memory_config: ShortTermMemoryConfig
     _memory_ephemeral_key: MemoryKey | None
     _memory_singleton: ShortTermMemory | None
+    _on_trajectory_complete: Callable[[Trajectory], None] | None
     _memory_summarizer: Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]] | None
     _memory_summarizer_client: JSONLLMClient | None
     _observation_guardrail: ObservationGuardrailConfig
@@ -437,6 +438,7 @@ class ReactPlanner:
         hop_budget: int | None = None,
         time_source: Callable[[], float] | None = None,
         event_callback: PlannerEventCallback | None = None,
+        on_trajectory_complete: Callable[[Trajectory], None] | None = None,
         llm_timeout_s: float = 360.0,
         llm_max_retries: int = 3,
         use_native_reasoning: bool = True,
@@ -507,6 +509,7 @@ class ReactPlanner:
             "hop_budget": hop_budget,
             "time_source": time_source,
             "event_callback": event_callback,
+            "on_trajectory_complete": on_trajectory_complete,
             "llm_timeout_s": llm_timeout_s,
             "llm_max_retries": llm_max_retries,
             "use_native_reasoning": use_native_reasoning,
@@ -566,6 +569,7 @@ class ReactPlanner:
             hop_budget=hop_budget,
             time_source=time_source,
             event_callback=event_callback,
+            on_trajectory_complete=on_trajectory_complete,
             llm_timeout_s=llm_timeout_s,
             llm_max_retries=llm_max_retries,
             use_native_reasoning=use_native_reasoning,

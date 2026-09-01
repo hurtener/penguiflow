@@ -13,15 +13,17 @@ advisory skill to the candidate planner. This lets applications adopt
 
 ## Optional trace publication
 
-After a planner run completes, a host may call
-`PenguiFlowTracePublisher.publish(trajectory, evidence_context)`. The publisher
+Configure `ReactPlanner(on_trajectory_complete=hook)` with a
+`PenguiFlowTracePublicationHook` to publish automatically after a terminal run.
+The hook calls `PenguiFlowTracePublisher.publish(trajectory, evidence_context)`.
+The publisher
 emits only a `TrajectoryProjection`: step counts, failure counts, finish reason,
 and whether a final answer exists. It deliberately excludes the query, tool
 context, observations, and answer. Missing or failed evidence sinks return
 `False`; they cannot interrupt a customer request.
 
-Call this from the host's existing post-run/background mechanism, not directly in
-the latency-sensitive execution loop.
+The hook starts publication on a daemon thread after the terminal planning run.
+Publisher or evidence-sink failures are logged and do not change the agent result.
 
 ## Candidate delivery
 
