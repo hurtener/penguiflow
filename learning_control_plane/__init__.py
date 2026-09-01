@@ -39,6 +39,7 @@ from .evidence import (
     OpenTelemetryEvidenceSink,
 )
 from .persistence import PersistedControlPlaneState, SQLiteControlPlaneRepository
+from .worker import OfflineEvaluationWorker, WorkerRun
 
 __all__ = [
     "ActivationReceipt",
@@ -61,6 +62,7 @@ __all__ = [
     "MLFLOW_LINEAGE_SCHEMA_VERSION",
     "MlflowEvidenceSink",
     "OpenTelemetryEvidenceSink",
+    "OfflineEvaluationWorker",
     "Metric",
     "PairedCaseResult",
     "PairedEvaluationResult",
@@ -70,4 +72,5 @@ __all__ = [
     "RunOne",
     "SQLiteControlPlaneRepository",
     "VariantCaseResult",
+    "WorkerRun",
 ]

@@ -100,6 +100,17 @@ reviews, authorizations, and receipts as one JSON-safe SQLite snapshot. Supplyin
 it to `LearningControlPlane` makes every state transition durable; omitting it
 preserves the lightweight in-memory mode used by existing adopters.
 
+## Operational Milestone 7 — Offline evaluation worker
+
+**Goal:** execute persisted draft jobs without placing evaluation in an agent's
+request path.
+
+**Implementation:** `OfflineEvaluationWorker` takes the host's fixed `RunOne` and
+metric functions and evaluates a bounded deterministic batch of `draft` jobs. Each
+job is saved through `LearningControlPlane` as `ready_for_review`, `rejected`, or
+`failed`; a scheduler can invoke `run_pending()` later without changing this
+contract.
+
 ## Post-MVP
 
 Auto-sequence edges, automated candidate mining, canary rollout, multi-framework

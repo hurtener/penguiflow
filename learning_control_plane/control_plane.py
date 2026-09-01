@@ -275,6 +275,14 @@ class LearningControlPlane:
             raise ValueError(f"unknown learning job: {job_id}")
         return job
 
+    def list_jobs(self, *, state: JobState | None = None) -> tuple[LearningJob, ...]:
+        """Return persisted jobs, optionally limited to one workflow state."""
+
+        jobs = tuple(sorted(self._jobs.values(), key=lambda job: job.job_id))
+        if state is None:
+            return jobs
+        return tuple(job for job in jobs if job.state == state)
+
     async def run_job(self, job_id: str, run_one: RunOne, metric: Metric) -> LearningJob:
         """Run one draft job offline and advance it only to review or rejection."""
 
