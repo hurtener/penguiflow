@@ -85,6 +85,12 @@ hook.
 **Done when:** PenguiFlow can use the standalone evaluation backend alone or opt
 into the full learning loop while continuing to serve if the LCP is unavailable.
 
+**Implementation:** `learning_control_plane.penguiflow` provides an isolated
+planner runner for the standalone evaluator, a metadata-only trajectory projection
+and best-effort post-run publisher, and a human-authorization-aware adapter for
+writing `learned` advisory skills into PenguiFlow's scoped local skill store. See
+[`penguiflow.md`](penguiflow.md) for the host integration contract.
+
 ## Post-MVP
 
 Auto-sequence edges, automated candidate mining, canary rollout, multi-framework

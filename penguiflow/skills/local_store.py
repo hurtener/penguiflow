@@ -161,6 +161,88 @@ class LocalSkillStore:
                 updated = True
         return inserted, updated
 
+    def upsert_learned_skill(
+        self,
+        skill: SkillDefinition,
+        *,
+        authorization_id: str,
+        scope_mode: SkillScopeMode,
+        scope_tenant_id: str | None = None,
+        scope_project_id: str | None = None,
+    ) -> tuple[bool, bool]:
+        """Store a human-authorized learned skill in its approved scope.
+
+        Learned skills never overwrite pack-owned skills. Re-delivering the same
+        authorization is idempotent; a changed skill definition updates its own
+        learned record while retaining the authorization as provenance.
+        """
+
+        if not skill.name:
+            raise ValueError("Skill name is required for upsert")
+        if not authorization_id.strip():
+            raise ValueError("authorization_id is required for upsert")
+        if scope_mode == "tenant" and not scope_tenant_id:
+            raise ValueError("tenant scope requires scope_tenant_id")
+        if scope_mode == "project" and not scope_project_id:
+            raise ValueError("project scope requires scope_project_id")
+        if scope_mode == "global" and (scope_tenant_id or scope_project_id):
+            raise ValueError("global scope must not include tenant or project identifiers")
+
+        now = int(time.time())
+        content_hash = _hash_payload(_canonical_skill_payload(skill))
+        payload = _serialise_skill_payload(skill)
+        self._ensure_schema()
+
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            row = conn.execute(
+                "SELECT id, origin, content_hash FROM skills WHERE name = ?",
+                (skill.name,),
+            ).fetchone()
+            if row is None:
+                name_seed = skill.name.encode("utf-8")
+                skill_id = f"sk_{hashlib.sha256(name_seed).hexdigest()[:12]}"
+                conn.execute(
+                    """
+                    INSERT INTO skills (
+                        id, scope_mode, scope_tenant_id, scope_project_id, name,
+                        title, description, trigger, task_type, tags, steps,
+                        preconditions, failure_modes, origin, origin_ref,
+                        content_hash, created_at, updated_at, last_used, use_count, extra
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        skill_id, scope_mode, scope_tenant_id, scope_project_id, skill.name,
+                        payload["title"], payload["description"], payload["trigger"], payload["task_type"],
+                        payload["tags"], payload["steps"], payload["preconditions"], payload["failure_modes"],
+                        "learned", authorization_id, content_hash, now, now, now, 0, payload["extra"],
+                    ),
+                )
+                return True, False
+
+            if str(row[1]) != "learned":
+                raise ValueError(f"learned skill name conflicts with {row[1]} skill: {skill.name}")
+            if str(row[2]) == content_hash:
+                return False, False
+            conn.execute(
+                """
+                UPDATE skills SET
+                    scope_mode = ?, scope_tenant_id = ?, scope_project_id = ?,
+                    title = ?, description = ?, trigger = ?, task_type = ?, tags = ?,
+                    steps = ?, preconditions = ?, failure_modes = ?, origin_ref = ?,
+                    content_hash = ?, updated_at = ?, extra = ?
+                WHERE name = ?
+                """,
+                (
+                    scope_mode, scope_tenant_id, scope_project_id,
+                    payload["title"], payload["description"], payload["trigger"], payload["task_type"],
+                    payload["tags"], payload["steps"], payload["preconditions"], payload["failure_modes"],
+                    authorization_id, content_hash, now, payload["extra"], skill.name,
+                ),
+            )
+        return False, True
+
     def prune_pack_skills(
         self,
         *,
