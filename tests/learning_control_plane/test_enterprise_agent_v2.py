@@ -18,6 +18,7 @@ from examples.planner_enterprise_agent_v2.learning_control_plane import (
     load_policy_compliance_dataset,
     load_real_held_out_dataset,
 )
+from examples.planner_enterprise_agent_v2.main import EnterpriseAgentOrchestrator
 from learning_control_plane.evaluation import EvaluationCase, EvaluationVariant
 from learning_control_plane.evidence import EvidenceContext
 from learning_control_plane.mining import TraceLearningRecord
@@ -172,3 +173,41 @@ def test_local_end_to_end_host_keeps_raw_inputs_outside_the_mining_record() -> N
     assert "raw" not in record.safe_summary
     assert case.inputs["query"] == "Create a concise dependency-aware plan."
     assert metrics["task_success"] == 1.0
+
+
+def test_investigation_publication_context_uses_the_configured_mlflow_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LCP_INVESTIGATION_PUBLISHING_ENABLED", "true")
+    monkeypatch.setenv("LCP_MLFLOW_EXPERIMENT_ID", "experiment-42")
+    monkeypatch.setenv("LCP_MLFLOW_TRACKING_STORE_REF", "databricks")
+    monkeypatch.setenv("LCP_SCOPE_REF", "tenant:acme")
+    orchestrator = object.__new__(EnterpriseAgentOrchestrator)
+    orchestrator.config = AgentConfig.from_env()
+    orchestrator._nodes = [type("Node", (), {"name": "triage_query"})()]
+    trajectory = Trajectory(
+        query="raw content stays in the native trajectory",
+        tool_context={
+            "trace_id": "native-trace-42",
+            "lcp_investigation_started_at": "2026-09-01T12:00:00+00:00",
+        },
+    )
+
+    context = EnterpriseAgentOrchestrator._investigation_context(orchestrator, trajectory)
+
+    assert context.source_trace_ref.experiment_id == "experiment-42"
+    assert context.source_trace_ref.tracking_store_ref == "databricks"
+    assert context.source_trace_ref.mlflow_trace_id == "native-trace-42"
+    assert context.scope_ref == "tenant:acme"
+    assert context.allowed_node_names == frozenset({"triage_query"})
+
+
+def test_disabled_investigation_publication_leaves_the_existing_completion_callback_intact() -> None:
+    completed_trace_ids: list[str] = []
+    orchestrator = object.__new__(EnterpriseAgentOrchestrator)
+    orchestrator._on_trajectory_complete = lambda trajectory: completed_trace_ids.append(trajectory.query)
+    orchestrator._investigation_publishing_enabled = False
+
+    EnterpriseAgentOrchestrator._on_trajectory_complete_callback(orchestrator, Trajectory(query="completed"))
+
+    assert completed_trace_ids == ["completed"]

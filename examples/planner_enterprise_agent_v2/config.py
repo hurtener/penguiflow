@@ -64,6 +64,12 @@ class AgentConfig:
     telemetry_backend: Literal["logging", "mlflow", "datadog"]
     mlflow_tracking_uri: str | None
 
+    # Optional learning-control-plane investigation publication
+    lcp_investigation_publishing_enabled: bool
+    lcp_mlflow_experiment_id: str | None
+    lcp_mlflow_tracking_store_ref: str | None
+    lcp_scope_ref: str | None
+
     # LLM Client Configuration
     use_dspy_client: bool  # Explicitly use DSPy for structured outputs (better for non-OpenAI models)
 
@@ -129,6 +135,13 @@ class AgentConfig:
             enable_telemetry=os.getenv("ENABLE_TELEMETRY", "true").lower() == "true",
             telemetry_backend=os.getenv("TELEMETRY_BACKEND", "logging"),  # type: ignore
             mlflow_tracking_uri=os.getenv("MLFLOW_TRACKING_URI"),
+            # Learning control plane
+            lcp_investigation_publishing_enabled=(
+                os.getenv("LCP_INVESTIGATION_PUBLISHING_ENABLED", "false").lower() == "true"
+            ),
+            lcp_mlflow_experiment_id=os.getenv("LCP_MLFLOW_EXPERIMENT_ID"),
+            lcp_mlflow_tracking_store_ref=os.getenv("LCP_MLFLOW_TRACKING_STORE_REF"),
+            lcp_scope_ref=os.getenv("LCP_SCOPE_REF"),
             # LLM Client
             use_dspy_client=os.getenv("DSPY_CLIENT", "false").lower() == "true",
             # Application

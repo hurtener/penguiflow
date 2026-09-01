@@ -26,6 +26,37 @@ provider costs. It stops after the automatic gate. A passing job becomes
 delivery scope before the existing activation adapter can create a customer
 skill receipt.
 
+## Publish real investigations to MLflow
+
+Before the full loop can mine real evidence, configure the Planner to publish a
+redacted investigation after terminal runs:
+
+```bash
+LCP_INVESTIGATION_PUBLISHING_ENABLED=true
+LCP_MLFLOW_EXPERIMENT_ID="<EXPERIMENT_ID>"
+LCP_MLFLOW_TRACKING_STORE_REF="databricks"
+LCP_SCOPE_REF="tenant:<TENANT_ID>"
+```
+
+Add those values to the untracked Planner `.env`, together with the MLflow
+tracking/authentication settings for the Databricks workspace that owns the
+experiment. Run normal Planner requests to create evidence. Publication is
+best-effort and redaction-first: a failed MLflow upload logs a warning but cannot
+change the Planner result.
+
+Verify one publication with a normal Planner request:
+
+```bash
+uv run python -m examples.planner_enterprise_agent_v2.main \
+  --query "Create a concise plan for reviewing a deployment report."
+```
+
+Open the configured MLflow experiment afterward. A successful publication creates
+a `learning.investigation.publish` trace with `learning.investigation.id` and
+`learning.investigation.digest` tags, plus a
+`learning.investigation_trajectory` attachment. The attachment is a redacted
+investigation document; it is not the native Planner trajectory.
+
 ## Full governed local loop
 
 `learning_control_plane_end_to_end.py` is the complete offline path for verified

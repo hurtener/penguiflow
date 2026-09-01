@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import json
 import logging
 import sys
 from collections import defaultdict
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -36,6 +39,13 @@ from examples.planner_enterprise_agent_v2.nodes import (
     triage_query,
 )
 from examples.planner_enterprise_agent_v2.telemetry import AgentTelemetry
+from learning_control_plane.investigation import SourceTraceRef
+from learning_control_plane.investigation_publisher import InvestigationPublisher, MlflowAttachmentPublisher
+from learning_control_plane.penguiflow import (
+    PenguiFlowInvestigationContext,
+    PenguiFlowInvestigationProjector,
+    PenguiFlowInvestigationPublicationHook,
+)
 from penguiflow.catalog import build_catalog
 from penguiflow.node import Node
 from penguiflow.planner import (
@@ -74,6 +84,35 @@ def _coerce_final_answer(payload: Any, planner_meta: Mapping[str, Any]) -> Final
     return FinalAnswer.model_validate(payload)
 
 
+def _deployment_fingerprint(config: AgentConfig) -> str:
+    """Return a stable identifier for the Planner configuration being evaluated."""
+
+    identity = {
+        "agent_name": config.agent_name,
+        "llm_model": config.llm_model,
+        "planner_max_iters": config.planner_max_iters,
+        "planner_token_budget": config.planner_token_budget,
+        "reflection_enabled": config.reflection_enabled,
+        "tool_policy_enabled": config.tool_policy_enabled,
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _investigation_started_at(value: object) -> datetime:
+    """Return the per-run start time stored in private planner tool context."""
+
+    if not isinstance(value, str):
+        return datetime.now(UTC)
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return datetime.now(UTC)
+    if parsed.tzinfo is None:
+        return datetime.now(UTC)
+    return parsed
+
+
 class EnterpriseAgentOrchestrator:
     """Production-ready agent orchestrator with ReactPlanner.
 
@@ -102,6 +141,7 @@ class EnterpriseAgentOrchestrator:
         skills: SkillsConfig | None = None,
         skills_provider: SkillProvider | None = None,
         on_trajectory_complete: Callable[[Trajectory], None] | None = None,
+        investigation_publisher: InvestigationPublisher | None = None,
     ) -> None:
         self.config = config
         self.telemetry = telemetry or AgentTelemetry(config)
@@ -109,6 +149,9 @@ class EnterpriseAgentOrchestrator:
         self._skills = skills
         self._skills_provider = skills_provider
         self._on_trajectory_complete = on_trajectory_complete
+        self._investigation_publisher = investigation_publisher
+        self._investigation_publishing_enabled = self._investigation_publishing_is_configured()
+        self._configure_investigation_tracking()
 
         # Configure logging
         logging.basicConfig(
@@ -131,6 +174,31 @@ class EnterpriseAgentOrchestrator:
                 "node_count": len(self._nodes),
             },
         )
+
+    def _investigation_publishing_is_configured(self) -> bool:
+        """Return whether this process has the complete opt-in publication configuration."""
+
+        if not self.config.lcp_investigation_publishing_enabled:
+            return False
+        if self.config.lcp_mlflow_experiment_id and self.config.lcp_mlflow_tracking_store_ref:
+            return True
+        self.telemetry.logger.warning(
+            "lcp_investigation_publishing_disabled",
+            extra={"reason": "missing LCP_MLFLOW_EXPERIMENT_ID or LCP_MLFLOW_TRACKING_STORE_REF"},
+        )
+        return False
+
+    def _configure_investigation_tracking(self) -> None:
+        """Configure MLflow for the optional publisher without blocking Planner startup."""
+
+        if not self._investigation_publishing_enabled or not self.config.mlflow_tracking_uri:
+            return
+        try:
+            import mlflow
+
+            mlflow.set_tracking_uri(self.config.mlflow_tracking_uri)
+        except Exception:
+            self.telemetry.logger.warning("lcp_investigation_tracking_configuration_failed", exc_info=True)
 
     def _build_nodes(self) -> list[Node]:
         """Construct all planner-discoverable nodes.
@@ -372,7 +440,7 @@ When context is provided, use it appropriately to enhance your responses.
             skills_provider=self._skills_provider,
             # Wire up telemetry callback
             event_callback=self.telemetry.record_planner_event,
-            on_trajectory_complete=self._on_trajectory_complete,
+            on_trajectory_complete=self._on_trajectory_complete_callback,
         )
 
         self.telemetry.logger.info(
@@ -476,6 +544,7 @@ When context is provided, use it appropriately to enhance your responses.
             "status_publisher": publish_status,
             "telemetry": self.telemetry,
             "status_logger": self.telemetry.logger,
+            "lcp_investigation_started_at": datetime.now(UTC).isoformat(),
         }
         if "user_id" in incoming_tool_context:
             planner_tool_context["user_id"] = incoming_tool_context["user_id"]
@@ -606,6 +675,44 @@ When context is provided, use it appropriately to enhance your responses.
     def reset_metrics(self) -> None:
         """Reset telemetry counters (for testing)."""
         self.telemetry.reset_metrics()
+
+    def _on_trajectory_complete_callback(self, trajectory: Trajectory) -> None:
+        """Run the existing caller callback and optional investigation hook after completion."""
+
+        if self._on_trajectory_complete is not None:
+            self._on_trajectory_complete(trajectory)
+        if not self._investigation_publishing_enabled:
+            return
+
+        context = self._investigation_context(trajectory)
+        publisher = self._investigation_publisher or MlflowAttachmentPublisher()
+        hook = PenguiFlowInvestigationPublicationHook(
+            PenguiFlowInvestigationProjector(context),
+            publisher,
+        )
+        hook(trajectory)
+
+    def _investigation_context(self, trajectory: Trajectory) -> PenguiFlowInvestigationContext:
+        """Build the trusted run identity used by the redaction-first projector."""
+
+        tool_context = trajectory.tool_context or {}
+        trace_id = str(tool_context.get("trace_id") or uuid4().hex)
+        started_at = _investigation_started_at(tool_context.get("lcp_investigation_started_at"))
+        scope_ref = self.config.lcp_scope_ref or f"tenant:{tool_context.get('tenant_id') or 'default'}"
+        return PenguiFlowInvestigationContext(
+            source_trace_ref=SourceTraceRef(
+                tracking_store_ref=self.config.lcp_mlflow_tracking_store_ref or "unconfigured",
+                experiment_id=self.config.lcp_mlflow_experiment_id or "unconfigured",
+                mlflow_trace_id=trace_id,
+                deployment_ref=_deployment_fingerprint(self.config),
+                native_trace_id=trace_id,
+            ),
+            agent_ref="planner_enterprise_agent_v2",
+            scope_ref=scope_ref,
+            execution_fingerprint=_deployment_fingerprint(self.config),
+            started_at=started_at,
+            allowed_node_names=frozenset(node.name for node in self._nodes if node.name is not None),
+        )
 
 
 def _format_status_for_terminal(update: StatusUpdate, trace_id: str) -> str:
