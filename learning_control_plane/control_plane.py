@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
@@ -16,6 +16,8 @@ from .evaluation import (
     EvaluationRequest,
     EvaluationVariant,
     Metric,
+    MetricSpecification,
+    MetricSummary,
     PairedCaseResult,
     PairedEvaluationResult,
     RunOne,
@@ -63,6 +65,7 @@ class PromotionPolicy:
 
     policy_version: str
     primary_metric: str
+    metric_specifications: Sequence[MetricSpecification] = ()
     minimum_primary_improvement: float = 0.0
     protected_metrics: Sequence[str] = ()
     minimum_complete_cases: int = 1
@@ -74,6 +77,11 @@ class PromotionPolicy:
         object.__setattr__(self, "primary_metric", _non_empty(self.primary_metric, "primary_metric"))
         protected = tuple(_non_empty(name, "protected metric") for name in self.protected_metrics)
         object.__setattr__(self, "protected_metrics", protected)
+        specifications = tuple(self.metric_specifications)
+        specification_names = [specification.name for specification in specifications]
+        if len(specification_names) != len(set(specification_names)):
+            raise ValueError("metric specification names must be unique")
+        object.__setattr__(self, "metric_specifications", specifications)
         if not math.isfinite(self.minimum_primary_improvement):
             raise ValueError("minimum_primary_improvement must be finite")
         if self.minimum_complete_cases < 1:
@@ -82,6 +90,14 @@ class PromotionPolicy:
             raise ValueError("maximum_failed_cases must not be negative")
         if self.maximum_attempts < 1:
             raise ValueError("maximum_attempts must be at least 1")
+
+    def metric_specification(self, metric_name: str) -> MetricSpecification:
+        """Return a declared specification or preserve the original score direction."""
+
+        for specification in self.metric_specifications:
+            if specification.name == metric_name:
+                return specification
+        return MetricSpecification(name=metric_name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,9 +109,13 @@ class GateDecision:
     reasons: tuple[str, ...]
     baseline_metrics: Mapping[str, float]
     candidate_metrics: Mapping[str, float]
+    metric_improvements: Mapping[str, float] = field(default_factory=dict)
+    metric_summaries: Sequence[MetricSummary] = ()
     investigation_digests: Sequence[str] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "metric_improvements", dict(self.metric_improvements))
+        object.__setattr__(self, "metric_summaries", tuple(self.metric_summaries))
         investigation_digests = tuple(
             _non_empty(digest, "investigation_digest") for digest in self.investigation_digests
         )
@@ -603,27 +623,51 @@ class LearningControlPlane:
                 f"({len(complete_pairs)} < {self._policy.minimum_complete_cases})"
             )
 
-        required_metrics = (self._policy.primary_metric, *self._policy.protected_metrics)
-        baseline_metrics, candidate_metrics = self._paired_mean_metrics(complete_pairs, required_metrics, reasons)
+        required_metrics = tuple(dict.fromkeys((self._policy.primary_metric, *self._policy.protected_metrics)))
+        summaries = tuple(
+            evaluation.metric_summary(self._policy.metric_specification(metric_name))
+            for metric_name in required_metrics
+        )
+        baseline_metrics: dict[str, float] = {}
+        candidate_metrics: dict[str, float] = {}
+        metric_improvements: dict[str, float] = {}
+        for summary in summaries:
+            baseline_mean = summary.baseline_mean
+            candidate_mean = summary.candidate_mean
+            mean_improvement = summary.mean_improvement
+            if baseline_mean is not None:
+                baseline_metrics[summary.specification.name] = baseline_mean
+            if candidate_mean is not None:
+                candidate_metrics[summary.specification.name] = candidate_mean
+            if mean_improvement is not None:
+                metric_improvements[summary.specification.name] = mean_improvement
+            for case_id in summary.missing_case_ids:
+                reasons.append(f"missing metric {summary.specification.name} for case {case_id}")
 
         primary = self._policy.primary_metric
         baseline_primary = baseline_metrics.get(primary)
         candidate_primary = candidate_metrics.get(primary)
+        primary_improvement = metric_improvements.get(primary)
         if baseline_primary is None or candidate_primary is None:
             reasons.append(f"missing primary metric: {primary}")
-        elif candidate_primary - baseline_primary < self._policy.minimum_primary_improvement:
+        elif primary_improvement is None or primary_improvement < self._policy.minimum_primary_improvement:
             reasons.append(
                 f"primary metric did not improve by {self._policy.minimum_primary_improvement}: "
-                f"{baseline_primary} -> {candidate_primary}"
+                f"{baseline_primary} -> {candidate_primary} "
+                f"({self._policy.metric_specification(primary).direction})"
             )
 
         for metric_name in self._policy.protected_metrics:
             baseline = baseline_metrics.get(metric_name)
             candidate_value = candidate_metrics.get(metric_name)
+            improvement = metric_improvements.get(metric_name)
             if baseline is None or candidate_value is None:
                 reasons.append(f"missing protected metric: {metric_name}")
-            elif candidate_value < baseline:
-                reasons.append(f"protected metric regressed: {metric_name} {baseline} -> {candidate_value}")
+            elif improvement is None or improvement < 0:
+                reasons.append(
+                    f"protected metric regressed: {metric_name} {baseline} -> {candidate_value} "
+                    f"({self._policy.metric_specification(metric_name).direction})"
+                )
 
         return GateDecision(
             approved=not reasons,
@@ -631,6 +675,8 @@ class LearningControlPlane:
             reasons=tuple(reasons),
             baseline_metrics=baseline_metrics,
             candidate_metrics=candidate_metrics,
+            metric_improvements=metric_improvements,
+            metric_summaries=summaries,
             investigation_digests=_investigation_digests(candidate, evaluation),
         )
 
@@ -641,30 +687,6 @@ class LearningControlPlane:
             for pair in case_results
             if pair.baseline.error is None and pair.candidate.error is None
         )
-
-    @staticmethod
-    def _paired_mean_metrics(
-        pairs: Sequence[PairedCaseResult],
-        metric_names: Sequence[str],
-        reasons: list[str],
-    ) -> tuple[dict[str, float], dict[str, float]]:
-        baseline_metrics: dict[str, float] = {}
-        candidate_metrics: dict[str, float] = {}
-        for metric_name in dict.fromkeys(metric_names):
-            baseline_values: list[float] = []
-            candidate_values: list[float] = []
-            for pair in pairs:
-                baseline = pair.baseline.metrics.get(metric_name)
-                candidate = pair.candidate.metrics.get(metric_name)
-                if baseline is None or candidate is None:
-                    reasons.append(f"missing metric {metric_name} for case {pair.case_id}")
-                    continue
-                baseline_values.append(baseline)
-                candidate_values.append(candidate)
-            if baseline_values and candidate_values:
-                baseline_metrics[metric_name] = sum(baseline_values) / len(baseline_values)
-                candidate_metrics[metric_name] = sum(candidate_values) / len(candidate_values)
-        return baseline_metrics, candidate_metrics
 
     def _emit_failure(self, job: LearningJob, error: Exception) -> str | None:
         event = EvidenceEvent(
@@ -682,6 +704,7 @@ class LearningControlPlane:
     ) -> str | None:
         metrics = {f"baseline.{name}": value for name, value in decision.baseline_metrics.items()}
         metrics.update({f"candidate.{name}": value for name, value in decision.candidate_metrics.items()})
+        metrics.update({f"improvement.{name}": value for name, value in decision.metric_improvements.items()})
         event = EvidenceEvent(
             event_type="gate.decided",
             context=job.evaluation_request.evidence_context,

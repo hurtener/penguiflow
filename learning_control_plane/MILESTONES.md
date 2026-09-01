@@ -242,6 +242,20 @@ compatible.
 boundary, strict JSON output, local content validation, and prompt/draft digests.
 See `skill_drafting.md`.
 
+## Milestone 18 — Direction-aware outcome scoring
+
+**Goal:** make real agent outcome metrics comparable without incorrectly treating
+cost, latency, or error rates as higher-is-better scores.
+
+**Done when:** a promotion policy declares each metric direction; paired evaluation
+evidence retains raw per-case values and direction-normalized improvements; and the
+gate applies its primary and protected checks against those normalized values.
+
+**Implementation:** `MetricSpecification` declares `higher_is_better` or
+`lower_is_better`. `MetricSummary` retains the complete paired evidence and reports
+mean, median, minimum, and maximum improvement. `GateDecision` persists those
+summaries alongside direction-normalized mean improvements. See `scoring.md`.
+
 ## Post-MVP
 
 Auto-sequence edges, automated candidate mining, canary rollout, multi-framework

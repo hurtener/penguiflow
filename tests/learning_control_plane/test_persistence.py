@@ -16,6 +16,7 @@ from learning_control_plane.evaluation import (
     EvaluationDataset,
     EvaluationVariant,
     LocalEvaluationBackend,
+    MetricSpecification,
 )
 from learning_control_plane.evidence import EvidenceContext
 from learning_control_plane.persistence import SQLiteControlPlaneRepository
@@ -24,7 +25,12 @@ from learning_control_plane.persistence import SQLiteControlPlaneRepository
 @pytest.mark.asyncio
 async def test_sqlite_repository_restores_a_reviewed_job_and_delivery_receipt(tmp_path: Path) -> None:
     repository = SQLiteControlPlaneRepository(tmp_path / "learning-control-plane.db")
-    policy = PromotionPolicy(policy_version="policy-v1", primary_metric="quality")
+    policy = PromotionPolicy(
+        policy_version="policy-v1",
+        primary_metric="quality",
+        metric_specifications=(MetricSpecification("latency_ms", direction="lower_is_better"),),
+        protected_metrics=("latency_ms",),
+    )
     context = EvidenceContext(agent_id="support-agent", deployment_digest="sha256:bundle")
     dataset = EvaluationDataset(
         dataset_id="heldout",
@@ -53,7 +59,10 @@ async def test_sqlite_repository_restores_a_reviewed_job_and_delivery_receipt(tm
         return "correct" if variant.advisory_skill else "incorrect"
 
     def score(case: EvaluationCase, output: str) -> dict[str, float]:
-        return {"quality": 1.0 if output == case.expected else 0.0}
+        return {
+            "quality": 1.0 if output == case.expected else 0.0,
+            "latency_ms": 80.0 if output == "correct" else 120.0,
+        }
 
     await plane.run_job(job.job_id, run_one, score)
     plane.review_job(job.job_id, reviewer_id="reviewer-1", approved=True, reason="Held-out cases improved.")
@@ -82,6 +91,8 @@ async def test_sqlite_repository_restores_a_reviewed_job_and_delivery_receipt(tm
 
     assert restored_job.state == "approved"
     assert restored_job.decision is not None
+    assert restored_job.decision.metric_improvements["latency_ms"] == 40.0
+    assert restored_job.decision.metric_summaries[1].specification.direction == "lower_is_better"
     assert restored_job.review is not None
     assert authorization.authorization_id in {item.authorization_id for item in repository.load().authorizations}
     assert {item.receipt_id for item in repository.load().receipts} == {"receipt-1"}

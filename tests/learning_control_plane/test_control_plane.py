@@ -8,6 +8,7 @@ from learning_control_plane.evaluation import (
     EvaluationDataset,
     EvaluationVariant,
     LocalEvaluationBackend,
+    MetricSpecification,
 )
 from learning_control_plane.evidence import EvidenceContext, EvidenceEvent
 
@@ -129,6 +130,70 @@ async def test_protected_metric_regression_rejects_candidate() -> None:
     assert completed.decision is not None
     assert not completed.decision.approved
     assert any("protected metric regressed" in reason for reason in completed.decision.reasons)
+
+
+@pytest.mark.asyncio
+async def test_lower_latency_primary_metric_uses_baseline_minus_candidate() -> None:
+    policy = PromotionPolicy(
+        policy_version="policy-v1",
+        primary_metric="latency_ms",
+        metric_specifications=(MetricSpecification("latency_ms", direction="lower_is_better"),),
+        minimum_primary_improvement=30.0,
+    )
+    plane = LearningControlPlane(policy=policy, evaluation_backend=LocalEvaluationBackend())
+    plane.register_candidate(_candidate(), _context())
+    job = plane.create_job(
+        candidate_id="candidate-skill",
+        evaluation_id="evaluation-1",
+        context=_context(),
+        dataset=_dataset(),
+    )
+
+    def run_one(case: EvaluationCase, variant: EvaluationVariant) -> str:
+        return "candidate" if variant.advisory_skill else "baseline"
+
+    def score(case: EvaluationCase, output: str) -> dict[str, float]:
+        return {"latency_ms": 80.0 if output == "candidate" else 120.0}
+
+    completed = await plane.run_job(job.job_id, run_one, score)
+
+    assert completed.state == "ready_for_review"
+    assert completed.decision is not None
+    assert completed.decision.metric_improvements == {"latency_ms": 40.0}
+    assert completed.decision.metric_summaries[0].median_improvement == 40.0
+
+
+@pytest.mark.asyncio
+async def test_lower_tool_error_rate_protected_metric_rejects_an_increase() -> None:
+    policy = PromotionPolicy(
+        policy_version="policy-v1",
+        primary_metric="quality_score",
+        metric_specifications=(MetricSpecification("tool_error_rate", direction="lower_is_better"),),
+        protected_metrics=("tool_error_rate",),
+    )
+    plane = LearningControlPlane(policy=policy, evaluation_backend=LocalEvaluationBackend())
+    plane.register_candidate(_candidate(), _context())
+    job = plane.create_job(
+        candidate_id="candidate-skill",
+        evaluation_id="evaluation-1",
+        context=_context(),
+        dataset=_dataset(),
+    )
+
+    def run_one(case: EvaluationCase, variant: EvaluationVariant) -> str:
+        return "candidate" if variant.advisory_skill else "baseline"
+
+    def score(case: EvaluationCase, output: str) -> dict[str, float]:
+        if output == "candidate":
+            return {"quality_score": 1.0, "tool_error_rate": 0.2}
+        return {"quality_score": 1.0, "tool_error_rate": 0.1}
+
+    completed = await plane.run_job(job.job_id, run_one, score)
+
+    assert completed.state == "rejected"
+    assert completed.decision is not None
+    assert completed.decision.metric_improvements["tool_error_rate"] == -0.1
+    assert any("protected metric regressed: tool_error_rate" in reason for reason in completed.decision.reasons)
 
 
 @pytest.mark.asyncio

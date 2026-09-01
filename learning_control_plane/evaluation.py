@@ -7,13 +7,16 @@ import inspect
 import json
 import logging
 import math
+import statistics
 from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from .evidence import EvidenceContext, EvidenceEvent, EvidenceSink
 
 logger = logging.getLogger("learning_control_plane.evaluation")
+
+MetricDirection = Literal["higher_is_better", "lower_is_better"]
 
 
 def _non_empty(value: str, field_name: str) -> str:
@@ -107,6 +110,19 @@ class EvaluationVariant:
 
 
 @dataclass(frozen=True, slots=True)
+class MetricSpecification:
+    """Name one outcome metric and whether a larger or smaller value is better."""
+
+    name: str
+    direction: MetricDirection = "higher_is_better"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _non_empty(self.name, "metric name"))
+        if self.direction not in ("higher_is_better", "lower_is_better"):
+            raise ValueError("metric direction must be higher_is_better or lower_is_better")
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationRequest:
     """Define one paired evaluation against a pinned agent deployment and dataset."""
 
@@ -166,11 +182,115 @@ class PairedCaseResult:
 
 
 @dataclass(frozen=True, slots=True)
+class PairedMetricValue:
+    """One baseline/candidate metric pair, with positive improvement always better."""
+
+    case_id: str
+    baseline: float
+    candidate: float
+    improvement: float
+
+
+@dataclass(frozen=True, slots=True)
+class MetricSummary:
+    """Complete paired evidence and descriptive statistics for one outcome metric."""
+
+    specification: MetricSpecification
+    paired_values: Sequence[PairedMetricValue]
+    missing_case_ids: Sequence[str] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "paired_values", tuple(self.paired_values))
+        object.__setattr__(self, "missing_case_ids", tuple(self.missing_case_ids))
+
+    @property
+    def baseline_mean(self) -> float | None:
+        """Return the mean baseline value, or None when no pair supplied this metric."""
+
+        if not self.paired_values:
+            return None
+        return statistics.fmean(value.baseline for value in self.paired_values)
+
+    @property
+    def candidate_mean(self) -> float | None:
+        """Return the mean candidate value, or None when no pair supplied this metric."""
+
+        if not self.paired_values:
+            return None
+        return statistics.fmean(value.candidate for value in self.paired_values)
+
+    @property
+    def mean_improvement(self) -> float | None:
+        """Return the direction-normalized mean paired improvement."""
+
+        if not self.paired_values:
+            return None
+        return statistics.fmean(value.improvement for value in self.paired_values)
+
+    @property
+    def median_improvement(self) -> float | None:
+        """Return the median direction-normalized paired improvement."""
+
+        if not self.paired_values:
+            return None
+        return float(statistics.median(value.improvement for value in self.paired_values))
+
+    @property
+    def minimum_improvement(self) -> float | None:
+        """Return the worst direction-normalized paired improvement."""
+
+        if not self.paired_values:
+            return None
+        return min(value.improvement for value in self.paired_values)
+
+    @property
+    def maximum_improvement(self) -> float | None:
+        """Return the best direction-normalized paired improvement."""
+
+        if not self.paired_values:
+            return None
+        return max(value.improvement for value in self.paired_values)
+
+
+@dataclass(frozen=True, slots=True)
 class PairedEvaluationResult:
     """Complete local evidence for one baseline-versus-candidate evaluation."""
 
     request: EvaluationRequest
     case_results: Sequence[PairedCaseResult]
+
+    def metric_summary(self, specification: MetricSpecification) -> MetricSummary:
+        """Return paired metric values and direction-aware summary statistics."""
+
+        paired_values: list[PairedMetricValue] = []
+        missing_case_ids: list[str] = []
+        for pair in self.case_results:
+            if pair.baseline.error is not None or pair.candidate.error is not None:
+                continue
+
+            baseline = pair.baseline.metrics.get(specification.name)
+            candidate = pair.candidate.metrics.get(specification.name)
+            if baseline is None or candidate is None:
+                missing_case_ids.append(pair.case_id)
+                continue
+
+            improvement = candidate - baseline
+            if specification.direction == "lower_is_better":
+                improvement = baseline - candidate
+            paired_values.append(
+                PairedMetricValue(
+                    case_id=pair.case_id,
+                    baseline=baseline,
+                    candidate=candidate,
+                    improvement=improvement,
+                )
+            )
+
+        return MetricSummary(
+            specification=specification,
+            paired_values=paired_values,
+            missing_case_ids=missing_case_ids,
+        )
 
     def mean_metrics(self, variant_id: str) -> dict[str, float]:
         """Return mean metrics from successful runs of one variant."""
@@ -309,8 +429,12 @@ __all__ = [
     "EvaluationVariant",
     "LocalEvaluationBackend",
     "Metric",
+    "MetricDirection",
+    "MetricSpecification",
+    "MetricSummary",
     "PairedCaseResult",
     "PairedEvaluationResult",
+    "PairedMetricValue",
     "RunOne",
     "VariantCaseResult",
 ]

@@ -8,6 +8,7 @@ from learning_control_plane.evaluation import (
     EvaluationRequest,
     EvaluationVariant,
     LocalEvaluationBackend,
+    MetricSpecification,
 )
 from learning_control_plane.evidence import EvidenceContext, EvidenceEvent
 
@@ -141,3 +142,54 @@ def test_request_rejects_a_candidate_without_an_advisory_skill() -> None:
             baseline=request.baseline,
             candidate=EvaluationVariant(variant_id="candidate-without-skill"),
         )
+
+
+@pytest.mark.asyncio
+async def test_metric_summary_retains_paired_values_and_normalizes_lower_latency() -> None:
+    request = _request()
+
+    def run_one(case: EvaluationCase, variant: EvaluationVariant) -> str:
+        return "candidate" if variant.advisory_skill else "baseline"
+
+    def score(case: EvaluationCase, output: str) -> dict[str, float]:
+        latency_by_case = {"case-1": 120.0, "case-2": 180.0}
+        baseline_latency = latency_by_case[case.case_id]
+        return {"latency_ms": baseline_latency - 40.0 if output == "candidate" else baseline_latency}
+
+    result = await LocalEvaluationBackend().evaluate(request, run_one, score)
+    summary = result.metric_summary(MetricSpecification("latency_ms", direction="lower_is_better"))
+
+    assert [(value.case_id, value.improvement) for value in summary.paired_values] == [
+        ("case-1", 40.0),
+        ("case-2", 40.0),
+    ]
+    assert summary.baseline_mean == 150.0
+    assert summary.candidate_mean == 110.0
+    assert summary.mean_improvement == 40.0
+    assert summary.median_improvement == 40.0
+    assert summary.minimum_improvement == 40.0
+    assert summary.maximum_improvement == 40.0
+
+
+def test_metric_specification_rejects_an_unknown_direction() -> None:
+    with pytest.raises(ValueError, match="metric direction"):
+        MetricSpecification("quality_score", direction="sideways")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_metric_summary_identifies_successful_pairs_missing_a_metric() -> None:
+    request = _request()
+
+    def run_one(case: EvaluationCase, variant: EvaluationVariant) -> str:
+        return variant.variant_id
+
+    def score(case: EvaluationCase, output: str) -> dict[str, float]:
+        if case.case_id == "case-2" and output == "candidate-skill":
+            return {}
+        return {"cost_usd": 0.20}
+
+    result = await LocalEvaluationBackend().evaluate(request, run_one, score)
+    summary = result.metric_summary(MetricSpecification("cost_usd", direction="lower_is_better"))
+
+    assert [value.case_id for value in summary.paired_values] == ["case-1"]
+    assert summary.missing_case_ids == ("case-2",)

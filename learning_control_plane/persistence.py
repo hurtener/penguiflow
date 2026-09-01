@@ -23,8 +23,11 @@ from .evaluation import (
     EvaluationDataset,
     EvaluationRequest,
     EvaluationVariant,
+    MetricSpecification,
+    MetricSummary,
     PairedCaseResult,
     PairedEvaluationResult,
+    PairedMetricValue,
     VariantCaseResult,
 )
 from .evidence import EvidenceContext
@@ -249,12 +252,51 @@ def _decision_payload(decision: GateDecision) -> dict[str, object]:
         "reasons": list(decision.reasons),
         "baseline_metrics": dict(decision.baseline_metrics),
         "candidate_metrics": dict(decision.candidate_metrics),
+        "metric_improvements": dict(decision.metric_improvements),
+        "metric_summaries": [_metric_summary_payload(summary) for summary in decision.metric_summaries],
         "investigation_digests": list(decision.investigation_digests),
     }
 
 
 def _decision_from_payload(payload: Any) -> GateDecision:
-    return GateDecision(**_mapping(payload, "gate decision"))
+    decision = dict(_mapping(payload, "gate decision"))
+    decision["metric_summaries"] = tuple(
+        _metric_summary_from_payload(summary) for summary in decision.get("metric_summaries", [])
+    )
+    return GateDecision(**decision)
+
+
+def _metric_summary_payload(summary: MetricSummary) -> dict[str, object]:
+    return {
+        "specification": {
+            "name": summary.specification.name,
+            "direction": summary.specification.direction,
+        },
+        "paired_values": [
+            {
+                "case_id": value.case_id,
+                "baseline": value.baseline,
+                "candidate": value.candidate,
+                "improvement": value.improvement,
+            }
+            for value in summary.paired_values
+        ],
+        "missing_case_ids": list(summary.missing_case_ids),
+    }
+
+
+def _metric_summary_from_payload(payload: Any) -> MetricSummary:
+    summary = _mapping(payload, "metric summary")
+    specification = MetricSpecification(**_mapping(summary["specification"], "metric specification"))
+    paired_values = tuple(
+        PairedMetricValue(**_mapping(value, "paired metric value"))
+        for value in summary.get("paired_values", [])
+    )
+    return MetricSummary(
+        specification=specification,
+        paired_values=paired_values,
+        missing_case_ids=tuple(summary.get("missing_case_ids", [])),
+    )
 
 
 def _review_payload(review: ReviewDecision) -> dict[str, object]:

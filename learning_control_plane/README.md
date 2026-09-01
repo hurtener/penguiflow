@@ -38,6 +38,7 @@ continue to serve requests with their last valid configuration.
 | `mlflow_lineage.md` | MLflow tag, metric, and artifact-path convention. |
 | `evaluation.py` | Standalone baseline-versus-advisory-skill local evaluator. |
 | `evaluation.md` | The evaluator's fixed-data and complete-evidence contract. |
+| `scoring.md` | Metric directions, paired score summaries, and gate comparison rules. |
 | `control_plane.py` | Offline candidate registry, job lifecycle, and deterministic gate. |
 | `control_plane.md` | The MVP decision workflow and its safety boundary. |
 | `architecture.md` | Boundaries and evidence flow for the MVP. |
