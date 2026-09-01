@@ -5,6 +5,14 @@ providers and evaluation backends live behind explicit contracts so an unavailab
 control plane cannot interrupt an agent serving a customer.
 """
 
+from .control_plane import (
+    AdvisorySkillCandidate,
+    GateDecision,
+    JobState,
+    LearningControlPlane,
+    LearningJob,
+    PromotionPolicy,
+)
 from .evaluation import (
     EvaluationBackend,
     EvaluationCase,
@@ -29,6 +37,7 @@ from .evidence import (
 )
 
 __all__ = [
+    "AdvisorySkillCandidate",
     "CompositeEvidenceSink",
     "EvidenceContext",
     "EvidenceEvent",
@@ -38,6 +47,10 @@ __all__ = [
     "EvaluationDataset",
     "EvaluationRequest",
     "EvaluationVariant",
+    "GateDecision",
+    "JobState",
+    "LearningControlPlane",
+    "LearningJob",
     "LocalEvaluationBackend",
     "MLFLOW_LINEAGE_SCHEMA_VERSION",
     "MlflowEvidenceSink",
@@ -45,6 +58,7 @@ __all__ = [
     "Metric",
     "PairedCaseResult",
     "PairedEvaluationResult",
+    "PromotionPolicy",
     "RunOne",
     "VariantCaseResult",
 ]

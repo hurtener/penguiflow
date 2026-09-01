@@ -56,6 +56,10 @@ policy versioning, evidence links, and fail-closed retry behavior.
 **Done when:** the core can select a candidate, request an evaluation, and create a
 promotion decision without importing any agent framework.
 
+**Implementation:** `LearningControlPlane` registers advisory-skill candidates,
+creates offline jobs, applies a versioned deterministic gate, and advances only to
+`ready_for_review` or `rejected`. Delivery remains out of scope until Milestone 4.
+
 ## Milestone 4 — Human approval and scoped delivery
 
 **Goal:** govern promotion and delivery of advisory skills.
