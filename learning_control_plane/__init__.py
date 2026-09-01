@@ -5,6 +5,19 @@ providers and evaluation backends live behind explicit contracts so an unavailab
 control plane cannot interrupt an agent serving a customer.
 """
 
+from .evaluation import (
+    EvaluationBackend,
+    EvaluationCase,
+    EvaluationDataset,
+    EvaluationRequest,
+    EvaluationVariant,
+    LocalEvaluationBackend,
+    Metric,
+    PairedCaseResult,
+    PairedEvaluationResult,
+    RunOne,
+    VariantCaseResult,
+)
 from .evidence import (
     MLFLOW_LINEAGE_SCHEMA_VERSION,
     CompositeEvidenceSink,
@@ -20,7 +33,18 @@ __all__ = [
     "EvidenceContext",
     "EvidenceEvent",
     "EvidenceSink",
+    "EvaluationBackend",
+    "EvaluationCase",
+    "EvaluationDataset",
+    "EvaluationRequest",
+    "EvaluationVariant",
+    "LocalEvaluationBackend",
     "MLFLOW_LINEAGE_SCHEMA_VERSION",
     "MlflowEvidenceSink",
     "OpenTelemetryEvidenceSink",
+    "Metric",
+    "PairedCaseResult",
+    "PairedEvaluationResult",
+    "RunOne",
+    "VariantCaseResult",
 ]

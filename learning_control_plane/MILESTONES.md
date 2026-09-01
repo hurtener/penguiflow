@@ -42,6 +42,10 @@ baseline/candidate paired result format, and local backend adapter.
 **Done when:** the same agent bundle can be evaluated with and without an advisory
 skill on a fixed held-out dataset, with complete per-case evidence.
 
+**Implementation:** `LocalEvaluationBackend` provides the standalone MVP contract.
+It records every baseline and candidate result, including runner and metric failures,
+and can emit aggregate redacted evidence through the Milestone 1 sink.
+
 ## Milestone 3 — Offline learning decision loop
 
 **Goal:** build the LCP core as a scheduled/offline service.
