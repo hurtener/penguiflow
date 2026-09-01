@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
@@ -15,6 +16,8 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
 
 logger = logging.getLogger("learning_control_plane.evidence")
+
+MLFLOW_LINEAGE_SCHEMA_VERSION = "v1"
 
 _SENSITIVE_ATTRIBUTE_PARTS = frozenset(
     {
@@ -87,6 +90,7 @@ class EvidenceEvent:
     event_type: str
     context: EvidenceContext
     attributes: Mapping[str, Any] = field(default_factory=dict)
+    metrics: Mapping[str, float] = field(default_factory=dict)
     event_id: str = field(default_factory=lambda: f"ev_{uuid4().hex}")
     occurred_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -96,6 +100,17 @@ class EvidenceEvent:
         if self.occurred_at.tzinfo is None:
             raise ValueError("occurred_at must be timezone-aware")
         object.__setattr__(self, "attributes", redact_attributes(self.attributes))
+        object.__setattr__(self, "metrics", self._validated_metrics())
+
+    def _validated_metrics(self) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        for raw_name, raw_value in self.metrics.items():
+            name = _require_non_empty(str(raw_name), "metric name")
+            value = float(raw_value)
+            if not math.isfinite(value):
+                raise ValueError(f"metric {name!r} must be finite")
+            metrics[name] = value
+        return metrics
 
     def record(self) -> dict[str, Any]:
         """Return the JSON-safe record stored by evidence systems."""
@@ -107,9 +122,34 @@ class EvidenceEvent:
                 "event_type": self.event_type,
                 "occurred_at": self.occurred_at.isoformat(),
                 "attributes": dict(self.attributes),
+                "metrics": dict(self.metrics),
             }
         )
         return record
+
+    def mlflow_tags(self) -> dict[str, str]:
+        """Return the versioned MLflow tags that identify this evidence."""
+
+        tags = {
+            "lcp.lineage_schema": MLFLOW_LINEAGE_SCHEMA_VERSION,
+            "lcp.event_id": self.event_id,
+            "lcp.event_type": self.event_type,
+            "lcp.occurred_at": self.occurred_at.isoformat(),
+        }
+        for key, value in asdict(self.context).items():
+            if value is not None:
+                tags[f"lcp.{key}"] = str(value)
+        return tags
+
+    def mlflow_metrics(self) -> dict[str, float]:
+        """Return metric values under the reserved MLflow metric namespace."""
+
+        return {f"lcp.metric.{name}": value for name, value in self.metrics.items()}
+
+    def mlflow_artifact_path(self) -> str:
+        """Return the fixed artifact path for this complete evidence receipt."""
+
+        return f"learning_control_plane/evidence/{MLFLOW_LINEAGE_SCHEMA_VERSION}/{self.event_id}.json"
 
     def telemetry_attributes(self) -> dict[str, str | bool | float | int]:
         """Return flat scalar attributes accepted by OpenTelemetry."""
@@ -230,12 +270,12 @@ class MlflowEvidenceSink:
             if active_run is None:
                 run_context = mlflow.start_run(run_name=f"{self._run_name_prefix}-{event.event_type}")
             with run_context:
-                mlflow.set_tags({"lcp.event_type": event.event_type, "lcp.event_id": event.event_id})
-                for key, value in asdict(event.context).items():
-                    if value is not None:
-                        mlflow.set_tag(f"lcp.{key}", str(value))
+                mlflow.set_tags(event.mlflow_tags())
+                metrics = event.mlflow_metrics()
+                if metrics and hasattr(mlflow, "log_metrics"):
+                    mlflow.log_metrics(metrics)
                 if hasattr(mlflow, "log_dict"):
-                    mlflow.log_dict(event.record(), f"learning_control_plane/evidence/{event.event_id}.json")
+                    mlflow.log_dict(event.record(), event.mlflow_artifact_path())
             return True
         except Exception:
             logger.warning("MLflow evidence emission failed", exc_info=True)
@@ -247,6 +287,7 @@ __all__ = [
     "EvidenceContext",
     "EvidenceEvent",
     "EvidenceSink",
+    "MLFLOW_LINEAGE_SCHEMA_VERSION",
     "MlflowEvidenceSink",
     "OpenTelemetryEvidenceSink",
     "redact_attributes",

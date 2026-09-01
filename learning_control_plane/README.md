@@ -27,6 +27,7 @@ continue to serve requests with their last valid configuration.
 | Path | Responsibility |
 |---|---|
 | `evidence.py` | The current Milestone 1 evidence records and optional telemetry sinks. |
+| `mlflow_lineage.md` | MLflow tag, metric, and artifact-path convention. |
 | `architecture.md` | Boundaries and evidence flow for the MVP. |
 | `MILESTONES.md` | Ordered delivery plan and completion criteria. |
 

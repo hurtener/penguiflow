@@ -27,6 +27,10 @@ and lineage conventions, and a no-op/degraded mode when either backend is absent
 **Done when:** a standalone evaluation run produces attributable evidence that can
 be queried by run, dataset, candidate, agent bundle, and metric version.
 
+**Completed foundation:** lineage schema v1 reserves stable MLflow tags, metric
+names, event names, and evidence-artifact paths. The standalone evaluation run that
+emits those records is Milestone 2.
+
 ## Milestone 2 — Standalone evaluation backend
 
 **Goal:** expose a framework-independent evaluation contract that can be adopted

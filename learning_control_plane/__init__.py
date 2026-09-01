@@ -6,6 +6,7 @@ control plane cannot interrupt an agent serving a customer.
 """
 
 from .evidence import (
+    MLFLOW_LINEAGE_SCHEMA_VERSION,
     CompositeEvidenceSink,
     EvidenceContext,
     EvidenceEvent,
@@ -19,6 +20,7 @@ __all__ = [
     "EvidenceContext",
     "EvidenceEvent",
     "EvidenceSink",
+    "MLFLOW_LINEAGE_SCHEMA_VERSION",
     "MlflowEvidenceSink",
     "OpenTelemetryEvidenceSink",
 ]
