@@ -132,6 +132,15 @@ host-supplied pattern key, requires a minimum cohort size, and calls a host-prov
 offline drafter. The resulting candidate remains subject to the existing offline
 evaluation and human approval workflow.
 
+## Operational Milestone 10 — Local end-to-end demonstration
+
+**Goal:** exercise the full MVP loop in one reproducible local run.
+
+**Implementation:** `examples/learning_control_plane_local_demo/flow.py` chains
+safe-summary mining, held-out evaluation, SQLite persistence, offline worker,
+human approval, scoped skill activation, and receipt recording. The matching
+integration test proves the same workflow without external services.
+
 ## Post-MVP
 
 Auto-sequence edges, automated candidate mining, canary rollout, multi-framework
