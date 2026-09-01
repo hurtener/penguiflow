@@ -151,6 +151,63 @@ candidate, evaluation/gate/review state, and all matching delivery authorization
 and receipts. Reviewers still use the existing durable `review_job()` command to
 make the decision.
 
+## Milestone 12 — Investigation trajectory contract and canonical digest
+
+**Goal:** establish the portable, redacted evidence contract before choosing a
+storage or transport mechanism.
+
+**Includes:** `InvestigationTrajectoryV1`, a complete `source_trace_ref`, the
+string-only discovery index, canonical UTF-8 JSON bytes, and a SHA-256 digest.
+
+**Done when:** the same logical document always produces identical bytes and
+digest despite input mapping order; timestamps and numbers have fixed formats;
+and tests prove the source reference locates a native run without reading it.
+
+## Milestone 13 — Idempotent investigation publisher
+
+**Goal:** publish one investigation document through one idempotent call.
+
+**Includes:** `publish(document) -> digest`, exactly-once behavior per
+`investigation_id`, and one MLflow attachment implementation.
+
+**Done when:** retries return the original digest and do not create a second
+attachment or index entry.
+
+## Milestone 14 — MLflow and OpenTelemetry dual-export spike
+
+**Goal:** answer whether MLflow attachments survive dual export and whether the
+OTLP result meets the observability consumer's needs.
+
+**Includes:** a timeboxed integration test against the selected MLflow and OTel
+versions, a recorded pass/fail result, and no object-store implementation.
+
+**Done when:** the evidence documents either survive the tested path with an
+adequate OTLP representation, or the exact failure is recorded as the decision
+for a later storage design.
+
+## Milestone 15 — PenguiFlow investigation projector
+
+**Goal:** turn a native PenguiFlow run into a redacted `InvestigationTrajectoryV1`.
+
+**Includes:** pre-write redaction, safe step/event projections, source-trace
+references, and explicit terminal states. The old metadata-only publisher remains
+compatible until this projector replaces it.
+
+**Done when:** tests prove forbidden fields cannot reach canonical bytes or the
+publisher, including failed, paused, and cancelled runs.
+
+## Milestone 16 — Digest-reference downstream integration
+
+**Goal:** link the new evidence documents to the existing evaluation and
+governance workflow without redesigning that workflow.
+
+**Includes:** source-trace digest/reference fields in discovery, evaluation
+cohorts, gate evidence, approval records, delivery, and receipts.
+
+**Done when:** an end-to-end run can follow a candidate from investigation digest
+to scoped delivery receipt while the evaluation, gate, and approval contracts
+remain unchanged.
+
 ## Post-MVP
 
 Auto-sequence edges, automated candidate mining, canary rollout, multi-framework

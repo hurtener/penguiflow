@@ -40,6 +40,12 @@ from .evidence import (
     MlflowEvidenceSink,
     OpenTelemetryEvidenceSink,
 )
+from .investigation import (
+    INVESTIGATION_TRAJECTORY_SCHEMA_VERSION,
+    InvestigationStatus,
+    InvestigationTrajectoryV1,
+    SourceTraceRef,
+)
 from .mining import (
     CandidateDrafter,
     CandidateMiner,
@@ -68,6 +74,9 @@ __all__ = [
     "EvaluationRequest",
     "EvaluationVariant",
     "GateDecision",
+    "INVESTIGATION_TRAJECTORY_SCHEMA_VERSION",
+    "InvestigationStatus",
+    "InvestigationTrajectoryV1",
     "JobState",
     "JobAuditRecord",
     "LearningControlPlane",
@@ -87,6 +96,7 @@ __all__ = [
     "ReviewQueueItem",
     "RunOne",
     "SQLiteControlPlaneRepository",
+    "SourceTraceRef",
     "TraceCohorts",
     "TraceLearningRecord",
     "TracePattern",
