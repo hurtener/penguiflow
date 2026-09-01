@@ -7,7 +7,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from .evaluation import (
@@ -21,6 +21,9 @@ from .evaluation import (
     RunOne,
 )
 from .evidence import EvidenceContext, EvidenceEvent, EvidenceSink
+
+if TYPE_CHECKING:
+    from .persistence import SQLiteControlPlaneRepository
 
 logger = logging.getLogger("learning_control_plane.control_plane")
 
@@ -181,14 +184,25 @@ class LearningControlPlane:
         policy: PromotionPolicy,
         evaluation_backend: EvaluationBackend,
         evidence_sink: EvidenceSink | None = None,
+        repository: SQLiteControlPlaneRepository | None = None,
     ) -> None:
         self._policy = policy
         self._evaluation_backend = evaluation_backend
         self._evidence_sink = evidence_sink
-        self._candidates: dict[str, AdvisorySkillCandidate] = {}
-        self._jobs: dict[str, LearningJob] = {}
-        self._authorizations: dict[str, DeliveryAuthorization] = {}
-        self._receipts: dict[str, ActivationReceipt] = {}
+        self._repository = repository
+        if repository is None:
+            self._candidates: dict[str, AdvisorySkillCandidate] = {}
+            self._jobs: dict[str, LearningJob] = {}
+            self._authorizations: dict[str, DeliveryAuthorization] = {}
+            self._receipts: dict[str, ActivationReceipt] = {}
+        else:
+            state = repository.load()
+            self._candidates = {candidate.candidate_id: candidate for candidate in state.candidates}
+            self._jobs = {job.job_id: job for job in state.jobs}
+            self._authorizations = {
+                authorization.authorization_id: authorization for authorization in state.authorizations
+            }
+            self._receipts = {receipt.receipt_id: receipt for receipt in state.receipts}
 
     def register_candidate(self, candidate: AdvisorySkillCandidate, context: EvidenceContext) -> AdvisorySkillCandidate:
         """Register one immutable advisory-skill candidate for offline evaluation."""
@@ -212,6 +226,7 @@ class LearningControlPlane:
                 },
             )
         )
+        self._persist()
         return candidate
 
     def create_job(
@@ -249,6 +264,7 @@ class LearningControlPlane:
             evaluation_request=request,
         )
         self._jobs[job.job_id] = job
+        self._persist()
         return job
 
     def get_job(self, job_id: str) -> LearningJob:
@@ -268,6 +284,7 @@ class LearningControlPlane:
 
         job = replace(job, state="evaluating", attempt_count=job.attempt_count + 1, error=None)
         self._jobs[job_id] = job
+        self._persist()
 
         try:
             evaluation = await self._evaluation_backend.evaluate(job.evaluation_request, run_one, metric)
@@ -283,6 +300,7 @@ class LearningControlPlane:
                 evidence_event_ids=event_ids,
             )
             self._jobs[job_id] = job
+            self._persist()
             return job
 
         decision = self._apply_gate(evaluation)
@@ -299,6 +317,7 @@ class LearningControlPlane:
             evidence_event_ids=event_ids,
         )
         self._jobs[job_id] = job
+        self._persist()
         return job
 
     def retry_job(self, job_id: str) -> LearningJob:
@@ -312,6 +331,7 @@ class LearningControlPlane:
 
         job = replace(job, state="draft", error=None)
         self._jobs[job_id] = job
+        self._persist()
         return job
 
     def review_job(self, job_id: str, *, reviewer_id: str, approved: bool, reason: str) -> LearningJob:
@@ -340,6 +360,7 @@ class LearningControlPlane:
             event_ids += (review_event_id,)
         job = replace(job, state=state, review=review, evidence_event_ids=event_ids)
         self._jobs[job_id] = job
+        self._persist()
         return job
 
     def authorize_delivery(self, job_id: str, *, scope_ref: str, expires_at: datetime) -> DeliveryAuthorization:
@@ -376,6 +397,7 @@ class LearningControlPlane:
                 attributes={"authorization_id": authorization.authorization_id, "expires_at": expires_at.isoformat()},
             )
         )
+        self._persist()
         return authorization
 
     def record_activation_receipt(self, receipt: ActivationReceipt) -> ActivationReceipt:
@@ -400,6 +422,7 @@ class LearningControlPlane:
                 attributes={"authorization_id": receipt.authorization_id, "provider_ref": receipt.provider_ref},
             )
         )
+        self._persist()
         return receipt
 
     def revoke_delivery(self, authorization_id: str, *, revoked_by: str, reason: str) -> DeliveryAuthorization:
@@ -427,7 +450,24 @@ class LearningControlPlane:
                 attributes={"authorization_id": authorization_id, "revoked_by": revoked_by},
             )
         )
+        self._persist()
         return authorization
+
+    def _persist(self) -> None:
+        """Save the complete workflow state when local persistence is enabled."""
+
+        if self._repository is None:
+            return
+        from .persistence import PersistedControlPlaneState
+
+        self._repository.save(
+            PersistedControlPlaneState(
+                candidates=tuple(self._candidates.values()),
+                jobs=tuple(self._jobs.values()),
+                authorizations=tuple(self._authorizations.values()),
+                receipts=tuple(self._receipts.values()),
+            )
+        )
 
     def _apply_gate(self, evaluation: PairedEvaluationResult) -> GateDecision:
         reasons: list[str] = []

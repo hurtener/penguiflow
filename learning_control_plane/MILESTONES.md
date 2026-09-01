@@ -91,6 +91,15 @@ and best-effort post-run publisher, and a human-authorization-aware adapter for
 writing `learned` advisory skills into PenguiFlow's scoped local skill store. See
 [`penguiflow.md`](penguiflow.md) for the host integration contract.
 
+## Operational Milestone 6 — Durable local workflow state
+
+**Goal:** preserve offline control-plane decisions across a local process restart.
+
+**Implementation:** `SQLiteControlPlaneRepository` stores candidates, jobs,
+reviews, authorizations, and receipts as one JSON-safe SQLite snapshot. Supplying
+it to `LearningControlPlane` makes every state transition durable; omitting it
+preserves the lightweight in-memory mode used by existing adopters.
+
 ## Post-MVP
 
 Auto-sequence edges, automated candidate mining, canary rollout, multi-framework

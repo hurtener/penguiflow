@@ -38,6 +38,7 @@ from .evidence import (
     MlflowEvidenceSink,
     OpenTelemetryEvidenceSink,
 )
+from .persistence import PersistedControlPlaneState, SQLiteControlPlaneRepository
 
 __all__ = [
     "ActivationReceipt",
@@ -64,7 +65,9 @@ __all__ = [
     "PairedCaseResult",
     "PairedEvaluationResult",
     "PromotionPolicy",
+    "PersistedControlPlaneState",
     "ReviewDecision",
     "RunOne",
+    "SQLiteControlPlaneRepository",
     "VariantCaseResult",
 ]
