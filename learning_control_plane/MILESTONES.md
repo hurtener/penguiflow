@@ -229,6 +229,19 @@ held-out evaluation cases through candidates, gate decisions, review decisions,
 delivery authorizations, and activation receipts. SQLite persists the complete
 chain, and the local demo prints it. See `investigation_lineage.md`.
 
+## Milestone 17 — Constrained LLM skill drafting
+
+**Goal:** optionally draft one advisory skill from redacted repeated-success
+patterns without giving the drafting model access to native trace content.
+
+**Done when:** only allowlisted pattern fields reach the provider; malformed or
+unsafe drafts fail closed; and the existing callback-based miner remains
+compatible.
+
+**Implementation:** `LlmSkillDrafter` uses a provider-neutral `complete(prompt)`
+boundary, strict JSON output, local content validation, and prompt/draft digests.
+See `skill_drafting.md`.
+
 ## Post-MVP
 
 Auto-sequence edges, automated candidate mining, canary rollout, multi-framework

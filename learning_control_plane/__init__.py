@@ -62,6 +62,13 @@ from .penguiflow import (
     PenguiFlowInvestigationPublicationHook,
 )
 from .persistence import PersistedControlPlaneState, SQLiteControlPlaneRepository
+from .skill_drafting import (
+    DraftedAdvisorySkill,
+    DraftValidationPolicy,
+    LlmSkillDrafter,
+    SkillDraftingProvider,
+    build_skill_drafting_prompt,
+)
 from .worker import OfflineEvaluationWorker, WorkerRun
 
 __all__ = [
@@ -71,6 +78,8 @@ __all__ = [
     "CandidateMiner",
     "CompositeEvidenceSink",
     "DeliveryAuthorization",
+    "DraftedAdvisorySkill",
+    "DraftValidationPolicy",
     "EvidenceContext",
     "EvidenceEvent",
     "EvidenceSink",
@@ -89,6 +98,7 @@ __all__ = [
     "LearningControlPlane",
     "LearningJob",
     "LocalEvaluationBackend",
+    "LlmSkillDrafter",
     "MLFLOW_LINEAGE_SCHEMA_VERSION",
     "MlflowEvidenceSink",
     "MlflowAttachmentPublisher",
@@ -108,10 +118,12 @@ __all__ = [
     "RunOne",
     "SQLiteControlPlaneRepository",
     "SourceTraceRef",
+    "SkillDraftingProvider",
     "TraceCohorts",
     "TraceLearningRecord",
     "TracePattern",
     "VariantCaseResult",
     "WorkerRun",
+    "build_skill_drafting_prompt",
     "reserve_later_held_out_cohort",
 ]
