@@ -1,4 +1,15 @@
-"""Steering event models and inbox for bidirectional control."""
+"""Steering event models and inbox for bidirectional control.
+
+Steering lets an external caller (a user or another agent) influence an already-running
+PenguiFlow task without cancelling and restarting it. Callers publish typed
+:class:`~penguiflow.state.models.SteeringEvent` records (see
+:class:`~penguiflow.state.models.SteeringEventType` for the supported kinds: injecting
+context, redirecting the goal, pausing/resuming, approving/rejecting a pending action,
+adjusting priority, sending a user message, or hard-cancelling) which the running task
+consumes via a :class:`SteeringInbox`. This module also provides payload sanitization and
+per-event-type validation so steering input can safely originate outside the trusted
+process boundary.
+"""
 
 from __future__ import annotations
 
@@ -16,9 +27,19 @@ MAX_STEERING_STRING = 4_096
 
 
 class SteeringValidationError(ValueError):
-    """Raised when a steering event payload is invalid."""
+    """Raised when a steering event payload is invalid.
+
+    Attributes:
+        errors: List of human-readable validation error messages describing what was wrong
+            with the payload for the event's :class:`~penguiflow.state.models.SteeringEventType`.
+    """
 
     def __init__(self, errors: list[str]) -> None:
+        """Initialize the error with the list of validation failures.
+
+        Args:
+            errors: Human-readable validation error messages.
+        """
         super().__init__("Invalid steering payload")
         self.errors = errors
 
@@ -48,7 +69,18 @@ def _sanitize_value(value: Any, *, depth: int) -> Any:
 
 
 def sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Clamp steering payload to a JSON-serialisable, size-bounded shape."""
+    """Clamp steering payload to a JSON-serialisable, size-bounded shape.
+
+    Recursively truncates nested dicts/lists/strings (see ``MAX_STEERING_*`` limits) and
+    falls back to a truncated string summary if the payload cannot be JSON-encoded or
+    exceeds ``MAX_STEERING_PAYLOAD_BYTES``.
+
+    Args:
+        payload: Raw steering payload to sanitize.
+
+    Returns:
+        A JSON-serialisable dict guaranteed to be within the configured size/shape bounds.
+    """
 
     sanitized = _sanitize_value(payload, depth=MAX_STEERING_DEPTH)
     if not isinstance(sanitized, dict):
@@ -71,7 +103,16 @@ def sanitize_steering_event(
     *,
     max_payload_bytes: int = MAX_STEERING_PAYLOAD_BYTES,
 ) -> SteeringEvent:
-    """Return a sanitized copy of the steering event."""
+    """Return a sanitized copy of the steering event.
+
+    Args:
+        event: The steering event whose payload should be sanitized.
+        max_payload_bytes: Maximum allowed size, in UTF-8 bytes, of the JSON-encoded payload
+            after sanitization; larger payloads are replaced with a truncated summary.
+
+    Returns:
+        A copy of ``event`` with its ``payload`` replaced by the sanitized version.
+    """
 
     payload = sanitize_payload(dict(event.payload or {}))
     raw = json.dumps(payload, ensure_ascii=False)
@@ -81,7 +122,19 @@ def sanitize_steering_event(
 
 
 def validate_steering_event(event: SteeringEvent) -> None:
-    """Validate steering payloads against type-specific expectations."""
+    """Validate steering payloads against type-specific expectations.
+
+    Each :class:`~penguiflow.state.models.SteeringEventType` requires a different payload
+    shape (e.g. ``INJECT_CONTEXT`` requires non-empty ``text``, ``REDIRECT`` requires an
+    ``instruction``/``goal``/``query``, ``PRIORITIZE`` requires an integer ``priority``).
+
+    Args:
+        event: The steering event to validate.
+
+    Raises:
+        SteeringValidationError: If ``event.payload`` is not a dict, or does not satisfy the
+            requirements for ``event.event_type``.
+    """
 
     payload = event.payload
     errors: list[str] = []
@@ -142,9 +195,25 @@ def validate_steering_event(event: SteeringEvent) -> None:
 
 
 class SteeringInbox:
-    """Async inbox that buffers steering events and exposes cancellation state."""
+    """Async inbox that buffers steering events and exposes cancellation state.
+
+    A running task (typically the ReactPlanner loop) polls or awaits this inbox to react to
+    externally published :class:`~penguiflow.state.models.SteeringEvent` records —
+    cancelling, pausing/resuming, or draining events to fold into the next planning step.
+    ``CANCEL`` and ``PAUSE``/``RESUME`` events are handled specially at :meth:`push` time so
+    their effects (``cancelled``, ``wait_if_paused``) are visible even before the event is
+    drained from the queue.
+    """
 
     def __init__(self, *, maxsize: int = 100, max_pending_user_messages: int = 2) -> None:
+        """Initialize the inbox.
+
+        Args:
+            maxsize: Maximum number of buffered steering events before :meth:`push` starts
+                returning ``False``.
+            max_pending_user_messages: Maximum number of undrained ``USER_MESSAGE`` events
+                allowed in the queue at once; additional ones are rejected by :meth:`push`.
+        """
         self._queue: asyncio.Queue[SteeringEvent] = asyncio.Queue(maxsize=maxsize)
         self._max_pending_user_messages = max_pending_user_messages
         self._pending_user_message_count = 0
@@ -155,18 +224,34 @@ class SteeringInbox:
 
     @property
     def cancelled(self) -> bool:
+        """Whether a ``CANCEL`` steering event has been pushed to this inbox."""
         return self._cancel_event.is_set()
 
     @property
     def cancel_reason(self) -> str | None:
+        """The reason string from the most recent ``CANCEL`` event, if any was pushed."""
         return self._cancel_reason
 
     @property
     def cancel_event(self) -> asyncio.Event:
+        """The underlying :class:`asyncio.Event` set when a ``CANCEL`` event is pushed."""
         return self._cancel_event
 
     async def push(self, event: SteeringEvent) -> bool:
-        """Queue a steering event, returning False if the queue is full."""
+        """Queue a steering event, returning False if the queue is full.
+
+        ``CANCEL`` events set :attr:`cancel_event` and record :attr:`cancel_reason`;
+        ``PAUSE``/``RESUME`` events immediately toggle the pause gate used by
+        :meth:`wait_if_paused` — both take effect even if the queue itself is full.
+        ``USER_MESSAGE`` events are additionally capped by ``max_pending_user_messages``.
+
+        Args:
+            event: The steering event to enqueue.
+
+        Returns:
+            ``True`` if the event was enqueued; ``False`` if the queue was full or the
+            ``USER_MESSAGE`` backlog limit was reached.
+        """
 
         if event.event_type == SteeringEventType.CANCEL:
             self._cancel_reason = str(event.payload.get("reason") or "cancelled")
@@ -190,12 +275,20 @@ class SteeringInbox:
             return False
 
     def has_event(self) -> bool:
-        """Check if there are queued steering events without draining them."""
+        """Check if there are queued steering events without draining them.
+
+        Returns:
+            ``True`` if at least one event is currently buffered.
+        """
 
         return not self._queue.empty()
 
     def drain(self) -> list[SteeringEvent]:
-        """Drain any queued steering events without blocking."""
+        """Drain any queued steering events without blocking.
+
+        Returns:
+            All currently buffered events, in FIFO order; an empty list if none are queued.
+        """
 
         events: list[SteeringEvent] = []
         while True:
@@ -209,21 +302,39 @@ class SteeringInbox:
         return events
 
     async def next(self) -> SteeringEvent:
-        """Wait for the next steering event."""
+        """Wait for the next steering event.
+
+        Returns:
+            The next :class:`~penguiflow.state.models.SteeringEvent` pushed to the inbox.
+        """
 
         return await self._queue.get()
 
     async def wait_if_paused(self) -> None:
-        """Block until a RESUME arrives if the task is paused."""
+        """Block until a RESUME arrives if the task is paused.
+
+        No-op if the inbox is not currently paused (i.e. no ``PAUSE`` event is outstanding).
+        """
 
         if not self._pause_event.is_set():
             await self._pause_event.wait()
 
 
 class SteeringCancelled(RuntimeError):
-    """Raised when a steering cancel event terminates a task."""
+    """Raised when a steering cancel event terminates a task.
+
+    Attributes:
+        reason: Human-readable reason for the cancellation (defaults to
+            ``"steering_cancelled"`` when none was provided).
+    """
 
     def __init__(self, reason: str | None = None) -> None:
+        """Initialize the exception with an optional cancellation reason.
+
+        Args:
+            reason: Human-readable reason for the cancellation, taken from the ``CANCEL``
+                steering event's payload when available.
+        """
         super().__init__(reason or "steering_cancelled")
         self.reason = reason or "steering_cancelled"
 

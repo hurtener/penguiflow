@@ -40,7 +40,11 @@ logger = logging.getLogger(__name__)
 
 
 class ResourceInfo(BaseModel):
-    """Information about an MCP resource."""
+    """Metadata about a single MCP resource, as returned by ``resources/list``.
+
+    Populated by ``ToolNode`` during resource discovery and returned from
+    ``ToolNode.list_resources()``.
+    """
 
     uri: str
     """Unique resource identifier."""
@@ -57,12 +61,19 @@ class ResourceInfo(BaseModel):
     size_bytes: int | None = None
     """Size hint (if known)."""
 
-    annotations: dict[str, Any] = Field(default_factory=dict)
+    annotations: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional server-supplied annotations for the resource.",
+    )
     """Additional annotations from the server."""
 
 
 class ResourceTemplateInfo(BaseModel):
-    """Information about an MCP resource template."""
+    """Metadata about an MCP resource template (a parameterized resource URI).
+
+    Returned from ``ToolNode.list_resource_templates()``; templates describe
+    a family of resources rather than a single concrete URI.
+    """
 
     uri_template: str
     """URI template with placeholders."""
@@ -78,7 +89,11 @@ class ResourceTemplateInfo(BaseModel):
 
 
 class ResourceContents(BaseModel):
-    """Contents returned from resources/read."""
+    """Contents returned from an MCP ``resources/read`` call.
+
+    Exactly one of ``text`` or ``blob`` is normally populated, depending on
+    whether the resource is text- or binary-based.
+    """
 
     uri: str
     """Resource URI."""
@@ -94,7 +109,13 @@ class ResourceContents(BaseModel):
 
 
 class ResourceCacheConfig(BaseModel):
-    """Configuration for resource caching."""
+    """Configuration for :class:`ResourceCache` behavior.
+
+    Controls whether reads are cached, how many entries are retained (with
+    least-recently-accessed eviction), how long entries live, and the
+    threshold below which text resources are inlined rather than stored as
+    artifacts.
+    """
 
     enabled: bool = True
     """Enable caching of resource reads."""
@@ -335,7 +356,15 @@ class ResourceCache:
 
 @dataclass
 class ResourceSubscription:
-    """Tracks a resource subscription."""
+    """Tracks a resource subscription.
+
+    Attributes:
+        uri: Subscribed resource URI.
+        callback: Optional callback invoked (sync or coroutine) with the
+            resource URI when an update notification arrives.
+        subscribed_at: Event-loop-relative timestamp when the subscription
+            was created.
+    """
 
     uri: str
     callback: Any | None = None
@@ -441,5 +470,12 @@ class ResourceSubscriptionManager:
         return list(self._subscriptions.keys())
 
     def is_subscribed(self, uri: str) -> bool:
-        """Check if subscribed to a resource."""
+        """Check if subscribed to a resource.
+
+        Args:
+            uri: Resource URI to check.
+
+        Returns:
+            True if currently subscribed to ``uri``.
+        """
         return uri in self._subscriptions

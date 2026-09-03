@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 class DSPyLLMClient:
     """LLM client using DSPy for structured outputs.
 
+    Deprecated:
+        DSPyLLMClient is deprecated and unmaintained as of 3.11.0a6. It is no longer part of
+        PenguiFlow's supported LLM surface and does not participate in built-in rate-limit
+        fallback (``llm_fallback``). Use the native LLM layer (default) or
+        ``transport="pydantic-ai"`` instead; this class will be removed in a future release.
+
     This client implements the JSONLLMClient protocol and uses DSPy's
     signature system to generate structured outputs. DSPy handles the
     prompt engineering and parsing internally, providing more reliable

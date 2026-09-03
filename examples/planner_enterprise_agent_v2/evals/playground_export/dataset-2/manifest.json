@@ -1,0 +1,35 @@
+{
+  "counts": {
+    "total": 2,
+    "unknown": 2
+  },
+  "dataset_id": "eval-20260418072337",
+  "export_command": "export_trace_dataset",
+  "redaction_policy": "internal_safe",
+  "schema_versions": {
+    "trace": "TraceExampleV1"
+  },
+  "source": {
+    "session_id": null,
+    "source_priority": [
+      "trajectory",
+      "planner_events",
+      "history"
+    ],
+    "trace_ids": [
+      "b278b0d82ee8e23c",
+      "cd1288861604a3a4"
+    ],
+    "trace_refs": [
+      {
+        "session_id": "eval:7b5795c1452f3cf1",
+        "trace_id": "b278b0d82ee8e23c"
+      },
+      {
+        "session_id": "eval:7b5795c1452f3cf1",
+        "trace_id": "cd1288861604a3a4"
+      }
+    ]
+  },
+  "workload": "unknown"
+}

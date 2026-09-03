@@ -29,37 +29,78 @@ def _utc_now() -> datetime:
 
 
 class ContextPatch(BaseModel):
-    task_id: str
-    spawned_from_event_id: str | None = None
-    source_context_version: int | None = None
-    source_context_hash: str | None = None
-    context_diverged: bool = False
-    completed_at: datetime = Field(default_factory=_utc_now)
-    digest: list[str] = Field(default_factory=list)
-    facts: dict[str, Any] = Field(default_factory=dict)
-    artifacts: list[dict[str, Any]] = Field(default_factory=list)
-    sources: list[dict[str, Any]] = Field(default_factory=list)
-    recommended_next_steps: list[str] = Field(default_factory=list)
-    assumptions: list[str] = Field(default_factory=list)
+    """Structured summary of a completed background task's contribution to context.
+
+    Produced when a background task finishes and needs to hand its results back to
+    the foreground agent's context, either immediately (APPEND/REPLACE) or pending
+    human approval (HUMAN_GATED).
+    """
+
+    task_id: str = Field(description="Identifier of the task that produced this patch.")
+    spawned_from_event_id: str | None = Field(
+        default=None, description="Event ID of the foreground turn that spawned the originating task, if any."
+    )
+    source_context_version: int | None = Field(
+        default=None, description="Context version the task branched from, for divergence detection."
+    )
+    source_context_hash: str | None = Field(
+        default=None, description="Hash of the context the task branched from, for divergence detection."
+    )
+    context_diverged: bool = Field(
+        default=False, description="Whether the foreground context changed since the task was spawned."
+    )
+    completed_at: datetime = Field(default_factory=_utc_now, description="Timestamp when the task completed.")
+    digest: list[str] = Field(default_factory=list, description="Short human-readable summary lines of the result.")
+    facts: dict[str, Any] = Field(default_factory=dict, description="Structured facts extracted from the task run.")
+    artifacts: list[dict[str, Any]] = Field(
+        default_factory=list, description="Artifacts (files, links, structured payloads) produced by the task."
+    )
+    sources: list[dict[str, Any]] = Field(
+        default_factory=list, description="Source references (documents, URLs) consulted during the task."
+    )
+    recommended_next_steps: list[str] = Field(
+        default_factory=list, description="Suggested follow-up actions surfaced by the task."
+    )
+    assumptions: list[str] = Field(
+        default_factory=list, description="Assumptions the task made while producing its result."
+    )
 
 
 class MergeStrategy(str, Enum):
+    """How a completed task's `ContextPatch` should be merged into foreground context.
+
+    Attributes:
+        APPEND: Add the patch to context alongside existing content.
+        REPLACE: Replace the relevant portion of context with the patch.
+        HUMAN_GATED: Hold the patch for human approval before merging.
+    """
+
     APPEND = "append"
     REPLACE = "replace"
     HUMAN_GATED = "human_gated"
 
 
 class NotificationAction(BaseModel):
-    id: str
-    label: str
-    payload: dict[str, Any] = Field(default_factory=dict)
+    """A single actionable button/option attached to a `NotificationPayload`."""
+
+    id: str = Field(description="Stable identifier for this action, used when the user selects it.")
+    label: str = Field(description="Human-readable label shown to the user.")
+    payload: dict[str, Any] = Field(
+        default_factory=dict, description="Arbitrary data returned to the caller when this action is selected."
+    )
 
 
 class NotificationPayload(BaseModel):
-    severity: Literal["info", "warning", "error"] = "info"
-    title: str
-    body: str
-    actions: list[NotificationAction] = Field(default_factory=list)
+    """Content of a user-facing notification, optionally with selectable actions."""
+
+    severity: Literal["info", "warning", "error"] = Field(
+        default="info", description="Notification severity used for display styling."
+    )
+    title: str = Field(description="Short notification title.")
+    body: str = Field(description="Notification body text.")
+    actions: list[NotificationAction] = Field(
+        default_factory=list, description="Actions the user can take in response to this notification."
+    )
 
 
 class ProactiveReportContext(BaseModel):
@@ -69,15 +110,21 @@ class ProactiveReportContext(BaseModel):
     and potentially expand upon with artifacts.
     """
 
-    task_id: str
-    task_description: str | None = None
-    digest: list[str] = Field(default_factory=list)
-    facts: dict[str, Any] = Field(default_factory=dict)
-    artifacts: list[dict[str, Any]] = Field(default_factory=list)
-    sources: list[dict[str, Any]] = Field(default_factory=list)
-    execution_time_ms: int | None = None
-    context_diverged: bool = False
-    merge_strategy: str = "APPEND"
+    task_id: str = Field(description="Identifier of the completed task this report is about.")
+    task_description: str | None = Field(default=None, description="Human-readable description of the task.")
+    digest: list[str] = Field(default_factory=list, description="Short human-readable summary lines of the result.")
+    facts: dict[str, Any] = Field(default_factory=dict, description="Structured facts extracted from the task run.")
+    artifacts: list[dict[str, Any]] = Field(
+        default_factory=list, description="Artifacts (files, links, structured payloads) produced by the task."
+    )
+    sources: list[dict[str, Any]] = Field(
+        default_factory=list, description="Source references (documents, URLs) consulted during the task."
+    )
+    execution_time_ms: int | None = Field(default=None, description="Wall-clock task execution time in milliseconds.")
+    context_diverged: bool = Field(
+        default=False, description="Whether the foreground context changed since the task was spawned."
+    )
+    merge_strategy: str = Field(default="APPEND", description="How the task result should merge into context.")
 
 
 class ProactiveReportRequest(BaseModel):
@@ -87,26 +134,43 @@ class ProactiveReportRequest(BaseModel):
     this request is queued to trigger foreground agent report-back.
     """
 
-    task_id: str
-    session_id: str
-    trace_id: str | None = None
-    task_description: str | None = None
-    execution_time_ms: int | None = None
-    patch: ContextPatch
-    merge_strategy: MergeStrategy
-    queued_at: datetime = Field(default_factory=_utc_now)
-    message_id: str = Field(default_factory=lambda: f"proactive_{secrets.token_hex(6)}")
-    group_id: str | None = None
+    task_id: str = Field(description="Identifier of the completed task this report is about.")
+    session_id: str = Field(description="Session the task belongs to.")
+    trace_id: str | None = Field(default=None, description="Trace ID of the task run, for correlation.")
+    task_description: str | None = Field(default=None, description="Human-readable description of the task.")
+    execution_time_ms: int | None = Field(default=None, description="Wall-clock task execution time in milliseconds.")
+    patch: ContextPatch = Field(description="Context patch produced by the completed task.")
+    merge_strategy: MergeStrategy = Field(description="How the patch should merge into foreground context.")
+    queued_at: datetime = Field(default_factory=_utc_now, description="When this report request was queued.")
+    message_id: str = Field(
+        default_factory=lambda: f"proactive_{secrets.token_hex(6)}",
+        description="Unique identifier for this report message.",
+    )
+    group_id: str | None = Field(
+        default=None, description="Task group ID this report belongs to, if the task was part of a group."
+    )
 
-    memory_summary: dict[str, Any] = Field(default_factory=dict)
-    tool_context: dict[str, Any] = Field(default_factory=dict)
-    context_version: int | None = None
-    context_hash: str | None = None
-    proactive_hops_remaining: int | None = None
+    memory_summary: dict[str, Any] = Field(
+        default_factory=dict, description="Summary of memory writes made during the task."
+    )
+    tool_context: dict[str, Any] = Field(
+        default_factory=dict, description="Tool-facing context accumulated during the task."
+    )
+    context_version: int | None = Field(default=None, description="Context version at the time of task completion.")
+    context_hash: str | None = Field(default=None, description="Context hash at the time of task completion.")
+    proactive_hops_remaining: int | None = Field(
+        default=None, description="Remaining proactive report hops allowed before reports are suppressed."
+    )
 
-    is_group_report: bool = False
-    group_task_ids: list[str] = Field(default_factory=list)
-    combined_patches: list[ContextPatch] = Field(default_factory=list)
+    is_group_report: bool = Field(
+        default=False, description="Whether this request represents a combined report for a task group."
+    )
+    group_task_ids: list[str] = Field(
+        default_factory=list, description="Task IDs included in this group report, when `is_group_report` is True."
+    )
+    combined_patches: list[ContextPatch] = Field(
+        default_factory=list, description="Context patches from all tasks in the group, when `is_group_report` is True."
+    )
 
 
 GroupReportStrategy = Literal["all", "any", "none"]
@@ -214,22 +278,37 @@ class GroupProactiveReportRequest(BaseModel):
     all tasks in the group for cohesive synthesis.
     """
 
-    group_id: str
-    session_id: str
-    group_name: str
-    trace_id: str | None = None
-    task_count: int
-    completed_count: int
-    failed_count: int
-    execution_time_ms: int | None = None
-    combined_digest: list[str] = Field(default_factory=list)
-    combined_facts: dict[str, Any] = Field(default_factory=dict)
-    combined_artifacts: list[dict[str, Any]] = Field(default_factory=list)
-    combined_sources: list[dict[str, Any]] = Field(default_factory=list)
-    merge_strategy: MergeStrategy
-    queued_at: datetime = Field(default_factory=_utc_now)
-    message_id: str = Field(default_factory=lambda: f"group_report_{secrets.token_hex(6)}")
-    context_diverged: bool = False
+    group_id: str = Field(description="Identifier of the task group this report is about.")
+    session_id: str = Field(description="Session the task group belongs to.")
+    group_name: str = Field(description="Display name of the task group.")
+    trace_id: str | None = Field(default=None, description="Trace ID for correlation, if available.")
+    task_count: int = Field(description="Total number of tasks in the group.")
+    completed_count: int = Field(description="Number of tasks that completed successfully.")
+    failed_count: int = Field(description="Number of tasks that failed or were cancelled.")
+    execution_time_ms: int | None = Field(
+        default=None, description="Wall-clock execution time for the group in milliseconds."
+    )
+    combined_digest: list[str] = Field(
+        default_factory=list, description="Combined summary lines from all tasks in the group."
+    )
+    combined_facts: dict[str, Any] = Field(
+        default_factory=dict, description="Combined structured facts from all tasks in the group."
+    )
+    combined_artifacts: list[dict[str, Any]] = Field(
+        default_factory=list, description="Combined artifacts produced by tasks in the group."
+    )
+    combined_sources: list[dict[str, Any]] = Field(
+        default_factory=list, description="Combined source references consulted by tasks in the group."
+    )
+    merge_strategy: MergeStrategy = Field(description="How the combined results should merge into context.")
+    queued_at: datetime = Field(default_factory=_utc_now, description="When this report request was queued.")
+    message_id: str = Field(
+        default_factory=lambda: f"group_report_{secrets.token_hex(6)}",
+        description="Unique identifier for this report message.",
+    )
+    context_diverged: bool = Field(
+        default=False, description="Whether the foreground context changed since the group was created."
+    )
     failed_task_summaries: list[dict[str, Any]] = Field(default_factory=list)
     """Summary info for failed tasks (task_id, error, description)."""
 

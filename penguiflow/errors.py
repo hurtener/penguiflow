@@ -8,7 +8,16 @@ from typing import Any
 
 
 class FlowErrorCode(str, Enum):
-    """Stable error codes surfaced by the runtime."""
+    """Stable error codes surfaced by the runtime.
+
+    Attributes:
+        NODE_TIMEOUT: A node's execution exceeded its configured timeout.
+        NODE_EXCEPTION: A node raised an unhandled exception during execution.
+        TRACE_CANCELLED: The trace was cancelled before completion.
+        DEADLINE_EXCEEDED: The trace's wall-clock deadline was exceeded.
+        HOP_BUDGET_EXHAUSTED: The trace's hop budget was exhausted.
+        TOKEN_BUDGET_EXHAUSTED: The trace's token budget was exhausted.
+    """
 
     NODE_TIMEOUT = "NODE_TIMEOUT"
     NODE_EXCEPTION = "NODE_EXCEPTION"
@@ -19,7 +28,18 @@ class FlowErrorCode(str, Enum):
 
 
 class FlowError(Exception):
-    """Wraps runtime failures with trace metadata for downstream handling."""
+    """Wraps runtime failures with trace metadata for downstream handling.
+
+    Attributes:
+        trace_id: Identifier of the trace during which the failure occurred, if known.
+        node_name: Name of the node that raised or triggered the failure, if known.
+        node_id: Identifier of the specific node instance, if known.
+        code: Stable error code string (see ``FlowErrorCode``).
+        message: Human-readable description of the failure.
+        original_exc: The underlying exception that was wrapped, if any.
+        metadata: Additional structured context attached to the error.
+        exception_type: Class name of ``original_exc``, or ``None`` if not set.
+    """
 
     __slots__ = (
         "trace_id",
@@ -43,6 +63,17 @@ class FlowError(Exception):
         node_id: str | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> None:
+        """Initialize the error with trace metadata.
+
+        Args:
+            trace_id: Identifier of the trace during which the failure occurred, if known.
+            node_name: Name of the node that raised or triggered the failure, if known.
+            code: Stable error code, either a ``FlowErrorCode`` member or a plain string.
+            message: Human-readable description of the failure.
+            original_exc: The underlying exception to wrap, if any.
+            node_id: Identifier of the specific node instance, if known.
+            metadata: Additional structured context to attach to the error.
+        """
         super().__init__(message)
         self.trace_id = trace_id
         self.node_name = node_name
@@ -59,12 +90,22 @@ class FlowError(Exception):
         return f"[{self.code}] {self.message}{trace}{node}".strip()
 
     def unwrap(self) -> BaseException | None:
-        """Return the wrapped exception, if any."""
+        """Return the wrapped exception, if any.
+
+        Returns:
+            The original exception passed to the constructor, or ``None`` if none was
+            provided.
+        """
 
         return self.original_exc
 
     def to_payload(self) -> dict[str, Any]:
-        """Return a JSON-serialisable representation of the error."""
+        """Return a JSON-serialisable representation of the error.
+
+        Returns:
+            A dictionary containing ``code`` and ``message``, plus ``trace_id``,
+            ``node_name``, ``node_id``, ``exception_type``, and ``metadata`` when set.
+        """
 
         payload: dict[str, Any] = {
             "code": self.code,
@@ -94,7 +135,21 @@ class FlowError(Exception):
         message: str | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> FlowError:
-        """Build a ``FlowError`` from an underlying exception."""
+        """Build a ``FlowError`` from an underlying exception.
+
+        Args:
+            trace_id: Identifier of the trace during which the failure occurred, if known.
+            node_name: Name of the node that raised or triggered the failure, if known.
+            node_id: Identifier of the specific node instance, if known.
+            exc: The underlying exception to wrap.
+            code: Stable error code describing the failure.
+            message: Optional human-readable message; defaults to ``str(exc)`` or the
+                exception's class name when ``exc`` has no message.
+            metadata: Additional structured context to attach to the error.
+
+        Returns:
+            A new ``FlowError`` wrapping ``exc``.
+        """
 
         error_message = message or str(exc) or exc.__class__.__name__
         return cls(

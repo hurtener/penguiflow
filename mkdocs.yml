@@ -67,6 +67,18 @@ plugins:
           options:
             show_source: false
             docstring_style: google
+            filters: ["!^_"]
+            members_order: source
+            show_if_no_docstring: true
+            show_signature_annotations: true
+            separate_signature: true
+            docstring_section_style: table
+            merge_init_into_class: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            heading_level: 2
 
 nav:
   - Home: index.md
@@ -138,6 +150,25 @@ nav:
       - Short-term memory API: reference/short-term-memory-api.md
       - Testing (FlowTestKit): reference/testing.md
       - Visualization: reference/visualization.md
+      - API reference:
+          - Overview: reference/api/index.md
+          - Flow runtime: reference/api/flow.md
+          - Messages & types: reference/api/messages.md
+          - Errors: reference/api/errors.md
+          - Metrics & middleware: reference/api/metrics.md
+          - Routing policies: reference/api/routing.md
+          - Artifacts: reference/api/artifacts.md
+          - Streaming: reference/api/streaming.md
+          - Visualization: reference/api/viz.md
+          - Remote execution: reference/api/remote.md
+          - Sessions & scheduling: reference/api/sessions.md
+          - State stores: reference/api/state.md
+          - Skills: reference/api/skills.md
+          - Steering: reference/api/steering.md
+          - Testing kit: reference/api/testkit.md
+          - Planner: reference/api/planner.md
+          - LLM layer: reference/api/llm.md
+          - Tools: reference/api/tools.md
   - Contributing:
       - Dev setup: contributing/dev-setup.md
       - Docs style: contributing/docs-style.md

@@ -62,7 +62,7 @@ class AgentTelemetry:
             "auto_seq_executed": 0,
         }
 
-    async def record_flow_event(self, event: FlowEvent) -> FlowEvent:
+    async def record_flow_event(self, event: FlowEvent) -> None:
         """Middleware function that intercepts all PenguiFlow events.
 
         This is the CRITICAL pattern from the case study - it extracts
@@ -128,8 +128,7 @@ class AgentTelemetry:
                     }
                 )
 
-        # Always return event unmodified - middleware is read-only
-        return event
+        # Middleware is read-only; the flow continues after this callback returns.
 
     def record_planner_event(self, event: PlannerEvent) -> None:
         """Callback for ReactPlanner events.

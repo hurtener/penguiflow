@@ -26,12 +26,14 @@ from .types import (
     ImagePart,
     LLMMessage,
     LLMRequest,
+    ReasoningDisplay,
     StreamCallback,
     StreamEvent,
     TextPart,
     ToolCallPart,
     ToolResultPart,
     ToolSpec,
+    validate_reasoning_display,
 )
 
 
@@ -302,6 +304,7 @@ class NativeLLMAdapter:
         streaming_enabled: bool = True,
         use_native_reasoning: bool = True,
         reasoning_effort: str | None = None,
+        reasoning_display: ReasoningDisplay = None,
         retry_rate_limit_errors: bool = True,
         trace_sink: LLMTraceSink | None = None,
         transport: str | None = None,
@@ -321,6 +324,7 @@ class NativeLLMAdapter:
             streaming_enabled: Enable streaming support.
             use_native_reasoning: Enable native reasoning for supported models.
             reasoning_effort: Reasoning effort level (e.g., "low", "medium", "high").
+            reasoning_display: Reasoning display mode ("summarized" or "omitted").
             retry_rate_limit_errors: When False, a 429 is raised immediately
                 instead of being retried in-place. Used by ``FallbackLLMClient``
                 so rate limits trigger fast model failover rather than backoff.
@@ -337,6 +341,7 @@ class NativeLLMAdapter:
                 Defaults to 32 KiB.
             **provider_kwargs: Additional provider-specific configuration.
         """
+        validated_reasoning_display = validate_reasoning_display(reasoning_display)
         if multimodal_inline_data_limit_bytes < 0:
             raise ValueError("multimodal_inline_data_limit_bytes must be >= 0")
         self._model = model
@@ -347,6 +352,7 @@ class NativeLLMAdapter:
         self._streaming_enabled = streaming_enabled
         self._use_native_reasoning = use_native_reasoning
         self._reasoning_effort = reasoning_effort
+        self._reasoning_display = validated_reasoning_display
         self._retry_rate_limit_errors = retry_rate_limit_errors
         self._trace_sink = trace_sink if trace_sink is not None else resolve_trace_sink_from_env()
         self._multimodal_inline_data_limit_bytes = multimodal_inline_data_limit_bytes
@@ -766,6 +772,8 @@ class NativeLLMAdapter:
         extra: dict[str, Any] | None = None
         if self._reasoning_effort is not None:
             extra = {"reasoning_effort": self._reasoning_effort}
+            if reasoning_display := self._resolve_reasoning_display():
+                extra["reasoning_display"] = reasoning_display
 
         request = LLMRequest(
             model=self._provider.model,
@@ -990,6 +998,15 @@ class NativeLLMAdapter:
         )
         return request
 
+    def _resolve_reasoning_display(self) -> str | None:
+        """Prefer explicit display, avoiding unsupported profile defaults."""
+        if self._reasoning_display in {"summarized", "omitted"}:
+            return self._reasoning_display
+        if not _reasoning_enabled_from_effort(self._reasoning_effort):
+            return None
+        default = get_profile(self._provider.model).reasoning_display_default
+        return default if default in {"summarized", "omitted"} else None
+
     def _build_request_with_runtime(
         self,
         messages: list[LLMMessage],
@@ -1048,6 +1065,8 @@ class NativeLLMAdapter:
         extra: dict[str, Any] | None = None
         if policy.inject_reasoning_effort and self._reasoning_effort is not None:
             extra = {"reasoning_effort": self._reasoning_effort}
+            if reasoning_display := self._resolve_reasoning_display():
+                extra["reasoning_display"] = reasoning_display
         if (
             policy.inject_reasoning_effort
             and self._provider.provider_name == "openrouter"
@@ -1091,6 +1110,7 @@ def create_native_adapter(
     streaming_enabled: bool = True,
     use_native_reasoning: bool = True,
     reasoning_effort: str | None = None,
+    reasoning_display: ReasoningDisplay | None = None,
     fallback: Any | None = None,
     cooldown_store: Any | None = None,
     trace_sink: LLMTraceSink | None = None,
@@ -1112,6 +1132,7 @@ def create_native_adapter(
         streaming_enabled: Enable streaming.
         use_native_reasoning: Enable native reasoning for supported models.
         reasoning_effort: Reasoning effort level (e.g., "low", "medium", "high").
+        reasoning_display: Reasoning display mode ("summarized" or "omitted").
         fallback: Optional ``ModelFallbackConfig``. When provided, a
             ``FallbackLLMClient`` is returned instead of a bare adapter so the
             call fails over to fallback models on rate limits.
@@ -1134,6 +1155,7 @@ def create_native_adapter(
         A ``NativeLLMAdapter``, or a ``FallbackLLMClient`` when ``fallback`` is set.
         Both satisfy the ``JSONLLMClient`` protocol.
     """
+    validated_reasoning_display = validate_reasoning_display(reasoning_display)
     if isinstance(model, Mapping):
         # Extract model name from config dict
         model_name = model.get("model", "")
@@ -1170,6 +1192,7 @@ def create_native_adapter(
         streaming_enabled=streaming_enabled,
         use_native_reasoning=use_native_reasoning,
         reasoning_effort=reasoning_effort,
+        reasoning_display=validated_reasoning_display,
         trace_sink=trace_sink,
         transport=transport,
         multimodal_inline_data_limit_bytes=multimodal_inline_data_limit_bytes,
