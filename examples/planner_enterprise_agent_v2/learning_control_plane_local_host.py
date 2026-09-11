@@ -38,7 +38,6 @@ class LocalOutcomeProvider:
         return {
             "task_success": 1.0 if is_candidate else 0.0,
             "customer_correction_rate": 0.0,
-            "human_feedback_score": 1.0 if is_candidate else 0.0,
         }
 
 

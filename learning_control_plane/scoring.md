@@ -27,6 +27,11 @@ alongside the existing baseline and candidate means. A primary metric must meet
 its configured minimum improvement; every protected metric must remain at or above
 zero normalized improvement.
 
+`candidate_metric_thresholds` adds an absolute candidate gate. Higher-is-better
+metrics must be at least their threshold, while lower-is-better metrics must be
+at most their threshold. This prevents a candidate from passing merely because
+it improved over a weak baseline while still missing an acceptable floor.
+
 This is descriptive evidence for the deterministic MVP gate, not yet a confidence
 claim. Statistical confidence intervals and sample-size rules remain the next
 milestone.

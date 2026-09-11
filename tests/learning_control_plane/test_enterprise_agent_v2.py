@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -22,6 +23,7 @@ from examples.planner_enterprise_agent_v2.main import EnterpriseAgentOrchestrato
 from learning_control_plane.evaluation import EvaluationCase, EvaluationVariant
 from learning_control_plane.evidence import EvidenceContext
 from learning_control_plane.mining import TraceLearningRecord
+from learning_control_plane.penguiflow import InvestigationPublication
 from penguiflow.planner.models import PlannerAction
 from penguiflow.planner.trajectory import Trajectory, TrajectoryStep
 
@@ -95,7 +97,6 @@ def test_enterprise_outcome_scorer_combines_host_outcomes_with_runtime_measureme
             return {
                 "task_success": 1.0,
                 "customer_correction_rate": 0.0,
-                "human_feedback_score": 0.8,
             }
 
     output = EnterpriseEvaluationOutput(
@@ -116,7 +117,6 @@ def test_enterprise_outcome_scorer_combines_host_outcomes_with_runtime_measureme
     assert metrics == {
         "task_success": 1.0,
         "customer_correction_rate": 0.0,
-        "human_feedback_score": 0.8,
         "policy_compliance": 1.0,
         "latency_ms": 125.0,
         "tool_error_rate": 0.5,
@@ -211,3 +211,32 @@ def test_disabled_investigation_publication_leaves_the_existing_completion_callb
     EnterpriseAgentOrchestrator._on_trajectory_complete_callback(orchestrator, Trajectory(query="completed"))
 
     assert completed_trace_ids == ["completed"]
+
+
+def test_cli_publication_wait_returns_completed_publications_and_clears_them() -> None:
+    publication = InvestigationPublication()
+    publication.completed.set()
+    orchestrator = object.__new__(EnterpriseAgentOrchestrator)
+    orchestrator._pending_investigation_publications = [publication]
+    orchestrator.telemetry = type("Telemetry", (), {"logger": Mock()})()
+
+    completed = EnterpriseAgentOrchestrator.wait_for_investigation_publications(orchestrator, 0.01)
+
+    assert completed == [publication]
+    assert orchestrator._pending_investigation_publications == []
+
+
+def test_cli_publication_wait_times_out_without_failing_the_agent() -> None:
+    publication = InvestigationPublication()
+    logger = Mock()
+    orchestrator = object.__new__(EnterpriseAgentOrchestrator)
+    orchestrator._pending_investigation_publications = [publication]
+    orchestrator.telemetry = type("Telemetry", (), {"logger": logger})()
+
+    completed = EnterpriseAgentOrchestrator.wait_for_investigation_publications(orchestrator, 0.01)
+
+    assert completed == []
+    logger.warning.assert_called_once_with(
+        "lcp_investigation_publication_timeout",
+        extra={"timeout_s": 0.01},
+    )

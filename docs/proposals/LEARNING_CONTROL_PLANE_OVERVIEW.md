@@ -1,5 +1,12 @@
 # Learning Control Plane — Overview
 
+> **Current MVP scope:** this older proposal includes Iceberg user-feedback
+> labels and learned auto-sequence edges. Those mechanisms are not part of the
+> implementation being built in `learning_control_plane/`. The current loop
+> learns advisory skills from automatically verified traces, evaluates them on
+> held-out cases, and promotes them only through automated metric gates and the
+> existing approval workflow.
+
 > Companion to the full design: [RFC_LEARNING_CONTROL_PLANE](./RFC_LEARNING_CONTROL_PLANE.md).
 > This page is the one-screen picture.
 

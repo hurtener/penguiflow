@@ -11,7 +11,7 @@ def test_milestone_zero_structure_is_present() -> None:
     package_root = Path(learning_control_plane.__file__).parent
     expected_paths = [
         "README.md",
-        "MILESTONES.md",
+        "FULL_LOOP_RUN.md",
         "architecture.md",
         "evidence.py",
     ]

@@ -16,6 +16,7 @@ from .control_plane import (
     DeliveryAuthorization,
     GateDecision,
     LearningJob,
+    MetricConfidenceInterval,
     ReviewDecision,
 )
 from .evaluation import (
@@ -115,6 +116,7 @@ def _candidate_payload(candidate: AdvisorySkillCandidate) -> dict[str, object]:
         "advisory_skill": candidate.advisory_skill,
         "source_trace_ids": list(candidate.source_trace_ids),
         "source_investigation_digests": list(candidate.source_investigation_digests),
+        "optimization_goal": candidate.optimization_goal,
     }
 
 
@@ -237,6 +239,7 @@ def _variant_result_payload(result: VariantCaseResult) -> dict[str, object]:
         "variant_id": result.variant_id,
         "output": result.output,
         "metrics": dict(result.metrics),
+        "safe_evidence": dict(result.safe_evidence),
         "error": result.error,
     }
 
@@ -254,6 +257,20 @@ def _decision_payload(decision: GateDecision) -> dict[str, object]:
         "candidate_metrics": dict(decision.candidate_metrics),
         "metric_improvements": dict(decision.metric_improvements),
         "metric_summaries": [_metric_summary_payload(summary) for summary in decision.metric_summaries],
+        "confidence_intervals": [
+            {
+                "metric_name": interval.metric_name,
+                "statistic": interval.statistic,
+                "confidence_level": interval.confidence_level,
+                "estimate": interval.estimate,
+                "lower_bound": interval.lower_bound,
+                "upper_bound": interval.upper_bound,
+                "required_lower_bound": interval.required_lower_bound,
+                "required_upper_bound": interval.required_upper_bound,
+            }
+            for interval in decision.confidence_intervals
+        ],
+        "established_primary_benefit_metrics": list(decision.established_primary_benefit_metrics),
         "investigation_digests": list(decision.investigation_digests),
     }
 
@@ -262,6 +279,10 @@ def _decision_from_payload(payload: Any) -> GateDecision:
     decision = dict(_mapping(payload, "gate decision"))
     decision["metric_summaries"] = tuple(
         _metric_summary_from_payload(summary) for summary in decision.get("metric_summaries", [])
+    )
+    decision["confidence_intervals"] = tuple(
+        MetricConfidenceInterval(**_mapping(interval, "metric confidence interval"))
+        for interval in decision.get("confidence_intervals", [])
     )
     return GateDecision(**decision)
 
@@ -282,6 +303,7 @@ def _metric_summary_payload(summary: MetricSummary) -> dict[str, object]:
             for value in summary.paired_values
         ],
         "missing_case_ids": list(summary.missing_case_ids),
+        "incomplete_case_ids": list(summary.incomplete_case_ids),
     }
 
 
@@ -296,6 +318,7 @@ def _metric_summary_from_payload(payload: Any) -> MetricSummary:
         specification=specification,
         paired_values=paired_values,
         missing_case_ids=tuple(summary.get("missing_case_ids", [])),
+        incomplete_case_ids=tuple(summary.get("incomplete_case_ids", [])),
     )
 
 
@@ -358,6 +381,7 @@ def _receipt_payload(receipt: ActivationReceipt) -> dict[str, object]:
         "scope_ref": receipt.scope_ref,
         "provider_ref": receipt.provider_ref,
         "delivered_at": receipt.delivered_at.isoformat(),
+        "skill_digest": receipt.skill_digest,
         "investigation_digests": list(receipt.investigation_digests),
     }
 
@@ -371,6 +395,7 @@ def _receipt_from_payload(payload: Any) -> ActivationReceipt:
         scope_ref=str(receipt["scope_ref"]),
         provider_ref=str(receipt["provider_ref"]),
         delivered_at=datetime.fromisoformat(str(receipt["delivered_at"])),
+        skill_digest=str(receipt["skill_digest"]) if receipt.get("skill_digest") else None,
         investigation_digests=tuple(receipt.get("investigation_digests", [])),
     )
 

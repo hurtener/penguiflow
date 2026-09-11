@@ -220,7 +220,7 @@ class InvestigationTrajectoryV1:
             candidate = self.intent_descriptor.get("class")
             if isinstance(candidate, str) and candidate.strip():
                 intent_class = candidate.strip()
-        return {
+        index = {
             "learning.investigation.schema": self.schema_version,
             "learning.investigation.id": self.investigation_id,
             "learning.investigation.agent_ref": self.agent_ref,
@@ -233,6 +233,11 @@ class InvestigationTrajectoryV1:
             "learning.investigation.has_outcome": str(bool(self.outcome_refs)).lower(),
             "learning.investigation.has_assessment": str(bool(self.assessment_refs)).lower(),
         }
+        if "verified_success" in self.execution_context:
+            index["learning.investigation.verified_success"] = str(
+                self.execution_context.get("verified_success") is True
+            ).lower()
+        return index
 
 
 __all__ = [

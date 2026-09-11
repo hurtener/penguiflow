@@ -83,6 +83,7 @@ async def test_local_backend_compares_the_same_cases_and_emits_aggregate_evidenc
 @pytest.mark.asyncio
 async def test_local_backend_keeps_a_failed_candidate_case_in_the_result() -> None:
     request = _request()
+    evidence = _EvidenceRecorder()
 
     def run_one(case: EvaluationCase, variant: EvaluationVariant) -> str:
         if case.case_id == "case-2" and variant.variant_id == "candidate-skill":
@@ -92,12 +93,19 @@ async def test_local_backend_keeps_a_failed_candidate_case_in_the_result() -> No
     def score(case: EvaluationCase, output: str) -> dict[str, float]:
         return {"quality_score": 1.0}
 
-    result = await LocalEvaluationBackend().evaluate(request, run_one, score)
+    result = await LocalEvaluationBackend(evidence_sink=evidence).evaluate(request, run_one, score)
 
     assert len(result.case_results) == 2
     assert result.case_results[1].candidate.error == "RuntimeError: tool unavailable"
     assert result.failed_case_ids("candidate-skill") == ("case-2",)
+    assert result.expected_pair_count == 2
+    assert result.complete_pair_count == 1
+    assert result.failed_pair_ids == ("case-2",)
     assert result.mean_metrics("candidate-skill") == {"quality_score": 1.0}
+    assert evidence.events[1].attributes["expected_pair_count"] == 2
+    assert evidence.events[1].attributes["complete_pair_count"] == 1
+    assert evidence.events[1].attributes["failed_pair_ids"] == ["case-2"]
+    assert evidence.events[1].attributes["candidate_failed_case_ids"] == ["case-2"]
 
 
 @pytest.mark.asyncio
@@ -193,3 +201,24 @@ async def test_metric_summary_identifies_successful_pairs_missing_a_metric() -> 
 
     assert [value.case_id for value in summary.paired_values] == ["case-1"]
     assert summary.missing_case_ids == ("case-2",)
+    assert summary.incomplete_case_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_metric_summary_identifies_pairs_with_a_failed_arm() -> None:
+    request = _request()
+
+    def run_one(case: EvaluationCase, variant: EvaluationVariant) -> str:
+        if case.case_id == "case-2" and variant.variant_id == "candidate-skill":
+            raise RuntimeError("provider unavailable")
+        return "correct"
+
+    def score(case: EvaluationCase, output: str) -> dict[str, float]:
+        return {"quality_score": 1.0}
+
+    result = await LocalEvaluationBackend().evaluate(request, run_one, score)
+    summary = result.metric_summary(MetricSpecification("quality_score"))
+
+    assert [value.case_id for value in summary.paired_values] == ["case-1"]
+    assert summary.missing_case_ids == ()
+    assert summary.incomplete_case_ids == ("case-2",)

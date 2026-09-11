@@ -169,7 +169,14 @@ class VariantCaseResult:
     variant_id: str
     output: Any = None
     metrics: Mapping[str, float] = field(default_factory=dict)
+    safe_evidence: Mapping[str, Any] = field(default_factory=dict)
     error: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "variant_id", _non_empty(self.variant_id, "variant_id"))
+        if not isinstance(self.safe_evidence, Mapping):
+            raise ValueError("safe_evidence must be a mapping")
+        object.__setattr__(self, "safe_evidence", dict(self.safe_evidence))
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,10 +205,12 @@ class MetricSummary:
     specification: MetricSpecification
     paired_values: Sequence[PairedMetricValue]
     missing_case_ids: Sequence[str] = ()
+    incomplete_case_ids: Sequence[str] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "paired_values", tuple(self.paired_values))
         object.__setattr__(self, "missing_case_ids", tuple(self.missing_case_ids))
+        object.__setattr__(self, "incomplete_case_ids", tuple(self.incomplete_case_ids))
 
     @property
     def baseline_mean(self) -> float | None:
@@ -259,13 +268,43 @@ class PairedEvaluationResult:
     request: EvaluationRequest
     case_results: Sequence[PairedCaseResult]
 
+    @property
+    def expected_pair_count(self) -> int:
+        """Return the number of baseline/candidate pairs requested."""
+
+        return len(self.case_results)
+
+    @property
+    def incomplete_case_ids(self) -> tuple[str, ...]:
+        """Return cases where the baseline or candidate arm failed."""
+
+        return tuple(
+            pair.case_id
+            for pair in self.case_results
+            if pair.baseline.error is not None or pair.candidate.error is not None
+        )
+
+    @property
+    def complete_pair_count(self) -> int:
+        """Return the number of pairs whose two arms completed."""
+
+        return self.expected_pair_count - len(self.incomplete_case_ids)
+
+    @property
+    def failed_pair_ids(self) -> tuple[str, ...]:
+        """Return incomplete case IDs using the report's paired-run terminology."""
+
+        return self.incomplete_case_ids
+
     def metric_summary(self, specification: MetricSpecification) -> MetricSummary:
         """Return paired metric values and direction-aware summary statistics."""
 
         paired_values: list[PairedMetricValue] = []
         missing_case_ids: list[str] = []
+        incomplete_case_ids: list[str] = []
         for pair in self.case_results:
             if pair.baseline.error is not None or pair.candidate.error is not None:
+                incomplete_case_ids.append(pair.case_id)
                 continue
 
             baseline = pair.baseline.metrics.get(specification.name)
@@ -290,6 +329,7 @@ class PairedEvaluationResult:
             specification=specification,
             paired_values=paired_values,
             missing_case_ids=missing_case_ids,
+            incomplete_case_ids=incomplete_case_ids,
         )
 
     def mean_metrics(self, variant_id: str) -> dict[str, float]:
@@ -403,9 +443,15 @@ class LocalEvaluationBackend:
             context=context,
             attributes={
                 "dataset_digest": request.dataset.manifest_digest,
-                "case_count": len(result.case_results),
+                "case_count": result.expected_pair_count,
+                "expected_pair_count": result.expected_pair_count,
+                "complete_pair_count": result.complete_pair_count,
+                "failed_pair_count": len(result.failed_pair_ids),
+                "failed_pair_ids": list(result.failed_pair_ids),
                 "baseline_failed_case_count": len(result.failed_case_ids(request.baseline.variant_id)),
+                "baseline_failed_case_ids": list(result.failed_case_ids(request.baseline.variant_id)),
                 "candidate_failed_case_count": len(result.failed_case_ids(request.candidate.variant_id)),
+                "candidate_failed_case_ids": list(result.failed_case_ids(request.candidate.variant_id)),
                 "baseline_variant_id": request.baseline.variant_id,
             },
             metrics=metrics,

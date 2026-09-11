@@ -12,18 +12,18 @@ call and retains the serialised trajectory. `EnterpriseOutcomeScorer` then adds:
 - `tool_error_rate`, from failed trajectory steps divided by total steps;
 - `cost_usd`, only if the model/provider placed a finite cost in trajectory
   metadata; and
-- host-supplied outcomes such as `task_success`, `customer_correction_rate`, and
-  `human_feedback_score` through `EnterpriseOutcomeProvider`.
+- host-supplied outcomes such as `task_success` and
+  `customer_correction_rate` through `EnterpriseOutcomeProvider`.
 
 The host loads real held-out input with `load_real_held_out_dataset`. Its
 `case_loader` receives only a safe `TraceLearningRecord`, resolves the approved
 source-run input in the host's own system, and returns an `EvaluationCase`.
-Lineage fields are set by the adapter. Neither raw input nor external customer
-feedback enters candidate mining or LLM skill drafting.
+Lineage fields are set by the adapter. Neither raw input nor customer outcome
+data enters candidate mining or LLM skill drafting.
 
 The existing local demo now evaluates policy compliance, latency, and tool-error
 rate. A production host can pass an `EnterpriseOutcomeProvider` to add its
-approved task, correction, and feedback outcomes.
+approved task and correction outcomes.
 
 Run the demo as a module so its sibling adapter file cannot shadow the
 `learning_control_plane` package:

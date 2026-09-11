@@ -36,6 +36,7 @@ async def test_local_end_to_end_loop_mines_evaluates_reviews_and_delivers_a_skil
             pattern_key="billing-refund",
             safe_summary="Verified the refund status with the billing system.",
             investigation_digest=f"sha256:investigation-{index}",
+            verified_success=True,
         )
         for index in range(5)
     )

@@ -45,10 +45,10 @@ continue to serve requests with their last valid configuration.
 | `control_plane.py` | Offline candidate registry, job lifecycle, and deterministic gate. |
 | `control_plane.md` | The MVP decision workflow and its safety boundary. |
 | `architecture.md` | Boundaries and evidence flow for the MVP. |
-| `MILESTONES.md` | Ordered delivery plan and completion criteria. |
+| `FULL_LOOP_RUN.md` | Start-to-finish local MVP setup, execution, and inspection guide. |
 
 Future code folders are intentionally not scaffolded yet. They will be created when
 their milestone introduces a real evaluation backend, control-plane workflow, or
 PenguiFlow provider.
 
-See [the milestones](MILESTONES.md) before adding production behavior.
+Start with [the full local run](FULL_LOOP_RUN.md) before connecting a real agent.

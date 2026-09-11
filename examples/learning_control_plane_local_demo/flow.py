@@ -46,6 +46,7 @@ async def run_demo(db_directory: Path) -> dict[str, str | list[str]]:
             pattern_key="billing-refund",
             safe_summary="Verified the refund status with the billing system.",
             investigation_digest=f"sha256:investigation-{index}",
+            verified_success=True,
         )
         for index in range(5)
     )

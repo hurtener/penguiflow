@@ -196,7 +196,8 @@ class LocalSkillStore:
         with sqlite3.connect(self._db_path) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             row = conn.execute(
-                "SELECT id, origin, content_hash FROM skills WHERE name = ?",
+                "SELECT id, origin, content_hash, origin_ref, scope_mode, "
+                "scope_tenant_id, scope_project_id FROM skills WHERE name = ?",
                 (skill.name,),
             ).fetchone()
             if row is None:
@@ -224,7 +225,31 @@ class LocalSkillStore:
             if str(row[1]) != "learned":
                 raise ValueError(f"learned skill name conflicts with {row[1]} skill: {skill.name}")
             if str(row[2]) == content_hash:
-                return False, False
+                provenance_matches = (
+                    str(row[3]) == authorization_id
+                    and str(row[4]) == scope_mode
+                    and row[5] == scope_tenant_id
+                    and row[6] == scope_project_id
+                )
+                if provenance_matches:
+                    return False, False
+                conn.execute(
+                    """
+                    UPDATE skills SET
+                        scope_mode = ?, scope_tenant_id = ?, scope_project_id = ?,
+                        origin_ref = ?, updated_at = ?
+                    WHERE name = ?
+                    """,
+                    (
+                        scope_mode,
+                        scope_tenant_id,
+                        scope_project_id,
+                        authorization_id,
+                        now,
+                        skill.name,
+                    ),
+                )
+                return False, True
             conn.execute(
                 """
                 UPDATE skills SET

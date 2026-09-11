@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
-from threading import Thread
+from threading import Event, Thread
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -15,13 +15,23 @@ from penguiflow.planner.trajectory import Trajectory
 from penguiflow.skills.local_store import LocalSkillStore
 from penguiflow.skills.models import SkillDefinition, SkillScopeMode, SkillTaskType
 
+from .assessment_publisher import InvestigationAssessmentPublisher
 from .control_plane import ActivationReceipt, AdvisorySkillCandidate, DeliveryAuthorization
 from .evaluation import EvaluationCase, EvaluationVariant
 from .evidence import EvidenceContext, EvidenceEvent, EvidenceSink
 from .investigation import InvestigationStatus, InvestigationTrajectoryV1, SourceTraceRef
 from .investigation_publisher import InvestigationPublisher
+from .verification import InvestigationVerification
 
 logger = logging.getLogger("learning_control_plane.penguiflow")
+
+
+class VerificationProjector(Protocol):
+    """Inspect a raw trajectory in-process and return only safe verification evidence."""
+
+    def __call__(self, trajectory: Trajectory) -> InvestigationVerification:
+        """Return redacted checks without retaining raw trajectory content."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +56,8 @@ class PenguiFlowInvestigationContext:
     provider_ref: str = "penguiflow"
     redaction_profile: str = "penguiflow-investigation-safe:v1"
     allowed_node_names: frozenset[str] = frozenset()
+    intent_descriptor: dict[str, str] | None = None
+    verification_projector: VerificationProjector | None = None
 
 
 class PenguiFlowInvestigationProjector:
@@ -63,18 +75,39 @@ class PenguiFlowInvestigationProjector:
     ) -> InvestigationTrajectoryV1:
         """Create a document without copying content-bearing trajectory fields."""
 
-        projected_steps = [
-            {
+        verification = self._project_verification(trajectory)
+        verification_by_index = {
+            evidence.step_index: evidence
+            for evidence in verification.step_evidence
+        } if verification is not None else {}
+        projected_steps: list[dict[str, Any]] = []
+        for index, step in enumerate(trajectory.steps):
+            projected_step: dict[str, Any] = {
                 "index": index,
                 "node": self._safe_node_name(step.action.next_node),
                 "status": "failed" if step.error or step.failure else "completed",
                 "has_observation": step.observation is not None,
                 "has_streams": bool(step.streams),
             }
-            for index, step in enumerate(trajectory.steps)
-        ]
+            step_evidence = verification_by_index.get(index)
+            if step_evidence is not None and step_evidence.node_name == projected_step["node"]:
+                projected_step.update(
+                    {
+                        "argument_facts": dict(step_evidence.argument_facts),
+                        "decision_reason_codes": list(step_evidence.decision_reason_codes),
+                        "result_checks": [check.record() for check in step_evidence.result_checks],
+                        "verified": step_evidence.verified,
+                    }
+                )
+            projected_steps.append(projected_step)
         step_signature = ">".join(str(step["node"]) for step in projected_steps) or "no_steps"
         finish_reason = trajectory.finish_reason or "unknown"
+        extensions: dict[str, Any] = {}
+        assessment_refs: tuple[str, ...] = ()
+        if verification is not None:
+            extensions["learning.verification"] = verification.record()
+            if verification.final_answer is not None:
+                assessment_refs = (verification.final_answer.assessment_ref,)
 
         return InvestigationTrajectoryV1(
             investigation_id=investigation_id or self._investigation_id(),
@@ -93,13 +126,27 @@ class PenguiFlowInvestigationProjector:
             steps=projected_steps,
             redaction_profile=self._context.redaction_profile,
             step_signature=step_signature,
+            intent_descriptor=self._context.intent_descriptor,
             execution_context={
                 "step_count": len(projected_steps),
                 "failed_step_count": sum(step["status"] == "failed" for step in projected_steps),
                 "has_final_answer": trajectory.final_answer is not None,
+                "verified_success": verification.verified_success if verification is not None else False,
             },
             termination_reason=_safe_termination_reason(finish_reason),
+            assessment_refs=assessment_refs,
+            extensions=extensions,
         )
+
+    def _project_verification(self, trajectory: Trajectory) -> InvestigationVerification | None:
+        projector = self._context.verification_projector
+        if projector is None:
+            return None
+        try:
+            return projector(trajectory)
+        except Exception:
+            logger.warning("PenguiFlow trajectory verification projection failed", exc_info=True)
+            return None
 
     def _investigation_id(self) -> str:
         source_trace_ref = self._context.source_trace_ref
@@ -120,6 +167,20 @@ class PenguiFlowInvestigationProjector:
         return "redacted_node"
 
 
+@dataclass(slots=True)
+class InvestigationPublication:
+    """Track the best-effort publication of one investigation document."""
+
+    completed: Event = field(default_factory=Event)
+    document: InvestigationTrajectoryV1 | None = None
+    digest: str | None = None
+
+    def wait(self, timeout_s: float) -> bool:
+        """Wait up to the supplied limit for the background publication."""
+
+        return self.completed.wait(timeout=timeout_s)
+
+
 class PenguiFlowInvestigationPublicationHook:
     """Publish a projected investigation after a completed PenguiFlow trajectory."""
 
@@ -127,26 +188,40 @@ class PenguiFlowInvestigationPublicationHook:
         self,
         projector: PenguiFlowInvestigationProjector,
         publisher: InvestigationPublisher,
+        assessment_publisher: InvestigationAssessmentPublisher | None = None,
     ) -> None:
         self._projector = projector
         self._publisher = publisher
+        self._assessment_publisher = assessment_publisher
 
-    def __call__(self, trajectory: Trajectory) -> None:
+    def __call__(self, trajectory: Trajectory) -> InvestigationPublication:
         """Publish in the background so an unavailable control plane cannot delay an agent."""
 
+        publication = InvestigationPublication()
         try:
-            Thread(target=self._publish, args=(trajectory,), daemon=True).start()
+            Thread(target=self._publish, args=(trajectory, publication), daemon=True).start()
         except Exception:
             logger.warning("PenguiFlow investigation publication hook failed", exc_info=True)
+            publication.completed.set()
+        return publication
 
-    def _publish(self, trajectory: Trajectory) -> None:
+    def _publish(self, trajectory: Trajectory, publication: InvestigationPublication) -> None:
         """Project before calling the publisher, so raw trajectory content cannot escape."""
 
         try:
             document = self._projector.project(trajectory, completed_at=datetime.now(UTC))
-            self._publisher.publish(document)
+            if self._assessment_publisher is not None:
+                try:
+                    self._assessment_publisher.publish(document)
+                except Exception:
+                    logger.warning("PenguiFlow investigation assessment publication failed", exc_info=True)
+            digest = self._publisher.publish(document)
+            publication.document = document
+            publication.digest = digest
         except Exception:
             logger.warning("PenguiFlow investigation publication failed", exc_info=True)
+        finally:
+            publication.completed.set()
 
 
 def project_trajectory(trajectory: Trajectory) -> TrajectoryProjection:
@@ -174,18 +249,19 @@ def compile_advisory_skill(
         raise ValueError("trigger must be non-empty")
 
     skill_name = f"learned.{_slug(candidate.candidate_id)}"
-    return SkillDefinition.model_validate(
-        {
-            "name": skill_name,
-            "title": title.strip() if title else f"Learned guidance: {candidate.candidate_id}",
-            "description": "Human-approved advisory guidance from the learning control plane.",
-            "trigger": cleaned_trigger,
-            "task_type": task_type,
-            "steps": [candidate.advisory_skill],
-            "lcp_candidate_id": candidate.candidate_id,
-            "lcp_source_trace_ids": list(candidate.source_trace_ids),
-        }
-    )
+    definition = {
+        "name": skill_name,
+        "title": title.strip() if title else f"Learned guidance: {candidate.candidate_id}",
+        "description": "Human-approved advisory guidance from the learning control plane.",
+        "trigger": cleaned_trigger,
+        "task_type": task_type,
+        "steps": [candidate.advisory_skill],
+        "lcp_candidate_id": candidate.candidate_id,
+        "lcp_source_trace_ids": list(candidate.source_trace_ids),
+    }
+    if candidate.optimization_goal is not None:
+        definition["lcp_optimization_goal"] = candidate.optimization_goal
+    return SkillDefinition.model_validate(definition)
 
 
 class PlannerFactory(Protocol):
@@ -319,6 +395,7 @@ class ScopedSkillActivationAdapter:
             scope_ref=authorization.scope_ref,
             provider_ref=f"penguiflow.skills:{stored[0].id}",
             delivered_at=delivered_at,
+            skill_digest=f"sha256:{stored[0].content_hash}",
             investigation_digests=authorization.investigation_digests,
         )
 
@@ -383,6 +460,7 @@ def _slug(value: str) -> str:
 __all__ = [
     "PenguiFlowEvaluationRunner",
     "PenguiFlowInvestigationContext",
+    "InvestigationPublication",
     "PenguiFlowInvestigationProjector",
     "PenguiFlowInvestigationPublicationHook",
     "PenguiFlowTracePublisher",

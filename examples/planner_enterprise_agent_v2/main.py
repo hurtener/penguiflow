@@ -42,6 +42,7 @@ from examples.planner_enterprise_agent_v2.telemetry import AgentTelemetry
 from learning_control_plane.investigation import SourceTraceRef
 from learning_control_plane.investigation_publisher import InvestigationPublisher, MlflowAttachmentPublisher
 from learning_control_plane.penguiflow import (
+    InvestigationPublication,
     PenguiFlowInvestigationContext,
     PenguiFlowInvestigationProjector,
     PenguiFlowInvestigationPublicationHook,
@@ -63,6 +64,7 @@ from penguiflow.skills import SkillProvider, SkillsConfig
 # Global buffers for demonstration (in production: use message queue/websocket)
 STATUS_BUFFER: defaultdict[str, list[StatusUpdate]] = defaultdict(list)
 EXECUTION_LOGS: list[str] = []
+INVESTIGATION_PUBLICATION_FLUSH_TIMEOUT_S = 10.0
 
 
 def _coerce_final_answer(payload: Any, planner_meta: Mapping[str, Any]) -> FinalAnswer:
@@ -142,6 +144,7 @@ class EnterpriseAgentOrchestrator:
         skills_provider: SkillProvider | None = None,
         on_trajectory_complete: Callable[[Trajectory], None] | None = None,
         investigation_publisher: InvestigationPublisher | None = None,
+        capture_investigation_publications: bool = False,
     ) -> None:
         self.config = config
         self.telemetry = telemetry or AgentTelemetry(config)
@@ -150,6 +153,8 @@ class EnterpriseAgentOrchestrator:
         self._skills_provider = skills_provider
         self._on_trajectory_complete = on_trajectory_complete
         self._investigation_publisher = investigation_publisher
+        self._capture_investigation_publications = capture_investigation_publications
+        self._pending_investigation_publications: list[InvestigationPublication] = []
         self._investigation_publishing_enabled = self._investigation_publishing_is_configured()
         self._configure_investigation_tracking()
 
@@ -690,7 +695,27 @@ When context is provided, use it appropriately to enhance your responses.
             PenguiFlowInvestigationProjector(context),
             publisher,
         )
-        hook(trajectory)
+        publication = hook(trajectory)
+        if self._capture_investigation_publications:
+            self._pending_investigation_publications.append(publication)
+
+    def wait_for_investigation_publications(self, timeout_s: float) -> list[InvestigationPublication]:
+        """Wait for CLI-captured publications without affecting Planner request execution."""
+
+        publications = self._pending_investigation_publications
+        self._pending_investigation_publications = []
+        completed_publications: list[InvestigationPublication] = []
+
+        for publication in publications:
+            if publication.wait(timeout_s):
+                completed_publications.append(publication)
+            else:
+                self.telemetry.logger.warning(
+                    "lcp_investigation_publication_timeout",
+                    extra={"timeout_s": timeout_s},
+                )
+
+        return completed_publications
 
     def _investigation_context(self, trajectory: Trajectory) -> PenguiFlowInvestigationContext:
         """Build the trusted run identity used by the redaction-first projector."""
@@ -821,7 +846,10 @@ Examples:
     config = AgentConfig.from_env()
 
     # Create orchestrator
-    agent = EnterpriseAgentOrchestrator(config)
+    agent = EnterpriseAgentOrchestrator(
+        config,
+        capture_investigation_publications=True,
+    )
 
     # Determine which queries to run
     if args.query:
@@ -897,6 +925,18 @@ Examples:
                 print("\nMetadata:")
                 for key, value in result.metadata.items():
                     print(f"  {key}: {value}")
+
+            completed_publications = agent.wait_for_investigation_publications(
+                INVESTIGATION_PUBLICATION_FLUSH_TIMEOUT_S
+            )
+            for publication in completed_publications:
+                if publication.document is None or publication.digest is None:
+                    agent.telemetry.logger.warning("lcp_investigation_publication_failed")
+                    continue
+                print("\nLearning control plane investigation:")
+                print(f"  investigation_id: {publication.document.investigation_id}")
+                print(f"  digest: {publication.digest}")
+                print(f"  source_trace_ref: {publication.document.source_trace_ref}")
 
         except Exception as exc:
             if args.stream:

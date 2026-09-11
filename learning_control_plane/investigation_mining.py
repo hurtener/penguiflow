@@ -17,6 +17,7 @@ from .investigation_publisher import (
     INVESTIGATION_ID_TAG,
 )
 from .mining import TraceCohorts, TraceLearningRecord, reserve_later_held_out_cohort
+from .verification import VERIFICATION_SCHEMA_VERSION
 
 
 def _non_empty(value: str, field_name: str) -> str:
@@ -238,14 +239,21 @@ def _verify_trace_index(tags: Mapping[str, str], document: InvestigationTrajecto
             raise ValueError(f"MLflow investigation tag {name!r} does not match the attachment")
 
 
-def _safe_learning_record(document: InvestigationTrajectoryV1) -> TraceLearningRecord:
+def _safe_learning_record(
+    document: InvestigationTrajectoryV1,
+) -> TraceLearningRecord:
     execution_context = document.execution_context
+    intent_class = _safe_intent_class(document.intent_descriptor)
+    verified_success = _verified_success(document)
+    safe_evidence = _project_verification_evidence(document)
     safe_summary = (
+        f"intent_class={intent_class}; "
         f"step_signature={document.step_signature}; "
         f"step_count={len(document.steps)}; "
         f"failed_step_count={_safe_non_negative_count(execution_context.get('failed_step_count'))}; "
         f"has_text={_safe_boolean(document.request.get('has_text'))}; "
-        f"input_part_count={_safe_non_negative_count(document.request.get('input_part_count'))}"
+        f"input_part_count={_safe_non_negative_count(document.request.get('input_part_count'))}; "
+        f"verified_success={verified_success}"
     )
     return TraceLearningRecord(
         trace_id=document.source_trace_ref.mlflow_trace_id,
@@ -257,9 +265,104 @@ def _safe_learning_record(document: InvestigationTrajectoryV1) -> TraceLearningR
         ),
         recorded_at=document.started_at,
         successful=document.status == "completed",
-        pattern_key=document.step_signature,
+        pattern_key=_pattern_key(intent_class, document.step_signature),
         safe_summary=safe_summary,
         investigation_digest=document.digest(),
+        intent_class=intent_class,
+        verified_success=verified_success,
+        safe_evidence=safe_evidence,
+    )
+
+
+def _project_verification_evidence(document: InvestigationTrajectoryV1) -> dict[str, Any]:
+    """Select the redacted verification fields useful for skill drafting."""
+
+    verification = document.extensions.get("learning.verification")
+    if not isinstance(verification, Mapping):
+        return {}
+    if verification.get("schema_version") != VERIFICATION_SCHEMA_VERSION:
+        return {}
+
+    step_evidence: list[dict[str, Any]] = []
+    raw_steps = verification.get("step_evidence")
+    if isinstance(raw_steps, Sequence) and not isinstance(raw_steps, (str, bytes)):
+        for raw_step in raw_steps:
+            if not isinstance(raw_step, Mapping):
+                continue
+            step = _selected_fields(
+                raw_step,
+                (
+                    "step_index",
+                    "node_name",
+                    "argument_facts",
+                    "decision_reason_codes",
+                    "verified",
+                ),
+            )
+            raw_checks = raw_step.get("result_checks")
+            if isinstance(raw_checks, Sequence) and not isinstance(raw_checks, (str, bytes)):
+                step["result_checks"] = [
+                    _selected_fields(check, ("check_id", "status", "reason_codes"))
+                    for check in raw_checks
+                    if isinstance(check, Mapping)
+                ]
+            step_evidence.append(step)
+
+    evidence: dict[str, Any] = {
+        "schema_version": verification["schema_version"],
+        "verified_success": verification.get("verified_success") is True,
+        "step_evidence": step_evidence,
+    }
+    final_answer = verification.get("final_answer")
+    if isinstance(final_answer, Mapping):
+        projected_answer = _selected_fields(
+            final_answer,
+            (
+                "rubric_version",
+                "minimum_score",
+                "score",
+                "passed",
+                "hard_failure_codes",
+            ),
+        )
+        criteria = final_answer.get("criteria")
+        if isinstance(criteria, Sequence) and not isinstance(criteria, (str, bytes)):
+            projected_answer["criteria"] = [
+                _selected_fields(
+                    criterion,
+                    ("criterion_id", "status", "score", "reason_codes"),
+                )
+                for criterion in criteria
+                if isinstance(criterion, Mapping)
+            ]
+        evidence["final_answer"] = projected_answer
+
+    policy_compliance = verification.get("policy_compliance")
+    if isinstance(policy_compliance, Mapping):
+        evidence["policy_compliance"] = _selected_fields(
+            policy_compliance,
+            ("check_id", "status", "reason_codes"),
+        )
+    return evidence
+
+
+def _selected_fields(record: Mapping[str, Any], names: Sequence[str]) -> dict[str, Any]:
+    """Copy only declared fields from one safe verification record."""
+
+    return {name: record[name] for name in names if name in record}
+
+
+def _verified_success(document: InvestigationTrajectoryV1) -> bool:
+    """Trust only a versioned verification extension with assessment lineage."""
+
+    verification = document.extensions.get("learning.verification")
+    if not isinstance(verification, Mapping):
+        return False
+    return (
+        verification.get("schema_version") == VERIFICATION_SCHEMA_VERSION
+        and verification.get("verified_success") is True
+        and bool(document.assessment_refs)
+        and document.execution_context.get("verified_success") is True
     )
 
 
@@ -271,6 +374,25 @@ def _safe_non_negative_count(value: object) -> int:
 
 def _safe_boolean(value: object) -> bool:
     return value if isinstance(value, bool) else False
+
+
+def _safe_intent_class(intent_descriptor: Mapping[str, Any] | None) -> str:
+    """Return the optional integration-owned workflow label, or ``unknown``."""
+
+    if intent_descriptor is None:
+        return "unknown"
+    value = intent_descriptor.get("class")
+    if not isinstance(value, str) or not value.strip():
+        return "unknown"
+    return value.strip()
+
+
+def _pattern_key(intent_class: str, step_signature: str) -> str:
+    """Keep legacy signatures stable while separating explicitly labelled workflows."""
+
+    if intent_class == "unknown":
+        return step_signature
+    return f"{intent_class}:{step_signature}"
 
 
 def build_held_out_evaluation_cases(

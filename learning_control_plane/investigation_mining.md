@@ -19,11 +19,14 @@ source time, source trace ID, investigation digest, step signature, and a fixed
 summary of counts and booleans. It does not include request text, step payloads,
 observations, final output, or attachment bytes.
 
-Use `load_cohorts(..., held_out_count=N)` to reserve the newest verified records
-before mining earlier successful records. To evaluate that held-out cohort, call
-`build_held_out_evaluation_cases(records, build_case)`. The host owns
-`build_case`: it may retrieve approved real evaluation input through the native
-run reference, but raw input does not enter the mining or drafting boundary.
+Use `load_cohorts(..., held_out_count=N)` to optionally reserve the newest
+verified records before mining earlier successful records. Pass
+`held_out_count=0` when the host has a separately frozen evaluation dataset and
+all selected traces are intended as training evidence. To evaluate a reserved
+cohort, call `build_held_out_evaluation_cases(records, build_case)`. The host
+owns `build_case`: it may retrieve approved real evaluation input through the
+native run reference, but raw input does not enter the mining or drafting
+boundary.
 
 Try the local end-to-end attachment reading flow with:
 

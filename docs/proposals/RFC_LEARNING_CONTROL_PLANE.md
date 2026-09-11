@@ -1,5 +1,11 @@
 # RFC: Learning Control Plane (Agent Self-Improvement)
 
+> **Current MVP scope:** this RFC records a broader earlier design. The active
+> implementation does not use Iceberg user feedback as a mining or evaluation
+> signal and does not learn auto-sequence edges. It learns advisory skills from
+> automatically verified traces, tests them on held-out cases, and applies
+> automated metric gates before the existing approval and scoped-delivery steps.
+
 - **Status:** Draft v0.9
 - **Date:** 2026-07-08
 - **Target:** 3.12+ (lands after the trace-derived evals stack, PR #115 pending merge)

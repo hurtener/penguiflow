@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +16,12 @@ from learning_control_plane.investigation_mining import (
     build_held_out_evaluation_cases,
 )
 from learning_control_plane.investigation_publisher import INVESTIGATION_DIGEST_TAG, INVESTIGATION_ID_TAG
+from learning_control_plane.verification import (
+    InvestigationVerification,
+    SafeStepEvidence,
+    VerificationCheck,
+    score_final_answer,
+)
 
 
 def _investigation(index: int) -> InvestigationTrajectoryV1:
@@ -36,6 +44,41 @@ def _investigation(index: int) -> InvestigationTrajectoryV1:
         redaction_profile="safe:v1",
         step_signature="classify>plan",
         execution_context={"failed_step_count": 0, "unsafe_detail": "must never reach a skill drafter"},
+    )
+
+
+def _verified_investigation(index: int) -> InvestigationTrajectoryV1:
+    document = _investigation(index)
+    criterion_ids = (
+        "factual_numerical_correctness",
+        "scope_correctness",
+        "evidence_grounding",
+        "completeness",
+        "interpretation_correctness",
+    )
+    assessment = score_final_answer(
+        {criterion_id: VerificationCheck(criterion_id, "passed") for criterion_id in criterion_ids}
+    )
+    verification = InvestigationVerification(
+        step_evidence=(
+            SafeStepEvidence(
+                step_index=0,
+                node_name="classify",
+                argument_facts={
+                    "metric_names": ("ctr",),
+                    "filter_count": 1,
+                },
+                decision_reason_codes=("requested_exact_aggregation",),
+                result_checks=(VerificationCheck("tool_execution", "passed"),),
+            ),
+        ),
+        final_answer=assessment,
+    )
+    return replace(
+        document,
+        execution_context={**document.execution_context, "verified_success": True},
+        assessment_refs=(assessment.assessment_ref,),
+        extensions={"learning.verification": verification.record()},
     )
 
 
@@ -68,12 +111,12 @@ class _FakeMlflow:
     def search_traces(
         self,
         *,
-        locations: list[str],
+        locations: Sequence[str],
         filter_string: str,
         return_type: str,
-    ) -> list[_FakeTrace]:
+    ) -> Sequence[_FakeTrace]:
         assert return_type == "list"
-        self.searches.append((locations, filter_string))
+        self.searches.append((list(locations), filter_string))
         return self.traces
 
 
@@ -98,9 +141,7 @@ def _stored_trace(document: InvestigationTrajectoryV1, attachment_id: str) -> _F
             }
         ),
         data=_FakeTraceData(
-            spans=(
-                _FakeSpan(outputs={"learning.investigation_trajectory": f"attachment://{attachment_id}"}),
-            )
+            spans=(_FakeSpan(outputs={"learning.investigation_trajectory": f"attachment://{attachment_id}"}),)
         ),
     )
 
@@ -128,15 +169,64 @@ def test_reader_returns_only_allowlisted_safe_records_in_source_time_order() -> 
 
     assert [record.trace_id for record in records] == ["source-trace-1", "source-trace-2"]
     assert records[0].pattern_key == "classify>plan"
+    assert records[0].intent_class == "unknown"
     assert records[0].investigation_digest == older.digest()
     assert records[0].safe_summary == (
-        "step_signature=classify>plan; step_count=1; failed_step_count=0; has_text=True; input_part_count=1"
+        "intent_class=unknown; step_signature=classify>plan; step_count=1; "
+        "failed_step_count=0; has_text=True; input_part_count=1; verified_success=False"
     )
+    assert records[0].verified_success is False
     assert "raw_query" not in records[0].safe_summary
     assert "raw_observation" not in records[0].safe_summary
-    assert mlflow.searches == [
-        (["experiment-42"], 'tags.`learning.investigation.status` = "completed"')
-    ]
+    assert mlflow.searches == [(["experiment-42"], 'tags.`learning.investigation.status` = "completed"')]
+
+
+def test_reader_uses_a_safe_intent_class_to_separate_an_explicit_workflow() -> None:
+    document = _investigation(1)
+    document = replace(document, intent_descriptor={"class": "delivery-aggregation"})
+    reader, _ = _reader((document,))
+
+    records = reader.load_records(InvestigationSelection(experiment_id="experiment-42"))
+
+    assert records[0].intent_class == "delivery-aggregation"
+    assert records[0].pattern_key == "delivery-aggregation:classify>plan"
+    assert records[0].safe_summary.startswith("intent_class=delivery-aggregation;")
+
+
+def test_reader_marks_only_versioned_assessed_documents_as_verified() -> None:
+    reader, _ = _reader((_verified_investigation(1), _investigation(2)))
+
+    records = reader.load_records(InvestigationSelection(experiment_id="experiment-42"))
+
+    assert records[0].verified_success is True
+    assert records[1].verified_success is False
+
+
+def test_reader_projects_safe_verification_evidence_and_drops_unknown_fields() -> None:
+    document = _verified_investigation(1)
+    verification = dict(document.extensions["learning.verification"])
+    verification["raw_answer"] = "customer_raw_secret"
+    steps = [dict(step) for step in verification["step_evidence"]]
+    steps[0]["raw_arguments"] = {"campaign": "customer_raw_secret"}
+    verification["step_evidence"] = steps
+    document = replace(
+        document,
+        extensions={"learning.verification": verification},
+    )
+    reader, _ = _reader((document,))
+
+    record = reader.load_records(InvestigationSelection(experiment_id="experiment-42"))[0]
+
+    encoded_evidence = json.dumps(record.safe_evidence, sort_keys=True)
+    assert record.safe_evidence["verified_success"] is True
+    assert record.safe_evidence["step_evidence"][0]["argument_facts"] == {
+        "metric_names": ("ctr",),
+        "filter_count": 1,
+    }
+    assert "requested_exact_aggregation" in encoded_evidence
+    assert "customer_raw_secret" not in encoded_evidence
+    assert "raw_answer" not in encoded_evidence
+    assert "raw_arguments" not in encoded_evidence
 
 
 def test_reader_rejects_an_attachment_with_a_digest_that_does_not_match_its_trace_tag() -> None:

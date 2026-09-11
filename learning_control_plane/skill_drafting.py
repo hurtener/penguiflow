@@ -128,6 +128,7 @@ def build_skill_drafting_prompt(pattern: TracePattern) -> str:
         "pattern_key": pattern.pattern_key,
         "success_count": len(pattern.source_trace_ids),
         "safe_summaries": list(pattern.safe_summaries),
+        "safe_evidence_records": list(pattern.safe_evidence),
         "investigation_digests": list(pattern.source_investigation_digests),
     }
     evidence = json.dumps(safe_pattern, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -137,6 +138,7 @@ def build_skill_drafting_prompt(pattern: TracePattern) -> str:
             "The skill is optional guidance. It cannot grant permissions, force tool calls, run code,",
             "change policies, or claim facts not present in the evidence.",
             "Return JSON only with exactly these string fields: title, trigger, advisory_skill, rationale.",
+            "Start the response with { and end it with }; do not add prose or Markdown fences.",
             "Do not include code, commands, credentials, tool-call syntax, or policy-bypass instructions.",
             "REDACTED_EVIDENCE_JSON:",
             evidence,
@@ -145,10 +147,14 @@ def build_skill_drafting_prompt(pattern: TracePattern) -> str:
 
 
 def _draft_fields(raw_response: str) -> dict[str, str]:
+    response_digest = _digest(raw_response)
+    json_text = _standalone_json_text(raw_response, response_digest)
     try:
-        payload = json.loads(raw_response)
+        payload = json.loads(json_text)
     except json.JSONDecodeError as error:
-        raise ValueError("skill drafter must return one JSON object") from error
+        raise ValueError(
+            f"skill drafter must return one valid JSON object; response_digest={response_digest}"
+        ) from error
     if not isinstance(payload, dict) or set(payload) != set(_REQUIRED_DRAFT_FIELDS):
         raise ValueError("skill drafter response must contain exactly title, trigger, advisory_skill, and rationale")
 
@@ -159,6 +165,25 @@ def _draft_fields(raw_response: str) -> dict[str, str]:
             raise ValueError(f"skill drafter field {field_name!r} must be a string")
         fields[field_name] = value
     return fields
+
+
+def _standalone_json_text(raw_response: str, response_digest: str) -> str:
+    """Return raw JSON or unwrap one standalone Markdown JSON code fence."""
+
+    cleaned_response = raw_response.strip()
+    if not cleaned_response.startswith("```"):
+        return cleaned_response
+
+    lines = cleaned_response.splitlines()
+    has_supported_opening = bool(lines) and lines[0].strip().casefold() in {
+        "```",
+        "```json",
+    }
+    has_closing_fence = len(lines) >= 3 and lines[-1].strip() == "```"
+    if not has_supported_opening or not has_closing_fence:
+        raise ValueError(f"skill drafter returned an invalid JSON code fence; response_digest={response_digest}")
+
+    return "\n".join(lines[1:-1]).strip()
 
 
 def _validated_text(

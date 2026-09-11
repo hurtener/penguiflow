@@ -89,7 +89,6 @@ async def run_learning_loop(args: argparse.Namespace) -> dict[str, Any]:
                 MetricSpecification("tool_error_rate", direction="lower_is_better"),
                 MetricSpecification("cost_usd", direction="lower_is_better"),
                 MetricSpecification("customer_correction_rate", direction="lower_is_better"),
-                MetricSpecification("human_feedback_score"),
             ),
             minimum_primary_improvement=args.minimum_task_success_improvement,
             protected_metrics=("policy_compliance", "latency_ms", "tool_error_rate"),
