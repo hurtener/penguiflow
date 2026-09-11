@@ -51,7 +51,7 @@ from .tool_get_tool import tool_get as tool_get_tool
 from .tool_search_cache import ToolSearchCache
 from .tool_search_tool import ToolSearchArgs, ToolSearchResponse
 from .tool_search_tool import tool_search as tool_search_tool
-from .trajectory import TrajectorySummary
+from .trajectory import Trajectory, TrajectorySummary
 
 logger = logging.getLogger("penguiflow.planner")
 
@@ -152,6 +152,7 @@ def init_react_planner(
     hop_budget: int | None = None,
     time_source: Callable[[], float] | None = None,
     event_callback: Any | None = None,
+    on_trajectory_complete: Callable[[Trajectory], None] | None = None,
     llm_timeout_s: float = 360.0,
     llm_max_retries: int = 3,
     use_native_reasoning: bool = True,
@@ -551,6 +552,7 @@ def init_react_planner(
     planner._observation_guardrail = observation_guardrail or ObservationGuardrailConfig()
 
     planner._pause_records = {}
+    planner._pending_persistence_tasks = {}
     planner._active_trajectory = None
     planner._active_tracker = None
 
@@ -565,6 +567,7 @@ def init_react_planner(
     planner._hop_budget = hop_budget
     planner._time_source = time_source or time.monotonic
     planner._event_callback = event_callback
+    planner._on_trajectory_complete = on_trajectory_complete
     planner._event_buffer = []
     planner._absolute_max_parallel = absolute_max_parallel
     planner._use_native_reasoning = use_native_reasoning

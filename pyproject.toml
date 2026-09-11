@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "penguiflow"
-version = "3.11.2"
+version = "3.12.0"
 description = "Async-first orchestration library for multi-agent and data pipelines"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,6 +20,7 @@ dependencies = [
     "uvicorn>=0.32",
     "databricks-mcp>=0.6.0",
     "mcp>=1.26,<2",
+    "mlflow==3.12.0",
 ]
 
 [project.optional-dependencies]
@@ -46,6 +47,7 @@ dev = [
     "grpcio-tools>=1.70.0",
     "googleapis-common-protos>=1.66.0",
     "protobuf>=5.26.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.39.0,<2",
     # LLM provider SDKs for testing native LLM layer
     "openai>=2.0.0",
     "anthropic>=0.75.0",
@@ -121,7 +123,7 @@ penguiflow = "penguiflow.cli.main:app"
 Homepage = "https://github.com/hurtener/penguiflow"
 
 [tool.setuptools]
-packages = { find = { include = ["penguiflow*", "penguiflow_a2a*", "examples*"] } }
+packages = { find = { include = ["penguiflow*", "penguiflow_a2a*", "learning_control_plane*", "examples*"] } }
 include-package-data = true
 
 [tool.setuptools.exclude-package-data]
@@ -179,6 +181,7 @@ dev = [
     "grpcio-tools>=1.70.0",
     "googleapis-common-protos>=1.66.0",
     "protobuf>=5.26.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.39.0,<2",
     # LLM provider SDKs for native LLM layer tests
     "openai>=2.0.0",
     "anthropic>=0.75.0",

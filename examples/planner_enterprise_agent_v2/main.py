@@ -14,9 +14,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import json
 import logging
 import sys
 from collections import defaultdict
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -35,6 +39,14 @@ from examples.planner_enterprise_agent_v2.nodes import (
     triage_query,
 )
 from examples.planner_enterprise_agent_v2.telemetry import AgentTelemetry
+from learning_control_plane.investigation import SourceTraceRef
+from learning_control_plane.investigation_publisher import InvestigationPublisher, MlflowAttachmentPublisher
+from learning_control_plane.penguiflow import (
+    InvestigationPublication,
+    PenguiFlowInvestigationContext,
+    PenguiFlowInvestigationProjector,
+    PenguiFlowInvestigationPublicationHook,
+)
 from penguiflow.catalog import build_catalog
 from penguiflow.node import Node
 from penguiflow.planner import (
@@ -45,11 +57,62 @@ from penguiflow.planner import (
     ReflectionCriteria,
     ToolPolicy,
 )
+from penguiflow.planner.trajectory import Trajectory
 from penguiflow.registry import ModelRegistry
+from penguiflow.skills import SkillProvider, SkillsConfig
 
 # Global buffers for demonstration (in production: use message queue/websocket)
 STATUS_BUFFER: defaultdict[str, list[StatusUpdate]] = defaultdict(list)
 EXECUTION_LOGS: list[str] = []
+INVESTIGATION_PUBLICATION_FLUSH_TIMEOUT_S = 10.0
+
+
+def _coerce_final_answer(payload: Any, planner_meta: Mapping[str, Any]) -> FinalAnswer:
+    """Coerce planner payloads into FinalAnswer for resilient eval runs.
+
+    Why: provider/model payloads can vary (`raw_answer`, `answer`, `text`), and
+    the example should stay runnable without requiring provider-specific glue.
+    """
+
+    if isinstance(payload, Mapping):
+        text_value = payload.get("text") or payload.get("answer") or payload.get("raw_answer")
+        if text_value is not None:
+            return FinalAnswer(
+                text=str(text_value),
+                route=str(payload.get("route") or planner_meta.get("route") or "general"),
+                artifacts=dict(payload.get("artifacts", {})) if isinstance(payload.get("artifacts"), Mapping) else {},
+                metadata=dict(payload.get("metadata", {})) if isinstance(payload.get("metadata"), Mapping) else {},
+            )
+    return FinalAnswer.model_validate(payload)
+
+
+def _deployment_fingerprint(config: AgentConfig) -> str:
+    """Return a stable identifier for the Planner configuration being evaluated."""
+
+    identity = {
+        "agent_name": config.agent_name,
+        "llm_model": config.llm_model,
+        "planner_max_iters": config.planner_max_iters,
+        "planner_token_budget": config.planner_token_budget,
+        "reflection_enabled": config.reflection_enabled,
+        "tool_policy_enabled": config.tool_policy_enabled,
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _investigation_started_at(value: object) -> datetime:
+    """Return the per-run start time stored in private planner tool context."""
+
+    if not isinstance(value, str):
+        return datetime.now(UTC)
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return datetime.now(UTC)
+    if parsed.tzinfo is None:
+        return datetime.now(UTC)
+    return parsed
 
 
 class EnterpriseAgentOrchestrator:
@@ -76,9 +139,24 @@ class EnterpriseAgentOrchestrator:
         config: AgentConfig,
         *,
         telemetry: AgentTelemetry | None = None,
+        state_store: Any | None = None,
+        skills: SkillsConfig | None = None,
+        skills_provider: SkillProvider | None = None,
+        on_trajectory_complete: Callable[[Trajectory], None] | None = None,
+        investigation_publisher: InvestigationPublisher | None = None,
+        capture_investigation_publications: bool = False,
     ) -> None:
         self.config = config
         self.telemetry = telemetry or AgentTelemetry(config)
+        self._state_store = state_store
+        self._skills = skills
+        self._skills_provider = skills_provider
+        self._on_trajectory_complete = on_trajectory_complete
+        self._investigation_publisher = investigation_publisher
+        self._capture_investigation_publications = capture_investigation_publications
+        self._pending_investigation_publications: list[InvestigationPublication] = []
+        self._investigation_publishing_enabled = self._investigation_publishing_is_configured()
+        self._configure_investigation_tracking()
 
         # Configure logging
         logging.basicConfig(
@@ -101,6 +179,31 @@ class EnterpriseAgentOrchestrator:
                 "node_count": len(self._nodes),
             },
         )
+
+    def _investigation_publishing_is_configured(self) -> bool:
+        """Return whether this process has the complete opt-in publication configuration."""
+
+        if not self.config.lcp_investigation_publishing_enabled:
+            return False
+        if self.config.lcp_mlflow_experiment_id and self.config.lcp_mlflow_tracking_store_ref:
+            return True
+        self.telemetry.logger.warning(
+            "lcp_investigation_publishing_disabled",
+            extra={"reason": "missing LCP_MLFLOW_EXPERIMENT_ID or LCP_MLFLOW_TRACKING_STORE_REF"},
+        )
+        return False
+
+    def _configure_investigation_tracking(self) -> None:
+        """Configure MLflow for the optional publisher without blocking Planner startup."""
+
+        if not self._investigation_publishing_enabled or not self.config.mlflow_tracking_uri:
+            return
+        try:
+            import mlflow
+
+            mlflow.set_tracking_uri(self.config.mlflow_tracking_uri)
+        except Exception:
+            self.telemetry.logger.warning("lcp_investigation_tracking_configuration_failed", exc_info=True)
 
     def _build_nodes(self) -> list[Node]:
         """Construct all planner-discoverable nodes.
@@ -204,11 +307,9 @@ class EnterpriseAgentOrchestrator:
         """
         catalog = build_catalog(self._nodes, self._registry)
 
-        # Use DSPy for better structured output handling across providers
-        # DSPy is especially beneficial for models that don't support native
-        # JSON schema mode (like Databricks, Cerebras), but works well with all providers
-        # Can be explicitly enabled via DSPY_CLIENT=true env var
-        use_dspy = self.config.use_dspy_client or self.config.llm_model.startswith("databricks/")
+        # Keep DSPy opt-in so eval/CLI flows can run with the native client for
+        # providers that expose OpenAI-compatible endpoints.
+        use_dspy = self.config.use_dspy_client
 
         # Configure LLM client
         llm_client = None
@@ -280,11 +381,15 @@ class EnterpriseAgentOrchestrator:
                 extra={"hints": planning_hints},
             )
 
-        # V2: Configure state store for durable pause/resume
-        state_store = None
-        if self.config.state_store_enabled:
-            # In production, use Redis, SQLite, or other durable backend
-            # For now, we'll pass None to use in-memory storage
+        # V2: Configure state store for durable pause/resume.
+        # Prefer injected store (e.g. playground/dev), fallback to config behavior.
+        state_store = self._state_store
+        if state_store is not None:
+            self.telemetry.logger.info(
+                "state_store_injected",
+                extra={"backend": type(state_store).__name__},
+            )
+        elif self.config.state_store_enabled:
             self.telemetry.logger.info(
                 "state_store_enabled",
                 extra={"backend": self.config.state_store_backend},
@@ -336,8 +441,11 @@ When context is provided, use it appropriately to enhance your responses.
             tool_policy=tool_policy,
             planning_hints=planning_hints,
             state_store=state_store,
+            skills=self._skills,
+            skills_provider=self._skills_provider,
             # Wire up telemetry callback
             event_callback=self.telemetry.record_planner_event,
+            on_trajectory_complete=self._on_trajectory_complete_callback,
         )
 
         self.telemetry.logger.info(
@@ -361,6 +469,8 @@ When context is provided, use it appropriately to enhance your responses.
         *,
         tenant_id: str = "default",
         memories: list[dict[str, Any]] | None = None,
+        session_id: str | None = None,
+        tool_context: Mapping[str, Any] | None = None,
     ) -> FinalAnswer:
         """Execute agent planning for a user query.
 
@@ -386,7 +496,10 @@ When context is provided, use it appropriately to enhance your responses.
             ... ]
             >>> result = await agent.execute("What was deployed?", memories=memories)
         """
-        trace_id = uuid4().hex
+        incoming_tool_context = dict(tool_context or {})
+        resolved_tenant_id = str(incoming_tool_context.get("tenant_id") or tenant_id)
+        resolved_session_id = str(incoming_tool_context.get("session_id") or session_id or "default")
+        trace_id = str(incoming_tool_context.get("trace_id") or uuid4().hex)
         status_history: list[StatusUpdate] = STATUS_BUFFER[trace_id]
         status_history_for_llm: list[dict[str, Any]] = []
 
@@ -429,17 +542,21 @@ When context is provided, use it appropriately to enhance your responses.
             llm_context["memories"] = memories
 
         # Node metadata - internal concerns only
-        tool_context: dict[str, Any] = {
-            "tenant_id": tenant_id,
+        planner_tool_context: dict[str, Any] = {
+            "tenant_id": resolved_tenant_id,
+            "session_id": resolved_session_id,
             "trace_id": trace_id,
             "status_publisher": publish_status,
             "telemetry": self.telemetry,
             "status_logger": self.telemetry.logger,
+            "lcp_investigation_started_at": datetime.now(UTC).isoformat(),
         }
+        if "user_id" in incoming_tool_context:
+            planner_tool_context["user_id"] = incoming_tool_context["user_id"]
 
         self.telemetry.logger.info(
             "execute_start",
-            extra={"query": query, "tenant_id": tenant_id, "trace_id": trace_id},
+            extra={"query": query, "tenant_id": resolved_tenant_id, "trace_id": trace_id},
         )
 
         finish: FinalAnswer | None = None
@@ -448,7 +565,7 @@ When context is provided, use it appropriately to enhance your responses.
             planner_result = await self._planner.run(
                 query=query,
                 llm_context=llm_context,
-                tool_context=tool_context,
+                tool_context=planner_tool_context,
             )
 
             if isinstance(planner_result, PlannerPause):
@@ -468,12 +585,15 @@ When context is provided, use it appropriately to enhance your responses.
                     },
                 )
             elif planner_result.reason == "answer_complete":
-                final_answer = FinalAnswer.model_validate(planner_result.payload)
-                metadata = dict(final_answer.metadata)
                 planner_meta = dict(planner_result.metadata)
+                final_answer = _coerce_final_answer(planner_result.payload, planner_meta)
+                metadata = dict(final_answer.metadata)
                 metadata.setdefault("trace_id", trace_id)
                 if planner_meta:
                     metadata.setdefault("planner", planner_meta)
+                    answer_action_seq = planner_meta.get("answer_action_seq")
+                    if isinstance(answer_action_seq, int):
+                        metadata.setdefault("answer_action_seq", answer_action_seq)
                 final_answer = final_answer.model_copy(update={"metadata": metadata})
                 self.telemetry.logger.info(
                     "execute_success",
@@ -542,7 +662,7 @@ When context is provided, use it appropriately to enhance your responses.
                 "execute_error",
                 extra={
                     "query": query,
-                    "tenant_id": tenant_id,
+                    "tenant_id": resolved_tenant_id,
                     "trace_id": trace_id,
                     "error_class": exc.__class__.__name__,
                     "error_message": str(exc),
@@ -560,6 +680,64 @@ When context is provided, use it appropriately to enhance your responses.
     def reset_metrics(self) -> None:
         """Reset telemetry counters (for testing)."""
         self.telemetry.reset_metrics()
+
+    def _on_trajectory_complete_callback(self, trajectory: Trajectory) -> None:
+        """Run the existing caller callback and optional investigation hook after completion."""
+
+        if self._on_trajectory_complete is not None:
+            self._on_trajectory_complete(trajectory)
+        if not self._investigation_publishing_enabled:
+            return
+
+        context = self._investigation_context(trajectory)
+        publisher = self._investigation_publisher or MlflowAttachmentPublisher()
+        hook = PenguiFlowInvestigationPublicationHook(
+            PenguiFlowInvestigationProjector(context),
+            publisher,
+        )
+        publication = hook(trajectory)
+        if self._capture_investigation_publications:
+            self._pending_investigation_publications.append(publication)
+
+    def wait_for_investigation_publications(self, timeout_s: float) -> list[InvestigationPublication]:
+        """Wait for CLI-captured publications without affecting Planner request execution."""
+
+        publications = self._pending_investigation_publications
+        self._pending_investigation_publications = []
+        completed_publications: list[InvestigationPublication] = []
+
+        for publication in publications:
+            if publication.wait(timeout_s):
+                completed_publications.append(publication)
+            else:
+                self.telemetry.logger.warning(
+                    "lcp_investigation_publication_timeout",
+                    extra={"timeout_s": timeout_s},
+                )
+
+        return completed_publications
+
+    def _investigation_context(self, trajectory: Trajectory) -> PenguiFlowInvestigationContext:
+        """Build the trusted run identity used by the redaction-first projector."""
+
+        tool_context = trajectory.tool_context or {}
+        trace_id = str(tool_context.get("trace_id") or uuid4().hex)
+        started_at = _investigation_started_at(tool_context.get("lcp_investigation_started_at"))
+        scope_ref = self.config.lcp_scope_ref or f"tenant:{tool_context.get('tenant_id') or 'default'}"
+        return PenguiFlowInvestigationContext(
+            source_trace_ref=SourceTraceRef(
+                tracking_store_ref=self.config.lcp_mlflow_tracking_store_ref or "unconfigured",
+                experiment_id=self.config.lcp_mlflow_experiment_id or "unconfigured",
+                mlflow_trace_id=trace_id,
+                deployment_ref=_deployment_fingerprint(self.config),
+                native_trace_id=trace_id,
+            ),
+            agent_ref="planner_enterprise_agent_v2",
+            scope_ref=scope_ref,
+            execution_fingerprint=_deployment_fingerprint(self.config),
+            started_at=started_at,
+            allowed_node_names=frozenset(node.name for node in self._nodes if node.name is not None),
+        )
 
 
 def _format_status_for_terminal(update: StatusUpdate, trace_id: str) -> str:
@@ -587,8 +765,8 @@ def _format_status_for_terminal(update: StatusUpdate, trace_id: str) -> str:
     if update.message:
         parts.append(f"{update.message}")
 
-    if update.roadmap_step_id is None and update.roadmap_step_list:
-        parts.append(f"Roadmap: {len(update.roadmap_step_list)} steps")
+    if update.roadmap_step_id is None and update.roadmap:
+        parts.append(f"Roadmap: {len(update.roadmap)} steps")
 
     return " ".join(parts)
 
@@ -668,7 +846,10 @@ Examples:
     config = AgentConfig.from_env()
 
     # Create orchestrator
-    agent = EnterpriseAgentOrchestrator(config)
+    agent = EnterpriseAgentOrchestrator(
+        config,
+        capture_investigation_publications=True,
+    )
 
     # Determine which queries to run
     if args.query:
@@ -682,7 +863,7 @@ Examples:
 
     # Example: Passing memories for context-aware planning
     # In production, these would come from a conversation database
-    example_memories = [
+    example_memories: list[dict[str, Any]] = [
         {
             "role": "user",
             "content": "Deploy version 2.3.1 to production",
@@ -744,6 +925,18 @@ Examples:
                 print("\nMetadata:")
                 for key, value in result.metadata.items():
                     print(f"  {key}: {value}")
+
+            completed_publications = agent.wait_for_investigation_publications(
+                INVESTIGATION_PUBLICATION_FLUSH_TIMEOUT_S
+            )
+            for publication in completed_publications:
+                if publication.document is None or publication.digest is None:
+                    agent.telemetry.logger.warning("lcp_investigation_publication_failed")
+                    continue
+                print("\nLearning control plane investigation:")
+                print(f"  investigation_id: {publication.document.investigation_id}")
+                print(f"  digest: {publication.digest}")
+                print(f"  source_trace_ref: {publication.document.source_trace_ref}")
 
         except Exception as exc:
             if args.stream:

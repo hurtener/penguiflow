@@ -160,9 +160,13 @@ __marimo__/
 # Agentic Code Assist Ignore
 
 CLAUDE.md
+**/CLAUDE.md
+**/*MILESTONES.md
 PROMPT.md
 .serena/memories/agui_adapter_integration.md
 docs/tools/a2a-agent-tools.md
 docs/.DS_Store
+.DS_Store
 
 mlflow.db
+skills/plain-technical-explainer/
