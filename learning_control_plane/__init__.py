@@ -5,8 +5,8 @@ providers and evaluation backends live behind explicit contracts so an unavailab
 control plane cannot interrupt an agent serving a customer.
 """
 
-from .assessment_publisher import InvestigationAssessmentPublisher, MlflowAssessmentPublisher
-from .control_plane import (
+from .providers.assessment_publisher import InvestigationAssessmentPublisher, MlflowAssessmentPublisher
+from .control_plane.control_plane import (
     ActivationReceipt,
     AdvisorySkillCandidate,
     ConfidenceIntervalRequirement,
@@ -21,7 +21,7 @@ from .control_plane import (
     ReviewDecision,
     ReviewQueueItem,
 )
-from .evaluation import (
+from .evaluation.evaluation import (
     EvaluationBackend,
     EvaluationCase,
     EvaluationDataset,
@@ -38,7 +38,7 @@ from .evaluation import (
     RunOne,
     VariantCaseResult,
 )
-from .evidence import (
+from .contracts.evidence import (
     MLFLOW_LINEAGE_SCHEMA_VERSION,
     CompositeEvidenceSink,
     EvidenceContext,
@@ -47,13 +47,13 @@ from .evidence import (
     MlflowEvidenceSink,
     OpenTelemetryEvidenceSink,
 )
-from .investigation import (
+from .contracts.investigation import (
     INVESTIGATION_TRAJECTORY_SCHEMA_VERSION,
     InvestigationStatus,
     InvestigationTrajectoryV1,
     SourceTraceRef,
 )
-from .investigation_mining import (
+from .mining.investigation_mining import (
     EvaluationCaseBuilder,
     InvestigationSelection,
     MlflowInvestigationReader,
@@ -61,8 +61,8 @@ from .investigation_mining import (
     TraceAttachmentDownloader,
     build_held_out_evaluation_cases,
 )
-from .investigation_publisher import InvestigationPublisher, MlflowAttachmentPublisher
-from .mining import (
+from .providers.investigation_publisher import InvestigationPublisher, MlflowAttachmentPublisher
+from .mining.mining import (
     CandidateDrafter,
     CandidateMiner,
     MinedCandidate,
@@ -73,20 +73,20 @@ from .mining import (
     find_repeated_successful_patterns,
     reserve_later_held_out_cohort,
 )
-from .penguiflow import (
+from .integrations.penguiflow.projector import (
     PenguiFlowInvestigationContext,
     PenguiFlowInvestigationProjector,
     PenguiFlowInvestigationPublicationHook,
 )
-from .persistence import PersistedControlPlaneState, SQLiteControlPlaneRepository
-from .skill_drafting import (
+from .control_plane.persistence import PersistedControlPlaneState, SQLiteControlPlaneRepository
+from .mining.skill_drafting import (
     DraftedAdvisorySkill,
     DraftValidationPolicy,
     LlmSkillDrafter,
     SkillDraftingProvider,
     build_skill_drafting_prompt,
 )
-from .verification import (
+from .evaluation.verification import (
     FINAL_ANSWER_RUBRIC_VERSION,
     VERIFICATION_SCHEMA_VERSION,
     CheckStatus,
@@ -99,7 +99,7 @@ from .verification import (
     VerificationCheck,
     score_final_answer,
 )
-from .worker import OfflineEvaluationWorker, WorkerRun
+from .control_plane.worker import OfflineEvaluationWorker, WorkerRun
 
 __all__ = [
     "ActivationReceipt",

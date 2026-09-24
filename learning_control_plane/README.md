@@ -52,3 +52,16 @@ their milestone introduces a real evaluation backend, control-plane workflow, or
 PenguiFlow provider.
 
 Start with [the full local run](FULL_LOOP_RUN.md) before connecting a real agent.
+
+## Directory layout
+
+- `contracts/`: portable evidence and investigation data contracts.
+- `control_plane/`: candidate lifecycle, SQLite persistence, and offline workers.
+- `evaluation/`: baseline-versus-candidate execution and verification rubrics.
+- `mining/`: MLflow investigation reading, safe pattern mining, and skill drafting.
+- `providers/`: MLflow attachment and assessment publishers.
+- `integrations/penguiflow/`: the optional PenguiFlow projector and advisory-skill adapter.
+- `docs/`: design notes grouped by control-plane area.
+
+The small Python modules at this directory's root are compatibility imports for
+existing users. New code should import from the folders above.

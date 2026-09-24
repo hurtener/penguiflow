@@ -11,7 +11,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from .evaluation import (
+from ..contracts.evidence import EvidenceContext, EvidenceEvent, EvidenceSink
+from ..evaluation.evaluation import (
     EvaluationBackend,
     EvaluationDataset,
     EvaluationRequest,
@@ -23,7 +24,6 @@ from .evaluation import (
     PairedEvaluationResult,
     RunOne,
 )
-from .evidence import EvidenceContext, EvidenceEvent, EvidenceSink
 
 if TYPE_CHECKING:
     from .persistence import SQLiteControlPlaneRepository
@@ -82,6 +82,14 @@ class PromotionPolicy:
     metric_specifications: Sequence[MetricSpecification] = ()
     minimum_primary_improvement: float = 0.0
     primary_benefit_thresholds: Mapping[str, float] = field(default_factory=dict)
+    # A benefit stated as a fraction of the baseline mean rather than as an
+    # absolute amount, and resolved once the baseline has been measured. A bar
+    # like "20% faster" has to still mean 20% after the baseline moves, which an
+    # absolute number fixed when the policy was written does not. Where a metric
+    # appears in both maps the binding requirement is the larger of the two, so
+    # the absolute entry acts as a floor under the relative bar -- normally the
+    # smallest difference the evidence can resolve.
+    primary_benefit_relative_thresholds: Mapping[str, float] = field(default_factory=dict)
     protected_metrics: Sequence[str] = ()
     candidate_metric_thresholds: Mapping[str, float] = field(default_factory=dict)
     maximum_relative_mean_regressions: Mapping[str, float] = field(default_factory=dict)
@@ -93,6 +101,11 @@ class PromotionPolicy:
     confidence_level: float = 0.95
     bootstrap_resamples: int = 10_000
     confidence_interval_requirements: Sequence[ConfidenceIntervalRequirement] = ()
+    target_source_case_ids: Sequence[str] = ()
+    target_confidence_interval_requirements: Sequence[ConfidenceIntervalRequirement] = ()
+    protected_source_case_ids: Sequence[str] = ()
+    protected_group_metric_names: Sequence[str] = ()
+    protected_group_confidence_interval_requirements: Sequence[ConfidenceIntervalRequirement] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "policy_version", _non_empty(self.policy_version, "policy_version"))
@@ -130,6 +143,14 @@ class PromotionPolicy:
                 raise ValueError(f"primary benefit threshold {name!r} must be finite")
             benefit_thresholds[name] = value
         object.__setattr__(self, "primary_benefit_thresholds", benefit_thresholds)
+        relative_benefit_thresholds: dict[str, float] = {}
+        for raw_name, raw_value in self.primary_benefit_relative_thresholds.items():
+            name = _non_empty(str(raw_name), "relative primary benefit metric")
+            value = float(raw_value)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"relative primary benefit threshold {name!r} must be finite and non-negative")
+            relative_benefit_thresholds[name] = value
+        object.__setattr__(self, "primary_benefit_relative_thresholds", relative_benefit_thresholds)
         if self.minimum_complete_cases < 1:
             raise ValueError("minimum_complete_cases must be at least 1")
         if self.maximum_failed_cases < 0:
@@ -143,6 +164,31 @@ class PromotionPolicy:
         if len(source_case_ids) != len(set(source_case_ids)):
             raise ValueError("required source case IDs must be unique")
         object.__setattr__(self, "required_source_case_ids", source_case_ids)
+        target_source_case_ids = tuple(
+            _non_empty(source_case_id, "target source case ID")
+            for source_case_id in self.target_source_case_ids
+        )
+        protected_source_case_ids = tuple(
+            _non_empty(source_case_id, "protected source case ID")
+            for source_case_id in self.protected_source_case_ids
+        )
+        if len(target_source_case_ids) != len(set(target_source_case_ids)):
+            raise ValueError("target source case IDs must be unique")
+        if len(protected_source_case_ids) != len(set(protected_source_case_ids)):
+            raise ValueError("protected source case IDs must be unique")
+        if set(target_source_case_ids) & set(protected_source_case_ids):
+            raise ValueError("target and protected source case IDs must not overlap")
+        if source_case_ids and not set(target_source_case_ids).issubset(source_case_ids):
+            raise ValueError("target source case IDs must be frozen cases")
+        if source_case_ids and not set(protected_source_case_ids).issubset(source_case_ids):
+            raise ValueError("protected source case IDs must be frozen cases")
+        object.__setattr__(self, "target_source_case_ids", target_source_case_ids)
+        object.__setattr__(self, "protected_source_case_ids", protected_source_case_ids)
+        protected_group_metric_names = tuple(
+            _non_empty(metric_name, "protected group metric")
+            for metric_name in self.protected_group_metric_names
+        )
+        object.__setattr__(self, "protected_group_metric_names", protected_group_metric_names)
         if self.minimum_complete_pairs_per_source_case < 1:
             raise ValueError("minimum_complete_pairs_per_source_case must be at least 1")
         if not 0 < self.confidence_level < 1:
@@ -150,10 +196,23 @@ class PromotionPolicy:
         if self.bootstrap_resamples < 100:
             raise ValueError("bootstrap_resamples must be at least 100")
         requirements = tuple(self.confidence_interval_requirements)
-        requirement_keys = [(requirement.metric_name, requirement.statistic) for requirement in requirements]
-        if len(requirement_keys) != len(set(requirement_keys)):
-            raise ValueError("confidence interval requirements must be unique per metric and statistic")
+        target_requirements = tuple(self.target_confidence_interval_requirements)
+        protected_requirements = tuple(self.protected_group_confidence_interval_requirements)
+        for requirement_set, label in (
+            (requirements, "confidence interval"),
+            (target_requirements, "target confidence interval"),
+            (protected_requirements, "protected confidence interval"),
+        ):
+            requirement_keys = [(requirement.metric_name, requirement.statistic) for requirement in requirement_set]
+            if len(requirement_keys) != len(set(requirement_keys)):
+                raise ValueError(f"{label} requirements must be unique per metric and statistic")
+        if target_requirements and not target_source_case_ids:
+            raise ValueError("target confidence interval requirements need target source case IDs")
+        if protected_requirements and not protected_source_case_ids:
+            raise ValueError("protected confidence interval requirements need protected source case IDs")
         object.__setattr__(self, "confidence_interval_requirements", requirements)
+        object.__setattr__(self, "target_confidence_interval_requirements", target_requirements)
+        object.__setattr__(self, "protected_group_confidence_interval_requirements", protected_requirements)
 
     def metric_specification(self, metric_name: str) -> MetricSpecification:
         """Return a declared specification or preserve the original score direction."""
@@ -164,11 +223,37 @@ class PromotionPolicy:
         return MetricSpecification(name=metric_name)
 
     def primary_benefits(self) -> Mapping[str, float]:
-        """Return one or more pre-registered benefits that can advance a candidate."""
+        """Return one or more pre-registered benefits that can advance a candidate.
 
-        if self.primary_benefit_thresholds:
-            return self.primary_benefit_thresholds
-        return {self.primary_metric: self.minimum_primary_improvement}
+        The values are absolute floors only. A metric whose bar is relative is
+        named here with whatever floor it declares -- 0.0 when it declares none --
+        because its real requirement is not known until the baseline is measured.
+        """
+
+        if not self.primary_benefit_thresholds and not self.primary_benefit_relative_thresholds:
+            return {self.primary_metric: self.minimum_primary_improvement}
+        benefits = dict(self.primary_benefit_thresholds)
+        for metric_name in self.primary_benefit_relative_thresholds:
+            benefits.setdefault(metric_name, 0.0)
+        return benefits
+
+    def resolved_primary_benefits(self, baseline_metrics: Mapping[str, float]) -> Mapping[str, float]:
+        """Return each pre-registered benefit's binding requirement against one measured baseline.
+
+        A relative threshold becomes an absolute one here, as its fraction of the
+        measured baseline mean. Where a metric declares both kinds the larger
+        wins, so the absolute entry is a floor the relative bar cannot fall
+        below: a shrinking baseline drags the relative bar down towards the noise
+        the evidence cannot see through, and the floor is what stops it.
+        """
+
+        resolved = dict(self.primary_benefits())
+        for metric_name, fraction in self.primary_benefit_relative_thresholds.items():
+            baseline_mean = baseline_metrics.get(metric_name)
+            if baseline_mean is None:
+                continue
+            resolved[metric_name] = max(resolved.get(metric_name, 0.0), fraction * abs(baseline_mean))
+        return resolved
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +335,8 @@ class GateDecision:
     metric_improvements: Mapping[str, float] = field(default_factory=dict)
     metric_summaries: Sequence[MetricSummary] = ()
     confidence_intervals: Sequence[MetricConfidenceInterval] = ()
+    case_group_summaries: Mapping[str, Sequence[MetricSummary]] = field(default_factory=dict)
+    case_group_confidence_intervals: Mapping[str, Sequence[MetricConfidenceInterval]] = field(default_factory=dict)
     established_primary_benefit_metrics: Sequence[str] = ()
     investigation_digests: Sequence[str] = ()
 
@@ -257,6 +344,22 @@ class GateDecision:
         object.__setattr__(self, "metric_improvements", dict(self.metric_improvements))
         object.__setattr__(self, "metric_summaries", tuple(self.metric_summaries))
         object.__setattr__(self, "confidence_intervals", tuple(self.confidence_intervals))
+        object.__setattr__(
+            self,
+            "case_group_summaries",
+            {
+                _non_empty(group_name, "case group name"): tuple(summaries)
+                for group_name, summaries in self.case_group_summaries.items()
+            },
+        )
+        object.__setattr__(
+            self,
+            "case_group_confidence_intervals",
+            {
+                _non_empty(group_name, "case group name"): tuple(intervals)
+                for group_name, intervals in self.case_group_confidence_intervals.items()
+            },
+        )
         object.__setattr__(
             self,
             "established_primary_benefit_metrics",
@@ -827,11 +930,44 @@ class LearningControlPlane:
             for case_id in summary.missing_case_ids:
                 reasons.append(f"missing metric {summary.specification.name} for case {case_id}")
 
+        target_summaries = self._case_group_summaries(
+            evaluation,
+            complete_pairs,
+            self._policy.target_source_case_ids,
+            tuple(primary_benefits),
+        )
+        target_baseline_metrics, target_candidate_metrics, target_improvements = _summary_metrics(target_summaries)
+        primary_baseline_metrics = baseline_metrics
+        primary_candidate_metrics = candidate_metrics
+        primary_improvements = metric_improvements
+        if self._policy.target_source_case_ids:
+            primary_baseline_metrics = target_baseline_metrics
+            primary_candidate_metrics = target_candidate_metrics
+            primary_improvements = target_improvements
+
+        protected_summaries = self._case_group_summaries(
+            evaluation,
+            complete_pairs,
+            self._policy.protected_source_case_ids,
+            self._policy.protected_group_metric_names,
+        )
+
+        # A relative benefit's bar is a fraction of the baseline, so it exists
+        # only now that the baseline has been measured. The point check, the
+        # interval below and the failure reason all read this one resolution, so
+        # a candidate is never measured against two different bars.
+        resolved_benefits = self._policy.resolved_primary_benefits(primary_baseline_metrics)
+        resolved_relative_bounds = {
+            metric_name: resolved_benefits[metric_name]
+            for metric_name in self._policy.primary_benefit_relative_thresholds
+            if metric_name in resolved_benefits
+        }
+
         primary_benefit_point_passes: dict[str, bool] = {}
-        for metric_name, minimum_improvement in primary_benefits.items():
-            baseline = baseline_metrics.get(metric_name)
-            candidate_value = candidate_metrics.get(metric_name)
-            improvement = metric_improvements.get(metric_name)
+        for metric_name, minimum_improvement in resolved_benefits.items():
+            baseline = primary_baseline_metrics.get(metric_name)
+            candidate_value = primary_candidate_metrics.get(metric_name)
+            improvement = primary_improvements.get(metric_name)
             primary_benefit_point_passes[metric_name] = bool(
                 baseline is not None
                 and candidate_value is not None
@@ -884,11 +1020,32 @@ class LearningControlPlane:
             evaluation=evaluation,
             complete_pairs=complete_pairs,
             reasons=reasons,
+            requirements=_rebound_relative_benefit_intervals(
+                self._policy.confidence_interval_requirements,
+                resolved_relative_bounds,
+            ),
+        )
+        target_confidence_intervals = self._confidence_intervals_for_complete_pairs(
+            evaluation=evaluation,
+            complete_pairs=complete_pairs,
+            reasons=reasons,
+            requirements=self._policy.target_confidence_interval_requirements,
+            source_case_ids=self._policy.target_source_case_ids,
+            group_name="target",
+        )
+        protected_confidence_intervals = self._confidence_intervals_for_complete_pairs(
+            evaluation=evaluation,
+            complete_pairs=complete_pairs,
+            reasons=reasons,
+            requirements=self._policy.protected_group_confidence_interval_requirements,
+            source_case_ids=self._policy.protected_source_case_ids,
+            group_name="protected",
         )
         primary_benefit_interval_passes: dict[str, bool] = {}
         for interval in confidence_intervals:
             is_primary_benefit_interval = (
-                interval.metric_name in primary_benefits
+                not self._policy.target_source_case_ids
+                and interval.metric_name in primary_benefits
                 and interval.statistic == "mean_improvement"
             )
             condition_passed = _confidence_interval_requirement_passed(interval)
@@ -916,6 +1073,25 @@ class LearningControlPlane:
                     f"({interval.confidence_level:.0%} confidence)"
                 )
 
+        for interval in target_confidence_intervals:
+            is_primary_benefit_interval = (
+                interval.metric_name in primary_benefits
+                and interval.statistic == "mean_improvement"
+            )
+            if is_primary_benefit_interval:
+                primary_benefit_interval_passes[interval.metric_name] = _confidence_interval_requirement_passed(
+                    interval
+                )
+                continue
+            if _confidence_interval_requirement_passed(interval):
+                continue
+            reasons.append(_confidence_interval_failure_reason(interval, group_name="target"))
+
+        for interval in protected_confidence_intervals:
+            if _confidence_interval_requirement_passed(interval):
+                continue
+            reasons.append(_confidence_interval_failure_reason(interval, group_name="protected"))
+
         established_primary_benefits = tuple(
             metric_name
             for metric_name, point_passed in primary_benefit_point_passes.items()
@@ -924,10 +1100,10 @@ class LearningControlPlane:
         if not established_primary_benefits:
             _append_primary_benefit_failure_reason(
                 reasons,
-                primary_benefits=primary_benefits,
-                baseline_metrics=baseline_metrics,
-                candidate_metrics=candidate_metrics,
-                metric_improvements=metric_improvements,
+                primary_benefits=resolved_benefits,
+                baseline_metrics=primary_baseline_metrics,
+                candidate_metrics=primary_candidate_metrics,
+                metric_improvements=primary_improvements,
                 interval_passes=primary_benefit_interval_passes,
             )
 
@@ -940,6 +1116,14 @@ class LearningControlPlane:
             metric_improvements=metric_improvements,
             metric_summaries=summaries,
             confidence_intervals=confidence_intervals,
+            case_group_summaries={
+                "target": target_summaries,
+                "protected": protected_summaries,
+            },
+            case_group_confidence_intervals={
+                "target": target_confidence_intervals,
+                "protected": protected_confidence_intervals,
+            },
             established_primary_benefit_metrics=established_primary_benefits,
             investigation_digests=_investigation_digests(candidate, evaluation),
         )
@@ -958,17 +1142,22 @@ class LearningControlPlane:
         evaluation: PairedEvaluationResult,
         complete_pairs: Sequence[PairedCaseResult],
         reasons: list[str],
+        requirements: Sequence[ConfidenceIntervalRequirement],
+        source_case_ids: Sequence[str] = (),
+        group_name: str | None = None,
     ) -> tuple[MetricConfidenceInterval, ...]:
         """Calculate required bootstrap intervals after case coverage is complete."""
 
-        requirements = self._policy.confidence_interval_requirements
         if not requirements:
             return ()
 
         pairs_by_source_case = _pairs_by_source_case(evaluation, complete_pairs)
-        source_case_ids = self._policy.required_source_case_ids or tuple(sorted(pairs_by_source_case))
+        source_case_ids = tuple(source_case_ids) or self._policy.required_source_case_ids or tuple(
+            sorted(pairs_by_source_case)
+        )
         if not source_case_ids:
-            reasons.append("no complete source cases are available for confidence intervals")
+            label = f"{group_name} " if group_name else ""
+            reasons.append(f"no complete {label}source cases are available for confidence intervals")
             return ()
 
         for source_case_id in source_case_ids:
@@ -977,8 +1166,9 @@ class LearningControlPlane:
                 reasons.append(f"missing frozen source case: {source_case_id}")
                 continue
             if len(pairs) < self._policy.minimum_complete_pairs_per_source_case:
+                group_label = f"{group_name} " if group_name else ""
                 reasons.append(
-                    "not enough complete baseline/candidate pairs for frozen source case "
+                    f"not enough complete baseline/candidate pairs for {group_label}frozen source case "
                     f"{source_case_id} ({len(pairs)} < {self._policy.minimum_complete_pairs_per_source_case})"
                 )
 
@@ -1009,6 +1199,34 @@ class LearningControlPlane:
         except ValueError as error:
             reasons.append(str(error))
             return ()
+
+    def _case_group_summaries(
+        self,
+        evaluation: PairedEvaluationResult,
+        complete_pairs: Sequence[PairedCaseResult],
+        source_case_ids: Sequence[str],
+        metric_names: Sequence[str],
+    ) -> tuple[MetricSummary, ...]:
+        """Summarize one frozen case group without mixing it into another group."""
+
+        if not source_case_ids or not metric_names:
+            return ()
+        grouped_pairs = _pairs_by_source_case(evaluation, complete_pairs)
+        selected_pairs = tuple(
+            pair
+            for source_case_id in source_case_ids
+            for pair in grouped_pairs.get(source_case_id, ())
+        )
+        if not selected_pairs:
+            return ()
+        group_evaluation = PairedEvaluationResult(
+            request=evaluation.request,
+            case_results=selected_pairs,
+        )
+        return tuple(
+            group_evaluation.metric_summary(self._policy.metric_specification(metric_name))
+            for metric_name in metric_names
+        )
 
     def _emit_failure(self, job: LearningJob, error: Exception) -> str | None:
         event = EvidenceEvent(
@@ -1115,6 +1333,47 @@ def _relative_regression(
     return absolute_regression / abs(baseline)
 
 
+def _summary_metrics(
+    summaries: Sequence[MetricSummary],
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    """Return baseline, candidate, and improvement means from group summaries."""
+
+    baseline_metrics: dict[str, float] = {}
+    candidate_metrics: dict[str, float] = {}
+    metric_improvements: dict[str, float] = {}
+    for summary in summaries:
+        metric_name = summary.specification.name
+        if summary.baseline_mean is not None:
+            baseline_metrics[metric_name] = summary.baseline_mean
+        if summary.candidate_mean is not None:
+            candidate_metrics[metric_name] = summary.candidate_mean
+        if summary.mean_improvement is not None:
+            metric_improvements[metric_name] = summary.mean_improvement
+    return baseline_metrics, candidate_metrics, metric_improvements
+
+
+def _confidence_interval_failure_reason(
+    interval: MetricConfidenceInterval,
+    *,
+    group_name: str,
+) -> str:
+    """Explain one failed group-level confidence requirement."""
+
+    if interval.required_lower_bound is not None:
+        return (
+            f"{group_name} confidence interval lower bound did not clear requirement: "
+            f"{interval.metric_name} {interval.statistic} "
+            f"{interval.lower_bound} < {interval.required_lower_bound} "
+            f"({interval.confidence_level:.0%} confidence)"
+        )
+    return (
+        f"{group_name} confidence interval upper bound exceeded requirement: "
+        f"{interval.metric_name} {interval.statistic} "
+        f"{interval.upper_bound} > {interval.required_upper_bound} "
+        f"({interval.confidence_level:.0%} confidence)"
+    )
+
+
 def _confidence_interval_requirement_passed(interval: MetricConfidenceInterval) -> bool:
     """Return whether one stored interval clears its frozen lower or upper condition."""
 
@@ -1127,6 +1386,37 @@ def _confidence_interval_requirement_passed(interval: MetricConfidenceInterval) 
         or interval.upper_bound <= interval.required_upper_bound
     )
     return lower_passed and upper_passed
+
+
+def _rebound_relative_benefit_intervals(
+    requirements: Sequence[ConfidenceIntervalRequirement],
+    resolved_bounds: Mapping[str, float],
+) -> tuple[ConfidenceIntervalRequirement, ...]:
+    """Point each relative benefit's mean-improvement interval at the bar resolved from the baseline.
+
+    A relative bar cannot be frozen into the policy as an interval bound, because
+    it is a fraction of a baseline nobody has measured yet. The policy declares
+    the metric's absolute floor instead, and this replaces it with the resolved
+    requirement so the confidence bound and the point estimate are read against
+    the same number.
+    """
+
+    if not resolved_bounds:
+        return tuple(requirements)
+
+    rebounded = []
+    for requirement in requirements:
+        resolved_bound = resolved_bounds.get(requirement.metric_name)
+        is_relative_benefit_bound = (
+            resolved_bound is not None
+            and requirement.statistic == "mean_improvement"
+            and requirement.minimum_lower_bound is not None
+        )
+        if is_relative_benefit_bound:
+            rebounded.append(replace(requirement, minimum_lower_bound=resolved_bound))
+        else:
+            rebounded.append(requirement)
+    return tuple(rebounded)
 
 
 def _append_primary_benefit_failure_reason(

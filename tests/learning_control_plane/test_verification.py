@@ -35,6 +35,20 @@ def test_final_answer_rubric_renormalizes_criteria_that_do_not_apply() -> None:
 
     assert assessment.score == 1.0
     assert assessment.passed is True
+    assert assessment.applicable_criteria == (
+        "factual_numerical_correctness",
+        "scope_correctness",
+        "evidence_grounding",
+        "completeness",
+    )
+    assert assessment.applicable_weight == pytest.approx(0.9)
+    assert assessment.effective_weights == {
+        "factual_numerical_correctness": pytest.approx(4 / 9),
+        "scope_correctness": pytest.approx(2 / 9),
+        "evidence_grounding": pytest.approx(1 / 6),
+        "completeness": pytest.approx(1 / 6),
+    }
+    assert assessment.record()["applicable_criteria"] == list(assessment.applicable_criteria)
     assert assessment.assessment_ref.startswith("assessment:sha256:")
 
 

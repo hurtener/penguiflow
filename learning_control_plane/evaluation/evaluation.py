@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from .evidence import EvidenceContext, EvidenceEvent, EvidenceSink
+from ..contracts.evidence import EvidenceContext, EvidenceEvent, EvidenceSink
 
 logger = logging.getLogger("learning_control_plane.evaluation")
 

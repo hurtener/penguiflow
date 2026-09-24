@@ -197,6 +197,82 @@ def test_gate_requires_the_accuracy_lower_confidence_bound_to_clear_the_threshol
     assert any("primary benefit was not established" in reason for reason in completed.decision.reasons)
 
 
+def test_gate_rejects_a_protected_case_regression_even_when_target_cases_improve() -> None:
+    policy = PromotionPolicy(
+        policy_version="policy-v1",
+        primary_metric="quality_score",
+        metric_specifications=(MetricSpecification("quality_score"),),
+        primary_benefit_thresholds={"quality_score": 0.1},
+        required_source_case_ids=("target-case", "protected-case"),
+        target_source_case_ids=("target-case",),
+        protected_source_case_ids=("protected-case",),
+        protected_group_metric_names=("quality_score",),
+        minimum_complete_pairs_per_source_case=3,
+        bootstrap_resamples=1_000,
+        target_confidence_interval_requirements=(
+            ConfidenceIntervalRequirement(
+                metric_name="quality_score",
+                statistic="mean_improvement",
+                minimum_lower_bound=0.1,
+            ),
+        ),
+        protected_group_confidence_interval_requirements=(
+            ConfidenceIntervalRequirement(
+                metric_name="quality_score",
+                statistic="mean_improvement",
+                minimum_lower_bound=0.0,
+            ),
+        ),
+    )
+    dataset = EvaluationDataset(
+        dataset_id="target-and-protected",
+        version="v1",
+        cases=tuple(
+            EvaluationCase(
+                case_id=f"{source_case_id}-{repeat}",
+                inputs={"source_case_id": source_case_id},
+            )
+            for source_case_id in ("target-case", "protected-case")
+            for repeat in range(3)
+        ),
+    )
+    plane = LearningControlPlane(policy=policy, evaluation_backend=LocalEvaluationBackend())
+    plane.register_candidate(_candidate(), _context())
+    job = plane.create_job(
+        candidate_id="candidate-skill",
+        evaluation_id="evaluation-1",
+        context=_context(),
+        dataset=dataset,
+    )
+    evaluation = PairedEvaluationResult(
+        request=job.evaluation_request,
+        case_results=tuple(
+            PairedCaseResult(
+                case_id=case.case_id,
+                baseline=VariantCaseResult(variant_id="baseline", metrics={"quality_score": 0.8}),
+                candidate=VariantCaseResult(
+                    variant_id="candidate-skill",
+                    metrics={
+                        "quality_score": 1.0
+                        if case.inputs["source_case_id"] == "target-case"
+                        else 0.7
+                    },
+                ),
+            )
+            for case in dataset.cases
+        ),
+    )
+
+    completed = plane.record_evaluation(job.job_id, evaluation)
+
+    assert completed.state == "rejected"
+    assert completed.decision is not None
+    assert completed.decision.established_primary_benefit_metrics == ("quality_score",)
+    assert completed.decision.case_group_summaries["target"][0].mean_improvement == pytest.approx(0.2)
+    assert completed.decision.case_group_summaries["protected"][0].mean_improvement == pytest.approx(-0.1)
+    assert any(reason.startswith("protected confidence interval") for reason in completed.decision.reasons)
+
+
 def test_gate_requires_the_cost_regression_upper_confidence_bound_to_stay_within_limit() -> None:
     policy = PromotionPolicy(
         policy_version="policy-v1",
