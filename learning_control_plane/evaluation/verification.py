@@ -283,11 +283,8 @@ class FinalAnswerAssessment:
         if self.applicable_weight == 0:
             return 0.0
         weights = {criterion.criterion_id: criterion.weight for criterion in self.rubric.criteria}
-        scores = {criterion.criterion_id: criterion.score for criterion in self.criteria}
-        weighted_score = sum(
-            weights[criterion_id] * float(scores[criterion_id])
-            for criterion_id in self.applicable_criteria
-        )
+        scores = {criterion.criterion_id: criterion.score for criterion in self.criteria if criterion.score is not None}
+        weighted_score = sum(weights[criterion_id] * scores[criterion_id] for criterion_id in self.applicable_criteria)
         return weighted_score / self.applicable_weight
 
     @property

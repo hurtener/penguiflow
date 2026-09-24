@@ -22,3 +22,9 @@ def test_learning_control_plane_source_is_grouped_by_responsibility() -> None:
         "docs/architecture.md",
     ]
     assert all((package_root / path).is_file() for path in expected_paths)
+
+
+def test_learning_control_plane_root_has_no_compatibility_shims() -> None:
+    package_root = Path(learning_control_plane.__file__).parent
+    root_modules = {path.name for path in package_root.glob("*.py")}
+    assert root_modules == {"__init__.py"}

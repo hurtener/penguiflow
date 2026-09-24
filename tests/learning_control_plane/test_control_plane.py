@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from learning_control_plane.contracts.evidence import EvidenceContext, EvidenceEvent
 from learning_control_plane.control_plane import (
     AdvisorySkillCandidate,
     ConfidenceIntervalRequirement,
@@ -20,7 +21,6 @@ from learning_control_plane.evaluation import (
     PairedEvaluationResult,
     VariantCaseResult,
 )
-from learning_control_plane.evidence import EvidenceContext, EvidenceEvent
 
 
 class _EvidenceRecorder:

@@ -4,14 +4,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from learning_control_plane.assessment_publisher import MlflowAssessmentPublisher
-from learning_control_plane.investigation import InvestigationTrajectoryV1, SourceTraceRef
-from learning_control_plane.verification import (
+from learning_control_plane.contracts.investigation import InvestigationTrajectoryV1, SourceTraceRef
+from learning_control_plane.evaluation.verification import (
     InvestigationVerification,
     SafeStepEvidence,
     VerificationCheck,
     score_final_answer,
 )
+from learning_control_plane.providers.assessment_publisher import MlflowAssessmentPublisher
 
 
 @dataclass

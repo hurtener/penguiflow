@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from learning_control_plane.evidence import (
+from learning_control_plane.contracts.evidence import (
     CompositeEvidenceSink,
     EvidenceContext,
     EvidenceEvent,

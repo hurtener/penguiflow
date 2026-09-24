@@ -7,8 +7,8 @@ from typing import Any
 
 import pytest
 
-from learning_control_plane.investigation import InvestigationTrajectoryV1, SourceTraceRef
-from learning_control_plane.investigation_publisher import MlflowAttachmentPublisher
+from learning_control_plane.contracts.investigation import InvestigationTrajectoryV1, SourceTraceRef
+from learning_control_plane.providers.investigation_publisher import MlflowAttachmentPublisher
 
 
 def _investigation(*, request: dict[str, object] | None = None) -> InvestigationTrajectoryV1:

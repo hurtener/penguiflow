@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from learning_control_plane.mining import TracePattern
-from learning_control_plane.skill_drafting import LlmSkillDrafter
+from learning_control_plane.mining.skill_drafting import LlmSkillDrafter
 
 
 class DemoProvider:

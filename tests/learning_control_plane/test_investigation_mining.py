@@ -8,20 +8,20 @@ from pathlib import Path
 
 import pytest
 
+from learning_control_plane.contracts.investigation import InvestigationTrajectoryV1, SourceTraceRef
 from learning_control_plane.evaluation import EvaluationCase
-from learning_control_plane.investigation import InvestigationTrajectoryV1, SourceTraceRef
-from learning_control_plane.investigation_mining import (
-    InvestigationSelection,
-    MlflowInvestigationReader,
-    build_held_out_evaluation_cases,
-)
-from learning_control_plane.investigation_publisher import INVESTIGATION_DIGEST_TAG, INVESTIGATION_ID_TAG
-from learning_control_plane.verification import (
+from learning_control_plane.evaluation.verification import (
     InvestigationVerification,
     SafeStepEvidence,
     VerificationCheck,
     score_final_answer,
 )
+from learning_control_plane.mining.investigation_mining import (
+    InvestigationSelection,
+    MlflowInvestigationReader,
+    build_held_out_evaluation_cases,
+)
+from learning_control_plane.providers.investigation_publisher import INVESTIGATION_DIGEST_TAG, INVESTIGATION_ID_TAG
 
 
 def _investigation(index: int) -> InvestigationTrajectoryV1:
@@ -291,7 +291,7 @@ def test_held_out_case_rejects_mismatched_lineage() -> None:
 
 def test_real_mlflow_reader_downloads_and_verifies_published_attachments(tmp_path: Path) -> None:
     mlflow = pytest.importorskip("mlflow")
-    from learning_control_plane.investigation_publisher import MlflowAttachmentPublisher
+    from learning_control_plane.providers.investigation_publisher import MlflowAttachmentPublisher
 
     previous_tracking_uri = mlflow.get_tracking_uri()
     try:

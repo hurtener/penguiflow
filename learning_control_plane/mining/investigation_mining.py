@@ -436,9 +436,10 @@ def build_held_out_evaluation_cases(
 
 
 __all__ = [
-    "InvestigationSelection",
     "EvaluationCaseBuilder",
+    "InvestigationSelection",
     "MlflowInvestigationReader",
     "MlflowTraceAttachmentStore",
     "TraceAttachmentDownloader",
+    "build_held_out_evaluation_cases",
 ]

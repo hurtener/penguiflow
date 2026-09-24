@@ -2,19 +2,19 @@ from __future__ import annotations
 
 import pytest
 
+from learning_control_plane.contracts.evidence import EvidenceContext
 from learning_control_plane.control_plane import (
     AdvisorySkillCandidate,
     LearningControlPlane,
     PromotionPolicy,
 )
+from learning_control_plane.control_plane.worker import OfflineEvaluationWorker
 from learning_control_plane.evaluation import (
     EvaluationCase,
     EvaluationDataset,
     EvaluationVariant,
     LocalEvaluationBackend,
 )
-from learning_control_plane.evidence import EvidenceContext
-from learning_control_plane.worker import OfflineEvaluationWorker
 
 
 def _draft_job(plane: LearningControlPlane, candidate_id: str) -> str:

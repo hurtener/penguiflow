@@ -8,22 +8,25 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from learning_control_plane.contracts.evidence import EvidenceContext
 from learning_control_plane.control_plane import LearningControlPlane, PromotionPolicy
+from learning_control_plane.control_plane.persistence import SQLiteControlPlaneRepository
+from learning_control_plane.control_plane.worker import OfflineEvaluationWorker
 from learning_control_plane.evaluation import (
     EvaluationCase,
     EvaluationDataset,
     EvaluationVariant,
     LocalEvaluationBackend,
 )
-from learning_control_plane.evidence import EvidenceContext
+from learning_control_plane.integrations.penguiflow.projector import (
+    ScopedSkillActivationAdapter,
+    compile_advisory_skill,
+)
 from learning_control_plane.mining import (
     CandidateMiner,
     TraceLearningRecord,
     reserve_later_held_out_cohort,
 )
-from learning_control_plane.penguiflow import ScopedSkillActivationAdapter, compile_advisory_skill
-from learning_control_plane.persistence import SQLiteControlPlaneRepository
-from learning_control_plane.worker import OfflineEvaluationWorker
 from penguiflow.skills.local_store import LocalSkillStore
 
 

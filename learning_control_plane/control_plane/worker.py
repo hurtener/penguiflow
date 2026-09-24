@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .control_plane import LearningControlPlane
 from ..evaluation.evaluation import Metric, RunOne
+from .control_plane import LearningControlPlane
 
 
 @dataclass(frozen=True, slots=True)

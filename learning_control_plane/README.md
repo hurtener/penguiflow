@@ -26,30 +26,25 @@ continue to serve requests with their last valid configuration.
 
 | Path | Responsibility |
 |---|---|
-| `evidence.py` | The current Milestone 1 evidence records and optional telemetry sinks. |
-| `investigation.py` | Portable investigation document, canonical JSON bytes, digest, and discovery index. |
-| `investigation_trajectory.md` | InvestigationTrajectoryV1 contract and canonicalization rules. |
-| `investigation_publisher.py` | Idempotent MLflow trace-attachment publisher for investigation documents. |
-| `investigation_dual_export.md` | Verified MLflow/OTLP dual-export result and MVP storage decision. |
-| `penguiflow_investigation_projector.md` | PenguiFlow's redaction-first investigation projection contract. |
-| `investigation_lineage.md` | Digest lineage from investigation evidence to delivery receipt. |
-| `investigation_mining.py` | Read-only verified MLflow attachment reader for safe candidate mining. |
-| `investigation_mining.md` | MLflow verification, redaction boundary, and held-out cohort contract. |
-| `planner_enterprise_v2.md` | Real held-out Planner V2 inputs, outcome metrics, and isolation contract. |
-| `skill_drafting.py` | Provider-neutral, validated LLM advisory-skill drafter. |
-| `skill_drafting.md` | Drafting input, output, validation, and local demo contract. |
-| `mlflow_lineage.md` | MLflow tag, metric, and artifact-path convention. |
-| `evaluation.py` | Standalone baseline-versus-advisory-skill local evaluator. |
-| `evaluation.md` | The evaluator's fixed-data and complete-evidence contract. |
-| `scoring.md` | Metric directions, paired score summaries, and gate comparison rules. |
-| `control_plane.py` | Offline candidate registry, job lifecycle, and deterministic gate. |
-| `control_plane.md` | The MVP decision workflow and its safety boundary. |
-| `architecture.md` | Boundaries and evidence flow for the MVP. |
+| `contracts/evidence.py` | Evidence records and optional telemetry sinks. |
+| `contracts/investigation.py` | Portable investigation document, canonical JSON bytes, digest, and discovery index. |
+| `control_plane/control_plane.py` | Offline candidate registry, job lifecycle, and deterministic gate. |
+| `control_plane/persistence.py`, `control_plane/worker.py` | SQLite control-plane state and offline evaluation workers. |
+| `evaluation/evaluation.py` | Standalone baseline-versus-advisory-skill local evaluator. |
+| `evaluation/verification.py` | Safe verification and final-answer scoring. |
+| `mining/investigation_mining.py` | Read-only verified MLflow attachment reader for safe candidate mining. |
+| `mining/mining.py`, `mining/skill_drafting.py` | Safe pattern mining and the validated advisory-skill drafter. |
+| `providers/investigation_publisher.py` | Idempotent MLflow trace-attachment publisher for investigation documents. |
+| `providers/assessment_publisher.py` | MLflow assessment publisher. |
+| `integrations/penguiflow/projector.py` | PenguiFlow's redaction-first investigation projector and advisory-skill adapter. |
+| `docs/architecture.md` | Boundaries and evidence flow for the MVP. |
+| `docs/control_plane/control_plane.md` | The MVP decision workflow and its safety boundary. |
+| `docs/evaluation/` | Evaluator contract (`evaluation.md`), metric directions and gates (`scoring.md`), verification rubric (`verification.md`). |
+| `docs/investigations/` | Trajectory contract, publisher, dual export, lineage, and mining (`investigation_*.md`). |
+| `docs/integrations/penguiflow/` | PenguiFlow projection contract, adapter, and the Planner V2 held-out inputs. |
+| `docs/providers/mlflow_lineage.md` | MLflow tag, metric, and artifact-path convention. |
+| `docs/mining_skill_drafting.md` | Drafting input, output, validation, and local demo contract. |
 | `FULL_LOOP_RUN.md` | Start-to-finish local MVP setup, execution, and inspection guide. |
-
-Future code folders are intentionally not scaffolded yet. They will be created when
-their milestone introduces a real evaluation backend, control-plane workflow, or
-PenguiFlow provider.
 
 Start with [the full local run](FULL_LOOP_RUN.md) before connecting a real agent.
 
@@ -63,5 +58,4 @@ Start with [the full local run](FULL_LOOP_RUN.md) before connecting a real agent
 - `integrations/penguiflow/`: the optional PenguiFlow projector and advisory-skill adapter.
 - `docs/`: design notes grouped by control-plane area.
 
-The small Python modules at this directory's root are compatibility imports for
-existing users. New code should import from the folders above.
+Import from these folders or from the package root (`from learning_control_plane import ...`).

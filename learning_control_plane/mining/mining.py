@@ -10,8 +10,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from ..control_plane.control_plane import AdvisorySkillCandidate
 from ..contracts.evidence import EvidenceContext
+from ..control_plane.control_plane import AdvisorySkillCandidate
 
 _SAFE_EVIDENCE_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 

@@ -33,6 +33,8 @@ from .control_plane import (
     ReviewDecision,
 )
 
+__all__ = ["PersistedControlPlaneState", "SQLiteControlPlaneRepository"]
+
 
 @dataclass(frozen=True, slots=True)
 class PersistedControlPlaneState:

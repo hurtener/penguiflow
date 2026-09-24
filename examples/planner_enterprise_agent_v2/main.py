@@ -39,14 +39,14 @@ from examples.planner_enterprise_agent_v2.nodes import (
     triage_query,
 )
 from examples.planner_enterprise_agent_v2.telemetry import AgentTelemetry
-from learning_control_plane.investigation import SourceTraceRef
-from learning_control_plane.investigation_publisher import InvestigationPublisher, MlflowAttachmentPublisher
-from learning_control_plane.penguiflow import (
+from learning_control_plane.contracts.investigation import SourceTraceRef
+from learning_control_plane.integrations.penguiflow.projector import (
     InvestigationPublication,
     PenguiFlowInvestigationContext,
     PenguiFlowInvestigationProjector,
     PenguiFlowInvestigationPublicationHook,
 )
+from learning_control_plane.providers.investigation_publisher import InvestigationPublisher, MlflowAttachmentPublisher
 from penguiflow.catalog import build_catalog
 from penguiflow.node import Node
 from penguiflow.planner import (

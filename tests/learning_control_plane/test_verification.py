@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from learning_control_plane.verification import (
+from learning_control_plane.evaluation.verification import (
     InvestigationVerification,
     SafeStepEvidence,
     VerificationCheck,

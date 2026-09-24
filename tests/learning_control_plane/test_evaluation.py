@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from learning_control_plane.contracts.evidence import EvidenceContext, EvidenceEvent
 from learning_control_plane.evaluation import (
     EvaluationCase,
     EvaluationDataset,
@@ -10,7 +11,6 @@ from learning_control_plane.evaluation import (
     LocalEvaluationBackend,
     MetricSpecification,
 )
-from learning_control_plane.evidence import EvidenceContext, EvidenceEvent
 
 
 class _EvidenceRecorder:

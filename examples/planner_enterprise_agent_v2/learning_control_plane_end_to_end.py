@@ -17,14 +17,17 @@ from examples.planner_enterprise_agent_v2.learning_control_plane import (
     PlannerEnterpriseV2EvaluationRunner,
     load_real_held_out_dataset,
 )
+from learning_control_plane.contracts.evidence import EvidenceContext
 from learning_control_plane.control_plane import LearningControlPlane, PromotionPolicy
+from learning_control_plane.control_plane.persistence import SQLiteControlPlaneRepository
+from learning_control_plane.control_plane.worker import OfflineEvaluationWorker
 from learning_control_plane.evaluation import LocalEvaluationBackend, MetricSpecification
-from learning_control_plane.evidence import EvidenceContext
-from learning_control_plane.investigation_mining import InvestigationSelection, MlflowInvestigationReader
+from learning_control_plane.integrations.penguiflow.projector import (
+    ScopedSkillActivationAdapter,
+    compile_advisory_skill,
+)
 from learning_control_plane.mining import CandidateMiner
-from learning_control_plane.penguiflow import ScopedSkillActivationAdapter, compile_advisory_skill
-from learning_control_plane.persistence import SQLiteControlPlaneRepository
-from learning_control_plane.worker import OfflineEvaluationWorker
+from learning_control_plane.mining.investigation_mining import InvestigationSelection, MlflowInvestigationReader
 from penguiflow.skills.local_store import LocalSkillStore
 
 

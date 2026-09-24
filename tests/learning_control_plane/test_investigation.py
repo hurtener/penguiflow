@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from learning_control_plane.investigation import InvestigationTrajectoryV1, SourceTraceRef
+from learning_control_plane.contracts.investigation import InvestigationTrajectoryV1, SourceTraceRef
 
 
 def _investigation(*, request: dict[str, object] | None = None) -> InvestigationTrajectoryV1:

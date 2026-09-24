@@ -7,11 +7,11 @@ from threading import Event
 
 import pytest
 
+from learning_control_plane.contracts.evidence import EvidenceContext, EvidenceEvent
+from learning_control_plane.contracts.investigation import SourceTraceRef
 from learning_control_plane.control_plane import AdvisorySkillCandidate, DeliveryAuthorization
 from learning_control_plane.evaluation import EvaluationCase, EvaluationVariant
-from learning_control_plane.evidence import EvidenceContext, EvidenceEvent
-from learning_control_plane.investigation import SourceTraceRef
-from learning_control_plane.penguiflow import (
+from learning_control_plane.integrations.penguiflow.projector import (
     PenguiFlowEvaluationRunner,
     PenguiFlowInvestigationContext,
     PenguiFlowInvestigationProjector,

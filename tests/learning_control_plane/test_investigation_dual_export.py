@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from learning_control_plane.investigation import InvestigationTrajectoryV1, SourceTraceRef
+from learning_control_plane.contracts.investigation import InvestigationTrajectoryV1, SourceTraceRef
 
 
 class _CapturedOtlpRequests:
@@ -79,7 +79,7 @@ from pathlib import Path
 
 import mlflow
 
-from learning_control_plane.investigation_publisher import MlflowAttachmentPublisher
+from learning_control_plane.providers.investigation_publisher import MlflowAttachmentPublisher
 from tests.learning_control_plane.test_investigation_dual_export import _investigation
 
 tracking_database, artifact_directory = sys.argv[1:]

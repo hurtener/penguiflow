@@ -15,8 +15,8 @@ from examples.planner_enterprise_agent_v2.config import AgentConfig
 from examples.planner_enterprise_agent_v2.evals.metrics import policy_metric
 from examples.planner_enterprise_agent_v2.main import EnterpriseAgentOrchestrator
 from learning_control_plane.evaluation import EvaluationCase, EvaluationDataset, EvaluationVariant
-from learning_control_plane.investigation_mining import build_held_out_evaluation_cases
 from learning_control_plane.mining import TraceLearningRecord
+from learning_control_plane.mining.investigation_mining import build_held_out_evaluation_cases
 from penguiflow.planner.trajectory import Trajectory
 from penguiflow.skills import LocalSkillProvider, LocalSkillStore, SkillDefinition, SkillProvider, SkillsConfig
 

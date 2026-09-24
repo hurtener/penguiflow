@@ -5,12 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from learning_control_plane.contracts.evidence import EvidenceContext
 from learning_control_plane.control_plane import (
     ActivationReceipt,
     AdvisorySkillCandidate,
     LearningControlPlane,
     PromotionPolicy,
 )
+from learning_control_plane.control_plane.persistence import SQLiteControlPlaneRepository
 from learning_control_plane.evaluation import (
     EvaluationCase,
     EvaluationDataset,
@@ -18,8 +20,6 @@ from learning_control_plane.evaluation import (
     LocalEvaluationBackend,
     MetricSpecification,
 )
-from learning_control_plane.evidence import EvidenceContext
-from learning_control_plane.persistence import SQLiteControlPlaneRepository
 
 
 @pytest.mark.asyncio

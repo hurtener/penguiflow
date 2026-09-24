@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from learning_control_plane.evidence import EvidenceContext
+from learning_control_plane.contracts.evidence import EvidenceContext
 from learning_control_plane.mining import (
     CandidateMiner,
     TraceLearningRecord,

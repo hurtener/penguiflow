@@ -1629,12 +1629,17 @@ def _percentile(values: Sequence[float], probability: float) -> float:
 
 
 __all__ = [
+    "ActivationReceipt",
     "AdvisorySkillCandidate",
     "ConfidenceIntervalRequirement",
+    "DeliveryAuthorization",
     "GateDecision",
+    "JobAuditRecord",
     "JobState",
     "LearningControlPlane",
     "LearningJob",
     "MetricConfidenceInterval",
     "PromotionPolicy",
+    "ReviewDecision",
+    "ReviewQueueItem",
 ]

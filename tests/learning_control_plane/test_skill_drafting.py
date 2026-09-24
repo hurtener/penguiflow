@@ -5,9 +5,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-from learning_control_plane.evidence import EvidenceContext
+from learning_control_plane.contracts.evidence import EvidenceContext
 from learning_control_plane.mining import CandidateMiner, TraceLearningRecord
-from learning_control_plane.skill_drafting import DraftValidationPolicy, LlmSkillDrafter
+from learning_control_plane.mining.skill_drafting import DraftValidationPolicy, LlmSkillDrafter
 
 
 class _FakeProvider:
