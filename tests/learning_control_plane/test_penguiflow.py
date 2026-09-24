@@ -11,6 +11,7 @@ from learning_control_plane.contracts.evidence import EvidenceContext, EvidenceE
 from learning_control_plane.contracts.investigation import SourceTraceRef
 from learning_control_plane.control_plane import AdvisorySkillCandidate, DeliveryAuthorization
 from learning_control_plane.evaluation import EvaluationCase, EvaluationVariant
+from learning_control_plane.evaluation.verification import InvestigationVerification, SafeStepEvidence
 from learning_control_plane.integrations.penguiflow.projector import (
     PenguiFlowEvaluationRunner,
     PenguiFlowInvestigationContext,
@@ -20,6 +21,7 @@ from learning_control_plane.integrations.penguiflow.projector import (
     PenguiFlowTracePublisher,
     ScopedSkillActivationAdapter,
     compile_advisory_skill,
+    expand_parallel_steps,
     project_trajectory,
 )
 from penguiflow.planner.models import PlannerAction
@@ -314,3 +316,123 @@ class FakePlanner:
             "query": query,
             "tenant_id": tool_context["tenant_id"],
         }
+
+
+# --- parallel steps --------------------------------------------------------
+
+
+def _parallel_step(branches: list[dict[str, object]], **extra: object) -> TrajectoryStep:
+    return TrajectoryStep(
+        action=PlannerAction(next_node="parallel", args={"steps": []}),
+        observation={"branches": branches, "stats": {"success": len(branches), "failed": 0}, **extra},
+    )
+
+
+def test_a_parallel_step_becomes_one_step_per_branch_with_the_real_node_names() -> None:
+    step = _parallel_step(
+        [
+            {"node": "search_docs", "args": {"query": "a"}, "observation": {"hits": 1}},
+            {"node": "read_doc", "args": {"id": 7}, "observation": {"text": "b"}},
+        ]
+    )
+
+    expanded = expand_parallel_steps([step])
+
+    assert [item.action.next_node for item in expanded] == ["search_docs", "read_doc"]
+    assert expanded[0].action.args == {"query": "a"}
+    assert expanded[1].observation == {"text": "b"}
+
+
+def test_a_failed_branch_is_a_failed_step() -> None:
+    step = _parallel_step(
+        [
+            {"node": "search_docs", "args": {}, "observation": {"hits": 1}},
+            {"node": "read_doc", "args": {}, "error": "boom", "failure": {"code": "x"}},
+        ]
+    )
+
+    expanded = expand_parallel_steps([step])
+
+    assert expanded[0].error is None
+    assert expanded[1].error == "boom"
+    assert expanded[1].failure == {"code": "x"}
+
+
+def test_a_successful_join_is_kept_as_its_own_step() -> None:
+    step = _parallel_step(
+        [{"node": "search_docs", "args": {}, "observation": {}}],
+        join={"node": "merge_hits", "observation": {"merged": True}},
+    )
+
+    expanded = expand_parallel_steps([step])
+
+    assert [item.action.next_node for item in expanded] == ["search_docs", "merge_hits"]
+
+
+def test_a_skipped_join_adds_no_step() -> None:
+    step = _parallel_step(
+        [{"node": "search_docs", "args": {}, "observation": {}}],
+        join={"status": "skipped", "reason": "pause"},
+    )
+
+    assert len(expand_parallel_steps([step])) == 1
+
+
+def test_a_malformed_parallel_step_is_kept_as_it_was() -> None:
+    no_observation = TrajectoryStep(action=PlannerAction(next_node="parallel", args={}), error="empty plan")
+    branch_without_a_node = _parallel_step([{"args": {}}])
+    non_list_branches = TrajectoryStep(
+        action=PlannerAction(next_node="parallel", args={}), observation={"branches": "oops"}
+    )
+    steps = [no_observation, branch_without_a_node, non_list_branches]
+
+    assert expand_parallel_steps(steps) == steps
+
+
+def test_steps_that_are_not_parallel_are_left_alone() -> None:
+    plain = TrajectoryStep(action=PlannerAction(next_node="search_docs", args={}), observation={"hits": 1})
+
+    assert expand_parallel_steps([plain]) == [plain]
+
+
+def test_the_projector_shows_the_calls_inside_a_parallel_step_and_keeps_indices_aligned() -> None:
+    seen_steps: list[list[str]] = []
+
+    def verification_projector(trajectory: Trajectory) -> InvestigationVerification:
+        seen_steps.append([step.action.next_node for step in trajectory.steps])
+        return InvestigationVerification(
+            step_evidence=tuple(
+                SafeStepEvidence(step_index=index, node_name=step.action.next_node)
+                for index, step in enumerate(trajectory.steps)
+            )
+        )
+
+    context = replace(
+        _investigation_context(),
+        allowed_node_names=frozenset({"search_docs", "read_doc", "summarize"}),
+        verification_projector=verification_projector,
+    )
+    trajectory = Trajectory(
+        query="q",
+        finish_reason="answer_complete",
+        final_answer="a",
+        steps=[
+            _parallel_step(
+                [
+                    {"node": "search_docs", "args": {}, "observation": {}},
+                    {"node": "read_doc", "args": {}, "observation": {}},
+                ]
+            ),
+            TrajectoryStep(action=PlannerAction(next_node="summarize", args={}), observation={}),
+        ],
+    )
+
+    document = PenguiFlowInvestigationProjector(context).project(
+        trajectory, completed_at=datetime(2026, 9, 1, 12, 1, tzinfo=UTC)
+    )
+
+    assert document.step_signature == "search_docs>read_doc>summarize"
+    assert [step["index"] for step in document.steps] == [0, 1, 2]
+    assert all("verified" in step for step in document.steps)
+    assert seen_steps == [["search_docs", "read_doc", "summarize"]]
+    assert [step.action.next_node for step in trajectory.steps] == ["parallel", "summarize"]

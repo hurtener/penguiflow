@@ -74,6 +74,7 @@ from .integrations.penguiflow.projector import (
     PenguiFlowInvestigationPublicationHook,
     ScopedSkillActivationAdapter,
     compile_advisory_skill,
+    expand_parallel_steps,
 )
 from .mining.investigation_mining import (
     EvaluationCaseBuilder,
@@ -195,6 +196,7 @@ __all__ = [
     "build_skill_drafting_prompt",
     "candidate_from_pattern",
     "compile_advisory_skill",
+    "expand_parallel_steps",
     "find_repeated_successful_patterns",
     "reserve_later_held_out_cohort",
     "score_final_answer",

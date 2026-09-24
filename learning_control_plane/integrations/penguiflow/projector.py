@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -11,7 +12,8 @@ from threading import Event, Thread
 from typing import Any, Protocol
 from uuid import uuid4
 
-from penguiflow.planner.trajectory import Trajectory
+from penguiflow.planner.models import PlannerAction
+from penguiflow.planner.trajectory import Trajectory, TrajectoryStep
 from penguiflow.skills.local_store import LocalSkillStore
 from penguiflow.skills.models import SkillDefinition, SkillScopeMode, SkillTaskType
 
@@ -32,6 +34,60 @@ class VerificationProjector(Protocol):
     def __call__(self, trajectory: Trajectory) -> InvestigationVerification:
         """Return redacted checks without retaining raw trajectory content."""
         ...
+
+
+def expand_parallel_steps(steps: Sequence[TrajectoryStep]) -> list[TrajectoryStep]:
+    """Replace each parallel step with one step per branch, so callers see the real tool calls.
+
+    PenguiFlow records a parallel action as a single step whose `observation["branches"]` holds
+    the calls it ran. Anything that reads step names, such as the redaction allow-list, an
+    intent classifier or a verifier, would see only "parallel" and miss every call inside it.
+    A successful join is kept as a step of its own. A parallel step that does not have the
+    expected shape is returned unchanged instead of guessed at.
+    """
+
+    expanded: list[TrajectoryStep] = []
+    for step in steps:
+        branch_steps = _parallel_branch_steps(step)
+        if branch_steps is None:
+            expanded.append(step)
+        else:
+            expanded.extend(branch_steps)
+    return expanded
+
+
+def _parallel_branch_steps(step: TrajectoryStep) -> list[TrajectoryStep] | None:
+    """The per-branch steps of a parallel step, or None when it is not one or is malformed."""
+
+    if step.action.next_node != "parallel" or not isinstance(step.observation, Mapping):
+        return None
+    branches = step.observation.get("branches")
+    if not isinstance(branches, list) or not branches:
+        return None
+
+    branch_steps: list[TrajectoryStep] = []
+    for branch in branches:
+        if not isinstance(branch, Mapping) or not isinstance(branch.get("node"), str):
+            return None
+        branch_steps.append(_step_from_call(branch))
+
+    join = step.observation.get("join")
+    if isinstance(join, Mapping) and isinstance(join.get("node"), str):
+        branch_steps.append(_step_from_call(join))
+    return branch_steps
+
+
+def _step_from_call(call: Mapping[str, Any]) -> TrajectoryStep:
+    """Rebuild the step a branch or join would have produced had it run on its own."""
+
+    args = call.get("args")
+    failure = call.get("failure")
+    return TrajectoryStep(
+        action=PlannerAction(next_node=call["node"], args=dict(args) if isinstance(args, Mapping) else {}),
+        observation=call.get("observation"),
+        error=call.get("error"),
+        failure=failure if isinstance(failure, Mapping) else None,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,13 +131,14 @@ class PenguiFlowInvestigationProjector:
     ) -> InvestigationTrajectoryV1:
         """Create a document without copying content-bearing trajectory fields."""
 
-        verification = self._project_verification(trajectory)
+        steps = expand_parallel_steps(trajectory.steps)
+        verification = self._project_verification(replace(trajectory, steps=steps))
         verification_by_index = {
             evidence.step_index: evidence
             for evidence in verification.step_evidence
         } if verification is not None else {}
         projected_steps: list[dict[str, Any]] = []
-        for index, step in enumerate(trajectory.steps):
+        for index, step in enumerate(steps):
             projected_step: dict[str, Any] = {
                 "index": index,
                 "node": self._safe_node_name(step.action.next_node),

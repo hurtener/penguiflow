@@ -11,6 +11,7 @@ from .projector import (
     ScopedSkillActivationAdapter,
     TrajectoryProjection,
     compile_advisory_skill,
+    expand_parallel_steps,
     project_trajectory,
 )
 
@@ -25,5 +26,6 @@ __all__ = [
     "ScopedSkillActivationAdapter",
     "TrajectoryProjection",
     "compile_advisory_skill",
+    "expand_parallel_steps",
     "project_trajectory",
 ]
