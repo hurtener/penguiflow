@@ -436,3 +436,51 @@ def test_the_projector_shows_the_calls_inside_a_parallel_step_and_keeps_indices_
     assert all("verified" in step for step in document.steps)
     assert seen_steps == [["search_docs", "read_doc", "summarize"]]
     assert [step.action.next_node for step in trajectory.steps] == ["parallel", "summarize"]
+
+
+def _two_step_trajectory() -> Trajectory:
+    return Trajectory(
+        query="q",
+        finish_reason="answer_complete",
+        final_answer="a",
+        steps=[
+            TrajectoryStep(action=PlannerAction(next_node="search_docs", args={}), observation={}),
+            TrajectoryStep(action=PlannerAction(next_node="search_docs", args={}), observation={}),
+        ],
+    )
+
+
+def test_without_a_normalizer_every_projected_step_is_in_the_signature() -> None:
+    document = PenguiFlowInvestigationProjector(_investigation_context()).project(
+        _two_step_trajectory(), completed_at=datetime(2026, 9, 1, 12, 1, tzinfo=UTC)
+    )
+
+    assert document.step_signature == "search_docs>search_docs"
+
+
+def test_a_normalizer_decides_which_steps_make_up_the_signature() -> None:
+    seen: list[list[str]] = []
+
+    def normalizer(steps: object) -> tuple[str, ...]:
+        seen.append([str(step["node"]) for step in steps])  # type: ignore[attr-defined, index]
+        return ("search",)
+
+    context = replace(_investigation_context(), signature_normalizer=normalizer)
+
+    document = PenguiFlowInvestigationProjector(context).project(
+        _two_step_trajectory(), completed_at=datetime(2026, 9, 1, 12, 1, tzinfo=UTC)
+    )
+
+    assert document.step_signature == "search"
+    assert seen == [["search_docs", "search_docs"]]
+    assert len(document.steps) == 2
+
+
+def test_a_normalizer_that_keeps_nothing_gives_the_no_steps_signature() -> None:
+    context = replace(_investigation_context(), signature_normalizer=lambda steps: ())
+
+    document = PenguiFlowInvestigationProjector(context).project(
+        _two_step_trajectory(), completed_at=datetime(2026, 9, 1, 12, 1, tzinfo=UTC)
+    )
+
+    assert document.step_signature == "no_steps"

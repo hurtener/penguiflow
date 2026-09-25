@@ -28,6 +28,13 @@ from ...providers.investigation_publisher import InvestigationPublisher
 logger = logging.getLogger("learning_control_plane.penguiflow")
 
 
+class SignatureNormalizer(Protocol):
+    """Turn projected steps into the node names that make up a run's step signature."""
+
+    def __call__(self, steps: Sequence[Mapping[str, Any]]) -> Sequence[str]:
+        """Return the signature's node names for these projected steps."""
+
+
 class VerificationProjector(Protocol):
     """Inspect a raw trajectory in-process and return only safe verification evidence."""
 
@@ -114,6 +121,9 @@ class PenguiFlowInvestigationContext:
     allowed_node_names: frozenset[str] = frozenset()
     intent_descriptor: dict[str, str] | None = None
     verification_projector: VerificationProjector | None = None
+    # Optional integration-owned rule for which steps count toward the step signature (for example
+    # leaving out failed probes and repeated lookups); without one every projected step counts.
+    signature_normalizer: SignatureNormalizer | None = None
 
 
 class PenguiFlowInvestigationProjector:
@@ -157,7 +167,12 @@ class PenguiFlowInvestigationProjector:
                     }
                 )
             projected_steps.append(projected_step)
-        step_signature = ">".join(str(step["node"]) for step in projected_steps) or "no_steps"
+        signature_nodes = (
+            list(self._context.signature_normalizer(projected_steps))
+            if self._context.signature_normalizer is not None
+            else [str(step["node"]) for step in projected_steps]
+        )
+        step_signature = ">".join(signature_nodes) or "no_steps"
         finish_reason = trajectory.finish_reason or "unknown"
         extensions: dict[str, Any] = {}
         assessment_refs: tuple[str, ...] = ()
