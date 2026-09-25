@@ -99,6 +99,7 @@ agent:
   template: react
   flags:
     hitl: true
+    mlflow: true
 
 tools:
   - name: search_documents

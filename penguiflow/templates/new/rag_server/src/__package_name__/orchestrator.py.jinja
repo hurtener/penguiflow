@@ -250,12 +250,22 @@ class {{ class_name }}Orchestrator:
             session.update_context(tool_context=snapshot_tool_context)
 {% endif %}
 
+{% if mlflow_enabled %}
+        with self._telemetry.trace_agent_run(operation="execute", trace_id=trace_id):
+            result = await self._planner.run(
+                query=query,
+                llm_context=llm_context,
+                tool_context=merged_tool_context,
+                steering=steering,
+            )
+{% else %}
         result = await self._planner.run(
             query=query,
             llm_context=llm_context,
             tool_context=merged_tool_context,
             steering=steering,
         )
+{% endif %}
 {% if with_streaming %}
         streams = _collect_streams(getattr(result, "metadata", {}) or {})
 {% endif %}
@@ -354,12 +364,22 @@ class {{ class_name }}Orchestrator:
             snapshot_tool_context.pop("memory_client", None)
             session.update_context(tool_context=snapshot_tool_context)
 {% endif %}
+{% if mlflow_enabled %}
+        with self._telemetry.trace_agent_run(operation="resume", trace_id=trace_id):
+            result = await self._planner.resume(
+                token=resume_token,
+                user_input=user_input,
+                tool_context=merged_tool_context,
+                steering=steering,
+            )
+{% else %}
         result = await self._planner.resume(
             token=resume_token,
             user_input=user_input,
             tool_context=merged_tool_context,
             steering=steering,
         )
+{% endif %}
 {% if with_streaming %}
         streams = _collect_streams(getattr(result, "metadata", {}) or {})
 {% endif %}

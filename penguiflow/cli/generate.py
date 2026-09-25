@@ -1145,6 +1145,7 @@ def _scaffold_project(
         with_rich_output=bool(spec.planner.rich_output.enabled),
         no_memory=not flags.memory,
         with_background_tasks=flags.background_tasks or bg.enabled,
+        with_mlflow=flags.mlflow,
     )
     project_dir = (output_dir or Path.cwd()) / spec.agent.name
     return project_dir, list(result.created), list(result.skipped), list(result.errors)
