@@ -184,3 +184,19 @@ def test_llm_drafter_rejects_a_known_forbidden_secret_from_the_accepted_draft() 
 
     with pytest.raises(ValueError, match="prohibited content"):
         LlmSkillDrafter(_FakeProvider(response), validation_policy=policy).draft(pattern)
+
+
+def test_the_prompt_is_unchanged_without_a_brief_and_leads_with_it_when_given() -> None:
+    pattern = (
+        CandidateMiner(minimum_successes=2, drafter=lambda _: "unused").mine(_pattern_records())[0].pattern
+    )
+    provider = _FakeProvider(_valid_response())
+
+    LlmSkillDrafter(provider).draft(pattern)
+    LlmSkillDrafter(provider, brief="  The agent answers campaign questions.  ").draft(pattern)
+
+    plain, briefed = provider.prompts
+    assert plain.startswith("Write one short advisory skill")
+    lead = "INTEGRATION_BRIEF:\nThe agent answers campaign questions.\n\n"
+    assert briefed.startswith(lead + "Write one short advisory skill")
+    assert briefed.removeprefix(lead) == plain

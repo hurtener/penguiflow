@@ -81,9 +81,11 @@ class LlmSkillDrafter:
         provider: SkillDraftingProvider,
         *,
         validation_policy: DraftValidationPolicy | None = None,
+        brief: str | None = None,
     ) -> None:
         self._provider = provider
         self._validation_policy = validation_policy or DraftValidationPolicy()
+        self._brief = brief
 
     def __call__(self, pattern: TracePattern) -> str:
         """Return validated advisory text for existing ``CandidateMiner`` callers."""
@@ -98,7 +100,7 @@ class LlmSkillDrafter:
     ) -> DraftedAdvisorySkill:
         """Ask the provider for a draft and reject unsafe or malformed output."""
 
-        prompt = build_skill_drafting_prompt(pattern, opportunity_context=opportunity_context)
+        prompt = build_skill_drafting_prompt(pattern, opportunity_context=opportunity_context, brief=self._brief)
         raw_response = self._provider.complete(prompt)
         fields = _draft_fields(raw_response)
         policy = self._validation_policy
@@ -128,8 +130,14 @@ def build_skill_drafting_prompt(
     pattern: TracePattern,
     *,
     opportunity_context: Mapping[str, object] | None = None,
+    brief: str | None = None,
 ) -> str:
-    """Build the sole LLM input from redacted pattern fields only."""
+    """Build the sole LLM input from redacted pattern fields only.
+
+    `brief` is the integration's own description of its agent and of what a useful skill targets. The
+    generic instructions alone left the model nothing to aim at but the successful step pattern, which
+    the agent already followed, so drafts restated it. Without a brief the prompt is unchanged.
+    """
 
     safe_pattern = {
         "agent_ref": pattern.agent_id,
@@ -143,8 +151,10 @@ def build_skill_drafting_prompt(
     if opportunity_context is not None:
         safe_pattern["opportunity_context"] = dict(opportunity_context)
     evidence = json.dumps(safe_pattern, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    brief_lines = ("INTEGRATION_BRIEF:", brief.strip(), "") if brief and brief.strip() else ()
     return "\n".join(
         (
+            *brief_lines,
             "Write one short advisory skill from the redacted evidence JSON below.",
             "The skill is optional guidance. It cannot grant permissions, force tool calls, run code,",
             "change policies, or claim facts not present in the evidence.",
