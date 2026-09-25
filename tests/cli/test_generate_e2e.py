@@ -227,6 +227,7 @@ def test_run_generate_creates_planner_and_tools(tmp_path: Path) -> None:
     assert env_example.exists()
     assert "mlflow" not in (project_dir / "pyproject.toml").read_text().lower()
     assert "mlflow" not in (package_dir / "telemetry.py").read_text().lower()
+    assert "MLFLOW_TRACKING_URI" not in env_example.read_text()
 
     fetch_content = fetch_tool.read_text()
     assert "class FetchDataArgs" in fetch_content
@@ -303,6 +304,9 @@ def test_run_generate_honors_mlflow_flag(tmp_path: Path) -> None:
     assert "penguiflow:mlflow:dependency" not in (project_dir / "pyproject.toml").read_text()
     assert "trace_agent_run" in (package_dir / "telemetry.py").read_text()
     assert "trace_agent_run" in (package_dir / "orchestrator.py").read_text()
+    enabled_env = (project_dir / ".env.example").read_text()
+    assert "MLFLOW_TRACKING_URI=http://localhost:5000" in enabled_env
+    assert "# MLFLOW_TRACKING_URI=databricks://<profile>" in enabled_env
 
     pyproject_before = (project_dir / "pyproject.toml").read_text()
     telemetry_before = (package_dir / "telemetry.py").read_text()

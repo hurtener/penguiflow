@@ -969,6 +969,7 @@ def _generate_env_example(
             "primary_model": spec.llm.primary.model,
             "primary_provider": spec.llm.primary.provider,
             "memory_enabled": str(spec.agent.flags.memory).lower(),
+            "mlflow_enabled": spec.agent.flags.mlflow,
             "summarizer_enabled": str(bool(spec.llm.summarizer and spec.llm.summarizer.enabled)).lower(),
             "reflection_enabled": str(bool(spec.llm.reflection and spec.llm.reflection.enabled)).lower(),
             "memory_base_url": spec.services.memory_iceberg.base_url or "http://localhost:8000",
