@@ -158,19 +158,16 @@ class PromotionPolicy:
         if self.maximum_attempts < 1:
             raise ValueError("maximum_attempts must be at least 1")
         source_case_ids = tuple(
-            _non_empty(source_case_id, "required source case ID")
-            for source_case_id in self.required_source_case_ids
+            _non_empty(source_case_id, "required source case ID") for source_case_id in self.required_source_case_ids
         )
         if len(source_case_ids) != len(set(source_case_ids)):
             raise ValueError("required source case IDs must be unique")
         object.__setattr__(self, "required_source_case_ids", source_case_ids)
         target_source_case_ids = tuple(
-            _non_empty(source_case_id, "target source case ID")
-            for source_case_id in self.target_source_case_ids
+            _non_empty(source_case_id, "target source case ID") for source_case_id in self.target_source_case_ids
         )
         protected_source_case_ids = tuple(
-            _non_empty(source_case_id, "protected source case ID")
-            for source_case_id in self.protected_source_case_ids
+            _non_empty(source_case_id, "protected source case ID") for source_case_id in self.protected_source_case_ids
         )
         if len(target_source_case_ids) != len(set(target_source_case_ids)):
             raise ValueError("target source case IDs must be unique")
@@ -185,8 +182,7 @@ class PromotionPolicy:
         object.__setattr__(self, "target_source_case_ids", target_source_case_ids)
         object.__setattr__(self, "protected_source_case_ids", protected_source_case_ids)
         protected_group_metric_names = tuple(
-            _non_empty(metric_name, "protected group metric")
-            for metric_name in self.protected_group_metric_names
+            _non_empty(metric_name, "protected group metric") for metric_name in self.protected_group_metric_names
         )
         object.__setattr__(self, "protected_group_metric_names", protected_group_metric_names)
         if self.minimum_complete_pairs_per_source_case < 1:
@@ -622,22 +618,14 @@ class LearningControlPlane:
         candidate = self._candidates[job.candidate_id]
         authorizations = tuple(
             sorted(
-                (
-                    authorization
-                    for authorization in self._authorizations.values()
-                    if authorization.job_id == job_id
-                ),
+                (authorization for authorization in self._authorizations.values() if authorization.job_id == job_id),
                 key=lambda authorization: authorization.authorization_id,
             )
         )
         authorization_ids = {authorization.authorization_id for authorization in authorizations}
         receipts = tuple(
             sorted(
-                (
-                    receipt
-                    for receipt in self._receipts.values()
-                    if receipt.authorization_id in authorization_ids
-                ),
+                (receipt for receipt in self._receipts.values() if receipt.authorization_id in authorization_ids),
                 key=lambda receipt: receipt.receipt_id,
             )
         )
@@ -887,8 +875,7 @@ class LearningControlPlane:
         failed_case_count = len(evaluation.case_results) - len(complete_pairs)
         if failed_case_count > self._policy.maximum_failed_cases:
             reasons.append(
-                f"too many failed baseline/candidate pairs "
-                f"({failed_case_count} > {self._policy.maximum_failed_cases})"
+                f"too many failed baseline/candidate pairs ({failed_case_count} > {self._policy.maximum_failed_cases})"
             )
         if len(complete_pairs) < self._policy.minimum_complete_cases:
             reasons.append(
@@ -1052,20 +1039,14 @@ class LearningControlPlane:
             if is_primary_benefit_interval:
                 primary_benefit_interval_passes[interval.metric_name] = condition_passed
                 continue
-            if (
-                interval.required_lower_bound is not None
-                and interval.lower_bound < interval.required_lower_bound
-            ):
+            if interval.required_lower_bound is not None and interval.lower_bound < interval.required_lower_bound:
                 reasons.append(
                     "confidence interval lower bound did not clear requirement: "
                     f"{interval.metric_name} {interval.statistic} "
                     f"{interval.lower_bound} < {interval.required_lower_bound} "
                     f"({interval.confidence_level:.0%} confidence)"
                 )
-            if (
-                interval.required_upper_bound is not None
-                and interval.upper_bound > interval.required_upper_bound
-            ):
+            if interval.required_upper_bound is not None and interval.upper_bound > interval.required_upper_bound:
                 reasons.append(
                     "confidence interval upper bound exceeded requirement: "
                     f"{interval.metric_name} {interval.statistic} "
@@ -1075,8 +1056,7 @@ class LearningControlPlane:
 
         for interval in target_confidence_intervals:
             is_primary_benefit_interval = (
-                interval.metric_name in primary_benefits
-                and interval.statistic == "mean_improvement"
+                interval.metric_name in primary_benefits and interval.statistic == "mean_improvement"
             )
             if is_primary_benefit_interval:
                 primary_benefit_interval_passes[interval.metric_name] = _confidence_interval_requirement_passed(
@@ -1130,11 +1110,7 @@ class LearningControlPlane:
 
     @staticmethod
     def _complete_pairs(case_results: Sequence[PairedCaseResult]) -> tuple[PairedCaseResult, ...]:
-        return tuple(
-            pair
-            for pair in case_results
-            if pair.baseline.error is None and pair.candidate.error is None
-        )
+        return tuple(pair for pair in case_results if pair.baseline.error is None and pair.candidate.error is None)
 
     def _confidence_intervals_for_complete_pairs(
         self,
@@ -1152,8 +1128,8 @@ class LearningControlPlane:
             return ()
 
         pairs_by_source_case = _pairs_by_source_case(evaluation, complete_pairs)
-        source_case_ids = tuple(source_case_ids) or self._policy.required_source_case_ids or tuple(
-            sorted(pairs_by_source_case)
+        source_case_ids = (
+            tuple(source_case_ids) or self._policy.required_source_case_ids or tuple(sorted(pairs_by_source_case))
         )
         if not source_case_ids:
             label = f"{group_name} " if group_name else ""
@@ -1213,9 +1189,7 @@ class LearningControlPlane:
             return ()
         grouped_pairs = _pairs_by_source_case(evaluation, complete_pairs)
         selected_pairs = tuple(
-            pair
-            for source_case_id in source_case_ids
-            for pair in grouped_pairs.get(source_case_id, ())
+            pair for source_case_id in source_case_ids for pair in grouped_pairs.get(source_case_id, ())
         )
         if not selected_pairs:
             return ()
@@ -1377,14 +1351,8 @@ def _confidence_interval_failure_reason(
 def _confidence_interval_requirement_passed(interval: MetricConfidenceInterval) -> bool:
     """Return whether one stored interval clears its frozen lower or upper condition."""
 
-    lower_passed = (
-        interval.required_lower_bound is None
-        or interval.lower_bound >= interval.required_lower_bound
-    )
-    upper_passed = (
-        interval.required_upper_bound is None
-        or interval.upper_bound <= interval.required_upper_bound
-    )
+    lower_passed = interval.required_lower_bound is None or interval.lower_bound >= interval.required_lower_bound
+    upper_passed = interval.required_upper_bound is None or interval.upper_bound <= interval.required_upper_bound
     return lower_passed and upper_passed
 
 
@@ -1444,10 +1412,7 @@ def _append_primary_benefit_failure_reason(
         reasons.append(f"primary benefit was not established: {descriptions[0]}")
         return
     candidates = "; ".join(descriptions)
-    reasons.append(
-        "no pre-registered primary benefit was established; require one of: "
-        f"{candidates}"
-    )
+    reasons.append(f"no pre-registered primary benefit was established; require one of: {candidates}")
 
 
 def _pairs_by_source_case(
@@ -1508,15 +1473,8 @@ def _bootstrap_confidence_intervals(
     random_source = random.Random(
         _bootstrap_seed(pairs_by_source_case, source_case_ids, requirements, confidence_level, resamples)
     )
-    estimates = {
-        (requirement.metric_name, requirement.statistic): []
-        for requirement in requirements
-    }
-    observed_pairs = [
-        pair
-        for source_case_id in source_case_ids
-        for pair in pairs_by_source_case[source_case_id]
-    ]
+    estimates = {(requirement.metric_name, requirement.statistic): [] for requirement in requirements}
+    observed_pairs = [pair for source_case_id in source_case_ids for pair in pairs_by_source_case[source_case_id]]
     observed_statistics = {
         (requirement.metric_name, requirement.statistic): _confidence_statistic(
             observed_pairs,
@@ -1527,14 +1485,9 @@ def _bootstrap_confidence_intervals(
     }
 
     for _ in range(resamples):
-        sampled_source_case_ids = [
-            random_source.choice(source_case_ids)
-            for _ in source_case_ids
-        ]
+        sampled_source_case_ids = [random_source.choice(source_case_ids) for _ in source_case_ids]
         sampled_pairs = [
-            pair
-            for source_case_id in sampled_source_case_ids
-            for pair in pairs_by_source_case[source_case_id]
+            pair for source_case_id in sampled_source_case_ids for pair in pairs_by_source_case[source_case_id]
         ]
         for requirement in requirements:
             key = (requirement.metric_name, requirement.statistic)
@@ -1584,11 +1537,12 @@ def _confidence_statistic(
     if requirement.statistic == "mean_improvement":
         return improvement
     if baseline_mean == 0:
-        raise ValueError(
-            "cannot calculate relative mean improvement with a zero baseline metric: "
-            f"{requirement.metric_name}"
-        )
-    relative_improvement = improvement / abs(baseline_mean)
+        # A resample of a few cases can draw a baseline that scored nothing (a correct rate of 0).
+        # Nothing can be lost from nothing, and any gain is the whole of it: the relative change is
+        # +1 for a gain, -1 for a loss, 0 for no change. Raising here aborted the whole gate.
+        relative_improvement = math.copysign(1.0, improvement) if improvement else 0.0
+    else:
+        relative_improvement = improvement / abs(baseline_mean)
     if requirement.statistic == "relative_mean_improvement":
         return relative_improvement
     return -relative_improvement
