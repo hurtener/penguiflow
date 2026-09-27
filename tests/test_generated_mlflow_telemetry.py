@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import importlib.util
 import logging
 import sys
@@ -13,7 +14,7 @@ from typing import Any
 import pytest
 
 from penguiflow.cli.new import run_new
-from penguiflow.planner import PlannerEvent
+from penguiflow.planner import PlannerEvent, PlannerFinish
 
 
 class _Span:
@@ -22,11 +23,19 @@ class _Span:
         self.span_type = span_type
         self.parent = parent
         self.attributes: dict[str, Any] = {}
+        self.inputs: Any = None
+        self.outputs: Any = None
         self.status: str | None = None
         self.ended = False
 
     def set_attributes(self, attributes: dict[str, Any]) -> None:
         self.attributes.update(attributes)
+
+    def set_inputs(self, inputs: Any) -> None:
+        self.inputs = inputs
+
+    def set_outputs(self, outputs: Any) -> None:
+        self.outputs = outputs
 
     def set_status(self, status: str) -> None:
         self.status = status
@@ -118,7 +127,7 @@ def _event(event_type: str, call_id: str, payload: str) -> PlannerEvent:
     "template",
     ["minimal", "react", "parallel", "rag_server", "wayfinder", "analyst", "enterprise"],
 )
-def test_generated_tool_span_lifecycle_and_privacy(
+def test_generated_spans_record_inputs_outputs_and_tool_parameters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     template: str,
@@ -126,11 +135,14 @@ def test_generated_tool_span_lifecycle_and_privacy(
     module, mlflow = _load_telemetry(tmp_path, monkeypatch, template)
     telemetry = module.AgentTelemetry(flow_name="trace-agent", logger=logging.getLogger("test.telemetry"))
 
-    with telemetry.trace_agent_run(operation="execute", trace_id="trace-1"):
-        telemetry.record_planner_event(_event("tool_call_start", "call-1", '{"secret":"input-secret"}'))
+    with telemetry.trace_agent_run(
+        operation="execute", trace_id="trace-1", inputs={"query": "input-secret"}
+    ):
+        telemetry.record_planner_event(_event("tool_call_start", "call-1", '{"term":"input-secret"}'))
         telemetry.record_planner_event(_event("tool_call_end", "call-1", "{}"))
         assert not mlflow.tools[0].ended
         telemetry.record_planner_event(_event("tool_call_result", "call-1", '{"value":"output-secret"}'))
+        telemetry.record_agent_output({"answer": "output-secret"})
 
     root = mlflow.roots[0]
     tool = mlflow.tools[0]
@@ -141,9 +153,67 @@ def test_generated_tool_span_lifecycle_and_privacy(
     assert tool.parent is root
     assert tool.status == "OK"
     assert tool.ended
-    recorded = str(root.attributes) + str(tool.attributes)
-    assert "input-secret" not in recorded
-    assert "output-secret" not in recorded
+    assert root.inputs == {"query": "input-secret"}
+    assert root.outputs == {"answer": "output-secret"}
+    assert tool.inputs == {"term": "input-secret"}
+    assert tool.outputs == {"value": "output-secret"}
+    recorded_attributes = str(root.attributes) + str(tool.attributes)
+    assert "input-secret" not in recorded_attributes
+    assert "output-secret" not in recorded_attributes
+
+
+def test_generated_telemetry_handles_invalid_tool_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module, mlflow = _load_telemetry(tmp_path, monkeypatch)
+    telemetry = module.AgentTelemetry(flow_name="trace-agent", logger=logging.getLogger("test.telemetry"))
+
+    with telemetry.trace_agent_run(operation="execute", trace_id="trace-invalid"):
+        telemetry.record_planner_event(_event("tool_call_start", "call-1", "invalid args"))
+        telemetry.record_planner_event(_event("tool_call_result", "call-1", "invalid result"))
+
+    assert mlflow.tools[0].inputs == "invalid args"
+    assert mlflow.tools[0].outputs == "invalid result"
+    assert mlflow.tools[0].ended
+
+
+@pytest.mark.asyncio
+async def test_generated_react_orchestrator_records_query_and_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = "react-io-agent"
+    result = run_new(
+        name=name,
+        template="react",
+        output_dir=tmp_path,
+        quiet=True,
+        with_mlflow=True,
+        no_memory=True,
+    )
+    assert result.success
+
+    fake_mlflow = _Mlflow()
+    monkeypatch.setitem(sys.modules, "mlflow", SimpleNamespace(
+        start_span=fake_mlflow.start_span,
+        start_span_no_context=fake_mlflow.start_span_no_context,
+    ))
+    monkeypatch.syspath_prepend(str(tmp_path / name / "src"))
+    orchestrator_module = importlib.import_module("react_io_agent.orchestrator")
+
+    async def run(**_kwargs: Any) -> PlannerFinish:
+        return PlannerFinish(reason="answer_complete", payload={"answer": "final answer"})
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "build_planner",
+        lambda *_args, **_kwargs: SimpleNamespace(planner=SimpleNamespace(run=run)),
+    )
+    orchestrator = orchestrator_module.ReactIoAgentOrchestrator(orchestrator_module.Config())
+    response = await orchestrator.execute(
+        "original question", tenant_id="tenant", user_id="user", session_id="session"
+    )
+
+    assert response.answer == "final answer"
+    assert fake_mlflow.roots[0].inputs == {"query": "original question"}
+    assert fake_mlflow.roots[0].outputs == {"answer": "final answer"}
 
 
 @pytest.mark.asyncio
