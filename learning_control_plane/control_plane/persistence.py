@@ -312,8 +312,7 @@ def _decision_from_payload(payload: Any) -> GateDecision:
     }
     decision["case_group_confidence_intervals"] = {
         str(group_name): tuple(
-            MetricConfidenceInterval(**_mapping(interval, "metric confidence interval"))
-            for interval in intervals
+            MetricConfidenceInterval(**_mapping(interval, "metric confidence interval")) for interval in intervals
         )
         for group_name, intervals in _mapping(
             decision.get("case_group_confidence_intervals", {}),
@@ -347,8 +346,7 @@ def _metric_summary_from_payload(payload: Any) -> MetricSummary:
     summary = _mapping(payload, "metric summary")
     specification = MetricSpecification(**_mapping(summary["specification"], "metric specification"))
     paired_values = tuple(
-        PairedMetricValue(**_mapping(value, "paired metric value"))
-        for value in summary.get("paired_values", [])
+        PairedMetricValue(**_mapping(value, "paired metric value")) for value in summary.get("paired_values", [])
     )
     return MetricSummary(
         specification=specification,
@@ -365,6 +363,7 @@ def _review_payload(review: ReviewDecision) -> dict[str, object]:
         "reason": review.reason,
         "decided_at": review.decided_at.isoformat(),
         "investigation_digests": list(review.investigation_digests),
+        "overrode_gate": review.overrode_gate,
     }
 
 
@@ -376,6 +375,7 @@ def _review_from_payload(payload: Any) -> ReviewDecision:
         reason=str(review["reason"]),
         decided_at=datetime.fromisoformat(str(review["decided_at"])),
         investigation_digests=tuple(review.get("investigation_digests", [])),
+        overrode_gate=bool(review.get("overrode_gate", False)),
     )
 
 

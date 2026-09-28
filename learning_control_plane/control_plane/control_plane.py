@@ -379,6 +379,9 @@ class ReviewDecision:
     reason: str
     decided_at: datetime
     investigation_digests: Sequence[str] = ()
+    # True when the owner approved a candidate the automated gate had rejected; the gate's own
+    # decision stays on the job unchanged, so the override is always visible beside it.
+    overrode_gate: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "reviewer_id", _non_empty(self.reviewer_id, "reviewer_id"))
@@ -740,6 +743,48 @@ class LearningControlPlane:
         if review_event_id is not None:
             event_ids += (review_event_id,)
         job = replace(job, state=state, review=review, evidence_event_ids=event_ids)
+        self._jobs[job_id] = job
+        self._persist()
+        return job
+
+    def override_gate_rejection(self, job_id: str, *, reviewer_id: str, reason: str) -> LearningJob:
+        """Approve a candidate the gate rejected, as an explicit, recorded owner decision.
+
+        `review_job` accepts only gate-passing jobs and stays that way. This is the separate, deliberate
+        path for an owner who accepts a candidate despite the gate: the job must carry the gate's
+        rejecting decision and no earlier review; the gate's decision is kept as it was; and the review
+        is marked `overrode_gate` so every later reader sees what happened.
+        """
+
+        job = self.get_job(job_id)
+        if job.state != "rejected" or job.decision is None or job.decision.approved:
+            raise ValueError("only a job the gate rejected can be approved over the gate")
+        if job.review is not None:
+            raise ValueError("this job already has a human review")
+        review = ReviewDecision(
+            reviewer_id=reviewer_id,
+            approved=True,
+            reason=reason,
+            decided_at=datetime.now(UTC),
+            investigation_digests=job.decision.investigation_digests,
+            overrode_gate=True,
+        )
+        review_event_id = self._emit(
+            EvidenceEvent(
+                event_type="review.gate_overridden",
+                context=job.evaluation_request.evidence_context,
+                attributes={
+                    "approved": True,
+                    "reviewer_id": reviewer_id,
+                    "overrode_gate": True,
+                    "investigation_digest_count": len(review.investigation_digests),
+                },
+            )
+        )
+        event_ids = job.evidence_event_ids
+        if review_event_id is not None:
+            event_ids += (review_event_id,)
+        job = replace(job, state="approved", review=review, evidence_event_ids=event_ids)
         self._jobs[job_id] = job
         self._persist()
         return job
