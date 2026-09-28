@@ -85,6 +85,17 @@ class CapturingOrchestrator:
         return self._response
 
 
+class TenantOnlyOrchestrator:
+    def __init__(self, *, response: Any) -> None:
+        self._response = response
+        self.last_tenant_id: str | None = None
+
+    async def execute(self, query: str, *, tenant_id: str, memories: list[dict[str, Any]] | None = None) -> Any:
+        _ = (query, memories)
+        self.last_tenant_id = tenant_id
+        return self._response
+
+
 def make_event(event_type: str = "step") -> PlannerEvent:
     return PlannerEvent(event_type=event_type, ts=1.0, trajectory_step=1)
 
@@ -274,3 +285,22 @@ async def test_orchestrator_wrapper_forwards_tool_context_when_supported() -> No
     assert orchestrator.last_tool_context is not None
     assert orchestrator.last_tool_context["task_service"] == "svc-1"
     assert orchestrator.last_tool_context["tenant_id"] == "tenant-2"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_wrapper_skips_unsupported_execute_kwargs() -> None:
+    orchestrator = TenantOnlyOrchestrator(response={"answer": "ok", "trace_id": "t1", "metadata": {}})
+    wrapper = OrchestratorAgentWrapper(
+        orchestrator,
+        tenant_id="tenant-default",
+        user_id="user-default",
+    )
+
+    result = await wrapper.chat(
+        "hi",
+        session_id="session-1",
+        tool_context={"tenant_id": "tenant-override"},
+    )
+
+    assert result.answer == "ok"
+    assert orchestrator.last_tenant_id == "tenant-override"

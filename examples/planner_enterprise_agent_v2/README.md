@@ -18,6 +18,7 @@ This example demonstrates enterprise-grade patterns for building autonomous agen
 - [Architecture](#architecture)
 - [Configuration](#configuration)
 - [Running the Agent](#running-the-agent)
+- [Evaluation Walkthrough](#evaluation-walkthrough)
 - [Production Deployment](#production-deployment)
 - [Telemetry & Observability](#telemetry--observability)
 - [Extending the Agent](#extending-the-agent)
@@ -93,6 +94,21 @@ Telemetry Metrics
   flow_node_errors: 0
   flow_node_successes: 6
 ```
+
+---
+
+## Evaluation Walkthrough
+
+This example includes a minimal eval walkthrough at:
+
+- `examples/planner_enterprise_agent_v2/evals/policy_compliance_v1/README.md`
+
+Flow:
+
+- define query suite,
+- collect/pin dataset,
+- run baseline eval by omitting `candidates_path` and using `min_test_score`,
+- use Playground for dataset curation from real traces, failing-case review, and trace-linked debugging while refining metrics.
 
 ---
 
@@ -217,7 +233,7 @@ All configuration is driven by environment variables (see `.env.example`):
 The `AgentConfig` dataclass provides type-safe configuration:
 
 ```python
-from examples.planner_enterprise_agent.config import AgentConfig
+from examples.planner_enterprise_agent_v2.config import AgentConfig
 
 # Load from environment
 config = AgentConfig.from_env()
@@ -239,8 +255,8 @@ config = AgentConfig(
 
 ```python
 import asyncio
-from examples.planner_enterprise_agent.main import EnterpriseAgentOrchestrator
-from examples.planner_enterprise_agent.config import AgentConfig
+from examples.planner_enterprise_agent_v2.main import EnterpriseAgentOrchestrator
+from examples.planner_enterprise_agent_v2.config import AgentConfig
 
 async def main():
     config = AgentConfig.from_env()
@@ -790,9 +806,9 @@ async def parse_doc(args: Args, ctx: Any) -> Result:
 
 ```python
 import pytest
-from examples.planner_enterprise_agent.main import EnterpriseAgentOrchestrator
-from examples.planner_enterprise_agent.config import AgentConfig
-from examples.planner_enterprise_agent.telemetry import AgentTelemetry
+from examples.planner_enterprise_agent_v2.main import EnterpriseAgentOrchestrator
+from examples.planner_enterprise_agent_v2.config import AgentConfig
+from examples.planner_enterprise_agent_v2.telemetry import AgentTelemetry
 
 @pytest.mark.asyncio
 async def test_document_workflow():

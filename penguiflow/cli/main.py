@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+from pathlib import Path
 
 import click
 
@@ -99,11 +101,16 @@ def init(
     help="Port to bind the playground server.",
 )
 @click.option(
+    "--agent-package",
+    default=None,
+    help="Explicit agent package to discover under project root.",
+)
+@click.option(
     "--no-browser",
     is_flag=True,
     help="Do not open the browser automatically.",
 )
-def dev(project_root: str, host: str, port: int, no_browser: bool) -> None:
+def dev(project_root: str, host: str, port: int, agent_package: str | None, no_browser: bool) -> None:
     """Launch the playground backend + UI for a project.
 
     IMPORTANT: The playground runs in penguiflow's Python environment, not the
@@ -127,6 +134,7 @@ def dev(project_root: str, host: str, port: int, no_browser: bool) -> None:
             host=host,
             port=port,
             open_browser=not no_browser,
+            agent_package=agent_package,
         )
     except DevCLIError as e:
         click.echo(f"✗ {e.message}", err=True)
@@ -310,6 +318,153 @@ def tools_connect(
         if e.hint:
             click.echo(f"  Hint: {e.hint}", err=True)
         sys.exit(1)
+
+
+@app.group()
+def eval() -> None:
+    """Run trace-derived dataset export and evaluation workflows."""
+
+
+def _load_env_file_values(file_path: Path) -> dict[str, str]:
+    if not file_path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for line in file_path.read_text(encoding="utf-8").splitlines():
+        raw = line.strip()
+        if not raw or raw.startswith("#") or "=" not in raw:
+            continue
+        key, _, value = raw.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def _autoload_project_env(project_root: Path | None) -> None:
+    if project_root is None:
+        return
+    for key, value in _load_env_file_values(project_root / ".env").items():
+        if key not in os.environ:
+            os.environ[key] = value
+
+
+def _render_eval_summary(result: dict[str, object]) -> str:
+    preferred_order = (
+        "mode",
+        "winner_id",
+        "passed_holdout_regression",
+        "passed_threshold",
+        "min_test_score",
+        "val_score",
+        "test_score",
+        "val_baseline_score",
+        "val_winner_score",
+        "test_baseline_score",
+        "test_winner_score",
+        "candidates",
+        "counts",
+        "workload",
+        "passed",
+        "baseline_score",
+        "winner_score",
+        "collect_trace_count",
+        "trace_count",
+        "dataset_path",
+        "manifest_path",
+        "report_path",
+    )
+    lines: list[str] = []
+    seen: set[str] = set()
+    for key in preferred_order:
+        if key in result:
+            lines.append(f"{key}: {result[key]}")
+            seen.add(key)
+
+    for key in sorted(result.keys()):
+        if key in seen:
+            continue
+        lines.append(f"{key}: {result[key]}")
+    return "\n".join(lines)
+
+
+@eval.command("collect")
+@click.option(
+    "--spec",
+    "spec_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=str),
+    help="Path to eval collect spec JSON file. Relative spec fields resolve from project_root.",
+)
+def eval_collect(spec_path: str) -> None:
+    """Run collect->export workflow from spec (no evaluation)."""
+    import asyncio
+    from pathlib import Path
+
+    from penguiflow.evals.api import collect_and_export_traces, load_eval_collect_spec
+
+    path = Path(spec_path).resolve()
+
+    try:
+        collect_spec = load_eval_collect_spec(path)
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
+
+    _autoload_project_env(collect_spec.project_root)
+
+    try:
+        result = asyncio.run(
+            collect_and_export_traces(
+                project_root=collect_spec.project_root,
+                query_suite_path=collect_spec.query_suite_path,
+                output_dir=collect_spec.output_dir,
+                session_id=collect_spec.session_id,
+                dataset_tag=collect_spec.dataset_tag,
+                agent_package=collect_spec.agent_package,
+                state_store_spec=collect_spec.state_store_spec,
+            )
+        )
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(_render_eval_summary(result))
+
+
+@eval.command("evaluate")
+@click.option(
+    "--spec",
+    "spec_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=str),
+    help="Path to eval dataset spec JSON file. Relative spec fields resolve from project_root if provided.",
+)
+def eval_evaluate(spec_path: str) -> None:
+    """Run evaluation against an existing dataset bundle from spec."""
+    import asyncio
+    from pathlib import Path
+
+    from penguiflow.evals.api import evaluate_dataset_from_spec_file, load_eval_dataset_spec
+
+    path = Path(spec_path).resolve()
+
+    try:
+        spec = load_eval_dataset_spec(path)
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
+
+    _autoload_project_env(spec.project_root)
+
+    try:
+        result = asyncio.run(evaluate_dataset_from_spec_file(path))
+    except Exception as exc:
+        click.echo(f"✗ {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(_render_eval_summary(result))
 
 
 @app.command()

@@ -1,0 +1,46 @@
+{
+  "counts": {
+    "test": 2,
+    "total": 4,
+    "val": 2
+  },
+  "dataset_id": "eval-20260616152852",
+  "export_command": "export_trace_dataset",
+  "redaction_policy": "internal_safe",
+  "schema_versions": {
+    "trace": "TraceExampleV1"
+  },
+  "source": {
+    "session_id": null,
+    "source_priority": [
+      "trajectory",
+      "planner_events",
+      "history"
+    ],
+    "trace_ids": [
+      "44c5169d5a91684d",
+      "1a145a34ec67db29",
+      "62e04bfbfbedd29f",
+      "683e85296246919f"
+    ],
+    "trace_refs": [
+      {
+        "session_id": "policy-compliance-v1-collect",
+        "trace_id": "44c5169d5a91684d"
+      },
+      {
+        "session_id": "policy-compliance-v1-collect",
+        "trace_id": "1a145a34ec67db29"
+      },
+      {
+        "session_id": "policy-compliance-v1-collect",
+        "trace_id": "62e04bfbfbedd29f"
+      },
+      {
+        "session_id": "policy-compliance-v1-collect",
+        "trace_id": "683e85296246919f"
+      }
+    ]
+  },
+  "workload": "planner_enterprise_agent_v2"
+}

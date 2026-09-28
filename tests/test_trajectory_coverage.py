@@ -362,3 +362,19 @@ def test_trajectory_compress_with_long_observation():
     assert summary.last_output_digest is not None
     assert summary.last_output_digest.endswith("...")
     assert len(summary.last_output_digest) <= 120
+
+
+def test_trajectory_final_answer_roundtrips_and_defaults_to_none():
+    """final_answer must survive serialise()/from_serialised().
+
+    Payloads written before the field existed have no 'final_answer' key, so
+    deserialising them must still work and yield None.
+    """
+    trajectory = Trajectory(query="What is the answer?", final_answer="42")
+
+    payload = trajectory.serialise()
+    assert payload["final_answer"] == "42"
+    assert Trajectory.from_serialised(payload).final_answer == "42"
+
+    legacy_payload = {key: value for key, value in payload.items() if key != "final_answer"}
+    assert Trajectory.from_serialised(legacy_payload).final_answer is None
