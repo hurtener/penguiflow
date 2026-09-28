@@ -382,6 +382,10 @@ class ReviewDecision:
     # True when the owner approved a candidate the automated gate had rejected; the gate's own
     # decision stays on the job unchanged, so the override is always visible beside it.
     overrode_gate: bool = False
+    # Set when an approval that was never delivered is withdrawn; the approval above stays as it was.
+    withdrawn_by: str = ""
+    withdrawn_at: datetime | None = None
+    withdrawn_reason: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "reviewer_id", _non_empty(self.reviewer_id, "reviewer_id"))
@@ -785,6 +789,44 @@ class LearningControlPlane:
         if review_event_id is not None:
             event_ids += (review_event_id,)
         job = replace(job, state="approved", review=review, evidence_event_ids=event_ids)
+        self._jobs[job_id] = job
+        self._persist()
+        return job
+
+    def withdraw_approval(self, job_id: str, *, reviewer_id: str, reason: str) -> LearningJob:
+        """Withdraw an approval that was never delivered, keeping the approval itself on the record.
+
+        A delivered skill is revoked, not withdrawn: this refuses a job with an active delivery
+        authorization. The job moves to `rejected`; its review keeps who approved it and why (and
+        whether over the gate) and gains who withdrew it, when and why.
+        """
+
+        job = self.get_job(job_id)
+        if job.state != "approved" or job.review is None or not job.review.approved:
+            raise ValueError("only an approved job can have its approval withdrawn")
+        now = datetime.now(UTC)
+        if any(
+            authorization.job_id == job_id and authorization.is_active(now)
+            for authorization in self._authorizations.values()
+        ):
+            raise ValueError("this job has an active delivery authorization; revoke the delivery instead")
+        withdrawn = replace(
+            job.review,
+            withdrawn_by=_non_empty(reviewer_id, "reviewer_id"),
+            withdrawn_at=now,
+            withdrawn_reason=_non_empty(reason, "withdrawal reason"),
+        )
+        event_id = self._emit(
+            EvidenceEvent(
+                event_type="review.withdrawn",
+                context=job.evaluation_request.evidence_context,
+                attributes={"reviewer_id": reviewer_id, "overrode_gate": job.review.overrode_gate},
+            )
+        )
+        event_ids = job.evidence_event_ids
+        if event_id is not None:
+            event_ids += (event_id,)
+        job = replace(job, state="rejected", review=withdrawn, evidence_event_ids=event_ids)
         self._jobs[job_id] = job
         self._persist()
         return job

@@ -364,6 +364,9 @@ def _review_payload(review: ReviewDecision) -> dict[str, object]:
         "decided_at": review.decided_at.isoformat(),
         "investigation_digests": list(review.investigation_digests),
         "overrode_gate": review.overrode_gate,
+        "withdrawn_by": review.withdrawn_by,
+        "withdrawn_at": review.withdrawn_at.isoformat() if review.withdrawn_at else None,
+        "withdrawn_reason": review.withdrawn_reason,
     }
 
 
@@ -376,6 +379,9 @@ def _review_from_payload(payload: Any) -> ReviewDecision:
         decided_at=datetime.fromisoformat(str(review["decided_at"])),
         investigation_digests=tuple(review.get("investigation_digests", [])),
         overrode_gate=bool(review.get("overrode_gate", False)),
+        withdrawn_by=str(review.get("withdrawn_by") or ""),
+        withdrawn_at=datetime.fromisoformat(str(review["withdrawn_at"])) if review.get("withdrawn_at") else None,
+        withdrawn_reason=str(review.get("withdrawn_reason") or ""),
     )
 
 
