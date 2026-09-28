@@ -88,3 +88,19 @@ async def test_a_delivered_approval_must_be_revoked_not_withdrawn(tmp_path) -> N
 
     with pytest.raises(ValueError, match="revoke the delivery instead"):
         plane.withdraw_approval(passed.job_id, reviewer_id="owner", reason="changed my mind")
+
+
+async def test_an_approved_gate_passing_job_can_be_reopened_for_review_but_not_an_override(tmp_path) -> None:
+    plane = _plane(tmp_path)
+    passed = await _job(plane, 0.9)
+    plane.review_job(passed.job_id, reviewer_id="owner", approved=True, reason="recorded on my behalf")
+
+    reopened = plane.reopen_review(passed.job_id, reviewer_id="owner", reason="I will decide on the page")
+
+    assert reopened.state == "ready_for_review" and reopened.review is None
+    again = plane.review_job(passed.job_id, reviewer_id="owner", approved=True, reason="now my own decision")
+    assert again.state == "approved"
+
+    overridden = plane.override_gate_rejection((await _job(plane, 0.55)).job_id, reviewer_id="owner", reason="v1")
+    with pytest.raises(ValueError, match="withdrawn, not reopened"):
+        plane.reopen_review(overridden.job_id, reviewer_id="owner", reason="x")

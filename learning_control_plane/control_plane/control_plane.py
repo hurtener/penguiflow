@@ -831,6 +831,45 @@ class LearningControlPlane:
         self._persist()
         return job
 
+    def reopen_review(self, job_id: str, *, reviewer_id: str, reason: str) -> LearningJob:
+        """Send a gate-passing, approved, never-delivered job back to `ready_for_review`.
+
+        For an approval recorded too early or on someone's behalf. An approval given over the gate is
+        withdrawn, not reopened (the gate did not pass it). A delivered skill is revoked instead. The
+        cleared approval is kept in the `review.reopened` evidence event.
+        """
+
+        job = self.get_job(job_id)
+        if job.state != "approved" or job.review is None or not job.review.approved:
+            raise ValueError("only an approved job can be reopened for review")
+        if job.review.overrode_gate or job.decision is None or not job.decision.approved:
+            raise ValueError("an approval over the gate is withdrawn, not reopened")
+        now = datetime.now(UTC)
+        if any(
+            authorization.job_id == job_id and authorization.is_active(now)
+            for authorization in self._authorizations.values()
+        ):
+            raise ValueError("this job has an active delivery authorization; revoke the delivery instead")
+        event_id = self._emit(
+            EvidenceEvent(
+                event_type="review.reopened",
+                context=job.evaluation_request.evidence_context,
+                attributes={
+                    "reopened_by": _non_empty(reviewer_id, "reviewer_id"),
+                    "reason": _non_empty(reason, "reopen reason"),
+                    "cleared_reviewer_id": job.review.reviewer_id,
+                    "cleared_decided_at": job.review.decided_at.isoformat(),
+                },
+            )
+        )
+        event_ids = job.evidence_event_ids
+        if event_id is not None:
+            event_ids += (event_id,)
+        job = replace(job, state="ready_for_review", review=None, evidence_event_ids=event_ids)
+        self._jobs[job_id] = job
+        self._persist()
+        return job
+
     def authorize_delivery(self, job_id: str, *, scope_ref: str, expires_at: datetime) -> DeliveryAuthorization:
         """Authorize one reviewed candidate for one scope; the host performs delivery."""
 
