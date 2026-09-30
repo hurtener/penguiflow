@@ -142,6 +142,73 @@ class TestLiteLLMJSONClient:
             mock_litellm.acompletion.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_complete_emits_provider_usage(self, mock_litellm: MagicMock) -> None:
+        mock_litellm.acompletion = AsyncMock(
+            return_value={
+                "choices": [{"message": {"content": '{"result": "ok"}'}}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 4},
+            }
+        )
+        usage: list[tuple[int, int, int]] = []
+
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                "gpt-4o",
+                temperature=0.0,
+                json_schema_mode=False,
+                on_usage=lambda input_tokens, output_tokens, total_tokens: usage.append(
+                    (input_tokens, output_tokens, total_tokens)
+                ),
+            )
+            await client.complete(messages=[{"role": "user", "content": "test"}])
+
+        assert usage == [(12, 4, 16)]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("prompt_tokens, completion_tokens", [(0, 0), (True, 2)])
+    async def test_complete_ignores_invalid_usage(
+        self, mock_litellm: MagicMock, prompt_tokens: int, completion_tokens: int
+    ) -> None:
+        mock_litellm.acompletion = AsyncMock(
+            return_value={
+                "choices": [{"message": {"content": '{"result": "ok"}'}}],
+                "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+            }
+        )
+        usage: list[tuple[int, int, int]] = []
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                "gpt-4o", temperature=0.0, json_schema_mode=False,
+                on_usage=lambda *counts: usage.append(counts),
+            )
+            await client.complete(messages=[{"role": "user", "content": "test"}])
+
+        assert usage == []
+
+    @pytest.mark.asyncio
+    async def test_complete_ignores_usage_callback_failure(self, mock_litellm: MagicMock) -> None:
+        mock_litellm.acompletion = AsyncMock(
+            return_value={
+                "choices": [{"message": {"content": '{"result": "ok"}'}}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 4},
+            }
+        )
+
+        def failing_callback(*_: int) -> None:
+            raise RuntimeError("telemetry unavailable")
+
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                "gpt-4o",
+                temperature=0.0,
+                json_schema_mode=False,
+                on_usage=failing_callback,
+            )
+            content, _ = await client.complete(messages=[{"role": "user", "content": "test"}])
+
+        assert content == '{"result": "ok"}'
+
+    @pytest.mark.asyncio
     async def test_complete_with_json_schema_mode(self, mock_litellm: MagicMock) -> None:
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
@@ -424,7 +491,7 @@ class TestLiteLLMJSONClient:
     @pytest.mark.asyncio
     async def test_streaming_with_usage_and_chunks(self, mock_litellm: MagicMock) -> None:
         async def _stream() -> AsyncIterator[dict[str, Any]]:
-            yield {"choices": [{"delta": {"content": '{"raw_answer": "Hel' }}], "usage": None}
+            yield {"choices": [{"delta": {"content": '{"raw_answer": "Hel'}}], "usage": None}
             yield {
                 "choices": [{"delta": {"content": 'lo"}'}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5},
@@ -461,6 +528,7 @@ class TestLiteLLMJSONClient:
         mock_litellm.types = mock_types
 
         chunks: list[tuple[str, bool]] = []
+        usage: list[tuple[int, int, int]] = []
 
         def on_chunk(text: str, done: bool) -> None:
             chunks.append((text, done))
@@ -476,6 +544,9 @@ class TestLiteLLMJSONClient:
                 temperature=0.0,
                 json_schema_mode=False,
                 streaming_enabled=True,
+                on_usage=lambda input_tokens, output_tokens, total_tokens: usage.append(
+                    (input_tokens, output_tokens, total_tokens)
+                ),
             )
             content, cost = await client.complete(
                 messages=[{"role": "user", "content": "hello"}],
@@ -490,6 +561,7 @@ class TestLiteLLMJSONClient:
             ("", True),
         ]
         assert cost == pytest.approx(0.123)
+        assert usage == [(10, 5, 15)]
 
     @pytest.mark.asyncio
     async def test_non_streaming_emits_reasoning_content_when_available(self, mock_litellm: MagicMock) -> None:
@@ -726,6 +798,7 @@ class TestArtifactPlaceholder:
     def test_object_without_len(self) -> None:
         class NoLen:
             pass
+
         result = _artifact_placeholder(NoLen())
         assert result == "<artifact:NoLen>"
 
@@ -891,9 +964,7 @@ class TestReasoningEffortGuard:
         return mock
 
     @pytest.mark.asyncio
-    async def test_reasoning_effort_not_passed_for_non_reasoning_model(
-        self, mock_litellm: MagicMock
-    ) -> None:
+    async def test_reasoning_effort_not_passed_for_non_reasoning_model(self, mock_litellm: MagicMock) -> None:
         """reasoning_effort should NOT be passed to models that don't support reasoning."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
@@ -909,9 +980,7 @@ class TestReasoningEffortGuard:
             assert "reasoning_effort" not in call_kwargs
 
     @pytest.mark.asyncio
-    async def test_reasoning_effort_passed_for_reasoning_model(
-        self, mock_litellm: MagicMock
-    ) -> None:
+    async def test_reasoning_effort_passed_for_reasoning_model(self, mock_litellm: MagicMock) -> None:
         """reasoning_effort SHOULD be passed to models that support reasoning."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(

@@ -175,6 +175,36 @@ def test_generated_telemetry_handles_invalid_tool_json(tmp_path: Path, monkeypat
     assert mlflow.tools[0].ended
 
 
+@pytest.mark.parametrize(
+    "template",
+    ["minimal", "react", "parallel", "rag_server", "wayfinder", "analyst", "enterprise"],
+)
+def test_generated_agent_aggregates_provider_token_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, template: str
+) -> None:
+    module, mlflow = _load_telemetry(tmp_path, monkeypatch, template)
+    telemetry = module.AgentTelemetry(flow_name="trace-agent", logger=logging.getLogger("test.usage"))
+
+    with telemetry.trace_agent_run(operation="execute", trace_id="usage-run"):
+        for input_tokens, output_tokens in ((12, 4), (3, 2)):
+            telemetry.record_planner_event(PlannerEvent(
+                event_type="llm_usage", ts=1.0, trajectory_step=0,
+                extra={"input_tokens": input_tokens, "output_tokens": output_tokens},
+            ))
+        telemetry.record_planner_event(PlannerEvent(
+            event_type="llm_usage", ts=1.0, trajectory_step=0,
+            extra={"input_tokens": -1, "output_tokens": 5},
+        ))
+
+    assert mlflow.roots[0].attributes["mlflow.chat.tokenUsage"] == {
+        "input_tokens": 15, "output_tokens": 6, "total_tokens": 21,
+    }
+
+    with telemetry.trace_agent_run(operation="execute", trace_id="scripted-run"):
+        pass
+    assert "mlflow.chat.tokenUsage" not in mlflow.roots[1].attributes
+
+
 @pytest.mark.asyncio
 async def test_generated_react_orchestrator_records_query_and_answer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -233,6 +263,27 @@ async def test_generated_concurrent_runs_keep_tool_parents(tmp_path: Path, monke
     assert len(mlflow.tools) == 2
     assert {span.parent for span in mlflow.tools} == {roots["trace-a"], roots["trace-b"]}
     assert all(span.status == "OK" and span.ended for span in mlflow.tools)
+
+
+@pytest.mark.asyncio
+async def test_generated_concurrent_runs_keep_usage_separate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, mlflow = _load_telemetry(tmp_path, monkeypatch)
+    telemetry = module.AgentTelemetry(flow_name="trace-agent", logger=logging.getLogger("test.concurrent.usage"))
+
+    async def run(trace_id: str, tokens: int) -> None:
+        with telemetry.trace_agent_run(operation="execute", trace_id=trace_id):
+            await asyncio.sleep(0)
+            telemetry.record_planner_event(PlannerEvent(
+                event_type="llm_usage", ts=1.0, trajectory_step=0,
+                extra={"input_tokens": tokens, "output_tokens": 1},
+            ))
+
+    await asyncio.gather(run("trace-a", 2), run("trace-b", 5))
+    roots = {span.attributes["trace_id"]: span for span in mlflow.roots}
+    assert roots["trace-a"].attributes["mlflow.chat.tokenUsage"]["total_tokens"] == 3
+    assert roots["trace-b"].attributes["mlflow.chat.tokenUsage"]["total_tokens"] == 6
 
 
 def test_generated_error_and_cleanup_statuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
