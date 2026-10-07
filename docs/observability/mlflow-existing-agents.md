@@ -20,11 +20,11 @@ Replace `react` with your agent's template. Review and merge the generated chang
 
 The migration touches these parts of the generated project:
 
-1. Add `mlflow-tracing>=3.8,<4` to the project dependencies, then run `uv lock` and `uv sync`. If your lockfile pins an older PenguiFlow release, update it to a release that emits planner `llm_usage` events before syncing i.e. version >= 3.12.0.
+1. Add `mlflow-tracing>=3.8,<4` to the project dependencies, then run `uv lock` and `uv sync`. Keep `penguiflow[planner]` for LiteLLM calls. Native provider calls also need their provider SDK.
 2. Merge the MLflow support in `telemetry.py` into your existing `AgentTelemetry`. Keep the existing planner-event callback and structured logging.
 3. In `orchestrator.py`, wrap each planner execution and resume operation in `trace_agent_run(...)`. Record the final answer or pause result with `record_agent_output(...)` before the span closes.
 4. Keep the existing `event_callback=self._telemetry.record_planner_event` wiring in the `ReactPlanner` constructor. The telemetry callback uses planner events to create tool spans and close them when tool results arrive.
-5. For token counts, keep the `llm_usage` event handler from the generated telemetry. The built-in planner clients report provider token usage through these events, and the telemetry callback aggregates them into `mlflow.chat.tokenUsage` for each agent run. A custom LLM client must report provider usage for counts to appear.
+5. Keep `mlflow.litellm.autolog()` enabled in generated telemetry for LiteLLM calls. For native LLM calls, keep the `llm_usage` event handler, which records per-call token usage on a child span. MLflow aggregates those spans at the trace level. Do not also write the total on the agent root span, because that can hide usage from LiteLLM child spans.
 
 The core orchestration pattern looks like this. Keep your project's existing result handling inside the context manager:
 
@@ -59,11 +59,11 @@ The generated `.env.example` uses `http://localhost:5000` as an example. Change 
 
 ## Check the trace
 
-Run the agent with a real LLM provider, then inspect its trace in MLflow. The generated integration records the agent input and output, tool inputs and outputs, and provider token usage when the provider returns usage values.
+Run the agent with a real LLM provider, then inspect its trace in MLflow. The generated integration records the agent input and output, tool inputs and outputs, and provider token usage when the provider returns usage values. LiteLLM autologging also records prompts, completions, and call metadata on its LLM spans.
 
-The default `stub-llm`/scripted path does not report token usage. Missing token counts on that path are expected. A custom LLM client must pass provider-reported input and output token counts into the planner telemetry path for them to appear.
+The default `stub-llm`/scripted path does not report token usage. Missing token counts on that path are expected. A custom LLM client must instrument its own calls or emit provider-reported usage events for counts to appear.
 
-Review the data captured by your traces before enabling this in a shared or production environment. Agent queries and tool arguments or results can contain user data or secrets. Limit access to the tracking server and set retention to match your data policy.
+Review the data captured by your traces before enabling this in a shared or production environment. Agent queries, tool arguments and results, and LiteLLM prompts and completions can contain user data or secrets. Limit access to the tracking server and set retention to match your data policy.
 
 ## Keep the integration current
 

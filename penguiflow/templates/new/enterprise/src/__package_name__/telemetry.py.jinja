@@ -32,9 +32,6 @@ class StatusUpdate:
 class _MlflowRun:
     span: Any
     tools: dict[str, Any] = field(default_factory=dict)
-    input_tokens: int = 0
-    output_tokens: int = 0
-    usage_calls: int = 0
 {% endif %}
 
 
@@ -205,6 +202,10 @@ class AgentTelemetry:
                 self._mlflow_unavailable = True
                 self.logger.warning("mlflow telemetry disabled: tracing API unavailable")
                 return None
+            try:
+                mlflow.litellm.autolog()
+            except Exception:
+                self.logger.warning("mlflow LiteLLM autolog unavailable", exc_info=True)
             self._mlflow = mlflow
         return self._mlflow
 
@@ -296,14 +297,6 @@ class AgentTelemetry:
         finally:
             for tool_span in run.tools.values():
                 self._close_tool_span(tool_span, "UNSET")
-            if run.usage_calls:
-                self._set_attributes(span, {
-                    "mlflow.chat.tokenUsage": {
-                        "input_tokens": run.input_tokens,
-                        "output_tokens": run.output_tokens,
-                        "total_tokens": run.input_tokens + run.output_tokens,
-                    }
-                })
             self._mlflow_run.reset(token)
             self._set_status(span, "OK" if outcome == "ok" else "ERROR")
             self._close_span(span, context, {"outcome": outcome})
@@ -324,9 +317,17 @@ class AgentTelemetry:
                 type(input_tokens) is int and input_tokens >= 0
                 and type(output_tokens) is int and output_tokens >= 0
             ):
-                run.input_tokens += input_tokens
-                run.output_tokens += output_tokens
-                run.usage_calls += 1
+                opened = self._open_span("llm.usage", "LLM")
+                if opened is not None:
+                    span, context = opened
+                    self._set_attributes(span, {
+                        "mlflow.chat.tokenUsage": {
+                            "input_tokens": input_tokens,
+                            "output_tokens": output_tokens,
+                            "total_tokens": input_tokens + output_tokens,
+                        }
+                    })
+                    self._close_span(span, context)
             return
         tool_call_id = event.extra.get("tool_call_id")
         if not isinstance(tool_call_id, str):

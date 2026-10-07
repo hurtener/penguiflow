@@ -69,7 +69,6 @@ def _build_litellm_client(
     reasoning_display: ReasoningDisplay = None,
     llm_fallback: ModelFallbackConfig | None = None,
     cooldown_store: CooldownStore | None = None,
-    on_usage: Callable[[int, int, int], None] | None = None,
 ) -> JSONLLMClient:
     def _factory(model: str, *, api_key: str | None = None, **kwargs: Any) -> _LiteLLMJSONClient:
         llm_value: str | dict[str, Any]
@@ -78,7 +77,7 @@ def _build_litellm_client(
         if api_key is not None:
             llm_config["api_key"] = api_key
         llm_value = llm_config if extra_kwargs or api_key is not None else model
-        return _LiteLLMJSONClient(llm_value, on_usage=on_usage, **kwargs)
+        return _LiteLLMJSONClient(llm_value, **kwargs)
 
     if llm_fallback is None:
         return _LiteLLMJSONClient(
@@ -91,7 +90,6 @@ def _build_litellm_client(
             use_native_reasoning=use_native_reasoning,
             reasoning_effort=reasoning_effort,
             reasoning_display=reasoning_display,
-            on_usage=on_usage,
         )
 
     if isinstance(llm, Mapping):
@@ -793,7 +791,6 @@ def init_react_planner(
                 reasoning_display=reasoning_display,
                 llm_fallback=llm_fallback,
                 cooldown_store=fallback_store,
-                on_usage=_emit_llm_usage,
             )
 
     if (
@@ -823,7 +820,6 @@ def init_react_planner(
                 timeout_s=llm_timeout_s,
                 llm_fallback=llm_fallback,
                 cooldown_store=fallback_store,
-                on_usage=_emit_llm_usage,
             )
 
     # LiteLLM-based separate clients (override DSPy if explicitly provided)
@@ -849,7 +845,6 @@ def init_react_planner(
                 timeout_s=llm_timeout_s,
                 llm_fallback=llm_fallback,
                 cooldown_store=fallback_store,
-                on_usage=_emit_llm_usage,
             )
 
     # Only set reflection client from reflection_llm if not already set by DSPy
@@ -878,5 +873,4 @@ def init_react_planner(
                     timeout_s=llm_timeout_s,
                     llm_fallback=llm_fallback,
                     cooldown_store=fallback_store,
-                    on_usage=_emit_llm_usage,
                 )

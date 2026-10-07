@@ -7,6 +7,7 @@ import importlib
 import importlib.util
 import logging
 import sys
+from contextvars import ContextVar, Token
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -46,16 +47,21 @@ class _Span:
 
 
 class _SpanContext:
-    def __init__(self, span: _Span) -> None:
+    def __init__(self, span: _Span, active: ContextVar[_Span | None]) -> None:
         self.span = span
+        self.active = active
+        self.token: Token[_Span | None] | None = None
         self.exit_type: type[BaseException] | None = None
 
     def __enter__(self) -> _Span:
+        self.token = self.active.set(self.span)
         return self.span
 
     def __exit__(self, exc_type: type[BaseException] | None, *_args: Any) -> None:
         self.exit_type = exc_type
         self.span.ended = True
+        assert self.token is not None
+        self.active.reset(self.token)
 
 
 class _Mlflow:
@@ -63,12 +69,22 @@ class _Mlflow:
         self.roots: list[_Span] = []
         self.root_contexts: list[_SpanContext] = []
         self.tools: list[_Span] = []
+        self.llm_spans: list[_Span] = []
+        self.active: ContextVar[_Span | None] = ContextVar("fake_mlflow_active", default=None)
+        self.autolog_calls = 0
+
+    def autolog(self) -> None:
+        self.autolog_calls += 1
 
     def start_span(self, *, name: str, span_type: str) -> _SpanContext:
-        span = _Span(name, span_type)
-        context = _SpanContext(span)
-        self.roots.append(span)
-        self.root_contexts.append(context)
+        parent = self.active.get()
+        span = _Span(name, span_type, parent)
+        context = _SpanContext(span, self.active)
+        if parent is None:
+            self.roots.append(span)
+            self.root_contexts.append(context)
+        else:
+            self.llm_spans.append(span)
         return context
 
     def start_span_no_context(self, *, name: str, span_type: str, parent_span: _Span) -> _Span:
@@ -93,10 +109,15 @@ def _load_telemetry(
     assert result.success
 
     fake_mlflow = _Mlflow()
-    monkeypatch.setitem(sys.modules, "mlflow", SimpleNamespace(
-        start_span=fake_mlflow.start_span,
-        start_span_no_context=fake_mlflow.start_span_no_context,
-    ))
+    monkeypatch.setitem(
+        sys.modules,
+        "mlflow",
+        SimpleNamespace(
+            start_span=fake_mlflow.start_span,
+            start_span_no_context=fake_mlflow.start_span_no_context,
+            litellm=SimpleNamespace(autolog=fake_mlflow.autolog),
+        ),
+    )
 
     package_name = name.replace("-", "_")
     path = tmp_path / name / "src" / package_name / "telemetry.py"
@@ -135,9 +156,7 @@ def test_generated_spans_record_inputs_outputs_and_tool_parameters(
     module, mlflow = _load_telemetry(tmp_path, monkeypatch, template)
     telemetry = module.AgentTelemetry(flow_name="trace-agent", logger=logging.getLogger("test.telemetry"))
 
-    with telemetry.trace_agent_run(
-        operation="execute", trace_id="trace-1", inputs={"query": "input-secret"}
-    ):
+    with telemetry.trace_agent_run(operation="execute", trace_id="trace-1", inputs={"query": "input-secret"}):
         telemetry.record_planner_event(_event("tool_call_start", "call-1", '{"term":"input-secret"}'))
         telemetry.record_planner_event(_event("tool_call_end", "call-1", "{}"))
         assert not mlflow.tools[0].ended
@@ -179,7 +198,7 @@ def test_generated_telemetry_handles_invalid_tool_json(tmp_path: Path, monkeypat
     "template",
     ["minimal", "react", "parallel", "rag_server", "wayfinder", "analyst", "enterprise"],
 )
-def test_generated_agent_aggregates_provider_token_usage(
+def test_generated_agent_autologs_litellm_and_records_native_usage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, template: str
 ) -> None:
     module, mlflow = _load_telemetry(tmp_path, monkeypatch, template)
@@ -187,18 +206,30 @@ def test_generated_agent_aggregates_provider_token_usage(
 
     with telemetry.trace_agent_run(operation="execute", trace_id="usage-run"):
         for input_tokens, output_tokens in ((12, 4), (3, 2)):
-            telemetry.record_planner_event(PlannerEvent(
-                event_type="llm_usage", ts=1.0, trajectory_step=0,
-                extra={"input_tokens": input_tokens, "output_tokens": output_tokens},
-            ))
-        telemetry.record_planner_event(PlannerEvent(
-            event_type="llm_usage", ts=1.0, trajectory_step=0,
-            extra={"input_tokens": -1, "output_tokens": 5},
-        ))
+            telemetry.record_planner_event(
+                PlannerEvent(
+                    event_type="llm_usage",
+                    ts=1.0,
+                    trajectory_step=0,
+                    extra={"input_tokens": input_tokens, "output_tokens": output_tokens},
+                )
+            )
+        telemetry.record_planner_event(
+            PlannerEvent(
+                event_type="llm_usage",
+                ts=1.0,
+                trajectory_step=0,
+                extra={"input_tokens": -1, "output_tokens": 5},
+            )
+        )
 
-    assert mlflow.roots[0].attributes["mlflow.chat.tokenUsage"] == {
-        "input_tokens": 15, "output_tokens": 6, "total_tokens": 21,
-    }
+    assert mlflow.autolog_calls == 1
+    assert "mlflow.chat.tokenUsage" not in mlflow.roots[0].attributes
+    assert [span.attributes["mlflow.chat.tokenUsage"] for span in mlflow.llm_spans] == [
+        {"input_tokens": 12, "output_tokens": 4, "total_tokens": 16},
+        {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+    ]
+    assert all(span.parent is mlflow.roots[0] and span.ended for span in mlflow.llm_spans)
 
     with telemetry.trace_agent_run(operation="execute", trace_id="scripted-run"):
         pass
@@ -221,10 +252,15 @@ async def test_generated_react_orchestrator_records_query_and_answer(
     assert result.success
 
     fake_mlflow = _Mlflow()
-    monkeypatch.setitem(sys.modules, "mlflow", SimpleNamespace(
-        start_span=fake_mlflow.start_span,
-        start_span_no_context=fake_mlflow.start_span_no_context,
-    ))
+    monkeypatch.setitem(
+        sys.modules,
+        "mlflow",
+        SimpleNamespace(
+            start_span=fake_mlflow.start_span,
+            start_span_no_context=fake_mlflow.start_span_no_context,
+            litellm=SimpleNamespace(autolog=fake_mlflow.autolog),
+        ),
+    )
     monkeypatch.syspath_prepend(str(tmp_path / name / "src"))
     orchestrator_module = importlib.import_module("react_io_agent.orchestrator")
 
@@ -237,9 +273,7 @@ async def test_generated_react_orchestrator_records_query_and_answer(
         lambda *_args, **_kwargs: SimpleNamespace(planner=SimpleNamespace(run=run)),
     )
     orchestrator = orchestrator_module.ReactIoAgentOrchestrator(orchestrator_module.Config())
-    response = await orchestrator.execute(
-        "original question", tenant_id="tenant", user_id="user", session_id="session"
-    )
+    response = await orchestrator.execute("original question", tenant_id="tenant", user_id="user", session_id="session")
 
     assert response.answer == "final answer"
     assert fake_mlflow.roots[0].inputs == {"query": "original question"}
@@ -266,24 +300,30 @@ async def test_generated_concurrent_runs_keep_tool_parents(tmp_path: Path, monke
 
 
 @pytest.mark.asyncio
-async def test_generated_concurrent_runs_keep_usage_separate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_generated_concurrent_runs_keep_usage_separate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     module, mlflow = _load_telemetry(tmp_path, monkeypatch)
     telemetry = module.AgentTelemetry(flow_name="trace-agent", logger=logging.getLogger("test.concurrent.usage"))
 
     async def run(trace_id: str, tokens: int) -> None:
         with telemetry.trace_agent_run(operation="execute", trace_id=trace_id):
             await asyncio.sleep(0)
-            telemetry.record_planner_event(PlannerEvent(
-                event_type="llm_usage", ts=1.0, trajectory_step=0,
-                extra={"input_tokens": tokens, "output_tokens": 1},
-            ))
+            telemetry.record_planner_event(
+                PlannerEvent(
+                    event_type="llm_usage",
+                    ts=1.0,
+                    trajectory_step=0,
+                    extra={"input_tokens": tokens, "output_tokens": 1},
+                )
+            )
 
     await asyncio.gather(run("trace-a", 2), run("trace-b", 5))
     roots = {span.attributes["trace_id"]: span for span in mlflow.roots}
-    assert roots["trace-a"].attributes["mlflow.chat.tokenUsage"]["total_tokens"] == 3
-    assert roots["trace-b"].attributes["mlflow.chat.tokenUsage"]["total_tokens"] == 6
+    totals: dict[str, int] = {}
+    for span in mlflow.llm_spans:
+        assert span.parent is not None
+        totals[span.parent.attributes["trace_id"]] = span.attributes["mlflow.chat.tokenUsage"]["total_tokens"]
+    assert totals == {"trace-a": 3, "trace-b": 6}
+    assert all("mlflow.chat.tokenUsage" not in root.attributes for root in roots.values())
 
 
 def test_generated_error_and_cleanup_statuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

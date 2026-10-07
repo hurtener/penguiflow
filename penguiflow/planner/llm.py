@@ -559,7 +559,6 @@ class _LiteLLMJSONClient:
         reasoning_effort: str | None = None,
         reasoning_display: str | None = None,
         retry_rate_limit_errors: bool = True,
-        on_usage: Callable[[int, int, int], None] | None = None,
     ) -> None:
         import warnings
 
@@ -580,30 +579,6 @@ class _LiteLLMJSONClient:
         self._reasoning_effort = reasoning_effort
         self._reasoning_display = reasoning_display
         self._retry_rate_limit_errors = retry_rate_limit_errors
-        self._on_usage = on_usage
-
-    def _emit_usage(self, usage: Any) -> None:
-        """Forward complete provider-reported token counts without affecting calls."""
-        if self._on_usage is None:
-            return
-        if isinstance(usage, Mapping):
-            input_tokens = usage.get("prompt_tokens")
-            output_tokens = usage.get("completion_tokens")
-        else:
-            input_tokens = getattr(usage, "prompt_tokens", None)
-            output_tokens = getattr(usage, "completion_tokens", None)
-        if (
-            type(input_tokens) is not int
-            or type(output_tokens) is not int
-            or input_tokens < 0
-            or output_tokens < 0
-            or (input_tokens == 0 and output_tokens == 0)
-        ):
-            return
-        try:
-            self._on_usage(input_tokens, output_tokens, input_tokens + output_tokens)
-        except Exception:
-            logger.exception("llm_usage_callback_error")
 
     async def complete(
         self,
@@ -817,7 +792,6 @@ class _LiteLLMJSONClient:
                         content = "".join(pieces)
                         cost = 0.0
                         if usage_payload:
-                            self._emit_usage(usage_payload)
                             try:
                                 # Construct a minimal response object for accurate cost calculation
                                 from litellm import ModelResponse
@@ -938,10 +912,6 @@ class _LiteLLMJSONClient:
                                 response.get("usage", {}).get("total_tokens", 0) if isinstance(response, Mapping) else 0
                             ),
                         },
-                    )
-
-                    self._emit_usage(
-                        response.get("usage") if isinstance(response, Mapping) else getattr(response, "usage", None)
                     )
 
                     return content_text, cost
