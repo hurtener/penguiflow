@@ -37,6 +37,7 @@ Key options:
   - `--with-a2a`
   - `--with-rich-output`
   - `--with-background-tasks`
+  - `--with-mlflow` (planner-backed templates only)
   - `--no-memory`
 
 ### Dependencies / extras
@@ -81,6 +82,9 @@ cd my-agent
 uv sync
 uv run penguiflow dev --project-root .
 ```
+
+Add `--with-mlflow` to include MLflow agent and tool-call tracing.
+Set `MLFLOW_TRACKING_URI` in the agent process environment to choose the tracking server, for example `export MLFLOW_TRACKING_URI=http://localhost:5000`. For Databricks, use `databricks://<profile>` with a configured Databricks profile. The CLI does not set a server URL.
 
 ## Failure modes & recovery
 

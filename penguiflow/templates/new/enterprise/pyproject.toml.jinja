@@ -15,6 +15,9 @@ dependencies = [
     "penguiflow[planner]",
 {% endif %}
     "pydantic>=2.6",
+{% if mlflow_enabled %}
+    "mlflow-tracing>=3.8,<4",
+{% endif %}
 ]
 
 [project.optional-dependencies]

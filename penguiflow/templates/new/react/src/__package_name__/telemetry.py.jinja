@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+{% if mlflow_enabled -%}
+import json
+{% endif -%}
 import logging
 from collections.abc import Callable
+{% if mlflow_enabled -%}
+from contextlib import contextmanager
+from contextvars import ContextVar
+{% endif -%}
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -18,6 +25,13 @@ class StatusUpdate:
     status: str
     message: str
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+{% if mlflow_enabled %}
+@dataclass
+class _MlflowRun:
+    span: Any
+    tools: dict[str, Any] = field(default_factory=dict)
+{% endif %}
 
 
 class AgentTelemetry:
@@ -34,11 +48,19 @@ class AgentTelemetry:
         self.logger = logger
         self._status_callback = status_callback
         self.events: list[PlannerEvent] = []
+{% if mlflow_enabled %}
+        self._mlflow: Any | None = None
+        self._mlflow_unavailable = False
+        self._mlflow_run: ContextVar[_MlflowRun | None] = ContextVar("mlflow_run", default=None)
+{% endif %}
 
     def record_planner_event(self, event: PlannerEvent) -> None:
         """Synchronous callback attached to the planner."""
         self.events.append(event)
         payload: dict[str, Any] = {"flow": self.flow_name, **event.to_payload()}
+{% if mlflow_enabled %}
+        self._record_mlflow_event(event)
+{% endif %}
 
         if event.event_type == "node_error":
             self.logger.error("planner_node_error", extra=payload)
@@ -46,6 +68,181 @@ class AgentTelemetry:
             self.logger.info("planner_finish", extra=payload)
         else:
             self.logger.debug(event.event_type, extra=payload)
+
+{% if mlflow_enabled %}
+    def _mlflow_module(self) -> Any | None:
+        if self._mlflow_unavailable:
+            return None
+        if self._mlflow is None:
+            try:
+                import mlflow
+            except ImportError:
+                self._mlflow_unavailable = True
+                self.logger.warning("mlflow telemetry disabled: package unavailable")
+                return None
+            if not hasattr(mlflow, "start_span"):
+                self._mlflow_unavailable = True
+                self.logger.warning("mlflow telemetry disabled: tracing API unavailable")
+                return None
+            try:
+                mlflow.litellm.autolog()
+            except Exception:
+                self.logger.warning("mlflow LiteLLM autolog unavailable", exc_info=True)
+            self._mlflow = mlflow
+        return self._mlflow
+
+    def _set_attributes(self, span: Any, attributes: dict[str, Any]) -> None:
+        try:
+            span.set_attributes(attributes)
+        except Exception:
+            self.logger.debug("mlflow span attribute error", exc_info=True)
+
+    def _set_inputs(self, span: Any, inputs: Any) -> None:
+        try:
+            span.set_inputs(inputs)
+        except Exception:
+            self.logger.debug("mlflow span input error", exc_info=True)
+
+    def _set_outputs(self, span: Any, outputs: Any) -> None:
+        try:
+            span.set_outputs(outputs)
+        except Exception:
+            self.logger.debug("mlflow span output error", exc_info=True)
+
+    def _event_payload(self, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except ValueError:
+                return value
+        return value
+
+    def _open_span(self, name: str, span_type: str) -> tuple[Any, Any] | None:
+        mlflow = self._mlflow_module()
+        if mlflow is None:
+            return None
+        try:
+            context = mlflow.start_span(name=name, span_type=span_type)
+            return context.__enter__(), context
+        except Exception:
+            self.logger.debug("mlflow span start error", exc_info=True)
+            return None
+
+    def _close_span(self, span: Any, context: Any, attributes: dict[str, Any] | None = None) -> None:
+        if attributes:
+            self._set_attributes(span, attributes)
+        try:
+            context.__exit__(None, None, None)
+        except Exception:
+            self.logger.debug("mlflow span close error", exc_info=True)
+
+    def _set_status(self, span: Any, status: str) -> None:
+        try:
+            span.set_status(status)
+        except Exception:
+            self.logger.debug("mlflow span status error", exc_info=True)
+
+    def _open_tool_span(self, name: str, parent_span: Any) -> Any | None:
+        mlflow = self._mlflow_module()
+        if mlflow is None or not hasattr(mlflow, "start_span_no_context"):
+            return None
+        try:
+            return mlflow.start_span_no_context(name=name, span_type="TOOL", parent_span=parent_span)
+        except Exception:
+            self.logger.debug("mlflow tool span start error", exc_info=True)
+            return None
+
+    def _close_tool_span(self, span: Any, status: str) -> None:
+        try:
+            span.end(status=status)
+        except Exception:
+            self.logger.debug("mlflow tool span close error", exc_info=True)
+
+    @contextmanager
+    def trace_agent_run(self, *, operation: str, trace_id: str, inputs: Any = None) -> Any:
+        opened = self._open_span(f"agent.{operation}", "AGENT")
+        if opened is None:
+            yield
+            return
+        span, context = opened
+        self._set_attributes(span, {"flow.name": self.flow_name, "operation": operation, "trace_id": trace_id})
+        if inputs is not None:
+            self._set_inputs(span, inputs)
+        run = _MlflowRun(span=span)
+        token = self._mlflow_run.set(run)
+        outcome = "ok"
+        try:
+            yield
+        except BaseException:
+            outcome = "error"
+            raise
+        finally:
+            for tool_span in run.tools.values():
+                self._close_tool_span(tool_span, "UNSET")
+            self._mlflow_run.reset(token)
+            self._set_status(span, "OK" if outcome == "ok" else "ERROR")
+            self._close_span(span, context, {"outcome": outcome})
+
+    def record_agent_output(self, output: Any) -> None:
+        run = self._mlflow_run.get()
+        if run is not None:
+            self._set_outputs(run.span, output)
+
+    def _record_mlflow_event(self, event: PlannerEvent) -> None:
+        run = self._mlflow_run.get()
+        if run is None:
+            return
+        if event.event_type == "llm_usage":
+            input_tokens = event.extra.get("input_tokens")
+            output_tokens = event.extra.get("output_tokens")
+            if (
+                type(input_tokens) is int and input_tokens >= 0
+                and type(output_tokens) is int and output_tokens >= 0
+            ):
+                opened = self._open_span("llm.usage", "LLM")
+                if opened is not None:
+                    span, context = opened
+                    self._set_attributes(span, {
+                        "mlflow.chat.tokenUsage": {
+                            "input_tokens": input_tokens,
+                            "output_tokens": output_tokens,
+                            "total_tokens": input_tokens + output_tokens,
+                        }
+                    })
+                    self._close_span(span, context)
+            return
+        tool_call_id = event.extra.get("tool_call_id")
+        if not isinstance(tool_call_id, str):
+            return
+        if event.event_type == "tool_call_start":
+            if tool_call_id in run.tools:
+                return
+            tool_name = event.extra.get("tool_name")
+            span = self._open_tool_span(
+                str(tool_name) if isinstance(tool_name, str) else "tool.call", run.span
+            )
+            if span is None:
+                return
+            self._set_attributes(span, {
+                "tool.call_id": tool_call_id,
+                "tool.name": tool_name if isinstance(tool_name, str) else "unknown",
+                "trajectory.step": event.trajectory_step,
+                "action.sequence": event.extra.get("action_seq", 0),
+            })
+            args = event.extra.get("args_json")
+            if args is not None:
+                self._set_inputs(span, self._event_payload(args))
+            run.tools[tool_call_id] = span
+        elif event.event_type == "tool_call_result":
+            opened = run.tools.pop(tool_call_id, None)
+            if opened is None:
+                return
+            result = event.extra.get("result_json")
+            if result is not None:
+                self._set_outputs(opened, self._event_payload(result))
+            outcome = "error" if isinstance(result, str) and '"error"' in result else "ok"
+            self._close_tool_span(opened, "ERROR" if outcome == "error" else "OK")
+{% endif %}
 
     def publish_status(self, update: StatusUpdate) -> None:
         """Forward status updates to callback or logs."""

@@ -49,6 +49,7 @@ class TemplateContext:
     with_rich_output: bool = False
     no_memory: bool = False
     with_background_tasks: bool = False
+    with_mlflow: bool = False
 
 
 def _normalise_package_name(name: str) -> str:
@@ -115,6 +116,8 @@ def _render_content(raw: str, ctx: TemplateContext) -> str:
             memory_enabled=not ctx.no_memory,
             with_background_tasks=ctx.with_background_tasks,
             background_tasks_enabled=ctx.with_background_tasks,
+            with_mlflow=ctx.with_mlflow,
+            mlflow_enabled=ctx.with_mlflow,
         )
     except Exception as exc:  # pragma: no cover - defensive, covered indirectly via tests
         raise TemplateRenderError(f"Failed to render template: {exc}") from exc
@@ -145,6 +148,7 @@ def run_new(
     with_rich_output: bool = False,
     no_memory: bool = False,
     with_background_tasks: bool = False,
+    with_mlflow: bool = False,
 ) -> NewResult:
     """Create a new PenguiFlow agent project from templates.
 
@@ -159,6 +163,9 @@ def run_new(
     Returns:
         NewResult with success flag and created/skipped/error paths.
     """
+    if with_mlflow and template in {"flow", "controller"}:
+        raise CLIError("--with-mlflow requires a planner-backed template with AgentTelemetry.")
+
     # Use only the final component for display name (handles paths like "foo/bar")
     display_name = Path(name).name
     package_name = _normalise_package_name(display_name)
@@ -173,6 +180,7 @@ def run_new(
         with_rich_output=with_rich_output,
         no_memory=no_memory,
         with_background_tasks=with_background_tasks,
+        with_mlflow=with_mlflow,
     )
     base_dir = output_dir or Path.cwd()
     project_dir = base_dir / name

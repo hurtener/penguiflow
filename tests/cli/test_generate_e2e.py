@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from textwrap import dedent
 
@@ -179,6 +180,15 @@ def _write_spec_with_added_tool(path: Path) -> None:
     )
 
 
+def _set_mlflow(path: Path, enabled: bool) -> None:
+    content = path.read_text()
+    if "    mlflow:" in content:
+        content = content.replace("    mlflow: true", f"    mlflow: {str(enabled).lower()}")
+    else:
+        content = content.replace("    memory: true\n", f"    memory: true\n    mlflow: {str(enabled).lower()}\n")
+    path.write_text(content)
+
+
 def test_run_generate_creates_planner_and_tools(tmp_path: Path) -> None:
     spec_path = tmp_path / "spec.yaml"
     _write_spec(spec_path)
@@ -215,6 +225,9 @@ def test_run_generate_creates_planner_and_tools(tmp_path: Path) -> None:
     assert tool_test.exists()
     assert config_file.exists()
     assert env_example.exists()
+    assert "mlflow" not in (project_dir / "pyproject.toml").read_text().lower()
+    assert "mlflow" not in (package_dir / "telemetry.py").read_text().lower()
+    assert "MLFLOW_TRACKING_URI" not in env_example.read_text()
 
     fetch_content = fetch_tool.read_text()
     assert "class FetchDataArgs" in fetch_content
@@ -275,6 +288,50 @@ def test_run_generate_creates_planner_and_tools(tmp_path: Path) -> None:
     assert "ANTHROPIC_API_KEY" in env_setup_content
     assert "NIM_API_KEY" in env_setup_content
     assert "demo-gen" in env_setup_content or "demo_gen" in env_setup_content
+
+
+def test_run_generate_honors_mlflow_flag(tmp_path: Path) -> None:
+    spec_path = tmp_path / "spec.yaml"
+    _write_spec(spec_path)
+    _set_mlflow(spec_path, True)
+
+    result = run_generate(spec_path=spec_path, output_dir=tmp_path, force=True, quiet=True)
+    assert result.success
+
+    project_dir = tmp_path / "demo-gen"
+    package_dir = project_dir / "src" / "demo_gen"
+    assert "mlflow-tracing>=3.8,<4" in (project_dir / "pyproject.toml").read_text()
+    assert "penguiflow:mlflow:dependency" not in (project_dir / "pyproject.toml").read_text()
+    assert "trace_agent_run" in (package_dir / "telemetry.py").read_text()
+    assert "trace_agent_run" in (package_dir / "orchestrator.py").read_text()
+    enabled_env = (project_dir / ".env.example").read_text()
+    assert "MLFLOW_TRACKING_URI=http://localhost:5000" in enabled_env
+    assert "# MLFLOW_TRACKING_URI=databricks://<profile>" in enabled_env
+
+    pyproject_before = (project_dir / "pyproject.toml").read_text()
+    telemetry_before = (package_dir / "telemetry.py").read_text()
+    orchestrator_before = (package_dir / "orchestrator.py").read_text()
+    _set_mlflow(spec_path, False)
+    applied = run_apply(spec_path=spec_path, output_dir=tmp_path, quiet=True)
+    assert applied.success
+    assert (project_dir / "pyproject.toml").read_text() == pyproject_before
+    assert (package_dir / "telemetry.py").read_text() == telemetry_before
+    assert (package_dir / "orchestrator.py").read_text() == orchestrator_before
+    assert "mlflow: false" in (project_dir / "agent.yaml").read_text()
+    ast.parse(orchestrator_before)
+
+
+def test_run_apply_scaffolds_mlflow_when_project_is_missing(tmp_path: Path) -> None:
+    spec_path = tmp_path / "spec.yaml"
+    _write_spec(spec_path)
+    _set_mlflow(spec_path, True)
+
+    result = run_apply(spec_path=spec_path, output_dir=tmp_path, quiet=True)
+
+    assert result.success
+    project_dir = tmp_path / "demo-gen"
+    assert "mlflow-tracing>=3.8,<4" in (project_dir / "pyproject.toml").read_text()
+    assert "trace_agent_run" in (project_dir / "src" / "demo_gen" / "telemetry.py").read_text()
 
 
 def test_run_generate_includes_background_tasks_wiring(tmp_path: Path) -> None:
@@ -386,6 +443,46 @@ def test_apply_check_reports_changes_without_writing(tmp_path: Path) -> None:
     assert not apply_result.success
     assert any(path.endswith("normalize_data.py") for path in apply_result.changed)
     assert not (project_dir / "src" / "demo_gen" / "tools" / "normalize_data.py").exists()
+
+
+def test_run_apply_preserves_scaffold_when_mlflow_flag_changes(tmp_path: Path) -> None:
+    spec_path = tmp_path / "spec.yaml"
+    _write_spec(spec_path)
+    result = run_generate(spec_path=spec_path, output_dir=tmp_path, force=True, quiet=True)
+    assert result.success
+
+    project_dir = tmp_path / "demo-gen"
+    telemetry_path = project_dir / "src" / "demo_gen" / "telemetry.py"
+    orchestrator_path = project_dir / "src" / "demo_gen" / "orchestrator.py"
+    telemetry_path.write_text(telemetry_path.read_text() + "\nCUSTOM_SENTINEL = True\n")
+    _set_mlflow(spec_path, True)
+
+    checked = run_apply(spec_path=spec_path, output_dir=tmp_path, check=True, diff=True, quiet=True)
+    assert not checked.success, "\n".join(checked.skipped)
+    assert "penguiflow:mlflow:telemetry" not in telemetry_path.read_text()
+    assert checked.diffs
+
+    applied = run_apply(spec_path=spec_path, output_dir=tmp_path, quiet=True)
+    assert applied.success
+    assert "trace_agent_run" not in telemetry_path.read_text()
+    assert "CUSTOM_SENTINEL = True" in telemetry_path.read_text()
+    assert "mlflow-tracing>=3.8,<4" not in (project_dir / "pyproject.toml").read_text()
+    assert "trace_agent_run" not in orchestrator_path.read_text()
+    assert orchestrator_path.read_text().count("self._planner.run(") == 1
+    assert "mlflow: true" in (project_dir / "agent.yaml").read_text()
+
+    repeated = run_apply(spec_path=spec_path, output_dir=tmp_path, quiet=True)
+    assert repeated.success
+    assert not repeated.changed
+
+    _set_mlflow(spec_path, False)
+    disabled = run_apply(spec_path=spec_path, output_dir=tmp_path, quiet=True)
+    assert disabled.success
+    assert "trace_agent_run" not in telemetry_path.read_text()
+    assert "CUSTOM_SENTINEL = True" in telemetry_path.read_text()
+    assert "mlflow-tracing>=3.8,<4" not in (project_dir / "pyproject.toml").read_text()
+    assert "trace_agent_run" not in orchestrator_path.read_text()
+    assert orchestrator_path.read_text().count("self._planner.run(") == 1
 
 
 def test_run_apply_from_project_root_does_not_create_nested_project(

@@ -2674,6 +2674,7 @@ Set safety limits in `src/<your_package>/planner.py`:
 | `--with-hitl` | Add human-in-the-loop pause/resume |
 | `--with-a2a` | Add A2A placeholder scaffold (Jan 2026: WIP) |
 | `--with-rich-output` | Add rich output component tooling |
+| `--with-mlflow` | Add MLflow integration for telemetry |
 | `--with-background-tasks` | Add background tasks/subagent scaffolding |
 | `--no-memory` | Remove Memory Server integration |
 | `--force` | Overwrite existing files |

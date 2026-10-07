@@ -200,6 +200,11 @@ def dev(project_root: str, host: str, port: int, no_browser: bool) -> None:
     is_flag=True,
     help="Include background task orchestration (subagent spawning, task management).",
 )
+@click.option(
+    "--with-mlflow",
+    is_flag=True,
+    help="Include MLflow agent telemetry.",
+)
 def new(
     name: str,
     template: str,
@@ -213,6 +218,7 @@ def new(
     with_rich_output: bool,
     no_memory: bool,
     with_background_tasks: bool,
+    with_mlflow: bool,
 ) -> None:
     """Create a new PenguiFlow agent project."""
     from pathlib import Path
@@ -234,6 +240,7 @@ def new(
             with_rich_output=with_rich_output,
             no_memory=no_memory,
             with_background_tasks=with_background_tasks,
+            with_mlflow=with_mlflow,
         )
         if not result.success:
             sys.exit(1)
