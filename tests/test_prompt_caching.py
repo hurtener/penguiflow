@@ -106,3 +106,36 @@ def test_no_cache_counts_leaves_the_price_unchanged() -> None:
     assert calculate_cost(model, 1_000, 200) == calculate_cost(
         model, 1_000, 200, cache_read_input_tokens=0, cache_creation_input_tokens=0
     )
+
+
+@pytest.mark.asyncio
+async def test_streamed_usage_on_the_final_choice_chunk_is_read(openai_sdk: MagicMock) -> None:
+    """The Databricks Claude endpoint puts usage on the last chunk alongside its choices. Reading it
+    only from choice-less chunks reported zero usage for every streamed call and lost the cache counts."""
+
+    provider = _provider(openai_sdk, "databricks-claude-sonnet-4-6")
+    usage = SimpleNamespace(
+        prompt_tokens=36_593, completion_tokens=4, total_tokens=36_597,
+        cache_read_input_tokens=36_576, cache_creation_input_tokens=0,
+    )
+    delta = SimpleNamespace(content="ok", tool_calls=None, reasoning_content=None)
+    chunks = [SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason="stop")], usage=usage)]
+
+    class Stream:
+        def __aiter__(self):
+            self._it = iter(chunks)
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._it)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    async def post(*_a, **_k):
+        return Stream()
+
+    provider._client.post = post
+    response = await provider._stream_completion({"messages": [], "model": "m"}, lambda _e: None, 30.0, None)
+    assert response.usage.input_tokens == 36_593
+    assert response.usage.cache_read_input_tokens == 36_576

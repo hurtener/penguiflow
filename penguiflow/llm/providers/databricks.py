@@ -448,16 +448,19 @@ class DatabricksProvider(OpenAICompatibleProvider):
                     if cancel and cancel.is_cancelled():
                         raise LLMCancelledError(message="Request cancelled", provider="databricks", retryable=False)
 
+                    # Usage can arrive on a chunk of its own or on the final chunk that also carries
+                    # choices -- the Databricks Claude endpoint does the latter. Reading it only from
+                    # choice-less chunks meant every streamed call reported zero usage, cost fell back
+                    # to a character-count estimate, and the prompt-cache counts were dropped entirely.
+                    if getattr(chunk, "usage", None):
+                        usage = Usage(
+                            input_tokens=chunk.usage.prompt_tokens,
+                            output_tokens=chunk.usage.completion_tokens,
+                            total_tokens=chunk.usage.total_tokens,
+                            cache_read_input_tokens=int(getattr(chunk.usage, "cache_read_input_tokens", 0) or 0),
+                            cache_creation_input_tokens=int(getattr(chunk.usage, "cache_creation_input_tokens", 0) or 0),
+                        )
                     if not chunk.choices:
-                        # Usage chunk at the end (if supported)
-                        if hasattr(chunk, "usage") and chunk.usage:
-                            usage = Usage(
-                                input_tokens=chunk.usage.prompt_tokens,
-                                output_tokens=chunk.usage.completion_tokens,
-                                total_tokens=chunk.usage.total_tokens,
-                                cache_read_input_tokens=int(getattr(chunk.usage, "cache_read_input_tokens", 0) or 0),
-                                cache_creation_input_tokens=int(getattr(chunk.usage, "cache_creation_input_tokens", 0) or 0),
-                            )
                         continue
 
                     delta = chunk.choices[0].delta
