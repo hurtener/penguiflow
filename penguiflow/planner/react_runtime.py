@@ -44,6 +44,7 @@ from .react_utils import _serialize_validation_errors
 from .streaming import _StreamingArgsExtractor
 from .tool_aliasing import build_aliased_tool_catalog, rewrite_action_node
 from .tool_calls import execute_tool_call
+from .step_refs import StepRefError, expand_step_refs
 from .trajectory import Trajectory, TrajectoryStep, extract_background_results
 from .validation_repair import (
     _autofill_missing_args,
@@ -1832,6 +1833,32 @@ async def run_loop(
                         continue
 
             autofilled_fields: tuple[str, ...] = ()
+            # Substitute any `<field>_from_step` reference before the arguments are validated.
+            # Before, and not later, for three reasons: the tool's own model then sees a complete
+            # literal argument so `extra="forbid"` and required fields keep working; render tools are
+            # pre-validated against their component schema further down, which a reference resolved
+            # inside a handler would fail; and the recorded step keeps the real data, so anything
+            # reading a run's tool arguments to check the answer was grounded still sees it.
+            try:
+                expanded_args, referenced_fields = expand_step_refs(
+                    action.args, trajectory.steps, tool=spec.name
+                )
+            except StepRefError as ref_exc:
+                # The model asked for data that is not there. Hand the message back so it can
+                # correct itself; rendering an empty component instead would hide the mistake.
+                trajectory.steps.append(TrajectoryStep(action=action, error=str(ref_exc)))
+                trajectory.summary = None
+                continue
+            if referenced_fields:
+                action.args = expanded_args
+                planner._emit_event(
+                    PlannerEvent(
+                        event_type="step_ref_expanded",
+                        ts=planner._time_source(),
+                        trajectory_step=len(trajectory.steps),
+                        extra={"tool": spec.name, "fields": list(referenced_fields)},
+                    )
+                )
             try:
                 parsed_args = spec.args_model.model_validate(action.args)
             except ValidationError as exc:

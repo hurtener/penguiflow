@@ -989,6 +989,12 @@ Rules for using tools:
    - "external": Calls external services - may have rate limits or costs
 4. Use the tool's description to understand when it's appropriate
 5. If a tool fails, consider alternative approaches before giving up
+6. Never retype data an earlier step already returned. To pass a field from a previous step's
+   result, write `"<field>_from_step": <step number>` instead of the value itself. The step number
+   counts from 1 in the order the steps are listed above. For example, if step 2 returned `rows`,
+   call `render_table` with `{"columns": [...], "rows_from_step": 2}` rather than copying every row
+   out. This works for any argument on any tool whose name matches a field the earlier step
+   returned, it is exact where retyping can drift, and it is far faster.
 </tool_usage>""")
 
     # ─────────────────────────────────────────────────────────────
