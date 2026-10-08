@@ -180,6 +180,11 @@ class Usage:
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    # Of input_tokens, how many were read from the provider's prompt cache and how many were written to
+    # it. input_tokens is the total INCLUDING both, which is how the Databricks endpoint reports
+    # prompt_tokens; pricing splits it rather than adding to it.
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
 
     @classmethod
     def zero(cls) -> Usage:

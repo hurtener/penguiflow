@@ -363,17 +363,40 @@ def get_pricing(model: str) -> tuple[float, float]:
     return (0.0, 0.0)
 
 
-def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+#: Anthropic prompt-cache pricing relative to an uncached input token.
+CACHE_READ_PRICE_FACTOR = 0.10
+CACHE_WRITE_PRICE_FACTOR = 1.25
+
+
+def calculate_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+) -> float:
     """Calculate cost for a completion in USD.
 
     Args:
         model: Model identifier.
-        input_tokens: Number of input tokens.
+        input_tokens: Number of input tokens, INCLUDING any read from or written to the prompt cache.
         output_tokens: Number of output tokens.
+        cache_read_input_tokens: Of input_tokens, how many were cache reads (billed at 10%).
+        cache_creation_input_tokens: Of input_tokens, how many were cache writes (billed at 125%).
 
     Returns:
         Total cost in USD.
     """
+    cached = max(cache_read_input_tokens, 0) + max(cache_creation_input_tokens, 0)
+    if cached:
+        uncached = max(input_tokens - cached, 0)
+        per_input_token = calculate_cost(model, 1_000_000, 0) / 1_000_000
+        return (
+            calculate_cost(model, uncached, output_tokens)
+            + cache_read_input_tokens * per_input_token * CACHE_READ_PRICE_FACTOR
+            + cache_creation_input_tokens * per_input_token * CACHE_WRITE_PRICE_FACTOR
+        )
     candidates = _pricing_candidates(model)
     if registered := _lookup_registered_pricing(candidates):
         input_price, output_price = registered
