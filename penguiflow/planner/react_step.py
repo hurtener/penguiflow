@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import logging
 from collections.abc import Mapping, MutableMapping
 from typing import Any
@@ -32,6 +34,24 @@ def _prepend_system_message(messages: list[dict[str, str]], content: str) -> lis
     if not inserted:
         patched.append({"role": "system", "content": content})
     return patched
+
+
+_FINAL_RESPONSE_HEAD = re.compile(r'"next_node"\s*:\s*"final_response"')
+
+#: Appended to an answer recovered from a cut-off final response, so the reader knows it is partial
+#: and the text does not end mid-sentence.
+CUT_OFF_ANSWER_NOTE = "\n\n(This answer was cut off because it exceeded the response length limit.)"
+
+
+def _is_cut_off_final_response(raw: str) -> bool:
+    """A long final answer whose JSON never closed: the model hit its output-token limit.
+
+    Re-asking for "corrected JSON" makes the model write the whole answer again and hit the same
+    limit again. Measured on the campaign agent: three 8,192-token rewrites, 268 of a 281-second run,
+    ending in the same truncated text. So it is recognised up front and recovered once.
+    """
+
+    return len(raw) > 2_000 and bool(_FINAL_RESPONSE_HEAD.search(raw[:400])) and '"answer"' in raw
 
 
 async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
@@ -75,6 +95,7 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
         },
     )
 
+    cut_off = False
     for attempt in range(1, planner._repair_attempts + 1):
         planner._guardrail_stream_decision = None
         if last_error is not None:
@@ -325,8 +346,12 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
         try:
             action, parse_debug = normalize_action_with_debug(raw)
         except ValueError as exc:
-            # Unparseable JSON (e.g. weak model emitted non-JSON). Treat as repairable.
+            # Unparseable JSON (e.g. weak model emitted non-JSON). Treat as repairable -- unless it is a
+            # final answer that ran out of tokens, which a retry would only rewrite and cut off again.
             last_error = str(exc)
+            if _is_cut_off_final_response(raw):
+                cut_off = True
+                break
             continue
         except ValidationError as exc:
             salvaged = _salvage_action_payload(raw)
@@ -347,6 +372,9 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                 _consume_steering_inputs()
                 return salvaged
             last_error = _serialize_validation_errors(exc)
+            if _is_cut_off_final_response(raw):
+                cut_off = True
+                break
             continue
 
         # Attach raw LLM response for debugging (excluded from serialization)
@@ -431,6 +459,8 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
             # Unescape the content
             extracted_answer = answer_match.group(1)
             extracted_answer = extracted_answer.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")
+            if extracted_answer and cut_off:
+                extracted_answer = extracted_answer.rstrip() + CUT_OFF_ANSWER_NOTE
             if extracted_answer:
                 logger.info(
                     "planner_fallback_answer_extracted",
