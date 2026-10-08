@@ -28,6 +28,7 @@ wrong about data it already has.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -58,12 +59,15 @@ def expand_step_refs(
     steps: Sequence[Any],
     *,
     tool: str = "",
-) -> tuple[dict[str, Any], tuple[str, ...]]:
+) -> tuple[dict[str, Any], dict[str, int]]:
     """Arguments with every `<field>_from_step` replaced by that step's data.
 
-    Returns the expanded arguments and the field names that were filled, so a caller can log what
-    the model referenced rather than typed. Arguments with no reference come back unchanged, which
-    keeps this a no-op for every tool and every action that does not use it.
+    Returns the expanded arguments and, per field filled, the number of characters the reference
+    stood in for. That second value is the measurement: it is what the model would otherwise have
+    typed, and without it there is no telling a run that used a reference from one that did not --
+    by design the expanded arguments are indistinguishable from typed ones by the time anything
+    records them. Arguments with no reference come back unchanged, which keeps this a no-op for
+    every tool and every action that does not use it.
 
     `steps` is the trajectory's steps so far; a reference is the 1-based position of one of them,
     counted the way the planner's own prompt numbers them.
@@ -71,10 +75,10 @@ def expand_step_refs(
 
     refs = step_ref_fields(args)
     if not refs:
-        return dict(args), ()
+        return dict(args), {}
 
     expanded = dict(args)
-    filled: list[str] = []
+    filled: dict[str, int] = {}
     for field in refs:
         key = f"{field}{STEP_REF_SUFFIX}"
         position = expanded.pop(key)
@@ -82,9 +86,19 @@ def expand_step_refs(
             raise StepRefError(
                 f"{tool or 'the action'} gave both {field!r} and {key!r}; supply one or the other"
             )
-        expanded[field] = _value_at(position, field, steps, key=key, tool=tool)
-        filled.append(field)
-    return expanded, tuple(filled)
+        value = _value_at(position, field, steps, key=key, tool=tool)
+        expanded[field] = value
+        filled[field] = _typed_size(value)
+    return expanded, filled
+
+
+def _typed_size(value: Any) -> int:
+    """How many characters the model would have written to supply this value itself."""
+
+    try:
+        return len(json.dumps(value, default=str))
+    except Exception:  # noqa: BLE001 -- a size we cannot measure is unknown, not zero
+        return -1
 
 
 def _value_at(

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import json
+
 import pytest
 
 from penguiflow.planner.step_refs import (
@@ -26,7 +28,8 @@ def test_a_reference_is_replaced_by_the_data_from_that_step() -> None:
     args, filled = expand_step_refs({"columns": ["acid"], "rows_from_step": 1}, steps)
 
     assert args == {"columns": ["acid"], "rows": ROWS}
-    assert filled == ("rows",)
+    assert set(filled) == {"rows"}
+    assert filled["rows"] == len(json.dumps(ROWS))
 
 
 def test_arguments_with_no_reference_come_back_unchanged() -> None:
@@ -36,7 +39,7 @@ def test_arguments_with_no_reference_come_back_unchanged() -> None:
 
     args, filled = expand_step_refs(original, [_step({"rows": []})])
 
-    assert (args, filled) == (original, ())
+    assert (args, filled) == (original, {})
 
 
 def test_several_fields_can_be_referenced_in_one_action() -> None:
@@ -47,6 +50,7 @@ def test_several_fields_can_be_referenced_in_one_action() -> None:
     assert args["rows"] == ROWS
     assert args["overall"] == {"spend": 10_222.57}
     assert sorted(filled) == ["overall", "rows"]
+    assert all(size > 0 for size in filled.values())
 
 
 def test_the_reference_key_never_survives_into_the_arguments() -> None:
@@ -112,6 +116,16 @@ def test_a_dangling_reference_raises_rather_than_rendering_nothing() -> None:
 def test_the_tool_name_appears_in_every_message_when_given() -> None:
     with pytest.raises(StepRefError, match="render_table"):
         expand_step_refs({"rows_from_step": 9}, [_step({"rows": ROWS})], tool="render_table")
+
+
+def test_the_characters_a_reference_stood_in_for_are_reported() -> None:
+    """The only measurement available, and the reason this first attempt was inconclusive. By design
+    the expanded arguments are indistinguishable from typed ones by the time anything records them,
+    so this count is how a run that used a reference is told apart from one that did not."""
+
+    _, filled = expand_step_refs({"rows_from_step": 1}, [_step({"rows": ROWS})])
+
+    assert filled["rows"] == len(json.dumps(ROWS))
 
 
 def test_the_fields_supplied_by_reference_can_be_listed_without_expanding() -> None:

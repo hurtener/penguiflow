@@ -1851,13 +1851,28 @@ async def run_loop(
                 continue
             if referenced_fields:
                 action.args = expanded_args
+                saved_chars = sum(size for size in referenced_fields.values() if size > 0)
                 planner._emit_event(
                     PlannerEvent(
                         event_type="step_ref_expanded",
                         ts=planner._time_source(),
                         trajectory_step=len(trajectory.steps),
-                        extra={"tool": spec.name, "fields": list(referenced_fields)},
+                        extra={
+                            "tool": spec.name,
+                            "fields": sorted(referenced_fields),
+                            "chars_not_typed": saved_chars,
+                        },
                     )
+                )
+                # Also one plain line on stdout. The expansion is invisible in the recorded step by
+                # design -- that is what keeps a run's arguments readable by anything checking the
+                # answer came from fetched data -- so a measurement has nowhere else to look. The
+                # repo already measures LLM timing from log lines the same way.
+                logger.info(
+                    "STEP_REF_EXPANDED tool=%s fields=%s chars_not_typed=%d",
+                    spec.name,
+                    ",".join(sorted(referenced_fields)),
+                    saved_chars,
                 )
             try:
                 parsed_args = spec.args_model.model_validate(action.args)
