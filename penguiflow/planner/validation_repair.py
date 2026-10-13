@@ -886,8 +886,11 @@ async def _ensure_structured_final(
             )
             return
 
-    # Exhausted: strip the invalid payload and surface the degradation loudly.
-    action.args.pop("structured", None)
+    # Exhausted: strip the invalid payload and surface the degradation loudly. The rejected object is kept under a
+    # separate key so a caller that renders from it can salvage what it can; "structured" never holds unvalidated data.
+    rejected = action.args.pop("structured", None)
+    if rejected is not None:
+        action.args["structured_rejected"] = rejected
     warning = (
         f"Structured final response failed validation against "
         f"{final_response_model.__name__} after {max(0, retries)} repair attempt(s); "

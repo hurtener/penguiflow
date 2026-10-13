@@ -261,6 +261,13 @@ class FinalPayload(BaseModel):
             "against it (after bounded repair). Never carries unvalidated data."
         ),
     )
+    structured_rejected: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "The structured answer the model produced when it failed validation and was dropped. Never trust its "
+            "shape; it exists so a caller rendering from the structured answer can salvage what it can."
+        ),
+    )
     artifacts: dict[str, Any] = Field(
         default_factory=dict,
         description="Heavy tool outputs collected during execution.",
