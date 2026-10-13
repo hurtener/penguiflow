@@ -703,6 +703,7 @@ def build_system_prompt(
     current_date: str | None = None,
     tool_examples: ToolExamplesConfig | None = None,
     structured_final_schema: Mapping[str, Any] | None = None,
+    structured_final_optional: bool = False,
     tool_call_mode: str = "prompted",
 ) -> str:
     """Build comprehensive system prompt for the planner.
@@ -962,6 +963,7 @@ unless the schema allows them):
 Rules:
 - "structured" carries the whole answer. Code renders what the reader sees from it, so every part of your
   answer must be a field of "structured" and nothing is lost by keeping "answer" short.
+{_optional_note(structured_final_optional)}
 - "answer" is a one-sentence placeholder only. Never write the full answer, a table, or a list there; it is
   replaced. Writing it twice wastes the reader's time and yours.
 - Do not wrap "structured" in markdown or strings - it is a plain JSON object.
@@ -1820,4 +1822,16 @@ def render_graceful_failure_prompt(
         "- Be helpful and apologetic without being overly formal\n"
         "- Do NOT expose internal system details\n"
         "- Reply with valid JSON only, no explanation"
+    )
+
+
+def _optional_note(optional: bool) -> str:
+    """What to tell the model about omitting the structured answer."""
+
+    if not optional:
+        return "- Every finish must carry \"structured\"."
+    return (
+        "- When the answer genuinely does not fit the shape - it is mostly explanation, or it is about what the data\n"
+        "  cannot tell you - omit \"structured\" entirely and write the whole answer in \"answer\" instead. Do that\n"
+        "  rather than forcing the shape; a wrong shape costs the reader the answer."
     )

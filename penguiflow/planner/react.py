@@ -344,6 +344,7 @@ class ReactPlanner:
     _stream_final_response: bool
     _final_response_model: type[BaseModel] | None
     _final_response_retries: int
+    _final_response_optional: bool
     _final_response_schema: dict[str, Any] | None
     _tool_call_mode: str
     _llm_transport: str | None
@@ -428,6 +429,7 @@ class ReactPlanner:
         stream_final_response: bool = False,
         final_response_model: type[BaseModel] | None = None,
         final_response_retries: int = 1,
+        final_response_optional: bool = False,
         tool_call_mode: str = "prompted",
         llm_transport: str | None = None,
         short_term_memory: ShortTermMemory | ShortTermMemoryConfig | None = None,
@@ -498,6 +500,7 @@ class ReactPlanner:
             "stream_final_response": stream_final_response,
             "final_response_model": final_response_model,
             "final_response_retries": final_response_retries,
+            "final_response_optional": final_response_optional,
             "tool_call_mode": tool_call_mode,
             "llm_transport": llm_transport,
             "short_term_memory": short_term_memory,
@@ -557,6 +560,7 @@ class ReactPlanner:
             stream_final_response=stream_final_response,
             final_response_model=final_response_model,
             final_response_retries=final_response_retries,
+            final_response_optional=final_response_optional,
             tool_call_mode=tool_call_mode,
             llm_transport=llm_transport,
             short_term_memory=short_term_memory,
@@ -1578,6 +1582,8 @@ class ReactPlanner:
     ) -> None:
         if self._final_response_model is None:
             return
+        if getattr(self, "_final_response_optional", False) and action.args.get("structured") is None:
+            return  # the model answered in prose, which this planner allows
         await _ensure_structured_final_impl(
             trajectory=trajectory,
             action=action,
