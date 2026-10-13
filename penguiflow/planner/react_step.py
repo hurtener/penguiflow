@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 import logging
@@ -467,9 +468,16 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                     extra={"length": len(extracted_answer)},
                 )
                 _consume_steering_inputs()
+                args: dict[str, Any] = {"answer": extracted_answer, "raw_answer": extracted_answer}
+                salvaged_structured = _extract_structured_object(last_raw)
+                if salvaged_structured is not None:
+                    # A caller rendering from the structured answer keeps "answer" short, so the regex above finds
+                    # only a placeholder; without this the malformed turn costs the reader the whole answer.
+                    args["structured_rejected"] = salvaged_structured
+                    logger.info("planner_fallback_structured_extracted", extra={"keys": sorted(salvaged_structured)})
                 return PlannerAction(
                     next_node="final_response",
-                    args={"answer": extracted_answer, "raw_answer": extracted_answer},
+                    args=args,
                     thought="Extracted answer from malformed JSON",
                 )
 
@@ -498,3 +506,37 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
         args={"answer": "LLM response parsing failed", "raw_answer": "LLM response parsing failed"},
         thought="Failed to parse LLM response",
     )
+
+
+def _extract_structured_object(raw: str) -> dict[str, Any] | None:
+    """The `structured` object of a malformed finish action, read by matching its braces, or None.
+
+    `json.loads` has already failed on the whole response; the structured object is usually still well formed, and it
+    holds the answer whenever the caller renders from it.
+    """
+
+    marker = re.search(r'"structured"\s*:\s*\{', raw)
+    if marker is None:
+        return None
+    start = marker.end() - 1
+    depth, in_string, escaped = 0, False, False
+    for index in range(start, len(raw)):
+        char = raw[index]
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_string:
+            escaped = True
+        elif char == '"':
+            in_string = not in_string
+        elif not in_string and char == "{":
+            depth += 1
+        elif not in_string and char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    found = json.loads(raw[start : index + 1])
+                except json.JSONDecodeError:
+                    return None
+                return found if isinstance(found, dict) else None
+    return None
