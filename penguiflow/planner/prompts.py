@@ -960,15 +960,17 @@ unless the schema allows them):
 {schema_text}
 
 Rules:
-- Emit "answer" FIRST inside args, then "structured" (the answer streams to the user).
-- "answer" remains the human-readable text; "structured" is the machine-readable version.
+- "structured" carries the whole answer. Code renders what the reader sees from it, so every part of your
+  answer must be a field of "structured" and nothing is lost by keeping "answer" short.
+- "answer" is a one-sentence placeholder only. Never write the full answer, a table, or a list there; it is
+  replaced. Writing it twice wastes the reader's time and yours.
 - Do not wrap "structured" in markdown or strings - it is a plain JSON object.
 
 Example finish shape:
 {{
   "next_node": "final_response",
   "args": {{
-    "answer": "...human readable...",
+    "answer": "Summary of the campaign's delivery.",
     "structured": {{ ...matching the schema above... }}
   }}
 }}
