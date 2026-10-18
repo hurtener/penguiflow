@@ -42,7 +42,8 @@ class _Span:
         self.status = status
 
     def end(self, *, status: str) -> None:
-        self.status = status
+        # Match MLflow: ending an UNSET span normalizes it to OK.
+        self.status = "OK" if status == "UNSET" else status
         self.ended = True
 
 
@@ -136,6 +137,7 @@ def _event(event_type: str, call_id: str, payload: str) -> PlannerEvent:
         ts=1.0,
         trajectory_step=2,
         extra={
+            "outcome": "success",
             "tool_call_id": call_id,
             "tool_name": "lookup",
             "action_seq": 3,
@@ -337,6 +339,123 @@ def test_generated_error_and_cleanup_statuses(tmp_path: Path, monkeypatch: pytes
 
     assert mlflow.roots[0].status == "ERROR"
     assert mlflow.root_contexts[0].exit_type is None
-    assert mlflow.tools[0].status == "UNSET"
+    assert mlflow.tools[0].status == "ERROR"
+    assert mlflow.tools[0].attributes["outcome"] == "unfinished"
     assert mlflow.tools[0].ended
     assert "private failure" not in str(mlflow.roots[0].attributes)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "result", "expected_status"),
+    [
+        ("success", '{"ok":true,"error":null,"value":42}', "OK"),
+        ("success", '{"message":"an error was corrected"}', "OK"),
+        ("error", '{"message":"failed"}', "ERROR"),
+        ("paused", '{"pause":"approval_required"}', "ERROR"),
+    ],
+)
+def test_generated_tool_status_uses_execution_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, result: str, expected_status: str
+) -> None:
+    module, mlflow = _load_telemetry(tmp_path, monkeypatch)
+    telemetry = module.AgentTelemetry(flow_name="trace-agent", logger=logging.getLogger("test.outcome"))
+    with telemetry.trace_agent_run(operation="execute", trace_id="outcome"):
+        telemetry.record_planner_event(_event("tool_call_start", "call", "{}"))
+        event = _event("tool_call_result", "call", result)
+        event.extra["outcome"] = outcome
+        telemetry.record_planner_event(event)
+    assert mlflow.tools[0].status == expected_status
+    assert mlflow.tools[0].attributes["outcome"] == outcome
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_generated_unfinished_tools_never_succeed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancelled: bool
+) -> None:
+    module, mlflow = _load_telemetry(tmp_path, monkeypatch)
+    telemetry = module.AgentTelemetry(flow_name="trace-agent", logger=logging.getLogger("test.unfinished"))
+
+    async def run() -> None:
+        with telemetry.trace_agent_run(operation="execute", trace_id="unfinished"):
+            telemetry.record_planner_event(_event("tool_call_start", "unfinished", "{}"))
+            if cancelled:
+                raise asyncio.CancelledError
+
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await run()
+    else:
+        await run()
+    assert mlflow.tools[0].status == "ERROR"
+    assert mlflow.tools[0].attributes["outcome"] == "unfinished"
+    assert mlflow.roots[0].status == ("ERROR" if cancelled else "OK")
+    assert mlflow.active.get() is None
+
+
+class _SlowLoggingWorker:
+    def __init__(self, mlflow: _Mlflow, *, delay: float = 0.0, hang: bool = False) -> None:
+        self.mlflow = mlflow
+        self.delay = delay
+        self.hang = hang
+        self.root_open_during_flush: bool | None = None
+
+    async def flush(self) -> None:
+        if self.hang:
+            await asyncio.Event().wait()
+        await asyncio.sleep(self.delay)
+        root = self.mlflow.roots[0]
+        self.root_open_during_flush = not root.ended
+        span = _Span("litellm-acompletion", "LLM", root)
+        span.attributes["mlflow.chat.tokenUsage"] = {"input_tokens": 5, "output_tokens": 1, "total_tokens": 6}
+        span.ended = True
+        self.mlflow.llm_spans.append(span)
+
+
+def _install_litellm_worker(monkeypatch: pytest.MonkeyPatch, worker: Any) -> None:
+    module_name = "litellm.litellm_core_utils.logging_worker"
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "litellm.litellm_core_utils", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, module_name, SimpleNamespace(GLOBAL_LOGGING_WORKER=worker))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "template",
+    ["minimal", "react", "parallel", "rag_server", "wayfinder", "analyst", "enterprise"],
+)
+async def test_generated_flush_waits_for_litellm_spans_before_root_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, template: str
+) -> None:
+    module, mlflow = _load_telemetry(tmp_path, monkeypatch, template)
+    worker = _SlowLoggingWorker(mlflow, delay=0.01)
+    _install_litellm_worker(monkeypatch, worker)
+    telemetry = module.AgentTelemetry(flow_name="trace-agent", logger=logging.getLogger("test.flush"))
+
+    with telemetry.trace_agent_run(operation="execute", trace_id="flush"):
+        await telemetry.flush_llm_logging()
+
+    assert worker.root_open_during_flush is True
+    assert mlflow.roots[0].ended
+    assert [span.parent for span in mlflow.llm_spans] == [mlflow.roots[0]]
+
+
+@pytest.mark.asyncio
+async def test_generated_flush_is_bounded_and_tolerates_missing_litellm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, mlflow = _load_telemetry(tmp_path, monkeypatch)
+    telemetry = module.AgentTelemetry(flow_name="trace-agent", logger=logging.getLogger("test.flush_bounds"))
+
+    await telemetry.flush_llm_logging()  # mlflow not loaded yet: no-op
+
+    monkeypatch.setitem(sys.modules, "litellm.litellm_core_utils.logging_worker", None)
+    with telemetry.trace_agent_run(operation="execute", trace_id="no-litellm"):
+        await telemetry.flush_llm_logging()
+
+    _install_litellm_worker(monkeypatch, _SlowLoggingWorker(mlflow, hang=True))
+    with telemetry.trace_agent_run(operation="execute", trace_id="hung-worker"):
+        await asyncio.wait_for(telemetry.flush_llm_logging(timeout_s=0.01), timeout=1)
+
+    assert all(root.ended for root in mlflow.roots)
+    assert mlflow.llm_spans == []

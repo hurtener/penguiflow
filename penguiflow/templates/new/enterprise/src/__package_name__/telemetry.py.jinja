@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 {% if mlflow_enabled -%}
+import asyncio
 import json
 {% endif -%}
 import logging
@@ -276,6 +277,24 @@ class AgentTelemetry:
         except Exception:
             self.logger.debug("mlflow tool span close error", exc_info=True)
 
+    async def flush_llm_logging(self, timeout_s: float = 5.0) -> None:
+        """Wait for LiteLLM's background logging queue to drain.
+
+        LiteLLM creates autologged LLM spans asynchronously after ``acompletion``
+        returns. MLflow aggregates trace token usage when the root span closes, so
+        call this before leaving ``trace_agent_run`` to include the final LLM call.
+        """
+        if self._mlflow is None:
+            return
+        try:
+            from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
+        except ImportError:
+            return
+        try:
+            await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=timeout_s)
+        except Exception:
+            self.logger.debug("litellm logging flush error", exc_info=True)
+
     @contextmanager
     def trace_agent_run(self, *, operation: str, trace_id: str, inputs: Any = None) -> Any:
         opened = self._open_span(f"agent.{operation}", "AGENT")
@@ -296,7 +315,8 @@ class AgentTelemetry:
             raise
         finally:
             for tool_span in run.tools.values():
-                self._close_tool_span(tool_span, "UNSET")
+                self._set_attributes(tool_span, {"outcome": "unfinished"})
+                self._close_tool_span(tool_span, "ERROR")
             self._mlflow_run.reset(token)
             self._set_status(span, "OK" if outcome == "ok" else "ERROR")
             self._close_span(span, context, {"outcome": outcome})
@@ -358,8 +378,9 @@ class AgentTelemetry:
             result = event.extra.get("result_json")
             if result is not None:
                 self._set_outputs(opened, self._event_payload(result))
-            outcome = "error" if isinstance(result, str) and '"error"' in result else "ok"
-            self._close_tool_span(opened, "ERROR" if outcome == "error" else "OK")
+            outcome = event.extra.get("outcome", "unknown")
+            self._set_attributes(opened, {"outcome": outcome})
+            self._close_tool_span(opened, "OK" if outcome == "success" else "ERROR")
 {% endif %}
 
     def publish_status(self, update: StatusUpdate) -> None:

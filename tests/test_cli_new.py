@@ -98,7 +98,7 @@ def test_run_new_adds_mlflow_only_when_enabled(tmp_path: Path, template: str) ->
 
     enabled_project, enabled_package = _project_paths(tmp_path, f"{template}-mlflow")
     disabled_project, disabled_package = _project_paths(tmp_path, f"{template}-plain")
-    assert "mlflow-tracing>=3.8,<4" in (enabled_project / "pyproject.toml").read_text()
+    assert "mlflow-skinny>=3.17.1,<4" in (enabled_project / "pyproject.toml").read_text()
     assert "penguiflow:mlflow:dependency" not in (enabled_project / "pyproject.toml").read_text()
     assert "trace_agent_run" in (enabled_package / "telemetry.py").read_text()
     assert "trace_agent_run" in (enabled_package / "orchestrator.py").read_text()

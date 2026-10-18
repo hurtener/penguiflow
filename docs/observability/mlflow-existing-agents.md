@@ -20,9 +20,9 @@ Replace `react` with your agent's template. Review and merge the generated chang
 
 The migration touches these parts of the generated project:
 
-1. Add `mlflow-tracing>=3.8,<4` to the project dependencies, then run `uv lock` and `uv sync`. Keep `penguiflow[planner]` for LiteLLM calls. Native provider calls also need their provider SDK.
+1. Add `mlflow-skinny>=3.17.1,<4` to the project dependencies, then run `uv lock` and `uv sync`. Keep `penguiflow[planner]` for LiteLLM calls. Native provider calls also need their provider SDK.
 2. Merge the MLflow support in `telemetry.py` into your existing `AgentTelemetry`. Keep the existing planner-event callback and structured logging.
-3. In `orchestrator.py`, wrap each planner execution and resume operation in `trace_agent_run(...)`. Record the final answer or pause result with `record_agent_output(...)` before the span closes.
+3. In `orchestrator.py`, wrap each planner execution and resume operation in `with trace_agent_run(...)`. Record the final answer or pause result with `record_agent_output(...)` before the span closes. Await `flush_llm_logging()` in a `finally` block inside the context manager. LiteLLM records autologged LLM spans from a background queue after each call returns, and MLflow totals trace token usage when the root span closes. Without the flush, the trace total can miss the final LLM call.
 4. Keep the existing `event_callback=self._telemetry.record_planner_event` wiring in the `ReactPlanner` constructor. The telemetry callback uses planner events to create tool spans and close them when tool results arrive.
 5. Keep `mlflow.litellm.autolog()` enabled in generated telemetry for LiteLLM calls. For native LLM calls, keep the `llm_usage` event handler, which records per-call token usage on a child span. MLflow aggregates those spans at the trace level. Do not also write the total on the agent root span, because that can hide usage from LiteLLM child spans.
 
@@ -34,13 +34,16 @@ with self._telemetry.trace_agent_run(
     trace_id=trace_id,
     inputs={"query": query},
 ):
-    result = await self._planner.run(
-        query=query,
-        llm_context=llm_context,
-        tool_context=tool_context,
-    )
-    if isinstance(result, PlannerFinish):
-        self._telemetry.record_agent_output({"answer": extract_answer(result.payload)})
+    try:
+        result = await self._planner.run(
+            query=query,
+            llm_context=llm_context,
+            tool_context=tool_context,
+        )
+        if isinstance(result, PlannerFinish):
+            self._telemetry.record_agent_output({"answer": extract_answer(result.payload)})
+    finally:
+        await self._telemetry.flush_llm_logging()
 ```
 
 Apply the same pattern around `ReactPlanner.resume(...)`, using the resume input as the span input. Adapt `extract_answer` to the result type your agent returns.
