@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 3.12.0 — 2026-07-10
+
+### Added
+- Initial release notes for version 3.12.0.
+
 ## 3.11.1 — 2026-07-09
 
 Documentation-only release. No runtime or public API behavior changes.
