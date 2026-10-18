@@ -46,6 +46,7 @@ class NativeToolCallResult:
     cost: float = 0.0
     reasoning_content: str | None = None
 
+
 logger = logging.getLogger("penguiflow.llm.protocol")
 _REASONING_OFF_VALUES = frozenset({"off", "none", "false", "0", "disable", "disabled", "no"})
 _TRANSPORTS = ("native", "pydantic-ai")
@@ -1202,6 +1203,7 @@ def create_native_adapter(
     if fallback is not None:
         from .fallback import FallbackLLMClient
 
+        print("Creating FallbackLLMClient with model_name:", model_name)
         return FallbackLLMClient(
             model_name,
             fallback,
