@@ -470,6 +470,8 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                 _consume_steering_inputs()
                 args: dict[str, Any] = {"answer": extracted_answer, "raw_answer": extracted_answer}
                 salvaged_structured = _extract_structured_object(last_raw)
+                if salvaged_structured is None and cut_off:
+                    salvaged_structured = _extract_cut_off_structured_object(last_raw)
                 if salvaged_structured is not None:
                     # A caller rendering from the structured answer keeps "answer" short, so the regex above finds
                     # only a placeholder; without this the malformed turn costs the reader the whole answer.
@@ -540,3 +542,48 @@ def _extract_structured_object(raw: str) -> dict[str, Any] | None:
                     return None
                 return found if isinstance(found, dict) else None
     return None
+
+
+def _extract_cut_off_structured_object(raw: str) -> dict[str, Any] | None:
+    """The `structured` object of a cut-off finish action: its whole fields and the readable part of its note.
+
+    A caller rendering from the structured answer puts a long list in `note`, its one free-text field. When the output
+    limit cuts the response inside that note the braces never close, so `_extract_structured_object` finds nothing and
+    the reader would get only the short placeholder. The fields before the note are whole; the note is kept up to its
+    last complete line, with the cut-off notice. None when the cut came before the note began.
+    """
+
+    marker = re.search(r'"structured"\s*:\s*\{', raw)
+    if marker is None:
+        return None
+    body = raw[marker.end() :]
+    note_start = re.search(r'"note"\s*:\s*"', body)
+    if note_start is None:
+        return None
+    try:
+        before_note = json.loads("{" + body[: note_start.start()].rstrip().rstrip(",") + "}")
+    except json.JSONDecodeError:
+        return None
+    note, closed = _read_json_string(body[note_start.end() :])
+    if not closed and "\n" in note:
+        note = note[: note.rfind("\n")]
+    return {**before_note, "note": note.rstrip() + CUT_OFF_ANSWER_NOTE}
+
+
+def _read_json_string(text: str) -> tuple[str, bool]:
+    """A JSON string read from just after its opening quote, unescaped, and whether its closing quote was reached."""
+
+    end, closed, escaped = len(text), False, False
+    for index, char in enumerate(text):
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            end, closed = index, True
+            break
+    literal = re.sub(r"\\(?:u[0-9a-fA-F]{0,3})?$", "", text[:end])  # an escape the cut left half written
+    try:
+        return json.loads(f'"{literal}"', strict=False), closed
+    except json.JSONDecodeError:
+        return literal.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t"), closed
