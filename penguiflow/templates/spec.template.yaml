@@ -10,6 +10,7 @@ agent:
     a2a: false
     memory: true
     background_tasks: false  # Enable background task orchestration
+    mlflow: false  # Enable MLflow agent telemetry
 
 tools:
   - name: fetch_data

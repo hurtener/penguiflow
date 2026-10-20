@@ -1361,9 +1361,7 @@ async def request_revision(
 
     # Enable streaming for revision if callback provided and client supports it
     stream_allowed = (
-        on_stream_chunk is not None
-        and planner._stream_final_response
-        and supports_callback_streaming(planner._client)
+        on_stream_chunk is not None and planner._stream_final_response and supports_callback_streaming(planner._client)
     )
 
     llm_result = await planner._client.complete(

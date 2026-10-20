@@ -137,6 +137,7 @@ nav:
       - Logging: observability/logging.md
       - Metrics & alerts: observability/metrics-and-alerts.md
       - Telemetry patterns: observability/telemetry-patterns.md
+      - MLflow for existing agents: observability/mlflow-existing-agents.md
   - CLI:
       - Overview: cli/overview.md
       - "penguiflow new": cli/new-command.md

@@ -30,6 +30,7 @@ def test_parse_spec_success(tmp_path: Path) -> None:
           template: react
           flags:
             memory: true
+            mlflow: true
         tools:
           - name: search
             description: Search the web
@@ -57,6 +58,29 @@ def test_parse_spec_success(tmp_path: Path) -> None:
     assert spec.tools[0].args["query"].render() == "str"
     assert spec.tools[0].result["hits"].render() == "list[str]"
     assert spec.planner.system_prompt_extra.startswith("You are helpful.")
+    assert spec.agent.flags.mlflow is True
+
+
+def test_mlflow_flag_defaults_to_false() -> None:
+    spec = parse_spec(
+        dedent(
+            """\
+            agent:
+              name: demo-agent
+              description: Demo agent
+              template: react
+            tools: []
+            llm:
+              primary:
+                model: gpt-4o
+            planner:
+              system_prompt_extra: Hello
+              memory_prompt: Use memory responsibly.
+            """
+        )
+    )
+
+    assert spec.agent.flags.mlflow is False
 
 
 def test_parse_spec_supports_short_term_memory(tmp_path: Path) -> None:

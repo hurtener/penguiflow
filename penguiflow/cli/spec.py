@@ -208,6 +208,7 @@ class AgentFlagsSpec(BaseModel):
     a2a: bool = False
     memory: bool = True
     background_tasks: bool = False
+    mlflow: bool = False
 
     model_config = ConfigDict(extra="forbid")
 

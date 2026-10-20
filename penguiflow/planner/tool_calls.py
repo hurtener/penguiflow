@@ -58,6 +58,31 @@ class ToolCallOutcome:
     background_spawned: bool = False
 
 
+def _emit_paused_tool_result(
+    planner: Any,
+    *,
+    trajectory: Trajectory,
+    spec: Any,
+    tool_call_id: str,
+    action_seq: int,
+    pause: PlannerPause,
+) -> None:
+    planner._emit_event(
+        PlannerEvent(
+            event_type="tool_call_result",
+            ts=planner._time_source(),
+            trajectory_step=len(trajectory.steps),
+            extra={
+                "tool_call_id": tool_call_id,
+                "tool_name": spec.name,
+                "result_json": _safe_json_dumps({"pause": pause.reason, "payload": dict(pause.payload)}),
+                "outcome": "paused",
+                "action_seq": action_seq,
+            },
+        )
+    )
+
+
 async def execute_tool_call(
     planner: Any,
     *,
@@ -134,6 +159,7 @@ async def execute_tool_call(
                             "tool_call_id": tool_call_id,
                             "tool_name": spec.name,
                             "result_json": result_json,
+                            "outcome": "error",
                             "action_seq": action_seq,
                         },
                     )
@@ -145,10 +171,29 @@ async def execute_tool_call(
                 )
             if decision.action.value == "PAUSE":
                 pause_payload = {"guardrail": planner._guardrail_decision_payload(decision)}
-                pause = await planner._pause_from_context(
-                    "approval_required",
-                    pause_payload,
-                    trajectory,
+                try:
+                    pause = await planner._pause_from_context(
+                        "approval_required",
+                        pause_payload,
+                        trajectory,
+                    )
+                except _PlannerPauseSignal as signal:
+                    _emit_paused_tool_result(
+                        planner,
+                        trajectory=trajectory,
+                        spec=spec,
+                        tool_call_id=tool_call_id,
+                        action_seq=action_seq,
+                        pause=signal.pause,
+                    )
+                    raise
+                _emit_paused_tool_result(
+                    planner,
+                    trajectory=trajectory,
+                    spec=spec,
+                    tool_call_id=tool_call_id,
+                    action_seq=action_seq,
+                    pause=pause,
                 )
                 return ToolCallOutcome(
                     pause=pause,
@@ -202,6 +247,7 @@ async def execute_tool_call(
                         "tool_call_id": tool_call_id,
                         "tool_name": spec.name,
                         "result_json": result_json,
+                        "outcome": "success",
                         "action_seq": action_seq,
                     },
                 )
@@ -305,6 +351,7 @@ async def execute_tool_call(
                                 "tool_call_id": tool_call_id,
                                 "tool_name": spec.name,
                                 "result_json": result_json,
+                                "outcome": "success",
                                 "action_seq": action_seq,
                             },
                         )
@@ -333,19 +380,13 @@ async def execute_tool_call(
         else:
             result = await spec.node.func(parsed_args, ctx)
     except _PlannerPauseSignal as signal:
-        result_json = _safe_json_dumps({"pause": signal.pause.reason, "payload": dict(signal.pause.payload)})
-        planner._emit_event(
-            PlannerEvent(
-                event_type="tool_call_result",
-                ts=planner._time_source(),
-                trajectory_step=len(trajectory.steps),
-                extra={
-                    "tool_call_id": tool_call_id,
-                    "tool_name": spec.name,
-                    "result_json": result_json,
-                    "action_seq": action_seq,
-                },
-            )
+        _emit_paused_tool_result(
+            planner,
+            trajectory=trajectory,
+            spec=spec,
+            tool_call_id=tool_call_id,
+            action_seq=action_seq,
+            pause=signal.pause,
         )
         return ToolCallOutcome(
             pause=signal.pause,
@@ -372,6 +413,7 @@ async def execute_tool_call(
                     "tool_call_id": tool_call_id,
                     "tool_name": spec.name,
                     "result_json": _safe_json_dumps({"error": error, "failure": failure_payload}),
+                    "outcome": "error",
                     "action_seq": action_seq,
                 },
             )
@@ -398,6 +440,7 @@ async def execute_tool_call(
                     "tool_call_id": tool_call_id,
                     "tool_name": spec.name,
                     "result_json": _safe_json_dumps({"error": error}),
+                    "outcome": "error",
                     "action_seq": action_seq,
                 },
             )
@@ -469,6 +512,7 @@ async def execute_tool_call(
                             "tool_call_id": tool_call_id,
                             "tool_name": spec.name,
                             "result_json": _safe_json_dumps({"error": error, "failure": failure_payload}),
+                            "outcome": "error",
                             "action_seq": action_seq,
                         },
                     )
@@ -480,10 +524,29 @@ async def execute_tool_call(
                 )
             if decision.action.value == "PAUSE":
                 pause_payload = {"guardrail": planner._guardrail_decision_payload(decision)}
-                pause = await planner._pause_from_context(
-                    "approval_required",
-                    pause_payload,
-                    trajectory,
+                try:
+                    pause = await planner._pause_from_context(
+                        "approval_required",
+                        pause_payload,
+                        trajectory,
+                    )
+                except _PlannerPauseSignal as signal:
+                    _emit_paused_tool_result(
+                        planner,
+                        trajectory=trajectory,
+                        spec=spec,
+                        tool_call_id=tool_call_id,
+                        action_seq=action_seq,
+                        pause=signal.pause,
+                    )
+                    raise
+                _emit_paused_tool_result(
+                    planner,
+                    trajectory=trajectory,
+                    spec=spec,
+                    tool_call_id=tool_call_id,
+                    action_seq=action_seq,
+                    pause=pause,
                 )
                 return ToolCallOutcome(
                     pause=pause,
@@ -509,6 +572,7 @@ async def execute_tool_call(
                 "tool_call_id": tool_call_id,
                 "tool_name": spec.name,
                 "result_json": result_json,
+                "outcome": "success",
                 "action_seq": action_seq,
             },
         )

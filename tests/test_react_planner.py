@@ -17,6 +17,7 @@ from penguiflow.node import Node
 from penguiflow.planner import PlannerEvent, PlannerPause, ReactPlanner
 from penguiflow.planner.guardrails import GuardrailAction, GuardrailDecision, RetrySpec
 from penguiflow.planner.memory import MemoryBudget, MemoryKey, ShortTermMemoryConfig
+from penguiflow.planner.pause import _PlannerPauseSignal
 from penguiflow.planner.react import (
     PlannerAction,
     ReflectionConfig,
@@ -72,6 +73,12 @@ class Intent(BaseModel):
 
 class Documents(BaseModel):
     documents: list[str]
+
+
+class NullableErrorResult(BaseModel):
+    ok: bool
+    error: str | None
+    value: int
 
 
 class SearchResult(BaseModel):
@@ -171,6 +178,16 @@ async def capture_answer(args: Answer, ctx: Any) -> Answer:
 @tool(desc="Return invalid documents")
 async def broken(args: Intent, ctx: object) -> Documents:  # type: ignore[return-type]
     return "boom"  # type: ignore[return-value]
+
+
+@tool(desc="Return a successful payload that has an optional error field")
+async def nullable_error_result(args: Intent, ctx: object) -> NullableErrorResult:
+    return NullableErrorResult(ok=True, error=None, value=42)
+
+
+@tool(desc="Raise while executing")
+async def raises_during_execution(args: Intent, ctx: object) -> Documents:
+    raise RuntimeError("tool execution failed")
 
 
 @tool(desc="Fetch documents from primary shard", tags=["parallel"])
@@ -1497,6 +1514,91 @@ async def test_react_planner_reports_output_validation_error() -> None:
 
     errors = [step["error"] for step in result.metadata["steps"] if step["error"]]
     assert any("returned data" in err for err in errors)
+
+
+@pytest.mark.asyncio()
+@pytest.mark.parametrize(
+    ("tool_fn", "tool_name", "out_model", "expected_outcome"),
+    [
+        (nullable_error_result, "nullable_error_result", NullableErrorResult, "success"),
+        (raises_during_execution, "raises_during_execution", Documents, "error"),
+        (broken, "broken", Documents, "error"),
+        (approval_gate, "approval_gate", Intent, "paused"),
+    ],
+)
+async def test_tool_call_result_event_has_explicit_execution_outcome(
+    tool_fn: Any,
+    tool_name: str,
+    out_model: type[BaseModel],
+    expected_outcome: str,
+) -> None:
+    """Result telemetry reflects the execution branch, not JSON field names."""
+    events: list[PlannerEvent] = []
+    client = StubClient(
+        [
+            {"thought": "call tool", "next_node": tool_name, "args": {"intent": "docs"}},
+            {"thought": "finish", "next_node": None, "args": {"raw_answer": "done"}},
+        ]
+    )
+    registry = ModelRegistry()
+    registry.register(tool_name, Intent, out_model)
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog([Node(tool_fn, name=tool_name)], registry),
+        event_callback=events.append,
+    )
+
+    await planner.run("check tool outcomes")
+
+    result_event = next(event for event in events if event.event_type == "tool_call_result")
+    assert result_event.extra["outcome"] == expected_outcome
+    if tool_name == "nullable_error_result":
+        assert json.loads(result_event.extra["result_json"]) == {"ok": True, "error": None, "value": 42}
+
+
+@pytest.mark.asyncio()
+@pytest.mark.parametrize("pause_at", ["tool_call_start", "tool_call_result"])
+async def test_guardrail_pause_emits_paused_tool_result(pause_at: str) -> None:
+    class _PauseGateway:
+        class _Config:
+            mode = "enforce"
+
+        config = _Config()
+
+        async def evaluate(self, context: object, event: object) -> GuardrailDecision | None:
+            del context
+            if getattr(event, "event_type", None) != pause_at:
+                return None
+            return GuardrailDecision(
+                action=GuardrailAction.PAUSE,
+                rule_id="approval-rule",
+                reason="approval required",
+            )
+
+    events: list[PlannerEvent] = []
+    client = StubClient(
+        [{"thought": "triage", "next_node": "triage", "args": {"question": "Test"}}]
+    )
+    registry = ModelRegistry()
+    registry.register("triage", Query, Intent)
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog([Node(triage, name="triage")], registry),
+        event_callback=events.append,
+    )
+    planner._guardrail_gateway = _PauseGateway()
+    planner._guardrail_context = object()
+
+    with pytest.raises(_PlannerPauseSignal) as signal:
+        await planner.run("check guardrail pause telemetry")
+
+    assert signal.value.pause.reason == "approval_required"
+    tool_results = [event for event in events if event.event_type == "tool_call_result"]
+    assert len(tool_results) == 1
+    assert tool_results[0].extra["outcome"] == "paused"
+    result_payload = json.loads(tool_results[0].extra["result_json"])
+    assert result_payload["pause"] == "approval_required"
+    assert result_payload["payload"]["guardrail"]["rule_id"] == "approval-rule"
 
 
 @pytest.mark.asyncio()

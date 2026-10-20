@@ -424,7 +424,7 @@ class TestLiteLLMJSONClient:
     @pytest.mark.asyncio
     async def test_streaming_with_usage_and_chunks(self, mock_litellm: MagicMock) -> None:
         async def _stream() -> AsyncIterator[dict[str, Any]]:
-            yield {"choices": [{"delta": {"content": '{"raw_answer": "Hel' }}], "usage": None}
+            yield {"choices": [{"delta": {"content": '{"raw_answer": "Hel'}}], "usage": None}
             yield {
                 "choices": [{"delta": {"content": 'lo"}'}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5},
@@ -461,7 +461,6 @@ class TestLiteLLMJSONClient:
         mock_litellm.types = mock_types
 
         chunks: list[tuple[str, bool]] = []
-
         def on_chunk(text: str, done: bool) -> None:
             chunks.append((text, done))
 
@@ -726,6 +725,7 @@ class TestArtifactPlaceholder:
     def test_object_without_len(self) -> None:
         class NoLen:
             pass
+
         result = _artifact_placeholder(NoLen())
         assert result == "<artifact:NoLen>"
 
@@ -891,9 +891,7 @@ class TestReasoningEffortGuard:
         return mock
 
     @pytest.mark.asyncio
-    async def test_reasoning_effort_not_passed_for_non_reasoning_model(
-        self, mock_litellm: MagicMock
-    ) -> None:
+    async def test_reasoning_effort_not_passed_for_non_reasoning_model(self, mock_litellm: MagicMock) -> None:
         """reasoning_effort should NOT be passed to models that don't support reasoning."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(
@@ -909,9 +907,7 @@ class TestReasoningEffortGuard:
             assert "reasoning_effort" not in call_kwargs
 
     @pytest.mark.asyncio
-    async def test_reasoning_effort_passed_for_reasoning_model(
-        self, mock_litellm: MagicMock
-    ) -> None:
+    async def test_reasoning_effort_passed_for_reasoning_model(self, mock_litellm: MagicMock) -> None:
         """reasoning_effort SHOULD be passed to models that support reasoning."""
         with patch.dict(sys.modules, {"litellm": mock_litellm}):
             client = _LiteLLMJSONClient(

@@ -969,6 +969,7 @@ def _generate_env_example(
             "primary_model": spec.llm.primary.model,
             "primary_provider": spec.llm.primary.provider,
             "memory_enabled": str(spec.agent.flags.memory).lower(),
+            "mlflow_enabled": spec.agent.flags.mlflow,
             "summarizer_enabled": str(bool(spec.llm.summarizer and spec.llm.summarizer.enabled)).lower(),
             "reflection_enabled": str(bool(spec.llm.reflection and spec.llm.reflection.enabled)).lower(),
             "memory_base_url": spec.services.memory_iceberg.base_url or "http://localhost:8000",
@@ -1145,6 +1146,7 @@ def _scaffold_project(
         with_rich_output=bool(spec.planner.rich_output.enabled),
         no_memory=not flags.memory,
         with_background_tasks=flags.background_tasks or bg.enabled,
+        with_mlflow=flags.mlflow,
     )
     project_dir = (output_dir or Path.cwd()) / spec.agent.name
     return project_dir, list(result.created), list(result.skipped), list(result.errors)
