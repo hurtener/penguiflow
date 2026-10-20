@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -111,10 +112,27 @@ def test_genai_prices_parity_for_production_models(model: str, expected: tuple[f
     assert get_pricing(model) == pytest.approx(expected)
 
 
-def test_databricks_claude_sonnet_5_cost_parity() -> None:
+@pytest.mark.parametrize(
+    ("request_timestamp", "expected_cost"),
+    [
+        (datetime(2026, 8, 31, 23, 59, 59, tzinfo=UTC), 0.012),
+        (datetime(2026, 9, 1, tzinfo=UTC), 0.018),
+    ],
+)
+def test_databricks_claude_sonnet_5_cost_parity(
+    monkeypatch: pytest.MonkeyPatch, request_timestamp: datetime, expected_cost: float
+) -> None:
+    genai_prices = pytest.importorskip("genai_prices")
+    calc_price = genai_prices.calc_price
+
+    def calc_price_at_timestamp(usage: Any, **kwargs: Any) -> Any:
+        return calc_price(usage, **kwargs, genai_request_timestamp=request_timestamp)
+
+    # This rate card changes on September 1; do not depend on the CI run date.
+    monkeypatch.setattr(genai_prices, "calc_price", calc_price_at_timestamp)
     assert calculate_cost(
         "databricks/databricks-claude-sonnet-5", input_tokens=1000, output_tokens=1000
-    ) == pytest.approx(0.012)
+    ) == pytest.approx(expected_cost)
 
 
 def test_calculate_cost_uses_genai_prices_tiered_usage() -> None:
