@@ -38,10 +38,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   `SessionLimits.max_pending_user_messages` (default 2). When set explicitly,
   `max_tasks_per_group` auto-seals a full group and rejects spawns into it
   (`group_task_limit_exceeded`), and `group_timeout_s` cancels a sealed group's
-  unfinished tasks once it expires. **Upgrade note:** projects generated from the
-  `minimal` template set every field explicitly, so their configured values now apply,
-  including a 10-task group cap and a 600 s group timeout (from seal to completion).
-  Raise those values in the project config if your task groups need more. (#128)
+  unfinished tasks once it expires. **Upgrade note:** generated projects pass these limit
+  fields explicitly. Wherever their config reaches the session, for example under
+  `penguiflow dev` or the AG-UI adapter, their configured values now apply instead of the
+  `SessionLimits` defaults: 5 concurrent tasks, 50 active tasks and 3600 s per task by
+  default. (#128)
 - **`cancel_group` never signals completion.** Waiters on `wait_for_group_completion`
   now wake up, and telemetry and the group report are emitted once. (#128)
 - **A guardrail PAUSE raises a private exception out of `run()`.** PAUSE now returns
