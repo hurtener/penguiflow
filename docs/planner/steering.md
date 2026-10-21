@@ -88,6 +88,7 @@ Session-backed runtimes may also use:
 **Fix**
 
 - increase `SteeringInbox(maxsize=...)` for your workload
+- for session-managed tasks, raise `SessionLimits.max_pending_user_messages` (or set `BackgroundTasksConfig.max_pending_steering`, which overrides it per session)
 - apply backpressure at your websocket/UI layer (drop or coalesce repeated USER_MESSAGE events)
 
 ### Cancellation doesn’t interrupt a long-running tool

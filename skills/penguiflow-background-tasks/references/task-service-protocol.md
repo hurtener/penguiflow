@@ -160,7 +160,7 @@ The service must enforce `max_concurrent_tasks` and `max_tasks_per_session` from
 - Reject spawn (return error to planner).
 - Queue (PENDING) and execute when capacity frees up.
 
-Library default is reject; production services usually queue with a deeper backpressure layer.
+The in-process `InProcessTaskService` passes its `background_config` to the session (`configure_background_tasks`, explicitly set fields only). The session rejects a spawn when the active-task limit (`max_tasks_per_session`) or `SessionLimits.max_background_tasks` is hit (`task_limit_exceeded` / `background_task_limit_exceeded`), and queues tasks beyond `max_concurrent_tasks` until a slot frees. Production services usually add a deeper backpressure layer.
 
 ## Observability hooks
 

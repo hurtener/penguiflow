@@ -613,6 +613,7 @@ class InProcessTaskService:
                 report_strategy=group_report,
                 retain_turn=retain_turn,
             )
+            await session.ensure_group_capacity(resolved_group.group_id)
 
         pipeline = PlannerTaskPipeline(planner_factory=self._subagent_factory)
         created_id = await session.spawn_task(
@@ -847,6 +848,7 @@ class InProcessTaskService:
                 report_strategy=group_report,
                 retain_turn=retain_turn,
             )
+            await session.ensure_group_capacity(resolved_group.group_id)
 
         snapshot = None
         if context_tool_context:

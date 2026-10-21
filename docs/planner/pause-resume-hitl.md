@@ -11,6 +11,12 @@
 
 Pauses are **first-class outputs** of the planner: `run(...)` and `resume(...)` can both return `PlannerPause`.
 
+Pauses come from two sources:
+
+- a tool calling `ctx.pause(...)` (below), or
+- a guardrail rule returning `PAUSE` in enforce mode. The planner returns `reason="approval_required"` with
+  the decision in `payload["guardrail"]`. See **[Guardrails](guardrails.md)**.
+
 ## Non-goals / boundaries
 
 - Pause/resume does not define a UI protocol. It only carries a `payload` you define.
@@ -116,7 +122,11 @@ If your `tool_context` contains non-serializable objects, the stored record may 
 
 ### Pause disabled
 
-If `pause_enabled=False` on the planner, calling `ctx.pause(...)` fails.
+If `pause_enabled=False` on the planner, calling `ctx.pause(...)` raises `RuntimeError`, which surfaces as a tool error.
+
+A guardrail `PAUSE` fails closed instead: on tool events the call (or its result) is blocked and recorded as the error
+`guardrail_pause_unavailable:<rule_id>` (the run continues); on `llm_before` / stream events the run ends
+with "Unable to complete the request."
 
 **Fix**
 
@@ -141,6 +151,11 @@ See **[Planner observability](observability.md)**.
 !!! warning
     `ctx.pause(...)` interrupts execution by raising an internal signal. The tool does not “resume mid-function”.
     After you call `planner.resume(...)`, the planner continues from the saved trajectory and the LLM chooses what to do next.
+
+!!! note
+    After a guardrail pause, the guarded action did not happen (on `tool_call_start` the tool did not run; on
+    `tool_call_result` its result was withheld). On resume the LLM plans again and the guardrail rules run again.
+    Rules do not see the approval, so a rule that still matches pauses again.
 
 This pattern gates a write tool by reading an approval flag from `tool_context` (which you can change between pause and resume).
 
@@ -207,4 +222,4 @@ if __name__ == "__main__":
 
 - **Token invalid after deploy/restart**: you need a `StateStore` that persists planner pause state.
 - **Resume continues with missing clients**: pass `tool_context` again on resume.
-- **Pauses never happen**: ensure `pause_enabled=True` and your tool actually calls `ctx.pause(...)`.
+- **Pauses never happen**: ensure `pause_enabled=True` and your tool actually calls `ctx.pause(...)` (or a guardrail returns `PAUSE` in enforce mode).

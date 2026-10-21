@@ -72,7 +72,7 @@ MemoryBudget(
 ### Overflow policies
 
 - `truncate_oldest` (default for services) — Drop oldest turns first.
-- `truncate_summary` — Shrink the rolling summary first (keeps recent turns intact).
+- `truncate_summary` — Shrink the rolling summary first (keeps its most recent part, below `summary_max_tokens` if needed), then drop the oldest turns. While `degraded` the summary isn't injected, so it is left intact.
 - `error` — Raise `MemoryBudgetExceeded`. Useful for hard-bound test environments.
 
 Production recommendation: `truncate_oldest`. `error` is for tests and special cases (e.g., billing-critical paths).

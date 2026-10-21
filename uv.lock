@@ -1596,7 +1596,7 @@ name = "gunicorn"
 version = "23.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "packaging", marker = "sys_platform != 'win32'" },
+    { name = "packaging" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/34/72/9614c465dc206155d93eff0ca20d42e1e35afc533971379482de953521a4/gunicorn-23.0.0.tar.gz", hash = "sha256:f014447a0101dc57e294f6c18ca6b40227a4c90e9bdb586042628030cba004ec", size = 375031, upload-time = "2024-08-10T20:25:27.378Z" }
 wheels = [
@@ -3113,7 +3113,7 @@ wheels = [
 
 [[package]]
 name = "penguiflow"
-version = "3.11.2"
+version = "3.11.3a2"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -3294,7 +3294,7 @@ requires-dist = [
     { name = "jinja2", marker = "extra == 'dev'", specifier = ">=3.1" },
     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.23" },
     { name = "jsonschema", marker = "extra == 'planner'", specifier = ">=4.23" },
-    { name = "litellm", marker = "extra == 'planner'", specifier = ">=1.94.0" },
+    { name = "litellm", marker = "extra == 'planner'", specifier = "==1.94.0" },
     { name = "markitdown", marker = "extra == 'dev'", specifier = ">=0.1.5" },
     { name = "markitdown", marker = "extra == 'web'", specifier = ">=0.1.5" },
     { name = "mcp", specifier = ">=1.26,<2" },
@@ -4506,8 +4506,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography", marker = "sys_platform != 'win32'" },
-    { name = "jeepney", marker = "sys_platform != 'win32'" },
+    { name = "cryptography" },
+    { name = "jeepney" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [

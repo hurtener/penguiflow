@@ -139,6 +139,8 @@ For small catalogs (< ~20 tools):
 
 The search cache uses SQLite FTS5 when available. If FTS5 cannot be created, `tool_search` falls back to regex or exact matching.
 
+FTS results are sorted by a relevance `score` from 0 to 1, derived from the FTS5 BM25 rank and normalized within the result set (best hit 1.0, worst 0.0; 0.5 when all hits tie). `preferred_namespaces` only breaks ties between equal scores, followed by side effects and name length.
+
 **Fix**
 
 - ensure your Python/SQLite build supports FTS5, or

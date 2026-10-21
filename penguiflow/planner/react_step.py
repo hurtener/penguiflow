@@ -34,6 +34,29 @@ def _prepend_system_message(messages: list[dict[str, str]], content: str) -> lis
     return patched
 
 
+def _guardrail_pause_action(planner: Any, decision: Any) -> PlannerAction:
+    """Handle a guardrail PAUSE raised on an LLM event (``llm_before`` or a stream chunk).
+
+    With pause enabled, the decision is parked on the planner and the run loop turns it
+    into a ``PlannerPause`` right after this step returns; the action returned here is
+    only a fallback for direct ``step()`` callers. With pause disabled, the step fails
+    closed the same way a STOP does at this layer.
+    """
+    if getattr(planner, "_pause_enabled", True):
+        planner._guardrail_pause_decision = decision
+        prompt = decision.pause.prompt if decision.pause is not None else ""
+        return PlannerAction(
+            next_node="final_response",
+            args={"answer": prompt or "Approval required to continue."},
+            thought=f"guardrail_pause:{decision.rule_id}",
+        )
+    return PlannerAction(
+        next_node="final_response",
+        args={"answer": "Unable to complete the request."},
+        thought=f"guardrail_pause_unavailable:{decision.rule_id}",
+    )
+
+
 async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
     if getattr(planner, "_tool_call_mode", "prompted") == "native":
         from .react_step_native import (
@@ -245,6 +268,8 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                         args={"answer": stop_message or "Unable to complete the request."},
                         thought=f"guardrail_stop:{decision.rule_id}",
                     )
+                if decision.action.value == "PAUSE":
+                    return _guardrail_pause_action(planner, decision)
                 if decision.action.value == "RETRY" and decision.retry is not None:
                     retry_meta = None
                     if isinstance(trajectory.metadata, MutableMapping):
@@ -309,6 +334,10 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                     args={"answer": stop_message or "Unable to complete the request."},
                     thought=f"guardrail_stream_stop:{decision.rule_id}",
                 )
+            if decision.action.value == "PAUSE":
+                # The LLM call happened, so record its cost, but don't act on its output.
+                planner._cost_tracker.record_main_call(cost)
+                return _guardrail_pause_action(planner, decision)
         last_raw = raw
         planner._cost_tracker.record_main_call(cost)
 

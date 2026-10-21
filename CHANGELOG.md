@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+- **Short-term memory loses its rolling summary when a state store is attached.** The
+  planner hydrates memory at the start of every run, but the stored state was saved
+  before the background summarizer finished, so each hydrate wiped the summary and
+  `pending_turns` kept growing. Background summarization now writes its result back to
+  the store. `persist` stamps the saved state with a `revision`, and `hydrate` skips
+  stored state that this instance already has. A background write never overwrites a
+  newer write from another worker, and never goes to a different key than the one it
+  started under. (#128)
+- **Rolling summary drops turns that arrive during a summarizer call.** Only the turns
+  that were summarized now leave `pending_turns`; later arrivals are summarized next.
+  (#128)
+- **`overflow_policy="truncate_summary"` hangs the event loop.** It now shrinks the
+  summary (below `summary_max_tokens` if needed) and then drops the oldest turns, and it
+  always terminates. While degraded, the summary is kept for recovery. (#128)
+- **Summarizer failures are never retried on their own.** Retries now run in the
+  background with the configured `retry_attempts` and `retry_backoff_base_s` before the
+  memory degrades. A failed recovery stays degraded instead of stranding its backlog.
+  Restoring a `recovering` or `retry` state from a store now resumes cleanly. (#128)
+- **Skill search and tool search rank results by name length instead of relevance.**
+  The SQLite FTS5 `bm25()` score was clamped to zero, so every hit scored 0.5. Scores
+  are now relative relevance from 0.0 to 1.0 (best match 1.0). `preferred_namespaces`
+  now breaks ties after relevance. (#128)
+- **`BackgroundTasksConfig` limits are ignored.** `max_concurrent_tasks`,
+  `max_tasks_per_session`, `task_timeout_s` and `max_pending_steering` now override the
+  session's `SessionLimits` when set explicitly, through
+  `StreamingSession.configure_background_tasks` (called by `InProcessTaskService` and
+  the AG-UI adapter). Unset fields keep today's `SessionLimits` values. New field
+  `SessionLimits.max_pending_user_messages` (default 2). When set explicitly,
+  `max_tasks_per_group` auto-seals a full group and rejects spawns into it
+  (`group_task_limit_exceeded`), and `group_timeout_s` cancels a sealed group's
+  unfinished tasks once it expires. **Upgrade note:** generated projects pass these limit
+  fields explicitly. Wherever their config reaches the session, for example under
+  `penguiflow dev` or the AG-UI adapter, their configured values now apply instead of the
+  `SessionLimits` defaults: 5 concurrent tasks, 50 active tasks and 3600 s per task by
+  default. (#128)
+- **`cancel_group` never signals completion.** Waiters on `wait_for_group_completion`
+  now wake up, and telemetry and the group report are emitted once. (#128)
+- **A guardrail PAUSE raises a private exception out of `run()`.** PAUSE now returns
+  `PlannerPause(reason="approval_required")` on all four guardrail events: tool call
+  start and result, `llm_before`, and LLM stream chunks. Before this fix, PAUSE on the
+  LLM events was ignored. This includes risk-router `on_timeout="pause"`. The guardrail
+  payload gains a `pause` key with the rule's `PauseSpec`. With `pause_enabled=False`,
+  a PAUSE fails closed: the tool call is blocked with
+  `guardrail_pause_unavailable:<rule_id>`, or the LLM step ends the run. (#128)
+- **A2A `/v1/...` routes are read as tenant `v1`.** `install_a2a_http` now mounts the
+  fixed `/v1` prefix before `/{tenant}`, so `/v1/...` uses the default tenant. (#128)
+
 ## 3.11.1 — 2026-07-09
 
 Documentation-only release. No runtime or public API behavior changes.

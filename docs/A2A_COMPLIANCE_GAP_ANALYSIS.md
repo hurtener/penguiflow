@@ -535,6 +535,9 @@ The spec includes an optional `tenant` “provided as a path parameter”, but t
   - Canonical non-tenant routes exactly as proto (`/...`)
   - Canonical tenant-prefixed form: `/{tenant}/...`
   - Optional `/v1/...` aliases for either form where needed for ecosystem compatibility
+- `/v1/...` is the version alias and uses the default tenant. Fixed prefixes are mounted before the
+  parameterised one (root → `/v1` → `/{tenant}/v1` → `/{tenant}`), so `/v1/...` is never read as tenant
+  `v1`. With `/v1` aliases enabled, a tenant named `v1` is reachable only via `/v1/v1/...`.
 - Reflect tenant presence in AgentCard `supportedInterfaces[].tenant` when used.
 
 ### Skill selection
@@ -1283,7 +1286,7 @@ PenguiFlow `Headers.tenant` is currently required (`penguiflow/types.py`). A2A�
 
 **Decision:**
 - If the server is deployed in tenant-prefixed mode (`/{tenant}/...`), set `Headers.tenant = <tenant>` from the path.
-- If we also expose `/v1/...` aliases, treat `/{tenant}/v1/...` as a compatibility alias of `/{tenant}/...`.
+- If we also expose `/v1/...` aliases, treat `/{tenant}/v1/...` as a compatibility alias of `/{tenant}/...`, and `/v1/...` as an alias of the root routes (default tenant, not tenant `v1`). `install_a2a_http` mounts root → `/v1` → `/{tenant}/v1` → `/{tenant}` so the fixed prefix wins; with aliases enabled, tenant `v1` is reachable only via `/v1/v1/...`. With `allow_v1_aliases=False`, `/v1/...` is an ordinary path for tenant `v1`.
 - Otherwise, derive `Headers.tenant` from authentication context if available (e.g., JWT claim / API key mapping) and document the mapping.
 - If neither is present, use a configurable default tenant (e.g., `"default"`). This default MUST be explicit in server config and tests.
 

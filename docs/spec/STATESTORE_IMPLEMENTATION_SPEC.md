@@ -664,11 +664,13 @@ async def load_planner_state(self, token: str) -> dict | None:
 
 **Purpose:** Persist short-term memory state for session continuity.
 
-**When Called:** After each planner run when `short_term_memory` is configured.
+**When Called:** After each completed planner run (once the turn is recorded) when `short_term_memory` is configured. With `strategy="rolling_summary"`, `DefaultShortTermMemory` also calls it from a background task when summarization finishes, which can be after `run()` has returned.
 
 **Contract:**
 - MUST be idempotent (same key can be saved multiple times)
 - SHOULD use upsert semantics
+- MUST store `state` as given (treat it as opaque, including the optional `revision` key)
+- MUST tolerate concurrent and background saves for the same key (multi-writer is best-effort; there is no compare-and-swap)
 - Key format: `"{tenant_id}:{user_id}:{session_id}"` (composite key)
 
 **Parameters:**
@@ -693,7 +695,8 @@ async def load_planner_state(self, token: str) -> dict | None:
     ],
     "pending": [...],              # Turns awaiting summarization
     "backlog": [...],              # Recovery buffer during degradation
-    "config_snapshot": {...}       # Configuration at save time
+    "config_snapshot": {...},      # Configuration at save time
+    "revision": "9f2c..."          # Optional: unique id per save (added by persist())
 }
 ```
 
@@ -717,11 +720,11 @@ async def save_memory_state(self, key: str, state: dict[str, Any]) -> None:
 
 **Purpose:** Load persisted memory state for session hydration.
 
-**When Called:** At the start of each planner run when `short_term_memory` is configured.
+**When Called:** At the start of each planner run when `short_term_memory` is configured, and by `DefaultShortTermMemory` before a background save (to check that no newer `revision` was stored).
 
 **Contract:**
 - MUST return `None` if key not found (NOT raise exception)
-- SHOULD return the exact state that was saved
+- SHOULD return the exact state that was saved, including `revision` (it is used to skip re-applying unchanged state and to avoid overwriting newer state)
 
 **Parameters:**
 | Parameter | Type | Description |
@@ -1078,8 +1081,8 @@ class MemoryBudget:
     summary_max_tokens: int = 1000    # Summary size limit
     total_max_tokens: int = 10000     # Total memory budget
     overflow_policy: Literal[
-        "truncate_summary",           # Drop oldest from summary
-        "truncate_oldest",            # Drop oldest turn
+        "truncate_summary",           # Shrink summary (keep its tail), then drop oldest turns
+        "truncate_oldest",            # Drop oldest pending, then oldest recent turns
         "error"                       # Raise MemoryBudgetExceeded
     ] = "truncate_oldest"
 ```
@@ -1103,6 +1106,8 @@ When implementing `save_memory_state`/`load_memory_state`:
 - Store the `health` field to track state across sessions
 - Preserve `pending` and `backlog` lists for recovery
 - Store `config_snapshot` for debugging
+- Preserve the optional `revision` field exactly as given
+- Expect saves from a background task (after summarization) as well as after each run
 
 ---
 
@@ -1290,8 +1295,8 @@ planner = ReactPlanner(
 **Integration Behavior:**
 - `save_planner_state()` called when planner pauses
 - `load_planner_state()` called during `planner.resume(token)`
-- `save_memory_state()` called after each run (if memory configured)
-- `load_memory_state()` called at start of each run (if memory configured)
+- `save_memory_state()` called after each run (if memory configured), and again from a background task after rolling-summary summarization finishes
+- `load_memory_state()` called at start of each run (if memory configured), and before that background save
 - Methods detected via `getattr()` - missing methods are skipped (planner continues without that capability)
 - Persistence method failures are **logged**; pause records always have an in-memory fallback, but resume may fail if the pause token cannot be loaded
 

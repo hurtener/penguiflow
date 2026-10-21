@@ -194,7 +194,7 @@ Memory has two budget knobs:
 
 Overflow behavior is controlled by `MemoryBudget.overflow_policy`:
 - `"truncate_oldest"`: drop oldest content first (pending → recent → summary)
-- `"truncate_summary"`: trim the summary to fit (lossy)
+- `"truncate_summary"`: shrink the summary first, keeping its most recent part (lossy; below `summary_max_tokens` if needed), then drop oldest turns (pending → recent). While `DEGRADED` the summary is not injected, so it is left intact
 - `"error"`: raise `MemoryBudgetExceeded`
 
 **Recommendation:** keep `"truncate_oldest"` for production. Use `"error"` only if you want hard guarantees during development/testing.
@@ -213,6 +213,12 @@ async def load_memory_state(self, key: str) -> dict | None: ...
 ```
 
 If these methods are missing, persistence is a no-op and memory stays in-process.
+
+When it happens:
+- **Hydrate** before each run, **persist** right after each recorded turn.
+- For `"rolling_summary"`, `DefaultShortTermMemory` also writes its state back to the same key once background summarization finishes (success, or failure that degrades health). This can happen after `run()` has returned.
+
+Each save adds a `revision` string to the state, so store and return the dict exactly as given. Hydrate skips a stored state whose `revision` this memory instance last wrote or loaded (nothing newer in the store), so an in-process summary isn't overwritten; a state without `revision` is always applied. The background write is skipped if another writer saved a newer revision meanwhile. Multiple writers on one key remain best-effort (no compare-and-swap).
 
 ### Minimal example adapter
 
@@ -239,19 +245,22 @@ class MyStateStore:
 
 For `"rolling_summary"`, `add_turn()` does not block. When a turn is evicted from the full zone:
 - it becomes part of `pending_turns` immediately (so there is no temporary “forget gap”)
-- a background task summarizes pending turns and updates `summary`
+- a background task summarizes pending turns and updates `summary`, removing only the turns it summarized; turns that arrive during the call stay in `pending_turns` until the next summarization
+- if a `state_store` is configured, the updated state is written back to it (best-effort; failures log `memory_background_persist_failed`)
 
 ### Health states
 
 `DefaultShortTermMemory.health` reports summarization state:
 - `HEALTHY`: summarization is working (summary + pending + recent)
-- `RETRY`: summarizer failed; retrying with exponential backoff
-- `DEGRADED`: summarizer unavailable; memory falls back to truncation-only injection
-- `RECOVERING`: trying to rebuild summary after degradation
+- `RETRY`: summarizer failed; the background task retries with exponential backoff (`retry_backoff_base_s * 2**(attempt-1)`, up to `retry_attempts` times)
+- `DEGRADED`: retries exhausted; pending turns move to a bounded backlog and memory falls back to truncation-only injection
+- `RECOVERING`: trying to rebuild summary from the backlog (at most once per `degraded_retry_interval_s`); a failed attempt returns to `DEGRADED` with the backlog kept
+
+Restored state (`from_dict` / hydrate) normalises in-progress health: `RECOVERING` becomes `DEGRADED` if a backlog remains (else `HEALTHY`), and `RETRY` becomes `HEALTHY`.
 
 ### Shutdown and flush
 
-If you want to wait for pending summarization before shutdown:
+If you want to wait for pending summarization before shutdown (this waits through retries and backoff — 2+4+8 s with defaults — when the summarizer is failing):
 
 ```python
 from penguiflow.planner.memory import DefaultShortTermMemory

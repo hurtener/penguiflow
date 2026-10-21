@@ -37,12 +37,32 @@ Key knobs (from `penguiflow.planner.models.BackgroundTasksConfig`):
   - `allow_tool_background`
   - `default_mode` (`subagent` vs `job`)
   - `default_merge_strategy` (`HUMAN_GATED` / `APPEND` / `REPLACE`)
-- limits:
-  - `max_concurrent_tasks`, `max_tasks_per_session`, `task_timeout_s`
+- limits (enforced by the session, only when set explicitly — see below):
+  - `max_concurrent_tasks`, `max_tasks_per_session` (active tasks), `task_timeout_s`, `max_pending_steering`
 - proactive reporting (auto-merge modes):
   - `proactive_report_enabled`, `proactive_report_max_hops`, …
 - task groups:
-  - `default_group_merge_strategy`, `default_group_report`, `max_tasks_per_group`, …
+  - `default_group_merge_strategy`, `default_group_report`, `max_tasks_per_group`, `group_timeout_s`, …
+
+### Where limits are enforced
+
+Limits are enforced by the session (`StreamingSession`), not by the planner. `StreamingSession.configure_background_tasks(config)` copies the config fields you **set explicitly** onto a per-session copy of its `SessionLimits`:
+
+| `BackgroundTasksConfig` field | `SessionLimits` field | Effective default when unset |
+|---|---|---|
+| `max_concurrent_tasks` | `max_concurrent_tasks` (all tasks in the session) | 3 |
+| `max_tasks_per_session` | `max_tasks_per_session` (active, non-terminal tasks) | 8 |
+| `task_timeout_s` | `max_task_runtime_s` | 900 s |
+| `max_pending_steering` | `max_pending_user_messages` (undrained user messages per task; extra ones are rejected) | 2 |
+
+Unset fields keep the session's `SessionLimits` values (the defaults above, unless your `SessionManager` uses custom limits), not the `BackgroundTasksConfig` field defaults. `SessionLimits.max_background_tasks` (default 4) is not overridden and still caps background tasks.
+
+The config reaches the session through `InProcessTaskService(background_config=...)` (applied on spawn), the AG-UI adapter (which discovers the planner's config), or a direct `configure_background_tasks` call. Passing it only to `ReactPlanner(background_tasks=...)` does not apply the limits unless one of these wires it to the session.
+
+Group limits come from the same config, again only when set explicitly (unset means no cap and no timeout):
+
+- `max_tasks_per_group`: a group seals automatically once it holds that many tasks. After that, spawning by `group_id` fails (`group_not_joinable`), while spawning by `group` name in the same turn opens a new group. Spawning into an open group that is already full fails with `group_task_limit_exceeded` before any task is created.
+- `group_timeout_s`: measured from seal to completion. On expiry the group's unfinished tasks are cancelled (reason `group_timeout`) and the group ends `failed`.
 
 ### The tasks.* tool surface (foreground-only)
 
@@ -94,7 +114,7 @@ This is intended for “slow but safe” integrations (e.g., scraping, batch ETL
   - `enabled=True`
   - `allow_tool_background=False` until you have strong idempotency + observability
   - `default_merge_strategy="HUMAN_GATED"` (review before merging context)
-- Enforce ceilings (`max_concurrent_tasks`, `max_tasks_per_session`) and alert when hit.
+- Enforce ceilings (`max_concurrent_tasks`, `max_tasks_per_session`) and alert when hit. If you leave them unset, the session's `SessionLimits` apply (3 concurrent / 8 active tasks / 900 s per task by default).
 - Prefer task groups for multi-step background work so the user gets one coherent report instead of many partial updates.
 
 ## Failure modes & recovery
@@ -127,7 +147,7 @@ This is intended for “slow but safe” integrations (e.g., scraping, batch ETL
 
 **Fix**
 
-- enforce limits in `BackgroundTasksConfig`
+- set limits in `BackgroundTasksConfig` and make sure the config reaches the session (see [Where limits are enforced](#where-limits-are-enforced)); `SessionLimits.max_background_tasks` still applies on top
 - keep `proactive_report_max_hops` small (default is 2)
 - do not expose tasks.* tools to subagents
 

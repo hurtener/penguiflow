@@ -42,7 +42,11 @@ The subsystem implements a layered architecture that separates concerns between 
 - **Location**: `penguiflow/sessions/session.py`
 - **Purpose**: Define resource limits and constraints for session management
 - **Key Responsibilities**:
-  - **Task Limits**: Enforces maximum number of tasks per session to prevent resource exhaustion. This includes both total task limits and background task limits to ensure that sessions don't spawn unlimited numbers of concurrent operations. The limits are checked during task spawning and can be configured differently for different deployment scenarios.
+  - **Task Limits**: Enforces maximum number of tasks per session to prevent resource exhaustion. This includes both an active-task limit (non-terminal tasks; completed tasks do not count) and a background task limit to ensure that sessions don't spawn unlimited numbers of concurrent operations. The limits are checked during task spawning and can be configured differently for different deployment scenarios.
+
+  - **Defaults**: `max_tasks_per_session=8` (active tasks), `max_background_tasks=4`, `max_concurrent_tasks=3`, `max_task_runtime_s=900`, `update_queue_size=500`, `steering_queue_size=200`, `max_pending_patches=32`, `max_steering_events_per_task=512`, and `max_pending_user_messages=2` (undrained `USER_MESSAGE` steering events per task; further user messages are rejected).
+
+  - **Per-Session Overrides**: `StreamingSession.configure_background_tasks(config)` overlays a `BackgroundTasksConfig` onto a per-session copy of these limits (the `SessionLimits` object shared by the `SessionManager` is never mutated). Only fields set explicitly on the config apply: `max_concurrent_tasks` → `max_concurrent_tasks`, `max_tasks_per_session` → `max_tasks_per_session`, `task_timeout_s` → `max_task_runtime_s`, `max_pending_steering` → `max_pending_user_messages`. `max_background_tasks` is not overridden. `InProcessTaskService(background_config=...)` and the AG-UI adapter call this for you.
 
   - **Concurrency Control**: Manages maximum concurrent tasks through asyncio semaphores to prevent overwhelming the system. The semaphore ensures that only a configured number of tasks execute simultaneously, preventing resource contention and ensuring fair scheduling.
 
@@ -172,7 +176,7 @@ The subsystem implements a layered architecture that separates concerns between 
 
 ### 4. Resource Management
 - **Concurrency Limits**: Enforces configurable limits on concurrent tasks to prevent resource exhaustion.
-- **Task Limits**: Controls the total number of tasks per session to prevent runaway operations.
+- **Task Limits**: Controls the number of active (non-terminal) tasks per session to prevent runaway operations.
 - **Runtime Limits**: Implements runtime limits for individual tasks to prevent long-running operations from blocking other work.
 - **Memory Management**: Efficiently manages memory usage through token estimation and context summarization.
 

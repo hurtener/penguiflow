@@ -39,11 +39,13 @@ The service:
 `A2AConfig` knobs:
 - `supported_versions` — A2A protocol versions this service speaks. Must be non-empty.
 - `default_version` — falls back to `supported_versions[0]` when unset.
-- `allow_v1_aliases` — when True, also serves `/v1/...` aliases of all routes.
-- `allow_tenant_prefix` — when True, serves `/{tenant}/...` for every route.
-- `default_tenant` — used when no tenant prefix is present.
+- `allow_v1_aliases` — when True, also serves `/v1/...` aliases of all operation routes (default tenant).
+- `allow_tenant_prefix` — when True, serves `/{tenant}/...` for every operation route (and `/{tenant}/v1/...` with v1 aliases on).
+- `default_tenant` — used when no tenant prefix is present (root and `/v1/...`).
 - `payload_mode` — `AUTO` infers from request shape; `ENVELOPE` forces `Message` envelopes.
 - `agent_url` — explicit canonical URL for the card (otherwise derived).
+
+These aliases are mounted by `install_a2a_http` / `create_a2a_http_app`; `create_a2a_http_router` alone mounts only the root routes.
 
 ## Agent card schema
 
@@ -143,11 +145,13 @@ Creates a `FastAPI(title=card.name, ...)` with `/docs` and `/openapi.json` and c
 
 ## Route map (HTTP + JSON-RPC)
 
-When `allow_tenant_prefix=True` and `allow_v1_aliases=True`, every operation route is mounted at:
-- `/<route>`
-- `/v1/<route>`
-- `/{tenant}/<route>`
+When `allow_tenant_prefix=True` and `allow_v1_aliases=True` (the defaults), `install_a2a_http` mounts every operation route at, in this order:
+- `/<route>` (default tenant)
+- `/v1/<route>` (default tenant)
 - `/{tenant}/v1/<route>`
+- `/{tenant}/<route>`
+
+Fixed prefixes come first so `/v1/...` is the version alias, not tenant `v1`; a tenant literally named `v1` is reachable only via `/v1/v1/...`. With `allow_v1_aliases=False`, `/v1/...` is an ordinary path for tenant `v1`. The agent card is served only at the root.
 
 | Method | Path | Purpose |
 |---|---|---|

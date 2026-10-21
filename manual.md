@@ -8098,6 +8098,7 @@ host_app = FastAPI()
 install_a2a_http(host_app, service)
 
 # Or include only the router if you want explicit mounting control
+# (root routes only: no /v1 or /{tenant} aliases)
 router_app = FastAPI()
 router_app.include_router(create_a2a_http_router(service))
 
@@ -8130,6 +8131,19 @@ See `examples/a2a_grpc_server/flow.py` for an end-to-end gRPC server + client de
 | `GET` | `/tasks/{task_id}` | Get task status/history |
 | `POST` | `/tasks/{task_id}:cancel` | Cancel task |
 | `POST` | `/rpc` | JSON-RPC binding |
+
+`create_a2a_http_app` / `install_a2a_http` also mount every operation route (not the agent card, which is
+served only at the root) under alias prefixes, controlled by `A2AConfig`:
+
+| Prefix | Enabled by | Tenant |
+|--------|------------|--------|
+| (none) | always | `default_tenant` |
+| `/v1` | `allow_v1_aliases=True` (default) | `default_tenant` |
+| `/{tenant}/v1` | both flags (default) | `{tenant}` |
+| `/{tenant}` | `allow_tenant_prefix=True` (default) | `{tenant}` |
+
+With v1 aliases on, `/v1/...` is always the version alias, so a tenant named `v1` is reachable only via
+`/v1/v1/...`. With `allow_v1_aliases=False` (tenant prefixes on), `/v1/...` is an ordinary path for tenant `v1`.
 
 **Unary request example:**
 
@@ -9539,6 +9553,11 @@ React Planner supports pausing execution for human approval or external input.
 
 #### How to Pause
 
+Pauses come from two sources: a tool calling `ctx.pause()` (below), or a guardrail rule returning `PAUSE`
+in enforce mode. A guardrail pause returns `PlannerPause(reason="approval_required")` with the decision
+(including its `PauseSpec` under `pause`) in `payload["guardrail"]`; the guarded LLM call or tool does not
+run, and on resume the LLM plans again. See `docs/planner/guardrails.md`.
+
 Tools request pause by calling `ctx.pause()`:
 
 ```python
@@ -9686,6 +9705,10 @@ planner = ReactPlanner(
 ```
 
 **Use when:** Pause not needed and want to prevent accidental pauses.
+
+A guardrail `PAUSE` on a pause-disabled planner fails closed: a tool call (or its result) is blocked with the error
+`guardrail_pause_unavailable:<rule_id>` (the run continues), and an `llm_before` / stream pause ends the
+run with "Unable to complete the request."
 
 #### Complete Example: Approval Workflow
 

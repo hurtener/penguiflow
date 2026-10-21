@@ -112,7 +112,9 @@ If you run multiple workers (or you want session continuity across restarts), ad
   - `save_memory_state(key: str, state: dict) -> Awaitable[None]`
   - `load_memory_state(key: str) -> Awaitable[dict | None]`
 
-The planner will call memory’s duck-typed `persist/hydrate` if present.
+The planner will call memory’s duck-typed `persist/hydrate` if present: hydrate before each run, persist after each recorded turn. With `rolling_summary`, the default memory also re-persists its state once background summarization finishes (possibly after `run()` returns). Store and return the state dict as given (it may include a `revision` key).
+
+Across multiple workers this is best-effort (no compare-and-swap): a background save is skipped if another worker stored a newer revision, but concurrent turns on the same session can still race (last write wins).
 
 ---
 

@@ -333,3 +333,13 @@ def test_filters_apply_across_search_types(search_type: str, tmp_path: Path) -> 
         search_type=search_type,
     )
     assert [item["name"] for item in results] == ["microsoft_365.send_mail"]
+
+
+def test_fts_results_are_ordered_by_relevance(tmp_path: Path) -> None:
+    """Issue 128 bug 4 (tool search twin): the best bm25 match ranks first with score 1.0."""
+    cache = _build_cache(tmp_path)
+    results = _search(cache, "list bigquery datasets or mail")
+
+    assert results[0]["name"] == "explorer.list_datasets"
+    assert results[0]["score"] == 1.0
+    assert all(item["score"] < 1.0 for item in results[1:])

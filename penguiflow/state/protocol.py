@@ -133,6 +133,11 @@ class SupportsMemoryState(Protocol):
     async def save_memory_state(self, key: str, state: dict[str, Any]) -> None:
         """Persist memory state under a key.
 
+        Treat ``state`` as opaque and store it exactly as given (it may include keys
+        such as ``revision`` that the memory uses to detect newer writes). Saves can
+        come from a background task, for example after short-term memory finishes a
+        rolling summary, possibly after the planner run has returned.
+
         Args:
             key: Identifier for the memory slot.
             state: Serializable state to store.
@@ -146,7 +151,8 @@ class SupportsMemoryState(Protocol):
             key: Identifier previously passed to `save_memory_state`.
 
         Returns:
-            The stored state, or None if no state exists for `key`.
+            The stored state exactly as saved (including any ``revision`` key), or None
+            if no state exists for `key`.
         """
         ...
 

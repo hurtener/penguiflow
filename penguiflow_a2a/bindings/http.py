@@ -296,37 +296,30 @@ def _agent_card_response(service: A2AService):
 
 
 def _include_operation_routes(app: Any, router: Any, service: A2AService, *, include_jsonrpc: bool) -> None:
+    """Mount the operation routes at the root and at the configured alias prefixes.
+
+    Starlette matches routes in registration order, so fixed prefixes are mounted
+    before parameterised ones: root, ``/v1``, ``/{tenant}/v1``, then ``/{tenant}``.
+    Mounting ``/{tenant}`` first would make ``/v1/...`` resolve to tenant ``"v1"``.
+    With ``allow_v1_aliases`` enabled, a tenant literally named ``v1`` is reachable
+    only through ``/v1/v1/...``.
+    """
+
+    def _alias_router() -> Any:
+        return create_a2a_http_router(
+            service,
+            include_agent_card=False,
+            include_jsonrpc=include_jsonrpc,
+            _attach_lifespan=False,
+        )
+
     app.include_router(router)
-    if service.config.allow_tenant_prefix:
-        app.include_router(
-            create_a2a_http_router(
-                service,
-                include_agent_card=False,
-                include_jsonrpc=include_jsonrpc,
-                _attach_lifespan=False,
-            ),
-            prefix="/{tenant}",
-        )
     if service.config.allow_v1_aliases:
-        app.include_router(
-            create_a2a_http_router(
-                service,
-                include_agent_card=False,
-                include_jsonrpc=include_jsonrpc,
-                _attach_lifespan=False,
-            ),
-            prefix="/v1",
-        )
+        app.include_router(_alias_router(), prefix="/v1")
         if service.config.allow_tenant_prefix:
-            app.include_router(
-                create_a2a_http_router(
-                    service,
-                    include_agent_card=False,
-                    include_jsonrpc=include_jsonrpc,
-                    _attach_lifespan=False,
-                ),
-                prefix="/{tenant}/v1",
-            )
+            app.include_router(_alias_router(), prefix="/{tenant}/v1")
+    if service.config.allow_tenant_prefix:
+        app.include_router(_alias_router(), prefix="/{tenant}")
 
 
 def create_a2a_http_router(

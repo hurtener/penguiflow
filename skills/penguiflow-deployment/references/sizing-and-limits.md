@@ -13,7 +13,7 @@ Concrete recipes for runtime knobs by workload type. All numbers are starting po
 | `Message.deadline_s` | per-trace | End-to-end deadline. |
 | `ExternalToolConfig.max_concurrency` | per-ToolNode | Bound parallel external calls. |
 | `ExternalToolConfig.timeout_s` | per-ToolNode | Bound per-tool latency. |
-| `BackgroundTasksConfig.max_concurrent_tasks` | planner | Bound async tasks. |
+| `BackgroundTasksConfig.max_concurrent_tasks` | session (overrides `SessionLimits` when set) | Bound concurrent tasks in a session. |
 | Queue visibility timeout | external queue | Time before message redelivery. |
 | Worker concurrency (asyncio task count) | platform | Number of concurrent jobs per worker. |
 | Replica count | platform | Horizontal scale. |

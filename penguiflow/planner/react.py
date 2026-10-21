@@ -82,6 +82,9 @@ from .models import (
 )
 from .parallel import execute_parallel_plan
 from .pause_management import (
+    _guardrail_pause as _guardrail_pause_impl,
+)
+from .pause_management import (
     _load_pause_record as _load_pause_record_impl,
 )
 from .pause_management import (
@@ -255,7 +258,9 @@ class ReactPlanner:
             - "Use context.history to avoid repeating failed approaches"
         token_budget: If set, triggers trajectory summarization when history exceeds limit.
             Token count is estimated by character length (approx).
-        pause_enabled: Allow nodes to trigger pause/resume flow. Default: True.
+        pause_enabled: Allow nodes to trigger pause/resume flow. Default: True. When False,
+            ``ctx.pause()`` raises ``RuntimeError`` and a guardrail PAUSE fails closed: the
+            guarded tool call (or LLM step) is blocked instead of pausing the run.
         state_store: Optional durable state adapter for pause/resume persistence.
         summarizer_llm: Separate (cheaper) LLM for trajectory compression. Falls back to
             main LLM if not set.
@@ -383,6 +388,7 @@ class ReactPlanner:
     _init_kwargs: dict[str, Any] | None
     _guardrail_stream_handler: _GuardrailStreamHandler | None
     _guardrail_stream_decision: GuardrailDecision | None
+    _guardrail_pause_decision: GuardrailDecision | None
     _session_dispatch_enabled: bool
     _session_registry_lock: asyncio.Lock
     _session_locks: dict[str, asyncio.Lock]
@@ -579,6 +585,7 @@ class ReactPlanner:
         )
         self._guardrail_stream_handler = None
         self._guardrail_stream_decision = None
+        self._guardrail_pause_decision = None
         self._llm_context_hooks = list(llm_context_hooks or [])
 
     def fork(
@@ -1178,6 +1185,17 @@ class ReactPlanner:
     ) -> PlannerPause:
         return await _pause_from_context_impl(self, reason, payload, trajectory)
 
+    async def _guardrail_pause(
+        self,
+        decision: GuardrailDecision,
+        trajectory: Trajectory,
+    ) -> PlannerPause | None:
+        """Record an approval pause for a guardrail PAUSE decision.
+
+        Returns ``None`` when pause/resume is disabled so the caller can fail closed.
+        """
+        return await _guardrail_pause_impl(self, self._guardrail_decision_payload(decision), trajectory)
+
     async def _record_pause(
         self,
         pause: PlannerPause,
@@ -1314,6 +1332,7 @@ class ReactPlanner:
 
     def _guardrail_decision_payload(self, decision: GuardrailDecision) -> dict[str, Any]:
         stop = decision.stop
+        pause = decision.pause
         return {
             "action": decision.action.value,
             "rule_id": decision.rule_id,
@@ -1327,6 +1346,14 @@ class ReactPlanner:
                 "internal_reason": stop.internal_reason,
             }
             if stop is not None
+            else None,
+            "pause": {
+                "scope": pause.scope,
+                "approver_roles": list(pause.approver_roles),
+                "prompt": pause.prompt,
+                "timeout_s": pause.timeout_s,
+            }
+            if pause is not None
             else None,
         }
 

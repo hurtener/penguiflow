@@ -355,9 +355,9 @@ class ToolSearchCache:
         scored: list[dict[str, Any]] = []
         raw_scores: list[float] = []
         for name, description, tags, declared_tags, side_effects, loading_mode, raw in rows:
+            # FTS5 bm25() is <= 0 and more negative means a better match, so negate it.
             raw_value = float(raw) if raw is not None else 0.0
-            raw_value = max(raw_value, 0.0)
-            score_raw = 1.0 / (1.0 + raw_value)
+            score_raw = max(-raw_value, 0.0)
             raw_scores.append(score_raw)
             scored.append(
                 {

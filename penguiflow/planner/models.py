@@ -591,7 +591,10 @@ class ToolSearchConfig(BaseModel):
     )
     preferred_namespaces: list[str] = Field(
         default=[],
-        description="Namespaces prioritized when ranking tool search results.",
+        description=(
+            "Namespaces preferred when ranking tool search results. Used as a tie-breaker after the "
+            "relevance score."
+        ),
     )
     fts_fallback_to_regex: bool = Field(
         default=True,
@@ -651,9 +654,17 @@ class BackgroundTasksConfig(BaseModel):
 
     This is the single source of truth for background task settings, consumed by:
     - ReactPlanner (prompt guidance, tool validation)
-    - SessionManager/TaskService (runtime enforcement)
+    - SessionManager/TaskService (runtime enforcement, through
+      ``StreamingSession.configure_background_tasks``)
     - Spec generation engine (agent.yaml generation)
     - Template engine (scaffolding new agents)
+
+    The resource limits below are enforced by the session only for fields that are
+    set explicitly (pydantic ``model_fields_set``) and only once the config reaches
+    the session (``InProcessTaskService(background_config=...)`` or the AG-UI adapter).
+    Unset fields keep the session's ``SessionLimits`` values (3 concurrent tasks,
+    8 active tasks, 900 s per task, 2 pending user messages) and mean "no cap" for the
+    group settings.
 
     Downstream teams configure these values in their agent's Config class,
     which builds this model before passing to ReactPlanner.
@@ -687,16 +698,24 @@ class BackgroundTasksConfig(BaseModel):
 
     # Resource limits
     max_concurrent_tasks: int = 5
-    """Maximum number of tasks running concurrently per session."""
+    """Maximum tasks running concurrently per session (``SessionLimits.max_concurrent_tasks``).
+
+    Applied only when set explicitly; otherwise the session's limit (default 3) applies."""
 
     max_tasks_per_session: int = 50
-    """Maximum total tasks (active + completed) per session."""
+    """Maximum active (non-terminal) tasks per session (``SessionLimits.max_tasks_per_session``).
+
+    Applied only when set explicitly; otherwise the session's limit (default 8) applies."""
 
     task_timeout_s: int = 3600
-    """Task timeout in seconds (default: 1 hour)."""
+    """Wall-clock timeout per task in seconds (``SessionLimits.max_task_runtime_s``).
+
+    Applied only when set explicitly; otherwise the session's limit (default 900 s) applies."""
 
     max_pending_steering: int = 2
-    """Maximum steering messages queued per task before backpressure."""
+    """Maximum undrained user steering messages per task; extra ones are rejected.
+
+    Maps to ``SessionLimits.max_pending_user_messages`` (default 2) when set explicitly."""
 
     # Proactive report-back settings
     proactive_report_enabled: bool = False
@@ -725,13 +744,19 @@ class BackgroundTasksConfig(BaseModel):
     """Default report strategy for groups: 'all', 'any', or 'none'."""
 
     group_timeout_s: float = 600.0
-    """Timeout for group completion (seal to complete)."""
+    """Timeout for group completion, from seal to complete.
+
+    When set explicitly, a sealed group that hasn't completed in time has its unfinished
+    tasks cancelled and ends as ``failed``. Unset means no timeout."""
 
     group_partial_on_failure: bool = True
     """If True, report partial results when some tasks in a group fail."""
 
     max_tasks_per_group: int = 10
-    """Maximum tasks allowed in a single group."""
+    """Maximum tasks allowed in a single group.
+
+    When set explicitly, a group seals automatically once it holds this many tasks, and
+    spawning into a full group raises ``group_task_limit_exceeded``. Unset means no cap."""
 
     auto_seal_groups_on_foreground_yield: bool = True
     """Auto-seal OPEN groups when foreground yields to user."""

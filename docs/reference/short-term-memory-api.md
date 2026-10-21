@@ -72,6 +72,9 @@ Controls how much STM content is retained and what happens under overflow.
 - `summary_max_tokens`: max tokens allowed for the rolling summary
 - `total_max_tokens`: overall cap for the memory payload
 - `overflow_policy`: `"truncate_summary" | "truncate_oldest" | "error"`
+  - `truncate_oldest` (default): drop the oldest pending turns, then the oldest recent turns
+  - `truncate_summary`: shrink the rolling summary first (keeping its most recent part, below `summary_max_tokens` if needed), then drop the oldest turns; while degraded the summary is not sent to the LLM, so it is left intact
+  - `error`: raise `MemoryBudgetExceeded`
 
 ### `MemoryIsolation`
 
@@ -106,9 +109,9 @@ Minimal protocol required by `ReactPlanner`:
 
 Optional extensions (duck-typed):
 
-- `persist(store, key)`: called when the planner finishes successfully
-- `hydrate(store, key)`: called before injecting memory
-- `to_dict()/from_dict(state)`: for custom persistence backends
+- `persist(store, key)`: called after each turn is recorded (when the planner finishes successfully). `DefaultShortTermMemory` saves `to_dict()` plus a `revision` string, and also writes back to the bound store/key itself after background summarization (best-effort; failures are logged as `memory_background_persist_failed`)
+- `hydrate(store, key)`: called before injecting memory. `DefaultShortTermMemory` binds `(store, key)` as the target for background writes and skips the stored state when its `revision` is the one it last wrote or loaded (a state without `revision` is always applied)
+- `to_dict()/from_dict(state)`: for custom persistence backends. `to_dict()` does not include `revision`. `from_dict()` keeps an in-flight summarization task; that call's result is discarded and the current state is summarized instead
 - `get_artifact(ref)`: for artifact lookups (optional)
 
 ---
@@ -121,7 +124,7 @@ In-memory implementation that supports:
 
 - truncation strategy
 - rolling summary strategy (background LLM summarization when wired by `ReactPlanner`)
-- failure → retry → degraded health transitions
+- failure → retry (exponential backoff, up to `retry_attempts`) → degraded health transitions
 - optional persistence via `save_memory_state/load_memory_state` on the store
 
 The planner will create a `DefaultShortTermMemory` per `MemoryKey` when configured with `ShortTermMemoryConfig`.

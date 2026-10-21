@@ -45,6 +45,32 @@ async def _pause_from_context(
     raise _PlannerPauseSignal(pause_payload)
 
 
+async def _guardrail_pause(
+    planner: Any,
+    decision_payload: Mapping[str, Any],
+    trajectory: Trajectory,
+) -> PlannerPause | None:
+    """Record an ``approval_required`` pause requested by a guardrail decision.
+
+    Unlike :func:`_pause_from_context`, this never raises the internal pause signal:
+    it returns the recorded :class:`PlannerPause` so callers can hand it back to the
+    run loop. Returns ``None`` when pause/resume is disabled for the planner, so the
+    caller can fail closed instead.
+    """
+    if not planner._pause_enabled:
+        return None
+    try:
+        await planner._pause_from_context(
+            "approval_required",
+            {"guardrail": dict(decision_payload)},
+            trajectory,
+        )
+    except _PlannerPauseSignal as signal:
+        pause_obj: PlannerPause = signal.pause
+        return pause_obj
+    raise RuntimeError("pause request did not trigger")
+
+
 async def _record_pause(
     planner: Any,
     pause_payload: PlannerPause,

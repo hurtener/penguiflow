@@ -232,7 +232,7 @@ class MemoryKey:
 
 ### 4. Flushing Operations
 - **Method**: `flush()` in DefaultShortTermMemory
-- **Purpose**: Wait for in-flight summarization to finish
+- **Purpose**: Wait for in-flight summarization to finish (including retries with backoff, and turns that became pending during a previous call)
 - **Scope**: Best-effort for rolling strategies when summarizer is not degraded
 - **Cancellation**: Handles cancellation of ongoing summarization
 
@@ -254,13 +254,13 @@ class MemoryKey:
 - **Post-Planning**: Record completed planning results as conversation turns
 - **Trajectory Digest**: Include trajectory information in memory
 - **Artifact Tracking**: Track artifacts shown and hidden during planning
-- **Persistence**: Persist memory state after recording turns
+- **Persistence**: Persist memory state after recording turns; `DefaultShortTermMemory` persists again itself when background summarization finishes (best-effort, possibly after the run returned)
 
 ### 4. Memory Lifecycle
 - **Initialization**: Set up memory based on configuration
 - **Operation**: Add turns and manage context during planning
-- **Cleanup**: Flush and persist memory at session end
-- **Recovery**: Hydrate memory for resumed sessions
+- **Cleanup**: No automatic session-end hook; call `flush()` (e.g. at shutdown) to wait for in-flight summarization, whose result the memory persists itself
+- **Recovery**: Hydrate memory before each run/resume (skipped when the stored `revision` is the one this instance last wrote or loaded)
 
 ## Error Handling & Recovery
 
@@ -474,11 +474,15 @@ Schedule Summarization (_maybe_schedule_summarize_locked)
     ↓
 Background Summarization Task
     ↓
-Generate Summary via LLM
+Generate Summary via LLM (on failure: retry in-task with exponential backoff)
     ↓
-Update Memory State
+Update Memory State (state replaced meanwhile → discard result and re-summarize)
+    ↓
+Remove Only the Summarized Turns (later arrivals stay pending)
     ↓
 Apply Budget Enforcement
+    ↓
+Persist to Bound Store/Key (best-effort; skipped if the store has a newer revision)
 ```
 
 ### 4. Memory Context Flow
@@ -504,19 +508,21 @@ Context Injection into Planning
 ```
 Summarization Failure
     ↓
-Health State Transition to DEGRADED
+RETRY State: Retry In-Task with Exponential Backoff (up to retry_attempts)
     ↓
-Store Failed Turns in Backlog
+Retries Exhausted → Health State Transition to DEGRADED
+    ↓
+Store Pending Turns in Backlog
     ↓
 Wait for Recovery Interval
     ↓
 Schedule Recovery Task
     ↓
-Process Backlog Items
-    ↓
 Transition to RECOVERING State
     ↓
-Successful Recovery → HEALTHY State
+Process Backlog Items
+    ↓
+Successful Recovery → HEALTHY State (failed recovery → DEGRADED, backlog kept)
 ```
 
 ## Integration Points
@@ -734,15 +740,16 @@ Continue Planning
     ┌─────────────┐
     │   HEALTHY   │
     └──────┬──────┘
-           │ Normal operation
+           │ Summarization failure
     ┌──────▼──────┐
-    │    RETRY    │ ←───┐ Summarization
-    └──────┬──────┘     │ failure (retryable)
-           │ Backoff    │
-    ┌──────▼──────┐     │
-    │  DEGRADED   │ ◄───┼── Retry attempts
-    └──────┬──────┘     │ exceeded
-           │ Fallback   │
+    │    RETRY    │ ↺ In-task retry with exponential
+    └──────┬──────┘   backoff (success → HEALTHY)
+           │ Retry attempts exceeded
+    ┌──────▼──────┐
+    │  DEGRADED   │ ◄───┐
+    └──────┬──────┘     │ Recovery failed
+           │ Recovery   │ (backlog kept)
+           │ interval   │
     ┌──────▼──────┐     │
     │ RECOVERING  │ ────┘
     └─────────────┘

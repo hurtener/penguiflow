@@ -590,7 +590,7 @@ async def request_approval(args: ApprovalArgs, ctx: ToolContext) -> ApprovalResu
 
 | Reason | Use Case |
 |--------|----------|
-| `approval_required` | Human must approve an action |
+| `approval_required` | Human must approve an action (also used by guardrail `PAUSE` decisions in enforce mode; the decision is in `payload["guardrail"]`) |
 | `await_input` | Need clarification or additional data |
 | `external_event` | Waiting for external system callback |
 | `constraints_conflict` | Multiple valid paths, need guidance |

@@ -36,9 +36,17 @@ single consolidated merge applies to foreground context
 
 Two ways:
 1. **Explicit**: planner calls `tasks.seal_group(group="g1")` when it's done spawning.
-2. **Auto**: `max_tasks_per_group` reached, or all spawned tasks complete and the service auto-seals (platform-specific).
+2. **Auto**: the group reaches `max_tasks_per_group` (only when that field is set explicitly; unset means no cap), or the turn's open groups are sealed when the foreground yields (`auto_seal_groups_on_foreground_yield=True`).
 
-Once sealed, no new `tasks.spawn(... group="g1")` is allowed. Spawn calls fail.
+Once sealed, the group accepts no new tasks. Spawning by `group_id` fails (`group_not_joinable`); spawning by `group="g1"` name in the same turn opens a new group instead. Spawning into an open group that already holds `max_tasks_per_group` tasks fails with `group_task_limit_exceeded` before any task is created.
+
+## Group timeout
+
+When `group_timeout_s` is set explicitly, a watchdog starts once the group is sealed (unset means no timeout). If the group has not completed when it expires, its unfinished tasks are cancelled (reason `group_timeout`, warning log `task_group_timeout`) and the group ends `failed` through the normal path: `wait_for_group_completion` waiters wake, `task_group_failed` telemetry is emitted, and the group report is queued per its report strategy. The watchdog is cancelled when the group completes or the session closes.
+
+## Cancelling a group
+
+`cancel_group` cancels the group's pending tasks (when `propagate=True`) and then finalizes the group as `failed`, signalled like any finished group: waiters wake, telemetry is emitted once, and the group report is queued once.
 
 ## Applying a group
 
@@ -163,7 +171,9 @@ if all_done:
 |---|---|---|
 | `apply_group` finds nothing to merge | Group wasn't sealed | Call `tasks.seal_group(...)` first |
 | Conflicting patches | Two tasks patched the same path | Use distinct paths; or `HUMAN_GATED` and let operator decide |
-| Group never auto-seals | `max_tasks_per_group` not reached; no explicit seal | Auto-seal when N spawn calls return; or set lower max |
+| Group never auto-seals | `max_tasks_per_group` unset or not reached; no explicit seal | Call `tasks.seal_group(...)` when spawning is done; or set `max_tasks_per_group` explicitly |
+| Spawn fails with `group_task_limit_exceeded` / `group_not_joinable` | Group is full or already sealed | Spawn by `group` name to open a new group, or raise `max_tasks_per_group` |
+| Group ends `failed` with tasks cancelled (`group_timeout`) | `group_timeout_s` elapsed between seal and completion | Raise `group_timeout_s`, or split the work into smaller groups |
 | Reports too verbose | Default summarizer is verbose; multiple grouped reports stack | Set `default_group_report=False`; or customize the summarizer prompt |
 | Operator backlog | HUMAN_GATED queue grows | Build the operator UI; consider downgrading some workflows to APPEND |
 

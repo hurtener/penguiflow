@@ -223,7 +223,7 @@ Most tools can be hidden by default (deferred) to reduce prompt bloat.
 - `default_loading_mode`: `always` | `deferred` (use `deferred` to hide tools by default).
 - `always_loaded_patterns`: glob patterns for tools that must remain visible (e.g. `tool_search`, `finish`, critical tools).
 - `activation_scope`: `run` | `session`.
-- `preferred_namespaces`: rank namespaces higher in `tool_search` ordering.
+- `preferred_namespaces`: break ties in `tool_search` ordering in favor of these namespaces (results are ranked by relevance score first).
 - `fts_fallback_to_regex`: if FTS5 is unavailable, fall back to regex when `search_type=fts`.
 - `enable_incremental_index`: avoid full reindex when catalog fingerprint matches.
 - `rebuild_cache_on_init`: force reindex on startup.
@@ -306,7 +306,7 @@ Note: interactive components (`form`, `confirm`, `select_option`) require `agent
 - `propagate_on_cancel`: `cascade` | `isolate`.
 - `spawn_requires_confirmation`: requires HITL.
 - `include_prompt_guidance`.
-- `max_concurrent_tasks` / `max_tasks_per_session` / `task_timeout_s` / `max_pending_steering`.
+- `max_concurrent_tasks` / `max_tasks_per_session` (active tasks) / `task_timeout_s` / `max_pending_steering`: applied to the session's `SessionLimits` (`max_concurrent_tasks`, `max_tasks_per_session`, `max_task_runtime_s`, `max_pending_user_messages`) when tasks are spawned.
 
 ### Tool-level background execution (spec: `tools[].background`)
 

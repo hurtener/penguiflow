@@ -1583,6 +1583,21 @@ async def _handle_finish_action(
     )
 
 
+async def _take_guardrail_pause(planner: Any, trajectory: Trajectory) -> PlannerPause | None:
+    """Turn a guardrail PAUSE parked by ``step`` (LLM events) into a recorded PlannerPause.
+
+    No trajectory step is appended: no action ran, so after resume the LLM plans again.
+    """
+    decision = getattr(planner, "_guardrail_pause_decision", None)
+    if decision is None:
+        return None
+    planner._guardrail_pause_decision = None
+    pause: PlannerPause | None = await planner._guardrail_pause(decision, trajectory)
+    if pause is not None:
+        trajectory.summary = None
+    return pause
+
+
 async def run_loop(
     planner: Any,
     trajectory: Trajectory,
@@ -1601,6 +1616,7 @@ async def run_loop(
             time_source=planner._time_source,
         )
     planner._active_tracker = tracker
+    planner._guardrail_pause_decision = None
     try:
         while len(trajectory.steps) < planner._max_iters:
             steering: SteeringInbox | None = getattr(planner, "_steering", None)
@@ -1671,6 +1687,9 @@ async def run_loop(
 
                 if selected_action is None:
                     action = await step_with_recovery(planner, trajectory, config=error_recovery_config)
+                    guardrail_pause = await _take_guardrail_pause(planner, trajectory)
+                    if guardrail_pause is not None:
+                        return guardrail_pause
                 else:
                     action = selected_action
                 # If this action came from a mixed-output response, enqueue eligible
