@@ -3294,7 +3294,7 @@ requires-dist = [
     { name = "jinja2", marker = "extra == 'dev'", specifier = ">=3.1" },
     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.23" },
     { name = "jsonschema", marker = "extra == 'planner'", specifier = ">=4.23" },
-    { name = "litellm", marker = "extra == 'planner'", specifier = ">=1.94.0" },
+    { name = "litellm", marker = "extra == 'planner'", specifier = "==1.94.0" },
     { name = "markitdown", marker = "extra == 'dev'", specifier = ">=0.1.5" },
     { name = "markitdown", marker = "extra == 'web'", specifier = ">=0.1.5" },
     { name = "mcp", specifier = ">=1.26,<2" },
