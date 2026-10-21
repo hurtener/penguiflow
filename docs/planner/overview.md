@@ -175,7 +175,7 @@ if __name__ == "__main__":
 
 ## Troubleshooting checklist
 
-- **Planner pauses unexpectedly**: check which tool called `ctx.pause(...)` and validate policy/HITL expectations.
+- **Planner pauses unexpectedly**: check which tool called `ctx.pause(...)` (or, with guardrails enabled, which rule returned PAUSE: see `pause.payload["guardrail"]`) and validate policy/HITL expectations.
 - **No tool calls happen**: verify the catalog is non-empty and tool visibility is not filtering everything out.
 - **Planner is serializing everything**: ensure `tool_context["session_id"]` is set.
 - **Frequent invalid args**: simplify schemas and add `@tool(examples=...)`.

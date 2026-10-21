@@ -45,6 +45,46 @@ def _component_tool_dedupe_key(tool_name: str, args_payload: Mapping[str, Any]) 
     return _dedupe_key({"tool": tool_name, "payload": args_payload})
 
 
+async def _guardrail_pause_outcome(
+    planner: Any,
+    decision: Any,
+    trajectory: Trajectory,
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    action_seq: int,
+    streams: Mapping[str, list[dict[str, Any]]] | None,
+) -> ToolCallOutcome:
+    """Turn a guardrail PAUSE decision on a tool event into a ToolCallOutcome.
+
+    With pause enabled the run pauses with ``reason="approval_required"``. With pause
+    disabled the call fails closed: it is recorded as an error and the run continues.
+    """
+    pause = await planner._guardrail_pause(decision, trajectory)
+    if pause is not None:
+        result_json = _safe_json_dumps({"pause": pause.reason, "payload": dict(pause.payload)})
+        outcome = ToolCallOutcome(pause=pause, streams=streams)
+    else:
+        failure_payload = {"guardrail": planner._guardrail_decision_payload(decision)}
+        error = f"guardrail_pause_unavailable:{decision.rule_id}"
+        result_json = _safe_json_dumps({"error": error, "failure": failure_payload})
+        outcome = ToolCallOutcome(error=error, failure=failure_payload, streams=streams)
+    planner._emit_event(
+        PlannerEvent(
+            event_type="tool_call_result",
+            ts=planner._time_source(),
+            trajectory_step=len(trajectory.steps),
+            extra={
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "result_json": result_json,
+                "action_seq": action_seq,
+            },
+        )
+    )
+    return outcome
+
+
 @dataclass(slots=True)
 class ToolCallOutcome:
     """Result of executing a tool call with validation and telemetry."""
@@ -144,14 +184,13 @@ async def execute_tool_call(
                     streams=None,
                 )
             if decision.action.value == "PAUSE":
-                pause_payload = {"guardrail": planner._guardrail_decision_payload(decision)}
-                pause = await planner._pause_from_context(
-                    "approval_required",
-                    pause_payload,
+                return await _guardrail_pause_outcome(
+                    planner,
+                    decision,
                     trajectory,
-                )
-                return ToolCallOutcome(
-                    pause=pause,
+                    tool_name=spec.name,
+                    tool_call_id=tool_call_id,
+                    action_seq=action_seq,
                     streams=None,
                 )
 
@@ -479,14 +518,13 @@ async def execute_tool_call(
                     streams=ctx._collect_chunks() or None,
                 )
             if decision.action.value == "PAUSE":
-                pause_payload = {"guardrail": planner._guardrail_decision_payload(decision)}
-                pause = await planner._pause_from_context(
-                    "approval_required",
-                    pause_payload,
+                return await _guardrail_pause_outcome(
+                    planner,
+                    decision,
                     trajectory,
-                )
-                return ToolCallOutcome(
-                    pause=pause,
+                    tool_name=spec.name,
+                    tool_call_id=tool_call_id,
+                    action_seq=action_seq,
                     streams=ctx._collect_chunks() or None,
                 )
             if decision.action.value == "REDACT" and decision.redactions:

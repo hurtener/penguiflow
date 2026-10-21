@@ -35,10 +35,16 @@ Guardrails are **off by default**. Enable them by passing a gateway at construct
 When enabled, the planner can enforce these actions:
 
 - `STOP`: terminate (or force-safe finish) with a user-safe message
-- `PAUSE`: trigger HITL approval (planner pauses with `reason="approval_required"`)
+- `PAUSE`: trigger HITL approval (planner pauses with `reason="approval_required"`; see below)
 - `RETRY`: re-run the LLM call with corrective instructions
 - `REDACT`: redact text from streamed output and tool results
 - `ALLOW`: do nothing
+
+!!! note
+    With `tool_call_mode="native"` (opt-in), LLM-event guardrails are not enforced: `llm_before` is not
+    evaluated (so no STOP/RETRY/PAUSE there), and STOP/PAUSE decisions on stream chunks are not acted on
+    (streamed-text redaction still applies). Tool-event guardrails (`tool_call_start` / `tool_call_result`)
+    apply in both modes.
 
 ### Guardrail events and decisions
 
@@ -62,6 +68,44 @@ Decisions include:
   - `pause: PauseSpec(scope, approver_roles, prompt, timeout_s)`
   - `stop: StopSpec(error_code, user_message, internal_reason)`
 
+`PauseSpec` fields are returned in `PlannerPause.payload["guardrail"]["pause"]` and are not enforced
+beyond that. For example, `approver_roles` and `timeout_s` are information for your approval UI; the
+planner does not check roles or expire the pause.
+
+### PAUSE behavior (enforce mode)
+
+A `PAUSE` decision works on all four events. `run(...)` (or `resume(...)`) returns:
+
+```python
+PlannerPause(reason="approval_required", payload={"guardrail": {...}}, resume_token="...")
+```
+
+`payload["guardrail"]` has `action`, `rule_id`, `reason`, `decision_id`, `severity`, `effects`, `stop`
+and `pause`. `pause` is `{"scope", "approver_roles", "prompt", "timeout_s"}` from the decision's
+`PauseSpec`, or `null` if the rule set none (see above: these fields are not enforced).
+
+What was held back depends on the event:
+
+- `llm_before`: the LLM is not called.
+- `llm_stream_chunk`: the action the LLM proposed in that call is not executed.
+- `tool_call_start`: the tool is not executed.
+- `tool_call_result`: the tool has already run; its result is withheld.
+
+Resume with `planner.resume(pause.resume_token, user_input=...)`. No action was taken, so the LLM plans
+the next step again, and guardrail rules run again on the new events. Rules do not see the approval: a rule
+that still matches will pause again, so your rule (or your orchestrator) must account for the approval.
+
+If the planner has `pause_enabled=False`, a guardrail PAUSE fails closed instead of pausing:
+
+- tool events: the call (or, on `tool_call_result`, its result) is blocked and recorded as an error step
+  `guardrail_pause_unavailable:<rule_id>` (the `tool_call_result` event carries the same error). The run continues and the LLM sees the error.
+- `llm_before` / stream events: the run finishes with the answer "Unable to complete the request."
+  (like a STOP at that layer).
+
+Callers of `ReactPlanner.step()` directly get a fallback `final_response` action for an LLM-event PAUSE
+(answer: the `PauseSpec` prompt or "Approval required to continue.", thought `guardrail_pause:<rule_id>`).
+`run()` turns it into the `PlannerPause` above.
+
 ### Modes: `shadow` vs `enforce`
 
 Guardrail gateway config controls enforcement:
@@ -84,6 +128,13 @@ Gateway options you will tune:
 - `sync_timeout_ms` (default 15ms)
 - `sync_parallel` (run sync rules concurrently)
 - `sync_fail_open` / `async_fail_open` (availability vs safety tradeoff)
+
+The gateway's risk router decides how long to wait for async rules and what to do on timeout
+(`on_timeout`). `DefaultRiskRouter` uses `on_timeout="pause"` for HIGH-risk tools, for CRITICAL-risk tools
+when `critical_fail_closed=False` (otherwise `"stop"`), for `llm_before` when the catalog has HIGH or
+CRITICAL tools, and for text that looks like a capability-change request. If async rules don't answer in
+time, the gateway returns a PAUSE with rule_id `__timeout__` and `PauseSpec(prompt="Safety check timed out")`,
+which pauses the run as described above.
 
 ### Observation size “guardrail” (reliability safety net)
 
@@ -125,6 +176,32 @@ Tradeoff guidance:
 - check which rule triggered (`rule_id`) and whether you are in `shadow` or `enforce`
 - verify your allowlist/denylist config (especially when catalogs are tenant-scoped)
 
+### Unexpected approval pauses
+
+**Symptoms**
+
+- `run(...)` returns `PlannerPause(reason="approval_required")` although no tool called `ctx.pause(...)`
+
+**Fix**
+
+- read `pause.payload["guardrail"]` (`rule_id`, `reason`, `pause.prompt`) to find the rule
+- rule_id `__timeout__` means async rules didn't answer within the risk router's wait (`on_timeout="pause"`);
+  raise the wait (`DefaultRiskRouter(high_risk_wait_ms=...)`, or `risk_router.high_risk_wait_ms` in a policy pack)
+  or speed up the async rules
+- to continue, call `planner.resume(pause.resume_token, user_input=...)`; the rule runs again on new events,
+  so a rule that still matches will pause again
+
+### Tool calls fail with `guardrail_pause_unavailable:*`
+
+**Cause**
+
+- a rule returned PAUSE on a tool event, but the planner has `pause_enabled=False`, so the call (or its
+  result) was blocked (fail closed). On `llm_before` / stream events the run instead ends with "Unable to complete the request."
+
+**Fix**
+
+- enable pause (`pause_enabled=True`) and handle `PlannerPause`, or change the rule to STOP/RETRY for that deployment
+
 ### Redaction doesn’t apply to streamed output
 
 **Likely causes**
@@ -154,7 +231,8 @@ Recommended signals:
 
 Useful places to look:
 
-- `PlannerEvent(event_type="tool_call_result").extra["result_json"]` may include a `failure.guardrail` payload on STOP/PAUSE.
+- `PlannerEvent(event_type="tool_call_result").extra["result_json"]` may include a `failure.guardrail` payload on STOP (or on a PAUSE that failed closed with `guardrail_pause_unavailable:*`).
+- for a PAUSE, the decision is in `PlannerPause.payload["guardrail"]` (the tool event's `result_json` carries it as `{"pause": "approval_required", "payload": {"guardrail": ...}}`).
 - streamed output seen in `PlannerEvent(event_type="llm_stream_chunk")` is already post-redaction (when enforced).
 
 See **[Planner observability](observability.md)**.
@@ -177,6 +255,7 @@ Guardrails examples exist under `examples/guardrails/`:
 - Is `ReactPlanner(..., guardrail_gateway=...)` set (guardrails are disabled otherwise)?
 - Is `GatewayConfig.mode` set to `enforce` when you expect blocking/redaction?
 - Do your rules list the correct `supports_event_types` for the events you care about?
-- Are timeouts too aggressive (`sync_timeout_ms`) causing unexpected STOP (fail-closed) behavior?
+- Are timeouts too aggressive (`sync_timeout_ms`, risk router waits) causing unexpected STOP (fail-closed) behavior, or PAUSE via `on_timeout="pause"` (rule_id `__timeout__`)?
+- Is `tool_call_mode="native"`? LLM-event guardrails (`llm_before`, stream STOP/PAUSE) are not enforced in that mode.
 - Are you confusing policy guardrails with the observation clamp (`ObservationGuardrailConfig`)?
 

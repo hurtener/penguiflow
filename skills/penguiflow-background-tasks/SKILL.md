@@ -35,16 +35,18 @@ planner = ReactPlanner(
         allow_tool_background=False,         # default
         default_mode="subagent",             # default — "subagent" | "job"
         default_merge_strategy="HUMAN_GATED",# default
-        max_concurrent_tasks=5,              # default
-        max_tasks_per_session=50,            # default
-        task_timeout_s=3600,                 # default; INT seconds
+        max_concurrent_tasks=5,              # field default; session uses 3 if unset
+        max_tasks_per_session=50,            # ACTIVE tasks; session uses 8 if unset
+        task_timeout_s=3600,                 # INT seconds; session uses 900 if unset
         proactive_report_enabled=False,      # default
         default_group_merge_strategy="APPEND",  # library default; flip to HUMAN_GATED for safety
         default_group_report=True,           # default
-        max_tasks_per_group=10,              # default
+        max_tasks_per_group=10,              # cap only if set; group auto-seals when full
     ),
 )
 ```
+Limits are enforced by the session, not the planner: `StreamingSession.configure_background_tasks(config)` applies only the fields you **set explicitly** to that session's `SessionLimits` (`max_concurrent_tasks`, `max_tasks_per_session`, `task_timeout_s` → `max_task_runtime_s`, `max_pending_steering` → `max_pending_user_messages`). Unset fields keep the `SessionLimits` values (3 concurrent / 8 active tasks / 900 s / 2 pending user messages by default), and `SessionLimits.max_background_tasks` (4) still applies. The config reaches the session via `InProcessTaskService(background_config=...)`, the AG-UI adapter, or a direct `configure_background_tasks` call — passing it only to `ReactPlanner` is not enough.
+
 Full field table in `references/config-and-policies.md`.
 
 ### 2) Implement (or import) a `TaskService`
@@ -95,7 +97,7 @@ Spawn related tasks with `group="..."` (e.g., per research segment), then `tasks
 A tool runs async (not inline) when **all** are true: `allow_tool_background=True`, `spec.extra["background"]["enabled"]=True`, and `tool_context` has `task_service` + `session_id`. Returns `{"task_id": ..., "status": "PENDING", "message": "spawned:job|subagent"}`. Useful for "always slow but safe" integrations.
 
 ### 8) Limits, alerts, observability
-Enforce `max_concurrent_tasks`, `max_tasks_per_session` — alert on hit. Track tasks created/completed/failed/cancelled, time-to-merge (HUMAN_GATED backlog), `PlannerEvent` lifecycle. See [[penguiflow-observability]].
+Enforce `max_concurrent_tasks`, `max_tasks_per_session` (active tasks) — alert on hit (`task_limit_exceeded`, `background_task_limit_exceeded`). Track tasks created/completed/failed/cancelled, time-to-merge (HUMAN_GATED backlog), `PlannerEvent` lifecycle. See [[penguiflow-observability]].
 
 ## Troubleshooting (fast checks)
 - **`task_service_unavailable`** — `tool_context["task_service"]` not set; wire your `TaskService` for every foreground call.
@@ -103,7 +105,7 @@ Enforce `max_concurrent_tasks`, `max_tasks_per_session` — alert on hit. Track 
 - **`tasks.*` calls hang** — `TaskService` implementation is buggy or its executor stalled; inspect the service's internals.
 - **Tasks pile up unmerged** — `default_merge_strategy="HUMAN_GATED"` and no one is merging; either auto-merge with `APPEND`/`REPLACE` or build a merge UI.
 - **Subagent spawns tasks recursively** — `tasks.*` visible to subagent context; hide via `ToolVisibilityPolicy`.
-- **Task timeout fires** — `task_timeout_s` too low for the workload, or the task is wedged. Raise the timeout or fix the workload.
+- **Task timeout fires** — `task_timeout_s` too low for the workload (if unset, the session's 900 s `max_task_runtime_s` applies), or the task is wedged. Raise the timeout or fix the workload.
 - **Tool's background opt-in ignored** — confirm `allow_tool_background=True` planner-wide and `spec.extra["background"]["enabled"]=True` on the tool.
 - **Group apply merges nothing** — `tasks.seal_group(group=...)` must run before `tasks.apply_group(...)`.
 

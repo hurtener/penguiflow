@@ -30,15 +30,18 @@ The `BackgroundTasksConfig` model defines all configurable aspects of background
 - `context_depth`: Context snapshot depth for spawned tasks (full, summary, minimal)
 
 #### Resource Limits
-- `max_concurrent_tasks`: Maximum concurrent tasks per session (default: 5)
-- `max_tasks_per_session`: Maximum total tasks per session (default: 50)
-- `task_timeout_s`: Task timeout in seconds (default: 3600)
-- `max_pending_steering`: Maximum queued steering messages per task (default: 2)
+These are enforced by the session, not the planner. `StreamingSession.configure_background_tasks(config)` applies each field that was **set explicitly** to a per-session copy of `SessionLimits`; unset fields keep the session's `SessionLimits` values (the effective defaults listed below), not the config field defaults.
+- `max_concurrent_tasks` → `SessionLimits.max_concurrent_tasks`: Maximum tasks running concurrently in the session (effective default when unset: 3)
+- `max_tasks_per_session` → `SessionLimits.max_tasks_per_session`: Maximum active (non-terminal) tasks per session (effective default when unset: 8)
+- `task_timeout_s` → `SessionLimits.max_task_runtime_s`: Per-task timeout in seconds (effective default when unset: 900)
+- `max_pending_steering` → `SessionLimits.max_pending_user_messages`: Maximum undrained `USER_MESSAGE` steering events per task; further user messages are rejected (effective default when unset: 2). This is not the inbox capacity (`SessionLimits.steering_queue_size`).
+
+`SessionLimits.max_background_tasks` (default: 4) is not overridden by the config and still caps background tasks.
 
 #### Task Groups (RFC_TASK_GROUPS)
 - `default_group_merge_strategy`: Default merge strategy for task groups
-- `max_tasks_per_group`: Maximum tasks allowed in a single group (default: 10)
-- `group_timeout_s`: Timeout for group completion (default: 600s)
+- `max_tasks_per_group`: Maximum tasks allowed in a single group. Enforced only when set explicitly (unset: no cap). A group seals automatically as soon as it holds that many tasks; spawning into an open group that is already full raises `group_task_limit_exceeded` before any task is created.
+- `group_timeout_s`: Timeout from seal to completion. Enforced only when set explicitly (unset: no timeout). On expiry the group's unfinished tasks are cancelled (reason `group_timeout`) and the group ends `failed`.
 
 ### 3. Steering System
 
@@ -79,7 +82,7 @@ The `TaskService` protocol defines the interface for managing background tasks:
 
 #### Task Group Operations
 - `seal_group()`: Seals a group to prevent new tasks from joining
-- `cancel_group()`: Cancels an entire task group
+- `cancel_group()`: Cancels an entire task group; the group ends `failed` and is signalled like any finished group (waiters wake, telemetry is emitted, the group report is queued)
 - `apply_group()`: Applies or rejects group results
 - `list_groups()`: Lists all task groups in a session
 - `get_group()`: Gets details for a specific task group
@@ -101,14 +104,15 @@ The `StreamingSession` manages the lifecycle of tasks and provides the execution
 #### Group Management
 - `resolve_or_create_group()`: Finds or creates a task group
 - `add_task_to_group()`: Adds a task to a group
-- `seal_group()`: Seals a group to prevent new tasks
-- `wait_for_group_completion()`: Waits for a group to complete
+- `seal_group()`: Seals a group to prevent new tasks (and starts the `group_timeout_s` watchdog, if set)
+- `cancel_group()`: Cancels pending tasks (when `propagate=True`) and finalizes the group as `failed`
+- `wait_for_group_completion()`: Waits for a group to complete, fail, or be cancelled
 
 ### 6. Background Task Execution
 
 #### Task Spawning Process
 1. **Action Recognition**: When the planner encounters a `task.subagent` or `task.tool` action
-2. **Validation**: Checks against `BackgroundTasksConfig` and spawn guards
+2. **Validation**: Checks spawn guards and the session's `SessionLimits` (including any limits set explicitly on `BackgroundTasksConfig` and applied via `configure_background_tasks`)
 3. **Context Snapshot**: Creates a snapshot of the current session context
 4. **Planner Forking**: Creates a new `ReactPlanner` instance using the `fork()` method
 5. **Task Creation**: Registers the task with the session manager
@@ -145,7 +149,7 @@ The `StreamingSession` manages the lifecycle of tasks and provides the execution
 [ReactPlanner] 
     ↓ (detects task.subagent/task.tool action)
 [Action Processing] 
-    ↓ (validates against BackgroundTasksConfig)
+    ↓ (validates against the session's SessionLimits)
 [Context Snapshot] 
     ↓ (captures current session state)
 [Fork Planner] 
@@ -480,6 +484,8 @@ planner = ReactPlanner(
     # ... other config
 )
 ```
+
+The limits in this config (`max_concurrent_tasks`, `task_timeout_s`) take effect once the config reaches the session: pass it to `InProcessTaskService(background_config=config)`, use the AG-UI adapter (which discovers the planner's config), or call `session.configure_background_tasks(config)` yourself. Passing it only to `ReactPlanner` does not apply them to the session.
 
 ### Advanced Steering Configuration
 ```python

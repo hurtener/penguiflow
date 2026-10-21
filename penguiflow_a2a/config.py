@@ -14,6 +14,14 @@ SUPPORTED_CONTENT_TYPES = ("application/a2a+json", "application/json")
 
 @dataclass(slots=True)
 class A2AConfig:
+    """A2A service configuration.
+
+    ``allow_v1_aliases`` also serves every operation route under ``/v1/...`` (default
+    tenant). ``allow_tenant_prefix`` also serves them under ``/{tenant}/...`` (and
+    ``/{tenant}/v1/...`` when aliases are on). With aliases on, ``/v1/...`` is always the
+    version alias, so a tenant named ``v1`` is reachable only through ``/v1/v1/...``.
+    """
+
     supported_versions: tuple[str, ...] = ("0.3",)
     default_version: str | None = None
     allow_v1_aliases: bool = True

@@ -57,19 +57,18 @@ States (the `MemoryHealth` enum):
 - `HEALTHY` (`"healthy"`) — Summarizer works; rolling summary is fresh.
 - `RETRY` (`"retry"`) — Last summarizer call failed; another retry is pending under `retry_attempts`/`retry_backoff_base_s`.
 - `DEGRADED` (`"degraded"`) — Retry budget exhausted; memory falls back to truncation behavior while a slower recovery loop continues (`degraded_retry_interval_s`).
-- `RECOVERING` (`"recovering"`) — A retry succeeded after degradation; transient state before returning to `HEALTHY`.
+- `RECOVERING` (`"recovering"`) — A recovery attempt (summarizing the backlog) is running after degradation; success returns to `HEALTHY`, failure back to `DEGRADED`.
 
 Transitions emit `on_health_changed(old, new)`. Wire this to your metrics sink to alert on summarizer reliability.
 
 ### Recovery loop
 
-When degraded:
-1. The planner retries the summarizer on each turn, up to `retry_attempts`.
-2. Failures trigger exponential backoff (`retry_backoff_base_s`).
-3. Persistent failure: state stays `degraded`; retries continue at `degraded_retry_interval_s`.
-4. A successful retry transitions back to `recovering`, then `healthy`.
+1. A failed summarizer call moves health to `retry`; the background task retries itself with exponential backoff (`retry_backoff_base_s * 2**(attempt-1)`), up to `retry_attempts` times. A success returns to `healthy`.
+2. Retries exhausted: health becomes `degraded` and pending turns move to a backlog.
+3. While degraded, a new turn triggers a recovery attempt at most once per `degraded_retry_interval_s` (health `recovering` while it runs).
+4. Recovery success → `healthy`. Recovery failure → back to `degraded` with the backlog kept.
 
-`recovery_backlog_limit` caps how many pending turns the recovery loop will try to incorporate at once.
+`recovery_backlog_limit` caps the backlog kept for recovery (oldest turns are dropped). A restored state normalises in-progress health: `recovering` becomes `degraded` if a backlog remains (else `healthy`), and `retry` becomes `healthy`.
 
 ## Trajectory digests
 

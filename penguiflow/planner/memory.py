@@ -8,11 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Protocol
+from uuid import uuid4
+
+logger = logging.getLogger("penguiflow.planner")
 
 
 class MemoryBudgetExceeded(RuntimeError):
@@ -54,7 +58,18 @@ class ConversationTurn:
 
 @dataclass(slots=True)
 class MemoryBudget:
-    """Token economy configuration for memory management."""
+    """Token economy configuration for memory management.
+
+    ``overflow_policy`` decides what happens when the memory payload exceeds
+    ``total_max_tokens``:
+
+    - ``"truncate_oldest"`` (default): drop the oldest pending turns, then the oldest
+      recent turns.
+    - ``"truncate_summary"``: shrink the rolling summary first (keeping its most recent
+      part, and below ``summary_max_tokens`` if needed), then drop the oldest turns. While
+      summarization is degraded the summary is not sent to the LLM, so it is left intact.
+    - ``"error"``: raise :class:`MemoryBudgetExceeded`.
+    """
 
     full_zone_turns: int = 5
     summary_max_tokens: int = 1000
@@ -113,7 +128,14 @@ def default_token_estimator(text: str) -> int:
 
 @dataclass(slots=True)
 class ShortTermMemoryConfig:
-    """Configuration for opt-in short-term memory."""
+    """Configuration for opt-in short-term memory.
+
+    Summarizer failures (``rolling_summary``) are retried in the background up to
+    ``retry_attempts`` times, waiting ``retry_backoff_base_s * 2**(attempt - 1)`` seconds
+    between attempts. After that the memory is degraded: it keeps only recent turns and
+    buffers evicted turns (up to ``recovery_backlog_limit``) in a backlog, and retries a
+    recovery at most every ``degraded_retry_interval_s`` seconds when new turns arrive.
+    """
 
     strategy: Literal["truncation", "rolling_summary", "none"] = "none"
     budget: MemoryBudget = field(default_factory=MemoryBudget)
@@ -260,6 +282,17 @@ class DefaultShortTermMemory:
         self._retry_count = 0
         self._last_degraded_attempt_ts = 0.0
 
+        # Persistence bookkeeping. Lock order is always _persist_lock -> _lock.
+        self._persist_lock = asyncio.Lock()
+        # Store and key that background summarization writes back to (set by hydrate,
+        # or by the first persist).
+        self._target: tuple[Any, str] | None = None
+        # Bumped whenever the in-memory state is replaced (from_dict) or bound to another
+        # key, so in-flight summarization never applies or persists a stale result.
+        self._generation = 0
+        # Revision of the stored state this instance last wrote or loaded.
+        self._synced_revision: str | None = None
+
     @property
     def health(self) -> MemoryHealth:
         """Return the current summarization health state."""
@@ -346,8 +379,9 @@ class DefaultShortTermMemory:
     async def flush(self) -> None:
         """Wait for any in-flight summarization to finish.
 
-        This is best-effort and returns immediately for non-rolling strategies or
-        when the summarizer is degraded.
+        This includes any retries (with backoff) of a failing summarizer, and summarizes
+        turns that became pending while a previous call was running. It is best-effort and
+        returns immediately for non-rolling strategies or when the summarizer is degraded.
         """
         while True:
             task = None
@@ -372,23 +406,94 @@ class DefaultShortTermMemory:
                     self._maybe_schedule_summarize_locked()
 
     async def persist(self, store: Any, key: str) -> None:
-        """Persist memory state to a store implementing `save_memory_state(key, state)`."""
+        """Persist memory state to a store implementing `save_memory_state(key, state)`.
+
+        The saved state is :meth:`to_dict` plus a ``revision`` string. If no store/key is
+        bound yet (see :meth:`hydrate`), this binds it, so background summarization writes
+        its result back there once it finishes.
+        """
         if not hasattr(store, "save_memory_state"):
             return
-        state = self.to_dict()
-        await store.save_memory_state(key, state)
+        async with self._persist_lock:
+            if self._target is None:
+                self._target = (store, key)
+            async with self._lock:
+                state = self.to_dict()
+            revision = uuid4().hex
+            state["revision"] = revision
+            await store.save_memory_state(key, state)
+            if self._is_target(store, key):
+                self._synced_revision = revision
 
     async def hydrate(self, store: Any, key: str) -> None:
-        """Hydrate memory state from a store implementing `load_memory_state(key)`."""
+        """Hydrate memory state from a store implementing `load_memory_state(key)`.
+
+        Binds ``(store, key)`` as the target for background persistence. The stored state
+        is skipped when its ``revision`` is the one this instance last wrote or loaded
+        (the store holds nothing newer), so an in-flight summary is not overwritten. A
+        state without ``revision`` is always applied.
+        """
         if not hasattr(store, "load_memory_state"):
             return
-        state = await store.load_memory_state(key)
-        if state is None:
+        async with self._persist_lock:
+            if not self._is_target(store, key):
+                self._target = (store, key)
+                self._generation += 1
+                self._synced_revision = None
+            state = await store.load_memory_state(key)
+            if state is None:
+                return
+            revision = state.get("revision")
+            if isinstance(revision, str) and revision == self._synced_revision:
+                return
+            async with self._lock:
+                self.from_dict(state)
+            self._synced_revision = revision if isinstance(revision, str) else None
+
+    def _is_target(self, store: Any, key: str) -> bool:
+        return self._target is not None and self._target[0] is store and self._target[1] == key
+
+    async def _persist_in_background(self, target: tuple[Any, str], generation: int) -> None:
+        """Write state changed by background summarization back to the bound store.
+
+        Best-effort: failures are logged, never raised. The write is skipped if the state
+        was replaced meanwhile, or if another writer saved a newer revision to the store.
+        """
+        store, key = target
+        if not hasattr(store, "save_memory_state"):
             return
-        self.from_dict(state)
+        try:
+            async with self._persist_lock:
+                if generation != self._generation:
+                    return
+                if hasattr(store, "load_memory_state"):
+                    current = await store.load_memory_state(key)
+                    current_revision = current.get("revision") if isinstance(current, Mapping) else None
+                    if current_revision != self._synced_revision:
+                        logger.debug(
+                            "memory_background_persist_skipped",
+                            extra={"reason": "store_has_newer_revision"},
+                        )
+                        return
+                async with self._lock:
+                    if generation != self._generation:
+                        return
+                    state = self.to_dict()
+                revision = uuid4().hex
+                state["revision"] = revision
+                await store.save_memory_state(key, state)
+                self._synced_revision = revision
+        except Exception as exc:
+            logger.warning(
+                "memory_background_persist_failed",
+                extra={"error": str(exc), "error_type": exc.__class__.__name__},
+            )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialise memory state to a JSON-friendly dictionary."""
+        """Serialise memory state to a JSON-friendly dictionary.
+
+        The result does not include ``revision``; :meth:`persist` adds it when saving.
+        """
         config = self._config
         snapshot = {
             "strategy": config.strategy,
@@ -440,7 +545,14 @@ class DefaultShortTermMemory:
         }
 
     def from_dict(self, state: Mapping[str, Any]) -> None:
-        """Load memory state from a dictionary created by `to_dict()`."""
+        """Load memory state from a dictionary created by `to_dict()`.
+
+        Health states that describe work in progress are normalised, because that work
+        did not survive: ``recovering`` becomes ``degraded`` when a backlog remains (so
+        recovery is retried) or ``healthy`` otherwise, and ``retry`` becomes ``healthy``.
+        An in-flight summarization task is kept; it notices that the state was replaced
+        and re-reads it instead of applying a stale result.
+        """
         if state.get("version") != 1:
             raise ValueError("Unsupported memory state version")
 
@@ -482,14 +594,21 @@ class DefaultShortTermMemory:
         if not isinstance(turns, Sequence) or not isinstance(pending, Sequence) or not isinstance(backlog, Sequence):
             raise ValueError("Invalid memory state structure")
 
-        self._health = MemoryHealth(str(health))
+        loaded_health = MemoryHealth(str(health))
+        loaded_backlog = [_load_turn(t) for t in backlog]
+        if loaded_health == MemoryHealth.RECOVERING:
+            loaded_health = MemoryHealth.DEGRADED if loaded_backlog else MemoryHealth.HEALTHY
+        elif loaded_health == MemoryHealth.RETRY:
+            loaded_health = MemoryHealth.HEALTHY
+
+        self._health = loaded_health
         self._summary = str(state.get("summary") or "")
         self._turns = [_load_turn(t) for t in turns]
         self._pending = [_load_turn(t) for t in pending]
-        self._backlog = [_load_turn(t) for t in backlog]
-        self._summarize_task = None
+        self._backlog = loaded_backlog
         self._retry_count = 0
         self._last_degraded_attempt_ts = 0.0
+        self._generation += 1
 
     def get_artifact(self, ref: str) -> Any | None:
         """Return a hidden artifact by reference (default implementation returns None)."""
@@ -572,6 +691,8 @@ class DefaultShortTermMemory:
                 else:
                     turns = list(self._pending)
                 previous_summary = self._summary
+                generation = self._generation
+                target = self._target
 
             include_digest = self._config.include_trajectory_digest
             turns_payload = [_turn_to_llm_dict(t, include_digest=include_digest) for t in turns]
@@ -583,54 +704,90 @@ class DefaultShortTermMemory:
                 if not isinstance(summary, str):
                     raise TypeError("summarizer response must include a string 'summary'")
             except Exception:
-                await self._handle_summarizer_failure()
-                return
+                delay = await self._handle_summarizer_failure(
+                    generation=generation,
+                    target=target,
+                    recovering=recovering,
+                )
+                if delay is None:
+                    return
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                continue
 
-            async with self._lock:
-                old_summary = self._summary
-                self._summary = summary
-                if recovering:
-                    self._backlog = []
-                else:
-                    self._pending = []
-                self._retry_count = 0
+            persist_target: tuple[Any, str] | None = None
+            try:
+                async with self._lock:
+                    if self._generation != generation:
+                        # The state was replaced (e.g. by hydrate) while the summarizer
+                        # ran: drop this result and summarize the current state instead.
+                        continue
+                    old_summary = self._summary
+                    self._summary = summary
+                    # Remove only the turns that were summarized. Turns that arrived
+                    # during the call stay pending for the next summarization.
+                    summarized = {id(t) for t in turns}
+                    if recovering:
+                        self._backlog = [t for t in self._backlog if id(t) not in summarized]
+                    else:
+                        self._pending = [t for t in self._pending if id(t) not in summarized]
+                    self._retry_count = 0
 
-                old_health = self._health
-                self._health = MemoryHealth.HEALTHY
+                    old_health = self._health
+                    self._health = MemoryHealth.HEALTHY
+                    persist_target = target
 
-                self._truncate_summary_to_budget_locked()
-                self._enforce_budget_locked()
+                    self._truncate_summary_to_budget_locked()
+                    self._enforce_budget_locked()
+            finally:
+                if persist_target is not None:
+                    await self._persist_in_background(persist_target, generation)
 
             await self._maybe_fire_on_summary_updated(old_summary, summary)
             await self._maybe_fire_on_health_changed(old_health, self._health)
             return
 
-    async def _handle_summarizer_failure(self) -> None:
-        async with self._lock:
-            self._retry_count += 1
-            old_health = self._health
-            if self._retry_count <= self._config.retry_attempts:
-                self._health = MemoryHealth.RETRY
-            else:
-                self._health = MemoryHealth.DEGRADED
-                self._backlog.extend(self._pending)
-                self._pending = []
-                overflow = len(self._backlog) - self._config.recovery_backlog_limit
-                if overflow > 0:
-                    self._backlog = self._backlog[overflow:]
-            await self._maybe_fire_on_health_changed(old_health, self._health)
-            retry = self._health == MemoryHealth.RETRY
-            attempt = self._retry_count
+    async def _handle_summarizer_failure(
+        self,
+        *,
+        generation: int,
+        target: tuple[Any, str] | None,
+        recovering: bool,
+    ) -> float | None:
+        """Update health after a failed summarizer call.
 
-        if retry:
-            await asyncio.sleep(self._config.retry_backoff_base_s * (2 ** max(0, attempt - 1)))
-            async with self._lock:
-                if self._config.strategy != "rolling_summary":
-                    return
-                if not self._pending:
-                    return
-                if self._summarize_task is None or self._summarize_task.done():
-                    self._summarize_task = asyncio.create_task(self._run_summarization())
+        Returns the delay before retrying, or ``None`` to stop (degraded).
+        """
+        async with self._lock:
+            if self._generation != generation:
+                # The state was replaced while the call ran; retry against the new state
+                # without counting this failure.
+                return 0.0
+            old_health = self._health
+            delay: float | None
+            if recovering:
+                # A failed recovery stays degraded with its backlog. The next attempt is
+                # time-gated by degraded_retry_interval_s.
+                self._health = MemoryHealth.DEGRADED
+                delay = None
+            else:
+                self._retry_count += 1
+                if self._retry_count <= self._config.retry_attempts:
+                    self._health = MemoryHealth.RETRY
+                    delay = self._config.retry_backoff_base_s * (2 ** max(0, self._retry_count - 1))
+                else:
+                    self._health = MemoryHealth.DEGRADED
+                    self._backlog.extend(self._pending)
+                    self._pending = []
+                    overflow = len(self._backlog) - self._config.recovery_backlog_limit
+                    if overflow > 0:
+                        self._backlog = self._backlog[overflow:]
+                    delay = None
+            await self._maybe_fire_on_health_changed(old_health, self._health)
+
+        if delay is None and target is not None:
+            await self._persist_in_background(target, generation)
+        return delay
 
     def _truncate_summary_to_budget_locked(self) -> None:
         budget = self._config.budget
@@ -650,6 +807,21 @@ class DefaultShortTermMemory:
         keep_chars = max(1, int(len(self._summary) * ratio))
         self._summary = self._summary[-keep_chars:]
 
+    def _shrink_summary_locked(self, excess_tokens: int, estimator: Callable[[str], int]) -> None:
+        """Shrink the summary (keeping its tail) by roughly ``excess_tokens``.
+
+        Every call removes at least 1/8 of the summary, so the budget loop always ends,
+        whatever the token estimator.
+        """
+        summary = self._summary
+        summary_tokens = max(estimator(summary), 1)
+        if excess_tokens >= summary_tokens:
+            self._summary = ""
+            return
+        keep_chars = int(len(summary) * (summary_tokens - excess_tokens) / summary_tokens)
+        keep_chars = min(keep_chars, len(summary) - max(len(summary) // 8, 1))
+        self._summary = summary[-keep_chars:] if keep_chars > 0 else ""
+
     def _enforce_budget_locked(self) -> None:
         total_budget = self._config.budget.total_max_tokens
         if total_budget <= 0:
@@ -666,8 +838,9 @@ class DefaultShortTermMemory:
             if policy == "error":
                 raise MemoryBudgetExceeded("memory context exceeded total_max_tokens")
 
-            if policy == "truncate_summary" and self._summary:
-                self._truncate_summary_to_budget_locked()
+            # Only shrink the summary when it is part of the payload (it isn't while degraded).
+            if policy == "truncate_summary" and "summary" in snapshot:
+                self._shrink_summary_locked(tokens - total_budget, estimator)
                 continue
 
             if self._pending:

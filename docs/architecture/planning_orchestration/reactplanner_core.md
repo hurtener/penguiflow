@@ -404,7 +404,7 @@ Planning Execution
     ↓
 Turn Recording after Completion
     ↓
-Memory Persistence
+Memory Persistence (again after background summarization, for rolling_summary)
     ↓
 Continued Planning with Updated Context
 ```
@@ -466,10 +466,9 @@ Continue Planning or Finish with Error
 - `error_recovery_config`: Configuration for error recovery strategies
 
 ### 6. Background Task Configuration
-- `background_tasks`: Configuration for background task spawning
+- `background_tasks`: Configuration for background task spawning (`BackgroundTasksConfig`)
 - `default_merge_strategy`: Default strategy for merging background results
-- `max_concurrent_tasks`: Maximum concurrent background tasks
-- `task_timeout_s`: Timeout for background tasks
+- `max_concurrent_tasks`, `max_tasks_per_session` (active tasks), `task_timeout_s`: `BackgroundTasksConfig` limits enforced by the session, not the planner. `StreamingSession.configure_background_tasks` applies the ones set explicitly to the session's `SessionLimits` (unset ones keep the `SessionLimits` values)
 
 ### 7. Reflection Configuration
 - `reflection_config`: Quality assurance configuration
@@ -976,7 +975,7 @@ Resolve Memory Key (explicit/context-derived)
 Get Memory Instance (singleton or keyed)
          │
          ▼
-Hydrate Memory State (from persistence)
+Hydrate Memory State (from persistence; skipped when the stored revision is unchanged)
          │
          ▼
 Apply Memory Context to LLM Context
@@ -997,7 +996,8 @@ After Step: Record Turn in Memory
 Enforce Memory Budgets & Policies
          │
          ▼
-Persist Memory State (if configured)
+Persist Memory State (if configured; rolling_summary memory persists again
+                      after background summarization finishes)
 ```
 
 ### Background Task Flow

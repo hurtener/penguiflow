@@ -42,6 +42,8 @@ Typical payload:
 }
 ```
 
+Guardrail `PAUSE` decisions (enforce mode) also produce `approval_required`, with payload `{"guardrail": {...}}` (the decision, including its `PauseSpec` under `"pause"`). See [[penguiflow-guardrails]].
+
 #### `await_input`
 The tool needs information the user has but hasn't provided. Examples: missing form field, ambiguous reference, clarification.
 
@@ -166,7 +168,7 @@ This works **only** because pauses raise and the tool restarts on resume. The LL
 - **Idempotent pre-pause work.** Anything you do before `ctx.pause(...)` re-runs on every retry.
 - **Cheap re-entry.** If checking the precondition requires a slow DB call, cache it in `tool_context`.
 - **One pause reason per pause site.** Don't multiplex reasons.
-- **Use `pause_enabled=False`** in deployments where HITL shouldn't fire — pauses then raise an error, surfacing bugs.
+- **Use `pause_enabled=False`** in deployments where HITL shouldn't fire — `ctx.pause(...)` then raises `RuntimeError` (a tool error), surfacing bugs. Guardrail `PAUSE` decisions fail closed instead: the tool call (or its result) is blocked with `guardrail_pause_unavailable:<rule_id>` (LLM-event pauses end the run with "Unable to complete the request.").
 
 ## When pauses don't fire
 
@@ -174,5 +176,6 @@ This works **only** because pauses raise and the tool restarts on resume. The LL
 |---|---|---|
 | Tool runs without prompting | `tool_context` already has the approval/input | Verify the check |
 | Tool raises "pause disabled" | Planner has `pause_enabled=False` | Enable on planner config, or remove HITL from that deployment |
+| Tool call errors `guardrail_pause_unavailable:*` | A guardrail returned PAUSE with `pause_enabled=False` (fail closed) | Enable pause, or change the rule's action |
 | Pause exits early without payload | Misnamed reason | Use exactly the 4 reasons listed |
 | Pause runs but never returns to caller | LLM ignored the resume and called a different tool | Check trajectory; tighten prompt to re-invoke the gated tool |

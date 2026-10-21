@@ -63,6 +63,13 @@ If you use `DefaultShortTermMemory` (the built-in implementation), it can persis
 
 See `penguiflow.state.protocol.SupportsMemoryState`.
 
+When saves happen:
+
+- `ReactPlanner` hydrates memory before each run and persists it right after each recorded turn.
+- With `rolling_summary`, `DefaultShortTermMemory` also writes its state back to the same store/key once background summarization finishes (success, or failure that degrades health). This can happen after `run()` has returned.
+
+Each save stamps the state with a `revision` string. On hydrate, a stored state whose `revision` matches what this memory instance last wrote or loaded is skipped (the store holds nothing newer), so an in-process summary is not wiped. The background write is skipped if another writer saved a newer revision in the meantime. Multiple writers on the same key remain best-effort (there is no compare-and-swap in the store protocol).
+
 !!! note
     These same methods are also used by the durable tool KV facade (`ctx.kv`) under a reserved keyspace prefix `kv:v1:`. If your StateStore implements STM persistence, it should accept arbitrary composite keys (not just `tenant:user:session`).
 
@@ -156,7 +163,7 @@ async def on_health_changed(old: MemoryHealth, new: MemoryHealth) -> None:
 `MemoryBudget` enforces token caps. When exceeded:
 
 - `truncate_oldest` removes older turns first (default).
-- `truncate_summary` shrinks the rolling summary first.
+- `truncate_summary` shrinks the rolling summary first (keeping its most recent part, below `summary_max_tokens` if needed), then drops the oldest turns. While health is degraded the summary is not sent to the LLM, so it is left intact.
 - `error` raises `MemoryBudgetExceeded` (useful for hard-bound environments).
 
 !!! warning
@@ -184,7 +191,7 @@ async def on_health_changed(old: MemoryHealth, new: MemoryHealth) -> None:
 
 ### Rolling summary degrades
 
-Rolling summaries depend on an LLM-backed summarizer. When it repeatedly fails, memory can enter degraded behavior (keeping only the recent “full zone” turns).
+Rolling summaries depend on an LLM-backed summarizer. A failed call is retried in the background with exponential backoff (`retry_backoff_base_s * 2**(attempt-1)`, up to `retry_attempts` times; health is `retry` meanwhile). When retries are exhausted, memory enters degraded behavior (keeping only the recent “full zone” turns, with older turns buffered in a bounded backlog for later recovery).
 
 **Fix**
 
@@ -218,7 +225,7 @@ STM exposes hooks in `ShortTermMemoryConfig` (async callbacks):
 - `on_summary_updated(previous, new)`
 - `on_health_changed(old, new)`
 
-In addition, planner logs warnings when memory hydration/persistence or serialization fails.
+In addition, planner logs warnings when memory hydration/persistence or serialization fails. A failed write-back after background summarization is logged as `memory_background_persist_failed` (never raised).
 In production, record at least:
 
 - memory key presence rate (how often key resolution fails)
@@ -284,7 +291,7 @@ if __name__ == "__main__":
 ## Troubleshooting checklist
 
 - **Memory missing**: check key resolution; pass explicit `memory_key`.
-- **Summary never appears**: confirm `strategy="rolling_summary"` and that the summarizer model is reachable.
+- **Summary never appears**: confirm `strategy="rolling_summary"` and that the summarizer model is reachable. Summarization runs in the background; a failing summarizer is retried with backoff (2+4+8 s with defaults) before memory degrades, and `flush()` waits through those retries.
 - **Memory bloats prompts**: reduce `full_zone_turns` and disable trajectory digest, and move large tool outputs into artifacts.
 
 ## API reference

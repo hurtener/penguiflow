@@ -44,6 +44,9 @@ Short-term memory persistence:
 
 - `save_memory_state(key: str, state: dict) -> None`
 - `load_memory_state(key: str) -> dict | None`
+- Treat `state` as an opaque dict: store it and return it exactly as given (including the optional `revision` key `DefaultShortTermMemory` uses to avoid re-applying or overwriting state).
+- Saves happen after each recorded turn and, for `rolling_summary`, again when background summarization finishes, which can be after `run()` has returned.
+- Consistency: best-effort multi-writer (no CAS); a background save is skipped if the stored `revision` changed since the memory last synced.
 
 Session KV facade (tool `ctx.kv`):
 

@@ -38,10 +38,14 @@ Rules return a `GuardrailDecision` whose `action` is one of:
 - `ALLOW`: no action needed
 - `REDACT`: redact content (tool results and streaming chunks)
 - `RETRY`: re-run with corrective guidance
-- `PAUSE`: request human intervention / explicit user input
+- `PAUSE`: request human approval; the run returns `PlannerPause(reason="approval_required")`
+  (enforced on all four events above)
 - `STOP`: terminate the run and return a safe user message
 
-## Per-rule custom messaging (RETRY/STOP)
+With `tool_call_mode="native"` (opt-in), `llm_before` is not evaluated and STOP/PAUSE decisions on
+stream chunks are not enforced; tool-event guardrails still apply.
+
+## Per-rule custom messaging (RETRY/STOP/PAUSE)
 
 Guardrails support **per-rule customized user-facing messaging**:
 
@@ -63,6 +67,20 @@ and return that message as the final answer (no further LLM/tool calls).
 
 This is appropriate for hard policies like system prompt exfiltration, direct tool escalation,
 or high-confidence jailbreak signals.
+
+### PAUSE: `PauseSpec`
+If a rule returns `PAUSE` (enforce mode), the planner returns
+`PlannerPause(reason="approval_required", payload={"guardrail": {...}})` without taking the guarded action:
+- `llm_before`: the LLM is not called
+- `llm_stream_chunk`: the action proposed in that LLM call is not executed
+- `tool_call_start`: the tool is not executed
+- `tool_call_result`: the tool already ran; its result is withheld
+
+`payload["guardrail"]["pause"]` carries the `PauseSpec` (`scope`, `approver_roles`, `prompt`, `timeout_s`)
+for your approval UI; the planner does not enforce these fields. After `planner.resume(...)` the LLM plans
+the next step again and the rules run again, so a rule that still matches pauses again. If the planner has
+`pause_enabled=False`, the PAUSE fails closed: a tool call (or its result) is blocked with
+`guardrail_pause_unavailable:<rule_id>`, and an LLM-event pause ends the run with a safe message.
 
 ## Multiple rules in the same turn
 
@@ -149,10 +167,16 @@ risk_router:
   high_risk_wait_ms: 500
 ```
 
+`tool_risks` feeds the risk router. With `DefaultRiskRouter`, if async rules don't answer within the wait,
+a HIGH-risk tool pauses the run (rule_id `__timeout__`, prompt "Safety check timed out"), and a CRITICAL
+tool stops it, or pauses if `critical_fail_closed: false`. `llm_before` also pauses on timeout when the
+catalog has HIGH or CRITICAL tools.
+
 ## Operational guidance
 
 - Prefer **STOP** for high-confidence safety violations (prompt exfiltration, tool escalation).
 - Prefer **RETRY** for “helpful correction” flows (clarify intent, enforce scope, ask for missing parameters).
 - When building async rules, ensure the planner is configured to wait for them where required,
-  otherwise treat them as monitoring/telemetry.
+  otherwise treat them as monitoring/telemetry. Where the risk router waits with `on_timeout="pause"`,
+  a slow async rule pauses the run for approval, so size the waits to your rules' latency.
 

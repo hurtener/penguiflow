@@ -1295,6 +1295,71 @@ async def test_react_planner_rolling_summary_uses_llm_summarizer() -> None:
     assert memory2["summary"] == "<session_summary>ok</session_summary>"
 
 
+async def test_react_planner_rolling_summary_survives_state_store_hydrate() -> None:
+    """Issue 128 bug 1: with a state store, the per-run hydrate must not wipe the summary."""
+    from penguiflow.state import InMemoryStateStore
+
+    class Client:
+        def __init__(self) -> None:
+            self._actions = [
+                {"thought": "finish", "next_node": None, "args": {"raw_answer": f"a{i}"}} for i in range(3)
+            ]
+            self.summary_calls = 0
+            self.calls: list[tuple[str | None, list[Mapping[str, str]]]] = []
+
+        async def complete(
+            self,
+            *,
+            messages: list[Mapping[str, str]],
+            response_format: Mapping[str, object] | None = None,
+            stream: bool = False,
+            on_stream_chunk: object = None,
+        ) -> tuple[str, float]:
+            del stream, on_stream_chunk
+            schema_name = None
+            if isinstance(response_format, Mapping):
+                json_schema = response_format.get("json_schema")
+                if isinstance(json_schema, Mapping):
+                    schema_name = json_schema.get("name")
+            self.calls.append((schema_name if isinstance(schema_name, str) else None, list(messages)))
+            if schema_name == "short_term_memory_summary":
+                self.summary_calls += 1
+                return json.dumps({"summary": f"<session_summary>s{self.summary_calls}</session_summary>"}), 0.0
+            return json.dumps(self._actions.pop(0), ensure_ascii=False), 0.0
+
+    client = Client()
+    store = InMemoryStateStore()
+    planner = make_planner(
+        client,
+        state_store=store,
+        short_term_memory=ShortTermMemoryConfig(
+            strategy="rolling_summary",
+            budget=MemoryBudget(full_zone_turns=0),
+            retry_attempts=0,
+            retry_backoff_base_s=0.0,
+        ),
+    )
+    key = MemoryKey(tenant_id="t", user_id="u", session_id="s")
+
+    await planner.run("q1", memory_key=key)
+    await planner._memory_by_key[key.composite()].flush()
+    await planner.run("q2", memory_key=key)
+    await planner._memory_by_key[key.composite()].flush()
+    await planner.run("q3", memory_key=key)
+
+    # One summarizer call per finished turn before q3, never a re-summary of old turns.
+    assert client.summary_calls == 2
+    third_messages = client.calls[-1][1]
+    memory3 = _extract_read_only_conversation_memory(third_messages)
+    assert memory3 is not None
+    assert memory3["summary"] == "<session_summary>s2</session_summary>"
+    assert "pending_turns" not in memory3
+
+    stored = await store.load_memory_state(key.composite())
+    assert stored is not None
+    assert stored["summary"]
+
+
 @pytest.mark.asyncio()
 async def test_react_planner_extracts_memory_key_from_tool_context() -> None:
     client = StubClient(

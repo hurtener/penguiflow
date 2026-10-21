@@ -61,12 +61,18 @@ spec = NodeSpec(
 
 ## Limits
 
-| Field | Default | Purpose |
-|---|---|---|
-| `max_concurrent_tasks` | `5` | Hard cap on simultaneous tasks per session. Spawn fails when exceeded. |
-| `max_tasks_per_session` | `50` | Hard cap on total tasks (active + completed) per session. |
-| `task_timeout_s` | `3600` (1 hour, **int** seconds) | Per-task wall-clock timeout. |
-| `max_pending_steering` | `2` | Max steering messages queued per task before backpressure. |
+Limits are enforced by the session, not the planner. `StreamingSession.configure_background_tasks(config)` copies each field you **set explicitly** onto a per-session copy of `SessionLimits`. Unset fields keep the `SessionLimits` value (shown in parentheses), so the field default does not apply on its own.
+
+| Field | Default | Session limit (value if unset) | Purpose |
+|---|---|---|---|
+| `max_concurrent_tasks` | `5` | `max_concurrent_tasks` (`3`) | Cap on tasks running at once in the session (semaphore). Extra tasks queue until a slot frees. |
+| `max_tasks_per_session` | `50` | `max_tasks_per_session` (`8`) | Cap on active (non-terminal) tasks per session; completed tasks don't count. Spawn fails with `task_limit_exceeded`. |
+| `task_timeout_s` | `3600` (1 hour, **int** seconds) | `max_task_runtime_s` (`900`) | Per-task wall-clock timeout. |
+| `max_pending_steering` | `2` | `max_pending_user_messages` (`2`) | Max undrained `USER_MESSAGE` steering events per task; further user messages are rejected. Not the inbox capacity (`steering_queue_size`). |
+
+`SessionLimits.max_background_tasks` (default `4`) is not overridden and still caps background tasks (`background_task_limit_exceeded`).
+
+The config reaches the session via `InProcessTaskService(background_config=...)` (applied on spawn), the AG-UI adapter (which discovers the planner's config), or a direct `session.configure_background_tasks(config)` call. Passing it only to `ReactPlanner(background_tasks=...)` does not apply these limits.
 
 These defaults are conservative; tune downward for latency-sensitive products and upward for long-running research agents.
 
@@ -91,7 +97,8 @@ For chat UIs, `proactive_report_enabled=True` produces "Heads up — research on
 |---|---|---|
 | `default_group_merge_strategy` | `"APPEND"` | Strategy applied at `tasks.apply_group`. |
 | `default_group_report` | `True` | Produce a single user-facing summary on apply. |
-| `max_tasks_per_group` | `10` | Hard cap per group. |
+| `max_tasks_per_group` | `10` | Hard cap per group, only when set explicitly (unset: no cap). The group auto-seals once full; spawning into a full open group fails with `group_task_limit_exceeded`. |
+| `group_timeout_s` | `600.0` | Seal-to-complete timeout, only when set explicitly (unset: no timeout). On expiry the group's unfinished tasks are cancelled and the group ends `failed`. |
 
 Groups bundle related background work into one merge. Useful when:
 - Multi-segment research: each segment is a task, the group is the consolidated report.
@@ -167,7 +174,8 @@ See [[penguiflow-observability]] for the broader event taxonomy.
 | Mistake | Consequence | Fix |
 |---|---|---|
 | `enabled=True` but no `task_service` in `tool_context` | All `tasks.*` calls fail | Wire the service |
-| No limits set | One bad session DoSes the worker | Set `max_concurrent_tasks`, `max_tasks_per_session` |
+| No limits set | Session falls back to `SessionLimits` defaults (3 concurrent / 8 active tasks / 900 s), which may not fit the workload | Set `max_concurrent_tasks`, `max_tasks_per_session` explicitly |
+| Config passed only to `ReactPlanner` | Limits never reach the session | Pass it to `InProcessTaskService(background_config=...)` or call `session.configure_background_tasks(config)` |
 | `default_merge_strategy="APPEND"` from day 1 | Hard to debug context drift | Start `HUMAN_GATED`, promote to APPEND only with observability |
 | `tasks.*` visible to subagents | Recursive task explosion | Visibility policy |
 | `task_timeout_s=None` for tool-initiated background | Wedged tasks accumulate | Set a real timeout |

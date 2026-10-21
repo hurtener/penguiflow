@@ -411,6 +411,42 @@ def test_router_include_does_not_change_unrelated_validation_errors() -> None:
         assert response.json()["type"].endswith("invalid-request")
 
 
+
+@pytest.mark.parametrize(
+    ("allow_v1_aliases", "path", "expected_tenant"),
+    [
+        (True, "/message:send", "default"),
+        (True, "/v1/message:send", "default"),
+        (True, "/acme/message:send", "acme"),
+        (True, "/acme/v1/message:send", "acme"),
+        (True, "/v1/v1/message:send", "v1"),
+        (False, "/v1/message:send", "v1"),
+    ],
+)
+def test_install_helper_resolves_tenant_for_alias_routes(
+    allow_v1_aliases: bool, path: str, expected_tenant: str
+) -> None:
+    """Issue 128 bug 7: ``/v1/...`` is the version alias, not tenant ``v1``."""
+
+    async def entry(message: FlowMessage, _ctx) -> dict[str, Any]:
+        return {"tenant": message.headers.tenant}
+
+    node = Node(entry, name="entry", policy=NodePolicy(validate="none"))
+    service = A2AService(
+        create(node.to()),
+        agent_card=_agent_card(),
+        config=A2AConfig(allow_v1_aliases=allow_v1_aliases, allow_tenant_prefix=True),
+    )
+    app = FastAPI()
+    install_a2a_http(app, service)
+
+    with TestClient(app) as client:
+        response = client.post(path, json=_message_payload("hi", blocking=True), headers=_base_headers())
+        assert response.status_code == 200
+        artifact = response.json()["task"]["artifacts"][0]
+        assert artifact["parts"][0]["data"]["data"]["tenant"] == expected_tenant
+
+
 def test_install_helper_mounts_aliases_and_agent_card_once() -> None:
     async def echo(message: FlowMessage, _ctx) -> str:
         return f"echo:{message.payload}"

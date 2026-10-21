@@ -437,6 +437,8 @@ background_tasks = BackgroundTasksConfig(
 )
 ```
 
+These limits are enforced by the session, not the planner: they apply once the config reaches the session (`InProcessTaskService(background_config=...)`, the AG-UI adapter, or `session.configure_background_tasks(config)`), and only the fields you set explicitly override the session's `SessionLimits` (3 concurrent / 8 active tasks / 900 s by default).
+
 `tasks.*` tools expect the foreground `tool_context` to include a task service under `"task_service"`:
 
 ```py
@@ -448,7 +450,7 @@ tool_context = {
 
 Operator-oriented defaults to consider:
 - `spawn_requires_confirmation=True` for high-risk environments.
-- `max_concurrent_tasks` and `max_tasks_per_session` to prevent runaway cost.
+- `max_concurrent_tasks` and `max_tasks_per_session` (active tasks) to prevent runaway cost.
 - `context_depth="summary"` for privacy/cost, unless tasks require full context.
 - `propagate_on_cancel="cascade"` to avoid orphaned work.
 

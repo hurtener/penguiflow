@@ -17,7 +17,10 @@ class SupportsMemoryState(Protocol):
 When the planner has a `StateStore` and `short_term_memory` is configured:
 - `run()` calls `load_memory_state(key)` to hydrate.
 - Each turn triggers `save_memory_state(key, updated_state)`.
+- With `rolling_summary`, the memory saves again from a background task once summarization finishes (possibly after `run()` returns).
 - Resume calls re-hydrate.
+
+Each save includes a `revision` string. Hydrate skips a stored state whose `revision` this instance last wrote or loaded; store and return the state dict as given.
 
 The `key` argument is the composite from `MemoryKey` (`"{tenant_id}:{user_id}:{session_id}"`), but the contract allows arbitrary composite keys — see "Reserved keyspace" below.
 
@@ -138,7 +141,7 @@ If the model recalls correctly, persistence works. If it doesn't:
 ## Multi-worker considerations
 
 - **Shared store required.** Each worker must read/write from the same backend (Redis, DB).
-- **Concurrency** — two workers can race on the same key. Last-write-wins is the simplest policy; STM tolerates this (turns are append-style, and the rolling summary regenerates on the next call).
+- **Concurrency** — two workers can race on the same key; persistence is best-effort (no compare-and-swap). A background save after summarization is skipped if the stored `revision` changed (another worker saved newer state), but concurrent turn saves are last-write-wins.
 - **Hot keys** — high-traffic sessions hit the same key repeatedly. Use a fast backend (Redis, in-memory cache layer in front of DB).
 - **TTL** — set a TTL on memory entries (e.g., 24-72h). Stale sessions accumulate; clean them up.
 

@@ -274,7 +274,9 @@ class SkillSearchResult(BaseModel):
     title: str | None = None
     trigger: str | None = None
     task_type: SkillTaskType | None = None
-    score: float
+    score: float = Field(
+        description="Relevance relative to the other results, from 0.0 to 1.0 (the best full-text match is 1.0).",
+    )
 
 
 class SkillSearchResponse(BaseModel):

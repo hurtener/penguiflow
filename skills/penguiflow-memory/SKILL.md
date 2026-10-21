@@ -91,7 +91,7 @@ For deployments with multiple workers / restarts, attach a `StateStore` implemen
 - `save_memory_state(key: str, state: dict) -> None`
 - `load_memory_state(key: str) -> dict | None`
 
-Hydration happens on `run()` start; persistence happens after turns are added. See [[penguiflow-statestore]] for backends. The same StateStore methods also back `ctx.kv` under reserved prefix `kv:v1:` — implementations must accept arbitrary composite keys, not only `tenant:user:session`.
+Hydration happens on `run()` start; persistence happens after turns are added and, for `rolling_summary`, again when background summarization finishes. See [[penguiflow-statestore]] for backends. The same StateStore methods also back `ctx.kv` under reserved prefix `kv:v1:` — implementations must accept arbitrary composite keys, not only `tenant:user:session`.
 
 ### 6) (Optional) Wire hooks for metrics
 `ShortTermMemoryConfig` accepts `on_turn_added(turn)`, `on_summary_updated(old, new)`, `on_health_changed(old, new)` — all async, **fire-and-forget**. Exceptions are swallowed. Use for lightweight metrics/logs only; durability goes through `StateStore`. Full signatures in `references/persistence-and-hooks.md`.

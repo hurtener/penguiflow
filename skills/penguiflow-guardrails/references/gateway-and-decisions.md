@@ -122,7 +122,7 @@ PauseSpec(
     timeout_s: float | None = 300.0,
 )
 ```
-`scope` is a fixed `Literal`, not a free string. Triggers `PlannerPause(reason="approval_required")`. The host resumes via `planner.resume(...)`. See [[penguiflow-hitl-pause-resume]].
+`scope` is a fixed `Literal`, not a free string. Triggers `PlannerPause(reason="approval_required")` on any of the four events (enforce mode). The decision is in `pause.payload["guardrail"]` (`action`, `rule_id`, `reason`, `decision_id`, `severity`, `effects`, `stop`, `pause`); `pause` holds these `PauseSpec` fields as a dict, or `None`. The planner does not enforce them (`approver_roles`, `timeout_s` are for your approval UI). The guarded LLM call / tool does not run (on `tool_call_result` the tool already ran; its result is withheld). The host resumes via `planner.resume(...)`; the LLM plans again and rules re-run (they don't see the approval). With `pause_enabled=False` the PAUSE fails closed: tool events → error `guardrail_pause_unavailable:<rule_id>`; `llm_before`/stream → final answer "Unable to complete the request.". See [[penguiflow-hitl-pause-resume]].
 
 ### `StopSpec`
 ```python
@@ -243,6 +243,8 @@ class ProdWriteApproval:
             )
         return None
 ```
+
+As written, this rule pauses again after `planner.resume(...)` if the LLM retries the same prod write: rules don't see the approval, so a real rule needs its own way to recognise an approved call.
 
 ## Audit format
 

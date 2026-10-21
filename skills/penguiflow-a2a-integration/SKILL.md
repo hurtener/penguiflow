@@ -53,7 +53,7 @@ Three options, ordered by integration depth:
 - `create_a2a_http_router(service)` — host composes via `app.include_router(...)` (most explicit; lifespan-aware).
 - `create_a2a_http_app(service)` — convenience standalone FastAPI app (single-purpose deployment).
 
-All three publish `GET /.well-known/agent-card.json` and `GET /extendedAgentCard`, plus JSON-RPC at `POST /rpc` and REST routes for `message/send`, `message/stream`, `tasks/cancel`, etc. The router supports tenant prefix (`/{tenant}/...`) and v1 aliases (`/v1/...`) when enabled in `A2AConfig`. See `references/server-binding.md` for the full route list.
+All three publish `GET /.well-known/agent-card.json` and `GET /extendedAgentCard`, plus JSON-RPC at `POST /rpc` and REST routes for `message/send`, `message/stream`, `tasks/cancel`, etc. `install_a2a_http` / `create_a2a_http_app` also mount the operation routes under `/v1/...`, `/{tenant}/v1/...` and `/{tenant}/...` when enabled in `A2AConfig`; `create_a2a_http_router` alone mounts root routes only. `/v1/...` uses the default tenant (with aliases on, tenant `v1` is reachable only via `/v1/v1/...`). See `references/server-binding.md` for the full route list.
 
 ### 4) (Optional) Add SSE / push / gRPC
 - **SSE**: built-in for `message/stream`; the router uses FastAPI `StreamingResponse`.
@@ -98,7 +98,8 @@ The toolset auto-persists a `RemoteBinding` per `(agent_url, skill, tenant, user
 - **`A2AService` start/stop ordering** — when using `install_a2a_http`/`create_a2a_http_router` with `_attach_lifespan=True` (default), the router owns startup/shutdown; if you mount it via `app.include_router(...)` and want explicit lifespan control, pass `_attach_lifespan=False` and call `service.start()`/`service.stop()` yourself.
 - **JSON-RPC `-32600 Request payload validation error`** — missing `id`, non-string `method`, or `jsonrpc != "2.0"`. The router enforces JSON-RPC 2.0 strictly.
 - **gRPC import errors** — `pip install "penguiflow[a2a-grpc]"`; the optional import in `penguiflow_a2a/__init__.py` is wrapped in `try/except RuntimeError`.
-- **Tenant prefix routes 404** — `A2AConfig.allow_tenant_prefix=False`; flip it to `True` and remount.
+- **Tenant prefix routes 404** — `A2AConfig.allow_tenant_prefix=False`, or you mounted only `create_a2a_http_router` (root routes only); flip the flag to `True` and/or mount via `install_a2a_http`.
+- **`/v1/...` requests land under tenant `v1`** — `allow_v1_aliases=False` makes `/v1/...` an ordinary tenant path; with aliases on (default), `/v1/...` uses the default tenant.
 
 ## Worked examples
 - `examples/a2a_grpc_server/flow.py` — minimal end-to-end gRPC server + client.

@@ -168,7 +168,23 @@ See **[Planner observability](observability.md)**.
 
 - confirm whether the gateway is in `shadow` or `enforce` mode
 - inspect the `failure.guardrail` payload in tool call results (it includes `rule_id` and `reason`)
+- for pauses, inspect `pause.payload["guardrail"]` (`rule_id`, `reason`, and the `PauseSpec` under `pause`);
+  rule_id `__timeout__` means async rules timed out under the risk router's `on_timeout="pause"`
 - tune rule configs (allowlists, redaction patterns, timeouts)
+
+See **[Guardrails](guardrails.md)**.
+
+## Tool calls fail with `guardrail_pause_unavailable:*`
+
+**Symptoms**
+
+- tool call errors with `guardrail_pause_unavailable:<rule_id>` (on `tool_call_start` the tool did not run; on `tool_call_result` its result was dropped)
+- run ends with "Unable to complete the request." right after a guardrail matched user input or streamed output
+
+**Fix**
+
+- a guardrail returned PAUSE but the planner has `pause_enabled=False`, so it failed closed
+- enable pause and handle `PlannerPause`, or change the rule's action for that deployment
 
 See **[Guardrails](guardrails.md)**.
 

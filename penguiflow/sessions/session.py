@@ -11,7 +11,7 @@ import secrets
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, Literal, cast
@@ -88,6 +88,12 @@ class SessionLimits:
         max_steering_payload_bytes: Maximum allowed size of a steering event payload, in bytes.
         max_steering_events_per_task: Maximum number of recently-seen event IDs tracked per task
             for duplicate detection.
+        max_pending_user_messages: Maximum number of undrained ``USER_MESSAGE`` steering events
+            per task; further user messages are rejected until the task drains its inbox.
+
+    A :class:`~penguiflow.planner.models.BackgroundTasksConfig` passed to
+    :meth:`StreamingSession.configure_background_tasks` overrides some of these limits for
+    that session, but only for the config fields that were set explicitly.
     """
 
     max_tasks_per_session: int = 8
@@ -99,6 +105,17 @@ class SessionLimits:
     max_pending_patches: int = 32
     max_steering_payload_bytes: int = MAX_STEERING_PAYLOAD_BYTES
     max_steering_events_per_task: int = 512
+    max_pending_user_messages: int = 2
+
+
+# BackgroundTasksConfig field -> SessionLimits field. Only fields the user set
+# explicitly on the config are applied (see StreamingSession.configure_background_tasks).
+_BACKGROUND_LIMIT_FIELDS: dict[str, str] = {
+    "max_concurrent_tasks": "max_concurrent_tasks",
+    "max_tasks_per_session": "max_tasks_per_session",
+    "task_timeout_s": "max_task_runtime_s",
+    "max_pending_steering": "max_pending_user_messages",
+}
 
 
 @dataclass(slots=True)
@@ -387,6 +404,7 @@ class StreamingSession:
         self._proactive_suppressed_task_ids: set[str] = set()
         self._proactive_suppressed_group_ids: set[str] = set()
         self._group_continuations: dict[str, asyncio.Task[None]] = {}
+        self._group_timeouts: dict[str, asyncio.Task[None]] = {}
         # Task group state
         self._groups: dict[str, TaskGroup] = {}
         self._current_turn_id: str | None = None
@@ -439,13 +457,62 @@ class StreamingSession:
         config: BackgroundTasksConfig | None = None,
         **overrides: Any,
     ) -> BackgroundTasksConfig:
-        """Configure runtime background task behavior."""
+        """Configure runtime background task behavior for this session.
+
+        Besides storing the config, this applies its resource limits to the session.
+        Only fields set explicitly on ``config`` (or passed as ``overrides``) take effect;
+        unset fields keep this session's :class:`SessionLimits` values. The mapping is:
+
+        - ``max_concurrent_tasks`` -> ``SessionLimits.max_concurrent_tasks``
+        - ``max_tasks_per_session`` -> ``SessionLimits.max_tasks_per_session`` (active tasks)
+        - ``task_timeout_s`` -> ``SessionLimits.max_task_runtime_s``
+        - ``max_pending_steering`` -> ``SessionLimits.max_pending_user_messages``
+
+        ``max_tasks_per_group`` and ``group_timeout_s`` are read from the stored config when
+        tasks join a group or a group is sealed, again only when set explicitly.
+
+        Args:
+            config: The background-task configuration. Defaults to the current one.
+            **overrides: Field overrides applied on top of ``config``.
+
+        Returns:
+            The configuration now in effect.
+        """
         if config is None:
             config = self._background_task_config or BackgroundTasksConfig()
         if overrides:
             config = config.model_copy(update=overrides)
         self._background_task_config = config
+        self._apply_background_limits(config)
         return config
+
+    def _apply_background_limits(self, config: BackgroundTasksConfig) -> None:
+        explicit = config.model_fields_set
+        updates: dict[str, Any] = {}
+        for source, target in _BACKGROUND_LIMIT_FIELDS.items():
+            if source not in explicit:
+                continue
+            value = getattr(config, source)
+            if target == "max_task_runtime_s" and value is not None:
+                value = float(value)
+            if getattr(self._limits, target) != value:
+                updates[target] = value
+        if not updates:
+            return
+        previous_concurrency = self._limits.max_concurrent_tasks
+        # SessionManager shares one SessionLimits object across sessions: copy, never mutate.
+        self._limits = replace(self._limits, **updates)
+        if self._limits.max_concurrent_tasks != previous_concurrency:
+            # Running tasks release the semaphore they acquired; new tasks use the new one.
+            limit = self._limits.max_concurrent_tasks
+            self._concurrency_semaphore = asyncio.Semaphore(limit) if limit > 0 else None
+
+    def _explicit_background_setting(self, name: str) -> Any | None:
+        """Return a BackgroundTasksConfig value only if it was set explicitly."""
+        config = self._background_task_config
+        if config is None or name not in config.model_fields_set:
+            return None
+        return getattr(config, name)
 
     def get_background_task_config(self) -> BackgroundTasksConfig:
         """Return the active :class:`BackgroundTasksConfig`, creating a default one if unset.
@@ -945,7 +1012,10 @@ class StreamingSession:
         if task_type == TaskType.FOREGROUND:
             self._foreground_task_id = task_id
             self._foreground_busy.clear()  # Mark foreground as busy
-        steering = SteeringInbox(maxsize=self._limits.steering_queue_size)
+        steering = SteeringInbox(
+            maxsize=self._limits.steering_queue_size,
+            max_pending_user_messages=self._limits.max_pending_user_messages,
+        )
         self._steering_inboxes[task_id] = steering
         handle = asyncio.create_task(
             self._run_task(
@@ -1063,7 +1133,10 @@ class StreamingSession:
         if task_type == TaskType.FOREGROUND:
             self._foreground_task_id = task_id
             self._foreground_busy.clear()  # Mark foreground as busy
-        steering = SteeringInbox(maxsize=self._limits.steering_queue_size)
+        steering = SteeringInbox(
+            maxsize=self._limits.steering_queue_size,
+            max_pending_user_messages=self._limits.max_pending_user_messages,
+        )
         self._steering_inboxes[task_id] = steering
         try:
             return await self._execute_task(
@@ -1624,6 +1697,10 @@ class StreamingSession:
             if handle is not None and not handle.done():
                 handle.cancel()
         self._group_continuations.clear()
+        for handle in list(self._group_timeouts.values()):
+            if not handle.done():
+                handle.cancel()
+        self._group_timeouts.clear()
         for task_id, handle in list(self._task_handles.items()):
             if not handle.done():
                 handle.cancel()
@@ -1680,7 +1757,11 @@ class StreamingSession:
         return new_group
 
     async def add_task_to_group(self, group_id: str, task_id: str) -> bool:
-        """Add a task to a group. Returns False if group not found or not open."""
+        """Add a task to a group. Returns False if group not found or not open.
+
+        When ``max_tasks_per_group`` is set explicitly on the background-task config, the
+        group is sealed as soon as it reaches that many tasks.
+        """
         group = self._groups.get(group_id)
         if group is None:
             return False
@@ -1688,7 +1769,27 @@ class StreamingSession:
             return False
         if task_id not in group.task_ids:
             group.task_ids.append(task_id)
+        cap = self._explicit_background_setting("max_tasks_per_group")
+        if cap is not None and cap > 0 and len(group.task_ids) >= cap:
+            await self.seal_group(group_id)
         return True
+
+    async def ensure_group_capacity(self, group_id: str) -> None:
+        """Verify a group can accept another task before one is spawned into it.
+
+        Only enforced when ``max_tasks_per_group`` is set explicitly on the
+        background-task config.
+
+        Raises:
+            RuntimeError: With ``"group_task_limit_exceeded: <group_id>"`` if the group
+                already holds ``max_tasks_per_group`` tasks.
+        """
+        group = self._groups.get(group_id)
+        cap = self._explicit_background_setting("max_tasks_per_group")
+        if group is None or cap is None or cap <= 0:
+            return
+        if len(group.task_ids) >= cap:
+            raise RuntimeError(f"group_task_limit_exceeded: {group_id}")
 
     async def seal_group(self, group_id: str) -> bool:
         """Seal a group (no more tasks can join). Returns False if already sealed."""
@@ -1701,7 +1802,33 @@ class StreamingSession:
         group.sealed_at = _utc_now()
         # Check if already complete (all tasks finished before seal)
         await self._check_group_completion(group_id)
+        timeout_s = self._explicit_background_setting("group_timeout_s")
+        if timeout_s is not None and timeout_s > 0 and group.status == "sealed":
+            self._group_timeouts[group_id] = asyncio.create_task(self._expire_group(group_id, float(timeout_s)))
         return True
+
+    async def _expire_group(self, group_id: str, timeout_s: float) -> None:
+        """Cancel a sealed group's unfinished tasks once ``group_timeout_s`` elapses.
+
+        Each cancelled task is marked failed in the group, so the group then completes
+        as ``failed`` through the normal path (waiters wake, the report is queued).
+        """
+        await asyncio.sleep(timeout_s)
+        self._group_timeouts.pop(group_id, None)
+        group = self._groups.get(group_id)
+        if group is None or group.status in ("complete", "failed"):
+            return
+        _LOGGER.warning(
+            "task_group_timeout",
+            extra={"session_id": self.session_id, "group_id": group_id, "timeout_s": timeout_s},
+        )
+        for task_id in list(group.pending_task_ids):
+            await self.cancel_task(task_id, reason="group_timeout")
+
+    def _cancel_group_timeout(self, group_id: str) -> None:
+        handle = self._group_timeouts.pop(group_id, None)
+        if handle is not None and not handle.done() and handle is not asyncio.current_task():
+            handle.cancel()
 
     async def get_group(
         self,
@@ -1771,12 +1898,14 @@ class StreamingSession:
         # Already complete/failed - don't re-process
         if group.status in ("complete", "failed"):
             return True
-        # Mark as complete or failed
-        if group.failed_task_ids:
-            group.status = "failed"
-        else:
-            group.status = "complete"
+        await self._finalize_group(group, "failed" if group.failed_task_ids else "complete")
+        return True
+
+    async def _finalize_group(self, group: TaskGroup, status: Literal["complete", "failed"]) -> None:
+        """Move a group to a terminal state and signal it: telemetry, report, waiters."""
+        group.status = status
         group.completed_at = _utc_now()
+        self._cancel_group_timeout(group.group_id)
         # Emit telemetry event
         asyncio.create_task(
             self._telemetry.emit(
@@ -1801,10 +1930,9 @@ class StreamingSession:
             group.report_queued = True
             await self._enqueue_group_report(group)
         # Signal any waiters that the group is complete
-        event = self._group_completion_events.get(group_id)
+        event = self._group_completion_events.get(group.group_id)
         if event is not None:
             event.set()
-        return True
 
     async def wait_for_group_completion(
         self,
@@ -1968,17 +2096,21 @@ class StreamingSession:
         reason: str | None = None,
         propagate: bool = True,
     ) -> bool:
-        """Cancel a task group and optionally all its tasks."""
+        """Cancel a task group and optionally all its tasks.
+
+        The group ends as ``failed`` and is signalled like any finished group:
+        ``wait_for_group_completion`` waiters wake, telemetry is emitted and the group
+        report is queued (per ``report_strategy``).
+        """
         group = self._groups.get(group_id)
         if group is None:
             return False
         if group.status in ("complete", "failed"):
             return False
-        group.status = "failed"
-        group.completed_at = _utc_now()
         if propagate:
-            for task_id in group.pending_task_ids:
+            for task_id in list(group.pending_task_ids):
                 await self.cancel_task(task_id, reason=reason or "group_cancelled")
+        await self._finalize_group(group, "failed")
         return True
 
     async def apply_group_patches(

@@ -337,3 +337,27 @@ async def test_provider_list_forwards_filters(tmp_path: Path) -> None:
         "canvas.microsoft365.mail.send_mail",
     }
     assert response.total == 2
+
+
+def test_fts_results_are_ordered_by_relevance_not_name_length(tmp_path: Path) -> None:
+    """Issue 128 bug 4: bm25() is negative (more negative = better); scores must reflect that."""
+    store = LocalSkillStore(db_path=tmp_path / "relevance.db")
+    for skill in (
+        SkillDefinition(
+            name="ops.restart-failed-database-replica",
+            trigger="restart failed database replica after replication failure",
+            steps=["Restart the replica."],
+        ),
+        SkillDefinition(
+            name="ops.billing",
+            trigger="billing question about a failed payment",
+            steps=["Check the invoice."],
+        ),
+    ):
+        store.upsert_pack_skill(skill, pack_name="ops", scope_mode="project", update_existing=True)
+
+    results = _search(store, "restart the failed database replica, not a payment")
+
+    assert [item["name"] for item in results] == ["ops.restart-failed-database-replica", "ops.billing"]
+    assert results[0]["score"] == 1.0
+    assert results[1]["score"] == 0.0
