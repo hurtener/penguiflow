@@ -54,6 +54,11 @@ class LLMCallSpan:
     content_chars: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    # The provider's stop reason. "length" on a final answer is a truncation, which was otherwise
+    # invisible in a recorded run.
+    finish_reason: str | None = None
     cost_usd: float | None = None
     latency_ms: float | None = None
     error_type: str | None = None

@@ -278,6 +278,8 @@ class OpenAICompatibleProvider(Provider, ABC):
             input_tokens=response.usage.prompt_tokens,
             output_tokens=response.usage.completion_tokens,
             total_tokens=response.usage.total_tokens,
+            cache_read_input_tokens=int(getattr(response.usage, "cache_read_input_tokens", 0) or 0),
+            cache_creation_input_tokens=int(getattr(response.usage, "cache_creation_input_tokens", 0) or 0),
         )
 
         message = LLMMessage(role="assistant", parts=parts)

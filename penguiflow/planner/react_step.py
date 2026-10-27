@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import re
+
 import logging
 from collections.abc import Mapping, MutableMapping
 from typing import Any
@@ -32,6 +35,24 @@ def _prepend_system_message(messages: list[dict[str, str]], content: str) -> lis
     if not inserted:
         patched.append({"role": "system", "content": content})
     return patched
+
+
+_FINAL_RESPONSE_HEAD = re.compile(r'"next_node"\s*:\s*"final_response"')
+
+#: Appended to an answer recovered from a cut-off final response, so the reader knows it is partial
+#: and the text does not end mid-sentence.
+CUT_OFF_ANSWER_NOTE = "\n\n(This answer was cut off because it exceeded the response length limit.)"
+
+
+def _is_cut_off_final_response(raw: str) -> bool:
+    """A long final answer whose JSON never closed: the model hit its output-token limit.
+
+    Re-asking for "corrected JSON" makes the model write the whole answer again and hit the same
+    limit again. Measured on the campaign agent: three 8,192-token rewrites, 268 of a 281-second run,
+    ending in the same truncated text. So it is recognised up front and recovered once.
+    """
+
+    return len(raw) > 2_000 and bool(_FINAL_RESPONSE_HEAD.search(raw[:400])) and '"answer"' in raw
 
 
 async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
@@ -75,6 +96,7 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
         },
     )
 
+    cut_off = False
     for attempt in range(1, planner._repair_attempts + 1):
         planner._guardrail_stream_decision = None
         if last_error is not None:
@@ -325,8 +347,12 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
         try:
             action, parse_debug = normalize_action_with_debug(raw)
         except ValueError as exc:
-            # Unparseable JSON (e.g. weak model emitted non-JSON). Treat as repairable.
+            # Unparseable JSON (e.g. weak model emitted non-JSON). Treat as repairable -- unless it is a
+            # final answer that ran out of tokens, which a retry would only rewrite and cut off again.
             last_error = str(exc)
+            if _is_cut_off_final_response(raw):
+                cut_off = True
+                break
             continue
         except ValidationError as exc:
             salvaged = _salvage_action_payload(raw)
@@ -347,6 +373,9 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
                 _consume_steering_inputs()
                 return salvaged
             last_error = _serialize_validation_errors(exc)
+            if _is_cut_off_final_response(raw):
+                cut_off = True
+                break
             continue
 
         # Attach raw LLM response for debugging (excluded from serialization)
@@ -431,15 +460,26 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
             # Unescape the content
             extracted_answer = answer_match.group(1)
             extracted_answer = extracted_answer.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")
+            if extracted_answer and cut_off:
+                extracted_answer = extracted_answer.rstrip() + CUT_OFF_ANSWER_NOTE
             if extracted_answer:
                 logger.info(
                     "planner_fallback_answer_extracted",
                     extra={"length": len(extracted_answer)},
                 )
                 _consume_steering_inputs()
+                args: dict[str, Any] = {"answer": extracted_answer, "raw_answer": extracted_answer}
+                salvaged_structured = _extract_structured_object(last_raw)
+                if salvaged_structured is None and cut_off:
+                    salvaged_structured = _extract_cut_off_structured_object(last_raw)
+                if salvaged_structured is not None:
+                    # A caller rendering from the structured answer keeps "answer" short, so the regex above finds
+                    # only a placeholder; without this the malformed turn costs the reader the whole answer.
+                    args["structured_rejected"] = salvaged_structured
+                    logger.info("planner_fallback_structured_extracted", extra={"keys": sorted(salvaged_structured)})
                 return PlannerAction(
                     next_node="final_response",
-                    args={"answer": extracted_answer, "raw_answer": extracted_answer},
+                    args=args,
                     thought="Extracted answer from malformed JSON",
                 )
 
@@ -468,3 +508,82 @@ async def step(planner: Any, trajectory: Trajectory) -> PlannerAction:
         args={"answer": "LLM response parsing failed", "raw_answer": "LLM response parsing failed"},
         thought="Failed to parse LLM response",
     )
+
+
+def _extract_structured_object(raw: str) -> dict[str, Any] | None:
+    """The `structured` object of a malformed finish action, read by matching its braces, or None.
+
+    `json.loads` has already failed on the whole response; the structured object is usually still well formed, and it
+    holds the answer whenever the caller renders from it.
+    """
+
+    marker = re.search(r'"structured"\s*:\s*\{', raw)
+    if marker is None:
+        return None
+    start = marker.end() - 1
+    depth, in_string, escaped = 0, False, False
+    for index in range(start, len(raw)):
+        char = raw[index]
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and in_string:
+            escaped = True
+        elif char == '"':
+            in_string = not in_string
+        elif not in_string and char == "{":
+            depth += 1
+        elif not in_string and char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    found = json.loads(raw[start : index + 1])
+                except json.JSONDecodeError:
+                    return None
+                return found if isinstance(found, dict) else None
+    return None
+
+
+def _extract_cut_off_structured_object(raw: str) -> dict[str, Any] | None:
+    """The `structured` object of a cut-off finish action: its whole fields and the readable part of its note.
+
+    A caller rendering from the structured answer puts a long list in `note`, its one free-text field. When the output
+    limit cuts the response inside that note the braces never close, so `_extract_structured_object` finds nothing and
+    the reader would get only the short placeholder. The fields before the note are whole; the note is kept up to its
+    last complete line, with the cut-off notice. None when the cut came before the note began.
+    """
+
+    marker = re.search(r'"structured"\s*:\s*\{', raw)
+    if marker is None:
+        return None
+    body = raw[marker.end() :]
+    note_start = re.search(r'"note"\s*:\s*"', body)
+    if note_start is None:
+        return None
+    try:
+        before_note = json.loads("{" + body[: note_start.start()].rstrip().rstrip(",") + "}")
+    except json.JSONDecodeError:
+        return None
+    note, closed = _read_json_string(body[note_start.end() :])
+    if not closed and "\n" in note:
+        note = note[: note.rfind("\n")]
+    return {**before_note, "note": note.rstrip() + CUT_OFF_ANSWER_NOTE}
+
+
+def _read_json_string(text: str) -> tuple[str, bool]:
+    """A JSON string read from just after its opening quote, unescaped, and whether its closing quote was reached."""
+
+    end, closed, escaped = len(text), False, False
+    for index, char in enumerate(text):
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            end, closed = index, True
+            break
+    literal = re.sub(r"\\(?:u[0-9a-fA-F]{0,3})?$", "", text[:end])  # an escape the cut left half written
+    try:
+        return json.loads(f'"{literal}"', strict=False), closed
+    except json.JSONDecodeError:
+        return literal.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t"), closed

@@ -508,11 +508,16 @@ class NativeLLMAdapter:
                         self._provider.model,
                         input_tokens,
                         output_tokens,
+                        cache_read_input_tokens=response.usage.cache_read_input_tokens,
+                        cache_creation_input_tokens=response.usage.cache_creation_input_tokens,
                     )
 
                     if _trace_call is not None:
                         _trace_call.input_tokens = input_tokens
                         _trace_call.output_tokens = output_tokens
+                        _trace_call.cache_read_input_tokens = response.usage.cache_read_input_tokens
+                        _trace_call.cache_creation_input_tokens = response.usage.cache_creation_input_tokens
+                        _trace_call.finish_reason = response.finish_reason
 
                 # If we streamed, finalize callbacks and optionally backfill reasoning.
                 if streaming_active:
@@ -826,10 +831,15 @@ class NativeLLMAdapter:
                         self._provider.model,
                         input_tokens,
                         output_tokens,
+                        cache_read_input_tokens=response.usage.cache_read_input_tokens,
+                        cache_creation_input_tokens=response.usage.cache_creation_input_tokens,
                     )
                     if _trace_call is not None:
                         _trace_call.input_tokens = input_tokens
                         _trace_call.output_tokens = output_tokens
+                        _trace_call.cache_read_input_tokens = response.usage.cache_read_input_tokens
+                        _trace_call.cache_creation_input_tokens = response.usage.cache_creation_input_tokens
+                        _trace_call.finish_reason = response.finish_reason
 
                 if streaming_active:
                     if on_reasoning_chunk is not None and response.reasoning_content and not saw_reasoning_delta:

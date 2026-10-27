@@ -349,6 +349,7 @@ def _build_minimal_planner_schema() -> dict[str, Any]:
 
 def _build_planner_action_schema_conditional_finish(
     structured_schema: Mapping[str, Any] | None = None,
+    structured_optional: bool = False,
 ) -> dict[str, Any]:
     """PlannerAction schema with a finish-specific requirement.
 
@@ -375,9 +376,12 @@ def _build_planner_action_schema_conditional_finish(
     finish_args_properties: dict[str, Any] = {"answer": {"type": "string", "minLength": 1}}
     finish_args_required = ["answer"]
     if structured_schema is not None:
-        # final_response_model: the structured payload is required on finish.
+        # final_response_model: the structured payload is required on finish, unless the caller allows the model to
+        # answer in prose instead. Requiring a shape the answer does not fit makes the model abandon the action
+        # format altogether, which costs the answer rather than only the shape.
         finish_args_properties["structured"] = dict(structured_schema)
-        finish_args_required.append("structured")
+        if not structured_optional:
+            finish_args_required.append("structured")
 
     conditional: dict[str, Any] = {
         "if": {

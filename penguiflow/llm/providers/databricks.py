@@ -37,6 +37,24 @@ from ..errors import (
     is_context_length_error,
 )
 from ..profiles import ModelProfile, get_profile
+
+
+def _mark_first_system_message_cacheable(messages: list[dict[str, Any]]) -> None:
+    """Put a cache breakpoint at the end of the first system message, in place.
+
+    The endpoint caches everything up to and including a block that carries `cache_control`, so
+    marking the main system prompt caches it together with anything placed before it -- including
+    the JSON-schema guidance the streaming path later prepends. Content the caller already split into
+    parts is left alone: whoever built the parts owns where the breakpoints go.
+    """
+
+    for message in messages:
+        if message.get("role") != "system":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            message["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+        return
 from ..types import (
     CompletionResponse,
     ContentPart,
@@ -169,6 +187,12 @@ class DatabricksProvider(OpenAICompatibleProvider):
         self._model = self._endpoint  # For compatibility with base class
 
         self._profile = profile or get_profile(model)
+        # Prompt caching for hosted Claude: on by default, PENGUIFLOW_DATABRICKS_PROMPT_CACHE=0 turns it
+        # off. A planner re-sends the same ~50K-token system prompt on every call of a run, and a
+        # cached read is billed at a tenth of an input token.
+        self._prompt_cache = "claude" in self._endpoint.lower() and os.environ.get(
+            "PENGUIFLOW_DATABRICKS_PROMPT_CACHE", "1"
+        ).strip().lower() not in ("0", "false", "off", "no")
         self._timeout = timeout
 
         host = host or os.environ.get("DATABRICKS_HOST") or os.environ.get("DATABRICKS_API_BASE")
@@ -424,14 +448,19 @@ class DatabricksProvider(OpenAICompatibleProvider):
                     if cancel and cancel.is_cancelled():
                         raise LLMCancelledError(message="Request cancelled", provider="databricks", retryable=False)
 
+                    # Usage can arrive on a chunk of its own or on the final chunk that also carries
+                    # choices -- the Databricks Claude endpoint does the latter. Reading it only from
+                    # choice-less chunks meant every streamed call reported zero usage, cost fell back
+                    # to a character-count estimate, and the prompt-cache counts were dropped entirely.
+                    if getattr(chunk, "usage", None):
+                        usage = Usage(
+                            input_tokens=chunk.usage.prompt_tokens,
+                            output_tokens=chunk.usage.completion_tokens,
+                            total_tokens=chunk.usage.total_tokens,
+                            cache_read_input_tokens=int(getattr(chunk.usage, "cache_read_input_tokens", 0) or 0),
+                            cache_creation_input_tokens=int(getattr(chunk.usage, "cache_creation_input_tokens", 0) or 0),
+                        )
                     if not chunk.choices:
-                        # Usage chunk at the end (if supported)
-                        if hasattr(chunk, "usage") and chunk.usage:
-                            usage = Usage(
-                                input_tokens=chunk.usage.prompt_tokens,
-                                output_tokens=chunk.usage.completion_tokens,
-                                total_tokens=chunk.usage.total_tokens,
-                            )
                         continue
 
                     delta = chunk.choices[0].delta
@@ -544,6 +573,8 @@ class DatabricksProvider(OpenAICompatibleProvider):
             "model": self._model,
             "messages": self._to_openai_messages(request.messages),
         }
+        if getattr(self, "_prompt_cache", False):
+            _mark_first_system_message_cacheable(params["messages"])
 
         temp = resolve_temperature(
             self._profile,
