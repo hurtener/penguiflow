@@ -15,11 +15,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from collections import defaultdict
 from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
+
+from opentelemetry import trace
 
 from examples.planner_enterprise_agent_v2.config import AgentConfig
 from examples.planner_enterprise_agent_v2.nodes import (
@@ -38,6 +41,7 @@ from examples.planner_enterprise_agent_v2.nodes import (
 from examples.planner_enterprise_agent_v2.telemetry import AgentTelemetry
 from penguiflow.catalog import build_catalog
 from penguiflow.node import Node
+from penguiflow.planner.memory import MemoryBudget, ShortTermMemoryConfig
 from penguiflow.planner import (
     DSPyLLMClient,
     PlannerPause,
@@ -72,6 +76,31 @@ def _coerce_final_answer(payload: Any, planner_meta: Mapping[str, Any]) -> Final
     return FinalAnswer.model_validate(payload)
 
 
+def _executed_document_answer(planner_meta: Mapping[str, Any]) -> FinalAnswer | None:
+    """Recover executed document output when reflection returns an unexecuted retry."""
+
+    reflection = planner_meta.get("reflection")
+    if not isinstance(reflection, Mapping) or reflection.get("passed") is not False:
+        return None
+    steps = planner_meta.get("steps")
+    if not isinstance(steps, list):
+        return None
+    for step in reversed(steps):
+        if not isinstance(step, Mapping):
+            continue
+        action = step.get("action")
+        observation = step.get("observation")
+        if not isinstance(action, Mapping) or action.get("next_node") != "analyze_documents":
+            continue
+        if not isinstance(observation, Mapping):
+            continue
+        try:
+            return FinalAnswer.model_validate(observation)
+        except ValueError:
+            continue
+    return None
+
+
 class EnterpriseAgentOrchestrator:
     """Production-ready agent orchestrator with ReactPlanner.
 
@@ -101,6 +130,8 @@ class EnterpriseAgentOrchestrator:
         self.config = config
         self.telemetry = telemetry or AgentTelemetry(config)
         self._state_store = state_store
+        os.environ.setdefault("PENGUIFLOW_LLM_TRACING", "otel")
+        self._tracer = trace.get_tracer("penguiflow.enterprise_agent_v2")
 
         # Configure logging
         logging.basicConfig(
@@ -360,6 +391,14 @@ When context is provided, use it appropriately to enhance your responses.
             tool_policy=tool_policy,
             planning_hints=planning_hints,
             state_store=state_store,
+            short_term_memory=ShortTermMemoryConfig(
+                strategy="truncation" if self.config.short_term_memory_enabled else "none",
+                budget=MemoryBudget(
+                    full_zone_turns=self.config.short_term_memory_full_zone_turns,
+                    total_max_tokens=self.config.short_term_memory_total_max_tokens,
+                ),
+                include_trajectory_digest=False,
+            ),
             # Wire up telemetry callback
             event_callback=self.telemetry.record_planner_event,
         )
@@ -374,6 +413,7 @@ When context is provided, use it appropriately to enhance your responses.
                 "tool_policy_enabled": self.config.tool_policy_enabled,
                 "planning_hints_enabled": self.config.planning_hints_enabled,
                 "state_store_enabled": self.config.state_store_enabled,
+                "short_term_memory_enabled": self.config.short_term_memory_enabled,
             },
         )
 
@@ -386,6 +426,8 @@ When context is provided, use it appropriately to enhance your responses.
         tenant_id: str = "default",
         memories: list[dict[str, Any]] | None = None,
         session_id: str | None = None,
+        user_id: str = "anonymous",
+        llm_context: Mapping[str, Any] | None = None,
         tool_context: Mapping[str, Any] | None = None,
     ) -> FinalAnswer:
         """Execute agent planning for a user query.
@@ -415,6 +457,7 @@ When context is provided, use it appropriately to enhance your responses.
         incoming_tool_context = dict(tool_context or {})
         resolved_tenant_id = str(incoming_tool_context.get("tenant_id") or tenant_id)
         resolved_session_id = str(incoming_tool_context.get("session_id") or session_id or "default")
+        resolved_user_id = str(incoming_tool_context.get("user_id") or user_id)
         trace_id = str(incoming_tool_context.get("trace_id") or uuid4().hex)
         status_history: list[StatusUpdate] = STATUS_BUFFER[trace_id]
         status_history_for_llm: list[dict[str, Any]] = []
@@ -449,17 +492,17 @@ When context is provided, use it appropriately to enhance your responses.
         #   - Non-serializable objects: functions, loggers
         #   - Never sent to LLM
 
-        llm_context: dict[str, Any] = {
-            "status_history": status_history_for_llm,  # Can help LLM track progress
-        }
+        planner_llm_context = dict(llm_context or {})
+        planner_llm_context["status_history"] = status_history_for_llm
 
         # Add memories if provided - these ARE sent to the LLM!
         if memories:
-            llm_context["memories"] = memories
+            planner_llm_context["memories"] = memories
 
         # Node metadata - internal concerns only
         planner_tool_context: dict[str, Any] = {
             "tenant_id": resolved_tenant_id,
+            "user_id": resolved_user_id,
             "session_id": resolved_session_id,
             "trace_id": trace_id,
             "status_publisher": publish_status,
@@ -475,13 +518,24 @@ When context is provided, use it appropriately to enhance your responses.
         )
 
         finish: FinalAnswer | None = None
+        otel_trace_id: str | None = None
 
         try:
-            planner_result = await self._planner.run(
-                query=query,
-                llm_context=llm_context,
-                tool_context=planner_tool_context,
-            )
+            with self._tracer.start_as_current_span(
+                "enterprise_agent_v2",
+                attributes={
+                    "gen_ai.operation.name": "invoke_agent",
+                    "penguiflow.agent.name": self.config.agent_name,
+                },
+            ) as otel_span:
+                planner_result = await self._planner.run(
+                    query=query,
+                    llm_context=planner_llm_context,
+                    tool_context=planner_tool_context,
+                )
+                raw_otel_trace_id = otel_span.get_span_context().trace_id
+                if raw_otel_trace_id:
+                    otel_trace_id = f"{raw_otel_trace_id:032x}"
 
             if isinstance(planner_result, PlannerPause):
                 publish_status(
@@ -502,6 +556,9 @@ When context is provided, use it appropriately to enhance your responses.
             elif planner_result.reason == "answer_complete":
                 planner_meta = dict(planner_result.metadata)
                 final_answer = _coerce_final_answer(planner_result.payload, planner_meta)
+                fallback_answer = _executed_document_answer(planner_meta)
+                if fallback_answer is not None:
+                    final_answer = fallback_answer
                 metadata = dict(final_answer.metadata)
                 metadata.setdefault("trace_id", trace_id)
                 if planner_meta:
@@ -569,6 +626,8 @@ When context is provided, use it appropriately to enhance your responses.
             assert finish is not None
             metadata = dict(finish.metadata)
             metadata.setdefault("trace_id", trace_id)
+            if otel_trace_id is not None:
+                metadata["otel_trace_id"] = otel_trace_id
             finish = finish.model_copy(update={"metadata": metadata})
             return finish
 

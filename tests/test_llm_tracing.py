@@ -17,6 +17,7 @@ from penguiflow.llm.tracing import (
     LLMCallSpan,
     LoggingLLMTraceSink,
     MlflowLLMTraceSink,
+    OpenTelemetryLLMTraceSink,
     resolve_trace_sink_from_env,
 )
 from penguiflow.llm.types import CompletionResponse, LLMMessage, TextPart, Usage
@@ -202,6 +203,63 @@ class TestLoggingSink:
         records = [r for r in caplog.records if r.message == "llm_call"]
         assert len(records) == 1
         assert records[0].llm_error_type == "ValueError"  # type: ignore[attr-defined]
+
+
+class _FakeOtelSpan:
+    def __init__(self, name: str, attributes: dict[str, Any]) -> None:
+        self.name = name
+        self.attributes = attributes
+
+    def set_attributes(self, attributes: dict[str, Any]) -> None:
+        self.attributes.update(attributes)
+
+    def set_status(self, _status: object) -> None:
+        pass
+
+
+class _FakeOtelTracer:
+    def __init__(self, spans: list[_FakeOtelSpan]) -> None:
+        self._spans = spans
+
+    @contextmanager
+    def start_as_current_span(self, name: str, *, kind: object, attributes: dict[str, Any]) -> Any:
+        span = _FakeOtelSpan(name, attributes)
+        self._spans.append(span)
+        yield span
+
+
+class TestOpenTelemetrySink:
+    @pytest.mark.asyncio
+    async def test_emits_metadata_only_genai_span(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        spans: list[_FakeOtelSpan] = []
+        monkeypatch.setattr(
+            "penguiflow.llm.tracing.trace.get_tracer",
+            lambda _name: _FakeOtelTracer(spans),
+        )
+
+        sink = OpenTelemetryLLMTraceSink()
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_create.return_value = _mock_provider()
+            adapter = NativeLLMAdapter("test-model", trace_sink=sink)
+            content, _ = await adapter.complete(messages=[{"role": "user", "content": "secret prompt"}])
+
+        assert content == '{"result": "ok"}'
+        assert len(spans) == 1
+        span = spans[0]
+        assert span.name == "gen_ai.chat"
+        assert span.attributes == {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.provider.name": "test",
+            "gen_ai.request.model": "test-model",
+            "penguiflow.llm.stream": False,
+            "penguiflow.llm.response_format": "text",
+            "gen_ai.usage.input_tokens": 10,
+            "gen_ai.usage.output_tokens": 5,
+            "penguiflow.llm.cost_usd": 0.0,
+            "penguiflow.llm.attempts": 1,
+            "penguiflow.llm.content_chars": len(content),
+            "penguiflow.llm.latency_ms": pytest.approx(0, abs=1000),
+        }
 
 
 class _FakeMlflowSpan:

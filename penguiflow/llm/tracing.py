@@ -33,6 +33,9 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind, Status, StatusCode
+
 logger = logging.getLogger("penguiflow.llm.tracing")
 
 TRACING_ENV_VAR = "PENGUIFLOW_LLM_TRACING"
@@ -127,6 +130,49 @@ class LoggingLLMTraceSink:
             )
 
 
+class OpenTelemetryLLMTraceSink:
+    """Sink emitting metadata-only OpenTelemetry GenAI spans.
+
+    The application owns OTel SDK, exporter, sampling, and trace-content policy.
+    This sink never records prompts, completions, tool outputs, or reasoning.
+    """
+
+    def __init__(self, *, span_name: str = "gen_ai.chat") -> None:
+        self._tracer = trace.get_tracer("penguiflow.llm")
+        self._span_name = span_name
+
+    @contextmanager
+    def span(self, call: LLMCallSpan) -> Iterator[Any]:
+        attributes: dict[str, Any] = {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.provider.name": call.provider,
+            "gen_ai.request.model": call.model,
+            "penguiflow.llm.stream": call.stream,
+        }
+        if call.response_format_kind:
+            attributes["penguiflow.llm.response_format"] = call.response_format_kind
+        with self._tracer.start_as_current_span(
+            self._span_name,
+            kind=SpanKind.CLIENT,
+            attributes=attributes,
+        ) as span:
+            try:
+                with _measured(call):
+                    yield span
+            except BaseException as exc:
+                span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+                raise
+            finally:
+                outcome = call.outcome_attributes()
+                outcome.pop("error_message", None)
+                mapped = {
+                    "gen_ai.usage.input_tokens": outcome.pop("input_tokens", None),
+                    "gen_ai.usage.output_tokens": outcome.pop("output_tokens", None),
+                    **{f"penguiflow.llm.{key}": value for key, value in outcome.items()},
+                }
+                span.set_attributes({key: value for key, value in mapped.items() if value is not None})
+
+
 class MlflowLLMTraceSink:
     """Sink emitting MLflow Tracing spans (``span_type="LLM"``).
 
@@ -198,20 +244,22 @@ class MlflowLLMTraceSink:
 def resolve_trace_sink_from_env() -> LLMTraceSink | None:
     """Build a trace sink from ``PENGUIFLOW_LLM_TRACING`` (transparent opt-in).
 
-    Supported values: ``mlflow`` (MLflow Tracing spans) and ``log`` /
-    ``logging`` (structured log lines). Unset or falsy values disable
+    Supported values: ``otel`` (OpenTelemetry spans), ``mlflow`` (MLflow
+    Tracing spans), and ``log`` / ``logging`` (structured log lines). Unset or falsy values disable
     tracing. Unknown values are ignored with a warning so a typo can never
     break a production run.
     """
     raw = os.environ.get(TRACING_ENV_VAR, "").strip().lower()
     if not raw or raw in ("0", "false", "off", "none", "disabled"):
         return None
+    if raw in ("otel", "opentelemetry"):
+        return OpenTelemetryLLMTraceSink()
     if raw == "mlflow":
         return MlflowLLMTraceSink()
     if raw in ("log", "logging"):
         return LoggingLLMTraceSink()
     logger.warning(
-        "Ignoring unknown %s value %r (expected 'mlflow' or 'log')",
+        "Ignoring unknown %s value %r (expected 'otel', 'mlflow', or 'log')",
         TRACING_ENV_VAR,
         raw,
     )
@@ -223,6 +271,7 @@ __all__ = [
     "LLMCallSpan",
     "LLMTraceSink",
     "LoggingLLMTraceSink",
+    "OpenTelemetryLLMTraceSink",
     "MlflowLLMTraceSink",
     "resolve_trace_sink_from_env",
 ]

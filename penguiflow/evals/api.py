@@ -638,6 +638,8 @@ class _EvalOrchestratorWrapper:
             kwargs["session_id"] = session_id
         if "tool_context" in signature.parameters:
             kwargs["tool_context"] = tool_ctx
+        if "llm_context" in signature.parameters:
+            kwargs["llm_context"] = dict(llm_context or {})
         raw_memories = (llm_context or {}).get("memories") if isinstance(llm_context, Mapping) else None
         if "memories" in signature.parameters and isinstance(raw_memories, list):
             kwargs["memories"] = raw_memories

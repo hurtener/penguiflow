@@ -58,6 +58,11 @@ class AgentConfig:
     state_store_enabled: bool
     state_store_backend: Literal["memory", "redis", "sqlite"] | None
 
+    # Short-Term Memory
+    short_term_memory_enabled: bool
+    short_term_memory_full_zone_turns: int
+    short_term_memory_total_max_tokens: int
+
     # Observability
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"]
     enable_telemetry: bool
@@ -124,6 +129,10 @@ class AgentConfig:
             # State Store (v2)
             state_store_enabled=os.getenv("STATE_STORE_ENABLED", "false").lower() == "true",
             state_store_backend=os.getenv("STATE_STORE_BACKEND", "memory"),  # type: ignore
+            # Short-term memory
+            short_term_memory_enabled=os.getenv("SHORT_TERM_MEMORY_ENABLED", "true").lower() == "true",
+            short_term_memory_full_zone_turns=int(os.getenv("SHORT_TERM_MEMORY_FULL_ZONE_TURNS", "5")),
+            short_term_memory_total_max_tokens=int(os.getenv("SHORT_TERM_MEMORY_TOTAL_MAX_TOKENS", "8000")),
             # Observability
             log_level=os.getenv("LOG_LEVEL", "INFO"),  # type: ignore
             enable_telemetry=os.getenv("ENABLE_TELEMETRY", "true").lower() == "true",
