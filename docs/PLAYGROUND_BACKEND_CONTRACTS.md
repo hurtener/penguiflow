@@ -7,7 +7,7 @@ Scope:
 - The wrapper layer in `penguiflow/cli/playground_wrapper.py`
 - The SSE framing in `penguiflow/cli/playground_sse.py`
 
-For build/release mechanics of the UI bundle, see `docs/PLAYGROUND_DEV.md`.
+Build UI assets from `penguiflow/cli/playground_ui` with `npm install && npm run build`.
 
 ---
 
@@ -148,6 +148,19 @@ Serves the compiled UI (if `penguiflow/cli/playground_ui/dist/` exists).
 ### `GET /health`
 
 Returns `{ "status": "ok" }`.
+
+### Eval endpoints
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /eval/datasets/browse` | List datasets beneath resolved eval root and identify one default. |
+| `GET /eval/metrics/browse` | List metric declarations from `evaluate.spec.json`. |
+| `POST /eval/datasets/export` | Export tagged traces to a dataset bundle. |
+| `POST /eval/datasets/load` | Preview a `dataset.jsonl` bundle. |
+| `POST /eval/run` | Run a dataset against a selected metric. |
+| `POST /eval/cases/compare` | Compare reference and prediction trajectories for one eval case. |
+
+Request and response models are declared alongside these handlers in `penguiflow/cli/playground.py`. Dataset, export, and run paths must resolve beneath project root.
 
 ### `GET /ui/spec`
 

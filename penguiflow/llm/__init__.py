@@ -150,6 +150,7 @@ from .tracing import (
     LLMTraceSink,
     LoggingLLMTraceSink,
     MlflowLLMTraceSink,
+    OpenTelemetryLLMTraceSink,
     resolve_trace_sink_from_env,
 )
 
@@ -279,5 +280,6 @@ __all__ = [
     "LLMTraceSink",
     "LoggingLLMTraceSink",
     "MlflowLLMTraceSink",
+    "OpenTelemetryLLMTraceSink",
     "resolve_trace_sink_from_env",
 ]

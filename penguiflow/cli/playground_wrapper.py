@@ -9,7 +9,7 @@ import secrets
 _LOGGER = logging.getLogger(__name__)
 from collections.abc import Callable, Mapping  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
-from typing import Any, Protocol  # noqa: E402
+from typing import Any, Protocol, cast  # noqa: E402
 
 from penguiflow.planner import (  # noqa: E402
     PlannerEvent,
@@ -64,6 +64,14 @@ class AgentWrapper(Protocol):
     ) -> ChatResult: ...
 
     async def shutdown(self) -> None: ...
+
+    async def wait_for_trace_persistence(
+        self,
+        trace_id: str,
+        session_id: str,
+        *,
+        timeout_s: float = 1.0,
+    ) -> None: ...
 
 
 class _EventRecorder:
@@ -151,6 +159,18 @@ def _normalise_answer(payload: Any) -> str | None:
     return str(payload)
 
 
+def _filter_supported_kwargs(
+    kwargs: Mapping[str, Any],
+    signature: inspect.Signature | None,
+) -> dict[str, Any]:
+    if signature is None:
+        return dict(kwargs)
+    params = signature.parameters
+    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()):
+        return dict(kwargs)
+    return {key: value for key, value in kwargs.items() if key in params}
+
+
 class PlannerAgentWrapper:
     """Adapter for bare planners returned by build_planner()."""
 
@@ -236,7 +256,8 @@ class PlannerAgentWrapper:
         metadata = _normalise_metadata(getattr(result, "metadata", None))
         _LOGGER.info(
             "chat complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s",
-            trace_id, session_id,
+            trace_id,
+            session_id,
             list(metadata.keys()) if metadata else None,
             bool(metadata and isinstance(metadata.get("steps"), list)),
         )
@@ -255,6 +276,15 @@ class PlannerAgentWrapper:
 
     async def shutdown(self) -> None:
         """Planner wrappers do not own additional resources."""
+
+    async def wait_for_trace_persistence(
+        self,
+        trace_id: str,
+        session_id: str,
+        *,
+        timeout_s: float = 1.0,
+    ) -> None:
+        await _await_trace_persistence(self._planner, trace_id, session_id, timeout_s=timeout_s)
 
     async def resume(
         self,
@@ -323,7 +353,8 @@ class PlannerAgentWrapper:
         metadata = _normalise_metadata(getattr(result, "metadata", None))
         _LOGGER.info(
             "resume complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s",
-            trace_id, session_id,
+            trace_id,
+            session_id,
             list(metadata.keys()) if metadata else None,
             bool(metadata and isinstance(metadata.get("steps"), list)),
         )
@@ -386,11 +417,13 @@ class OrchestratorAgentWrapper:
             if "steering" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
                 kwargs["steering"] = steering
 
+        kwargs = _filter_supported_kwargs(kwargs, sig)
         try:
             return await execute(**kwargs)
         except TypeError:
             kwargs.pop("tool_context", None)
             kwargs.pop("steering", None)
+            kwargs = _filter_supported_kwargs(kwargs, sig)
             return await execute(**kwargs)
 
     async def _call_resume(
@@ -422,11 +455,13 @@ class OrchestratorAgentWrapper:
             if "steering" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
                 kwargs["steering"] = steering
 
+        kwargs = _filter_supported_kwargs(kwargs, sig)
         try:
             return await resume_fn(resume_token, **kwargs)
         except TypeError:
             kwargs.pop("tool_context", None)
             kwargs.pop("steering", None)
+            kwargs = _filter_supported_kwargs(kwargs, sig)
             return await resume_fn(resume_token, **kwargs)
 
     async def initialize(self) -> None:
@@ -440,7 +475,9 @@ class OrchestratorAgentWrapper:
         # Check if orchestrator has _ensure_initialized (lazy init pattern)
         ensure_init = getattr(self._orchestrator, "_ensure_initialized", None)
         if ensure_init is not None and callable(ensure_init):
-            await ensure_init()
+            init_result = ensure_init()
+            if inspect.isawaitable(init_result):
+                await cast("Any", init_result)
 
         self._initialized = True
 
@@ -492,7 +529,8 @@ class OrchestratorAgentWrapper:
         metadata = _normalise_metadata(_get_attr(response, "metadata"))
         _LOGGER.debug(
             "orchestrator chat complete: trace_id=%s, session_id=%s, metadata_keys=%s, has_steps=%s",
-            trace_id, session_id,
+            trace_id,
+            session_id,
             list(metadata.keys()) if metadata else None,
             bool(metadata and isinstance(metadata.get("steps"), list)),
         )
@@ -537,6 +575,18 @@ class OrchestratorAgentWrapper:
         if stop_fn is not None:
             await stop_fn()
 
+    async def wait_for_trace_persistence(
+        self,
+        trace_id: str,
+        session_id: str,
+        *,
+        timeout_s: float = 1.0,
+    ) -> None:
+        planner = getattr(self._orchestrator, "_planner", None)
+        if planner is None:
+            return
+        await _await_trace_persistence(planner, trace_id, session_id, timeout_s=timeout_s)
+
     async def resume(
         self,
         resume_token: str,
@@ -552,8 +602,7 @@ class OrchestratorAgentWrapper:
         resume_fn = getattr(self._orchestrator, "resume", None)
         if resume_fn is None or not callable(resume_fn):
             raise RuntimeError(
-                "Resume is not supported for this orchestrator. "
-                "Ensure your agent was created with --with-hitl flag."
+                "Resume is not supported for this orchestrator. Ensure your agent was created with --with-hitl flag."
             )
 
         trace_id = trace_id_hint or secrets.token_hex(8)
@@ -649,6 +698,21 @@ def _planner_trace_id(planner: Any) -> str | None:
         value = tool_ctx.get("trace_id")
         return str(value) if value is not None else None
     return None
+
+
+async def _await_trace_persistence(
+    planner: Any,
+    trace_id: str,
+    session_id: str,
+    *,
+    timeout_s: float,
+) -> None:
+    waiter = getattr(planner, "wait_for_trace_persistence", None)
+    if not callable(waiter):
+        return
+    wait_result = waiter(trace_id, session_id=session_id, timeout_s=timeout_s)
+    if inspect.isawaitable(wait_result):
+        await cast("Any", wait_result)
 
 
 __all__ = [

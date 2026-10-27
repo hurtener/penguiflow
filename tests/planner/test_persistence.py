@@ -277,3 +277,86 @@ async def test_events_persisted_on_run_loop_error(monkeypatch: pytest.MonkeyPatc
     events = await store.list_planner_events("t1")
     assert len(events) >= 1
     assert events[0].event_type == "step_start"
+
+
+async def test_run_persists_final_answer() -> None:
+    """The answer the run terminated with must reach the persisted trajectory.
+
+    The terminal action is never appended to ``steps``, so without this the
+    saved trace records the route taken but not the answer given.
+    """
+    store = InMemoryStateStore()
+    planner = _make_echo_planner(store)
+
+    result = await planner.run("hi", tool_context={"session_id": "s1", "trace_id": "t1"})
+    assert isinstance(result, PlannerFinish)
+    assert result.payload["raw_answer"] == "ok"
+    await _drain_persistence_tasks()
+
+    traj = await store.get_trajectory("t1", "s1")
+    assert traj is not None
+    assert traj.final_answer == "ok"
+
+
+class NeverFinishesClient:
+    """Scripted client that keeps calling a tool and never emits a final answer."""
+
+    async def complete(self, *, messages: Any, **_: Any) -> str:
+        return '{"thought":"loop","next_node":"echo","args":{"text":"x"}}'
+
+
+async def test_failed_run_does_not_record_tool_output_as_final_answer() -> None:
+    """A non-answer termination must not promote tool data to the final answer.
+
+    ``echo`` returns ``{"answer": ...}`` -- a perfectly ordinary tool shape. The
+    budget/deadline and iteration-limit paths pass the last observation straight
+    through as the finish payload, so extracting an answer from it would export
+    an internal value as though the agent had answered the user.
+    """
+    store = InMemoryStateStore()
+    registry = ModelRegistry()
+    registry.register("echo", EchoArgs, EchoOut)
+    catalog = build_catalog([Node(echo, name="echo")], registry)
+    planner = ReactPlanner(
+        llm_client=NeverFinishesClient(),
+        catalog=catalog,
+        max_iters=2,
+        state_store=store,
+    )
+
+    result = await planner.run("hi", tool_context={"session_id": "s1", "trace_id": "t1"})
+    assert isinstance(result, PlannerFinish)
+    assert result.reason != "answer_complete"
+    await _drain_persistence_tasks()
+
+    traj = await store.get_trajectory("t1", "s1")
+    assert traj is not None
+    assert traj.final_answer is None
+
+
+async def test_run_persists_finish_reason() -> None:
+    """The reason a run ended must survive into the persisted trajectory.
+
+    Without it the exporter cannot tell a completed answer from a run that hit
+    its budget or iteration limit, so failed runs are indistinguishable from
+    successes offline.
+    """
+    store = InMemoryStateStore()
+    registry = ModelRegistry()
+    registry.register("echo", EchoArgs, EchoOut)
+    catalog = build_catalog([Node(echo, name="echo")], registry)
+    planner = ReactPlanner(
+        llm_client=NeverFinishesClient(),
+        catalog=catalog,
+        max_iters=2,
+        state_store=store,
+    )
+
+    result = await planner.run("hi", tool_context={"session_id": "s1", "trace_id": "t1"})
+    assert isinstance(result, PlannerFinish)
+    assert result.reason != "answer_complete"
+    await _drain_persistence_tasks()
+
+    traj = await store.get_trajectory("t1", "s1")
+    assert traj is not None
+    assert traj.finish_reason == result.reason

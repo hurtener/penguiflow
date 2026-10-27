@@ -74,6 +74,22 @@ class SessionContext:
 
 @dataclass(slots=True)
 class SessionLimits:
+    """Resource and safety limits enforced by a :class:`StreamingSession`.
+
+    Attributes:
+        max_tasks_per_session: Maximum number of non-terminal tasks a session may hold at once.
+        max_background_tasks: Maximum number of non-terminal background tasks per session.
+        max_concurrent_tasks: Maximum number of tasks executing concurrently (via a semaphore);
+            ``0`` disables the concurrency cap.
+        max_task_runtime_s: Wall-clock timeout applied to each task pipeline, or ``None`` for no limit.
+        update_queue_size: Maximum size of the update broker's per-subscriber queues.
+        steering_queue_size: Maximum size of each task's steering-event inbox.
+        max_pending_patches: Maximum number of context patches awaiting human approval at once.
+        max_steering_payload_bytes: Maximum allowed size of a steering event payload, in bytes.
+        max_steering_events_per_task: Maximum number of recently-seen event IDs tracked per task
+            for duplicate detection.
+    """
+
     max_tasks_per_session: int = 8
     max_background_tasks: int = 4
     max_concurrent_tasks: int = 3
@@ -87,6 +103,16 @@ class SessionLimits:
 
 @dataclass(slots=True)
 class PendingContextPatch:
+    """A context patch awaiting human approval (``MergeStrategy.HUMAN_GATED``).
+
+    Attributes:
+        patch_id: Unique identifier used to approve or reject this patch via ``steer``/``apply_pending_patch``.
+        task_id: The task whose completion produced this patch.
+        patch: The underlying :class:`ContextPatch` payload to merge if approved.
+        strategy: The merge strategy the patch was submitted with.
+        created_at: Unix timestamp (seconds) when the patch was queued.
+    """
+
     patch_id: str
     task_id: str
     patch: ContextPatch
@@ -96,6 +122,18 @@ class PendingContextPatch:
 
 @dataclass(slots=True)
 class TaskResult:
+    """Outcome of a task pipeline, returned by :class:`TaskPipeline` callables.
+
+    Attributes:
+        payload: The task's primary output value, if any.
+        context_patch: Optional patch to merge into the session context (see ``apply_context_patch``).
+        digest: Human-readable summary lines describing the result.
+        artifacts: Structured artifacts produced by the task (e.g. files, generated content).
+        sources: Structured source/citation references backing the result.
+        notification: Optional notification to surface to the user about this task's completion.
+        metadata: Free-form metadata associated with the result.
+    """
+
     payload: Any | None = None
     context_patch: ContextPatch | None = None
     digest: list[str] = field(default_factory=list)
@@ -196,6 +234,20 @@ class TaskRuntime:
         step_index: int | None = None,
         total_steps: int | None = None,
     ) -> StateUpdate:
+        """Build a :class:`StateUpdate` and publish it on the owning session.
+
+        If ``update_type`` is ``PROGRESS`` and ``content`` is a dict, the task's
+        stored progress snapshot is also updated in the registry.
+
+        Args:
+            update_type: The kind of update being emitted (progress, result, etc.).
+            content: The update payload; interpretation depends on ``update_type``.
+            step_index: Optional 0-based index of the current step, for progress reporting.
+            total_steps: Optional total number of steps, for progress reporting.
+
+        Returns:
+            The :class:`StateUpdate` that was published.
+        """
         if update_type == UpdateType.PROGRESS and isinstance(content, dict):
             self.state.progress = dict(content)
             asyncio.create_task(self.session.registry.update_task(self.state.task_id, progress=self.state.progress))
@@ -212,6 +264,11 @@ class TaskRuntime:
         return update
 
     def notify(self, payload: NotificationPayload) -> None:
+        """Emit a notification update for this task.
+
+        Args:
+            payload: The notification content (severity, title, body, actions) to publish.
+        """
         self.emit_update(UpdateType.NOTIFICATION, payload.model_dump(mode="json"))
 
 
@@ -272,7 +329,15 @@ def _background_results_payload(results: dict[str, BackgroundTaskResult]) -> lis
 
 
 class StreamingSession:
-    """Manages bidirectional communication and task lifecycle."""
+    """Manages bidirectional communication and task lifecycle.
+
+    A ``StreamingSession`` owns the tasks, steering inboxes, update broker, task groups,
+    and shared conversation context for a single session_id. It is the primary runtime
+    surface used by transports (``connect``), planner-facing meta-tools (spawning and
+    steering tasks), and background-task orchestration (context patches, proactive
+    reporting, and task groups). Instances are typically created and cached via
+    :class:`SessionManager` rather than constructed directly.
+    """
 
     def __init__(
         self,
@@ -329,28 +394,44 @@ class StreamingSession:
 
     @property
     def registry(self) -> TaskRegistry:
+        """Return the :class:`TaskRegistry` tracking task state for this session."""
         return self._registry
 
     @property
     def limits(self) -> SessionLimits:
+        """Return the :class:`SessionLimits` configuration governing this session."""
         return self._limits
 
     @property
     def pending_patches(self) -> dict[str, PendingContextPatch]:
+        """Return a snapshot copy of patches awaiting human approval, keyed by patch_id."""
         return dict(self._pending_patches)
 
     @property
     def context_version(self) -> int:
+        """Return the monotonically increasing version counter for the session context."""
         return self._context.version
 
     @property
     def context_hash(self) -> str | None:
+        """Return the SHA-256 hash of the current ``llm_context``, or ``None`` if unset."""
         return self._context.context_hash
 
     def get_context(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Return copies of the session's current context dicts.
+
+        Returns:
+            A ``(llm_context, tool_context)`` tuple of shallow copies, safe for callers to
+            mutate without affecting session state.
+        """
         return dict(self._context.llm_context), dict(self._context.tool_context)
 
     def get_background_results(self) -> dict[str, BackgroundTaskResult]:
+        """Return a copy of completed background task results, keyed by task_id.
+
+        Returns:
+            A shallow copy of the session's ``background_results`` mapping.
+        """
         return dict(self._context.background_results)
 
     def configure_background_tasks(
@@ -367,17 +448,40 @@ class StreamingSession:
         return config
 
     def get_background_task_config(self) -> BackgroundTasksConfig:
+        """Return the active :class:`BackgroundTasksConfig`, creating a default one if unset.
+
+        Returns:
+            The current background-task configuration for this session.
+        """
         if self._background_task_config is None:
             self._background_task_config = BackgroundTasksConfig()
         return self._background_task_config
 
     def set_foreground_busy(self, *, busy: bool) -> None:
+        """Mark whether the foreground turn is currently busy or idle.
+
+        This gates the proactive reporter: reports are only generated while the
+        foreground is idle.
+
+        Args:
+            busy: ``True`` to mark the foreground as busy, ``False`` to mark it idle.
+        """
         if busy:
             self._foreground_busy.clear()
         else:
             self._foreground_busy.set()
 
     async def on_foreground_yield(self, *, turn_id: str | None = None) -> int:
+        """Handle the foreground yielding control, auto-sealing open task groups if configured.
+
+        Args:
+            turn_id: The turn whose open groups should be sealed. Defaults to the session's
+                current turn (see ``set_turn_id``) when omitted.
+
+        Returns:
+            The number of task groups sealed. Always ``0`` when
+            ``auto_seal_groups_on_foreground_yield`` is disabled in the background-task config.
+        """
         config = self.get_background_task_config()
         if not config.auto_seal_groups_on_foreground_yield:
             return 0
@@ -389,6 +493,20 @@ class StreamingSession:
         task_ids: Iterable[str] | None = None,
         group_id: str | None = None,
     ) -> int:
+        """Suppress future proactive reports for the given tasks and/or group.
+
+        Once suppressed, matching task/group completions will not enqueue proactive
+        report requests (e.g. because their results were already consumed by a
+        retained turn).
+
+        Args:
+            task_ids: Task IDs to suppress individually.
+            group_id: A group ID to suppress as a whole.
+
+        Returns:
+            The number of newly-added suppressions (already-suppressed entries are not
+            counted again).
+        """
         added = 0
         if group_id:
             if group_id not in self._proactive_suppressed_group_ids:
@@ -430,6 +548,20 @@ class StreamingSession:
         max_hops: int,
         cooldown_s: float,
     ) -> None:
+        """Schedule a background waiter that keeps polling a group after a retain-turn timeout.
+
+        Repeatedly waits for the group's completion (up to ``max_hops`` times, sleeping
+        ``cooldown_s`` between attempts) so a group that timed out while retaining the
+        turn is still tracked to completion. A no-op if a continuation for this group
+        is already scheduled and running.
+
+        Args:
+            group_id: The task group to keep waiting on.
+            timeout_s: Per-attempt wait timeout in seconds, or ``None`` to wait indefinitely
+                (in which case only one hop is meaningful).
+            max_hops: Maximum number of wait attempts; scheduling is skipped entirely if ``<= 0``.
+            cooldown_s: Seconds to sleep between attempts when the previous attempt timed out.
+        """
         if max_hops <= 0:
             return
         existing = self._group_continuations.get(group_id)
@@ -454,9 +586,23 @@ class StreamingSession:
         )
 
     async def connect(self, transport: Transport) -> SessionConnection:
+        """Bind a :class:`Transport` to this session.
+
+        Args:
+            transport: The transport implementation used to send/receive messages
+                for this session.
+
+        Returns:
+            A new :class:`SessionConnection` wrapping this session and the transport.
+        """
         return SessionConnection(self, transport)
 
     async def hydrate(self) -> None:
+        """Load persisted tasks from the state store into the in-memory registry.
+
+        Idempotent: subsequent calls after the first successful hydration are no-ops.
+        Restores the most recent foreground task ID from the loaded tasks, if any.
+        """
         if self._hydrated:
             return
         tasks = await self._state_store.list_tasks(self.session_id)
@@ -477,6 +623,17 @@ class StreamingSession:
         llm_context: dict[str, Any] | None = None,
         tool_context: dict[str, Any] | None = None,
     ) -> None:
+        """Replace the session's ``llm_context`` and/or ``tool_context``.
+
+        Any legacy inline ``background_results``/``background_result`` entries found in
+        ``llm_context`` are extracted into the session's dedicated background-results
+        store. Bumps ``context_version`` and recomputes ``context_hash`` whenever
+        ``llm_context`` is provided.
+
+        Args:
+            llm_context: Replacement dict for the LLM-facing context, or ``None`` to leave unchanged.
+            tool_context: Replacement dict for the tool-facing context, or ``None`` to leave unchanged.
+        """
         if llm_context is not None:
             cleaned, extracted = extract_background_results(llm_context)
             self._context.llm_context = dict(cleaned or {})
@@ -676,6 +833,16 @@ class StreamingSession:
                 raise RuntimeError("background_task_limit_exceeded")
 
     async def ensure_capacity(self, task_type: TaskType) -> None:
+        """Verify the session has room for another task of the given type.
+
+        Args:
+            task_type: The task type (``FOREGROUND`` or ``BACKGROUND``) to check capacity for.
+
+        Raises:
+            RuntimeError: With ``"task_limit_exceeded"`` if the session's active-task limit
+                would be exceeded, or ``"background_task_limit_exceeded"`` if the
+                background-task limit would be exceeded.
+        """
         await self._ensure_limits(task_type)
 
     async def spawn_task(
@@ -697,6 +864,36 @@ class StreamingSession:
         notify_on_complete: bool = True,
         group_id: str | None = None,
     ) -> str:
+        """Create a task and run its pipeline concurrently, returning immediately.
+
+        Registers the task in the registry, builds (or adapts) its context snapshot,
+        creates its steering inbox, and schedules ``pipeline`` on a background
+        ``asyncio.Task`` without waiting for it to finish. Use this for background
+        tasks, or for foreground tasks whose completion is awaited elsewhere.
+
+        Args:
+            pipeline: The async callable that executes the task given a :class:`TaskRuntime`.
+            task_type: Whether this is a ``FOREGROUND`` or ``BACKGROUND`` task.
+            priority: Scheduling priority hint stored on the task.
+            context_snapshot: An explicit context snapshot to use instead of building one from
+                the session's current context.
+            description: Human-readable description of the task, used in summaries and notifications.
+            spawn_reason: Machine-readable reason the task was spawned (e.g. ``"tasks.spawn"``).
+            parent_task_id: The task that spawned this one, if any.
+            spawned_from_event_id: The steering/event ID that triggered this spawn, if any.
+            query: The user-facing query this task is answering, if applicable.
+            task_id: Explicit task ID to use; a random one is generated if omitted.
+            trace_id: Trace ID to associate with the task's updates.
+            merge_strategy: Strategy used to merge the task's resulting context patch.
+            propagate_on_cancel: Whether cancelling this task cascades to its children
+                (``"cascade"``) or leaves them running (``"isolate"``).
+            notify_on_complete: Whether a default completion notification is emitted when
+                the task finishes without an explicit notification.
+            group_id: Task group to associate this task's completion with, if any.
+
+        Returns:
+            The task ID (either ``task_id`` or a newly generated one).
+        """
         await self._ensure_limits(task_type)
         task_id = task_id or secrets.token_hex(8)
         snapshot = context_snapshot or self._build_snapshot(
@@ -781,6 +978,40 @@ class StreamingSession:
         propagate_on_cancel: Literal["cascade", "isolate"] = "cascade",
         notify_on_complete: bool = True,
     ) -> TaskResult:
+        """Create a task and run its pipeline to completion, awaiting the result.
+
+        Unlike :meth:`spawn_task`, this awaits the pipeline directly and returns its
+        :class:`TaskResult`. When ``task_type`` is ``FOREGROUND``, the foreground-busy
+        flag is set for the duration of the call and ``on_foreground_yield`` is invoked
+        once the pipeline finishes (success, failure, or cancellation).
+
+        Args:
+            pipeline: The async callable that executes the task given a :class:`TaskRuntime`.
+            task_type: Whether this is a ``FOREGROUND`` or ``BACKGROUND`` task.
+            priority: Scheduling priority hint stored on the task.
+            context_snapshot: An explicit context snapshot to use instead of building one from
+                the session's current context.
+            description: Human-readable description of the task, used in summaries and notifications.
+            spawn_reason: Machine-readable reason the task was spawned.
+            parent_task_id: The task that spawned this one, if any.
+            spawned_from_event_id: The steering/event ID that triggered this spawn, if any.
+            query: The user-facing query this task is answering, if applicable.
+            task_id: Explicit task ID to use; a random one is generated if omitted.
+            trace_id: Trace ID to associate with the task's updates.
+            merge_strategy: Strategy used to merge the task's resulting context patch.
+            propagate_on_cancel: Whether cancelling this task cascades to its children
+                (``"cascade"``) or leaves them running (``"isolate"``).
+            notify_on_complete: Whether a default completion notification is emitted when
+                the task finishes without an explicit notification.
+
+        Returns:
+            The :class:`TaskResult` produced by the pipeline.
+
+        Raises:
+            RuntimeError: If session/task-type limits are exceeded (see ``ensure_capacity``).
+            TimeoutError: If the pipeline exceeds ``limits.max_task_runtime_s``.
+            SteeringCancelled: If the task is cancelled via steering while running.
+        """
         await self._ensure_limits(task_type)
         task_id = task_id or secrets.token_hex(8)
         snapshot = context_snapshot or self._build_snapshot(
@@ -848,6 +1079,23 @@ class StreamingSession:
                 await self.on_foreground_yield(turn_id=self._current_turn_id)
 
     async def steer(self, event: SteeringEvent) -> bool:
+        """Process an inbound steering event against this session's tasks.
+
+        Handles the full steering lifecycle: session/validation checks, duplicate-event
+        detection, persistence, approve/reject routing for pending context patches and
+        gated controls, control-policy confirmation gating (emitting a ``CHECKPOINT``
+        update when confirmation is required), and dispatch of ``PRIORITIZE``, ``PAUSE``,
+        ``RESUME``, and ``CANCEL`` (including cascading cancellation to child tasks).
+        Finally, the event is pushed onto the target task's steering inbox if one exists.
+
+        Args:
+            event: The steering event to process.
+
+        Returns:
+            ``True`` if the event was accepted/handled (including being pushed to the
+            task's steering inbox); ``False`` if it was rejected, invalid, a duplicate,
+            targeted a different session, or is pending confirmation.
+        """
         if event.session_id != self.session_id:
             return False
         event = sanitize_steering_event(event, max_payload_bytes=self._limits.max_steering_payload_bytes)
@@ -966,12 +1214,37 @@ class StreamingSession:
         return accepted
 
     async def get_task(self, task_id: str) -> TaskState | None:
+        """Look up a task's current state by ID.
+
+        Args:
+            task_id: The task to look up.
+
+        Returns:
+            The task's :class:`TaskState`, or ``None`` if no such task exists.
+        """
         return await self._registry.get_task(task_id)
 
     async def list_tasks(self, *, status: TaskStatus | None = None) -> list[TaskState]:
+        """List tasks belonging to this session.
+
+        Args:
+            status: If provided, only return tasks with this status.
+
+        Returns:
+            The matching list of :class:`TaskState` objects.
+        """
         return await self._registry.list_tasks(self.session_id, status=status)
 
     async def cancel_task(self, task_id: str, *, reason: str | None = None) -> bool:
+        """Request cancellation of a task by sending a ``CANCEL`` steering event.
+
+        Args:
+            task_id: The task to cancel.
+            reason: Optional human-readable reason recorded on the cancellation.
+
+        Returns:
+            ``True`` if the cancel event was accepted (see :meth:`steer`), ``False`` otherwise.
+        """
         return await self.steer(
             SteeringEvent(
                 session_id=self.session_id,
@@ -989,6 +1262,16 @@ class StreamingSession:
         payload: dict[str, Any] | None = None,
         source: str = "user",
     ) -> int:
+        """Send the same steering event to every active task in this session.
+
+        Args:
+            event_type: The steering event type to broadcast (e.g. ``PAUSE``, ``RESUME``).
+            payload: Payload to attach to each event.
+            source: The ``source`` recorded on each event (e.g. ``"user"`` or ``"system"``).
+
+        Returns:
+            The number of tasks that accepted the event (see :meth:`steer`).
+        """
         tasks = await self._registry.list_active(self.session_id)
         count = 0
         for task in tasks:
@@ -1012,6 +1295,17 @@ class StreamingSession:
         since_id: str | None = None,
         limit: int = 500,
     ) -> list[StateUpdate]:
+        """Fetch persisted state updates for this session from the state store.
+
+        Args:
+            task_id: If provided, only return updates for this task.
+            since_id: If provided, only return updates after this update ID.
+            limit: Maximum number of updates to return.
+
+        Returns:
+            The matching list of :class:`StateUpdate` objects, oldest constraints applied
+            by the underlying state store.
+        """
         updates = await self._state_store.list_updates(
             self.session_id,
             task_id=task_id,
@@ -1037,6 +1331,19 @@ class StreamingSession:
         update_types: list[UpdateType] | None = None,
         since_id: str | None = None,
     ) -> AsyncIterator[StateUpdate]:
+        """Subscribe to live state updates for this session, optionally replaying history.
+
+        Args:
+            task_ids: If provided, only yield updates for these task IDs.
+            update_types: If provided, only yield updates of these types.
+            since_id: If provided (and exactly one ``task_id`` is given), first replay
+                persisted updates after this ID before switching to live updates.
+
+        Returns:
+            An async iterator of :class:`StateUpdate` objects matching the given filters.
+            The subscription is automatically released when the iterator is closed or
+            fully consumed.
+        """
         queue, unsubscribe = await self._broker.subscribe(
             task_ids=task_ids,
             update_types=update_types,
@@ -1080,6 +1387,29 @@ class StreamingSession:
         payload: Any | None = None,
         group_id: str | None = None,
     ) -> str | None:
+        """Merge a completed task's context patch into the session, per ``strategy``.
+
+        Detects whether the patch was produced from a context version/hash older than
+        the session's current one (``context_diverged``) and emits a warning notification
+        when so. For ``HUMAN_GATED``, the patch is queued for approval and a ``CHECKPOINT``
+        update is published instead of being applied immediately. For ``APPEND``/``REPLACE``,
+        the patch is recorded as a background result immediately.
+
+        Args:
+            patch: The context patch produced by the completed task.
+            strategy: The merge strategy to apply.
+            payload: The task's raw result payload, stored alongside the patch for
+                ``APPEND``/``REPLACE`` strategies.
+            group_id: The task group this patch's task belongs to, if any.
+
+        Returns:
+            The generated ``patch_id`` if the patch is pending human approval
+            (``HUMAN_GATED``), otherwise ``None``.
+
+        Raises:
+            RuntimeError: If the number of pending patches would exceed
+                ``limits.max_pending_patches``.
+        """
         diverged = False
         if patch.source_context_version is not None and patch.source_context_version != self._context.version:
             diverged = True
@@ -1179,6 +1509,16 @@ class StreamingSession:
         patch_id: str,
         strategy: MergeStrategy | None = None,
     ) -> bool:
+        """Approve and merge a previously human-gated pending context patch.
+
+        Args:
+            patch_id: The ID of the pending patch to apply (see ``pending_patches``).
+            strategy: Merge strategy to apply the patch with; defaults to ``APPEND``.
+
+        Returns:
+            ``True`` if a matching pending patch was found and applied, ``False`` if no
+            pending patch exists for ``patch_id``.
+        """
         pending = self._pending_patches.pop(patch_id, None)
         if pending is None:
             return False
@@ -1268,6 +1608,14 @@ class StreamingSession:
                 handle.cancel()
 
     async def close(self) -> None:
+        """Shut down the session, cancelling all in-flight tasks and background helpers.
+
+        Cancels the proactive reporter task, any scheduled group-continuation tasks, and
+        every running task handle (marking each corresponding task as ``CANCELLED`` with
+        error ``"session_closed"``). Clears internal task-handle and steering-inbox
+        tracking. Intended to be called once when a session is being torn down (see
+        :meth:`SessionManager.drop`).
+        """
         # Cancel proactive reporter task
         if self._proactive_task is not None and not self._proactive_task.done():
             self._proactive_task.cancel()
@@ -2066,6 +2414,15 @@ class SessionManager:
         self._telemetry_sink = telemetry_sink
 
     async def get_or_create(self, session_id: str) -> StreamingSession:
+        """Return the existing session for ``session_id``, creating and hydrating one if needed.
+
+        Args:
+            session_id: The session identifier to look up or create.
+
+        Returns:
+            The (possibly newly created) :class:`StreamingSession`, hydrated from the
+            configured state store.
+        """
         async with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
@@ -2081,10 +2438,23 @@ class SessionManager:
         return session
 
     async def get(self, session_id: str) -> StreamingSession | None:
+        """Return the session for ``session_id`` if it already exists, without creating one.
+
+        Args:
+            session_id: The session identifier to look up.
+
+        Returns:
+            The existing :class:`StreamingSession`, or ``None`` if none has been created yet.
+        """
         async with self._lock:
             return self._sessions.get(session_id)
 
     async def drop(self, session_id: str) -> None:
+        """Remove and close the session for ``session_id``, if it exists.
+
+        Args:
+            session_id: The session identifier to remove.
+        """
         async with self._lock:
             session = self._sessions.pop(session_id, None)
         if session is not None:

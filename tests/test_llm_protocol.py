@@ -229,6 +229,10 @@ class TestNativeLLMAdapter:
         with pytest.raises(ValueError, match="multimodal_inline_data_limit_bytes"):
             NativeLLMAdapter("test-model", multimodal_inline_data_limit_bytes=-1)
 
+    def test_full_reasoning_display_rejected(self) -> None:
+        with pytest.raises(ValueError, match="reasoning_display"):
+            NativeLLMAdapter("test-model", reasoning_display="full")
+
     @pytest.mark.asyncio
     async def test_unsupported_audio_input_fails_loudly(self, mock_provider: MagicMock) -> None:
         mock_provider.profile = ModelProfile(supports_audio_input=False)
@@ -461,6 +465,24 @@ class TestNativeLLMAdapter:
 
             assert request.structured_output is None
             assert request.extra == {"reasoning_effort": "high"}
+
+    def test_build_request_databricks_sonnet_5_uses_default_reasoning_display(self) -> None:
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.model = "databricks-claude-sonnet-5"
+            mock_provider.provider_name = "databricks"
+            mock_provider.profile = ModelProfile(reasoning_display_default="omitted")
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter(
+                "databricks/databricks-claude-sonnet-5",
+                use_native_reasoning=True,
+                reasoning_effort="high",
+            )
+            messages = adapter._convert_messages([{"role": "user", "content": "test"}])
+            request = adapter._build_request(messages, None)
+
+            assert request.extra == {"reasoning_effort": "high", "reasoning_display": "omitted"}
 
     def test_build_request_anthropic_claude_without_reasoning_keeps_structured_output(self) -> None:
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
@@ -783,6 +805,7 @@ class TestCreateNativeAdapter:
                 streaming_enabled=True,
                 use_native_reasoning=True,
                 reasoning_effort=None,
+                reasoning_display=None,
                 trace_sink=None,
                 transport=None,
                 multimodal_inline_data_limit_bytes=INLINE_MULTIMODAL_DATA_LIMIT_BYTES,
@@ -806,6 +829,7 @@ class TestCreateNativeAdapter:
                 streaming_enabled=True,
                 use_native_reasoning=True,
                 reasoning_effort=None,
+                reasoning_display=None,
                 trace_sink=None,
                 transport=None,
                 multimodal_inline_data_limit_bytes=INLINE_MULTIMODAL_DATA_LIMIT_BYTES,
@@ -832,6 +856,7 @@ class TestCreateNativeAdapter:
                 streaming_enabled=True,
                 use_native_reasoning=True,
                 reasoning_effort=None,
+                reasoning_display=None,
                 trace_sink=None,
                 transport=None,
                 multimodal_inline_data_limit_bytes=INLINE_MULTIMODAL_DATA_LIMIT_BYTES,
@@ -897,6 +922,14 @@ class TestCreateNativeAdapter:
 
             call_kwargs = mock_fallback.call_args.kwargs
             assert call_kwargs["multimodal_inline_data_limit_bytes"] == 2048
+
+    def test_create_rejects_full_reasoning_display_with_fallback(self) -> None:
+        with pytest.raises(ValueError, match="reasoning_display"):
+            create_native_adapter(
+                "gpt-4o",
+                fallback=ModelFallbackConfig(models=["gpt-4o-mini"]),
+                reasoning_display="full",
+            )
 
 
 class TestNativeLLMAdapterStreaming:
@@ -1287,3 +1320,31 @@ class TestNativeLLMAdapterCost:
             )
 
             assert result.cost > 0.0
+
+    @pytest.mark.asyncio
+    async def test_complete_with_tools_uses_databricks_sonnet_5_reasoning_defaults(self) -> None:
+        mock_provider = MagicMock()
+        mock_provider.model = "databricks-claude-sonnet-5"
+        mock_provider.provider_name = "databricks"
+        mock_provider.profile = ModelProfile(reasoning_display_default="omitted")
+        mock_provider.complete = AsyncMock(
+            return_value=CompletionResponse(
+                message=LLMMessage(role="assistant", parts=[TextPart(text="Response")]),
+                usage=Usage.zero(),
+            )
+        )
+
+        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
+            mock_create.return_value = mock_provider
+
+            adapter = NativeLLMAdapter(
+                "databricks/databricks-claude-sonnet-5",
+                reasoning_effort="high",
+            )
+            await adapter.complete_with_tools(
+                messages=[{"role": "user", "content": "Think"}],
+                tools=[],
+            )
+
+            request = mock_provider.complete.call_args.args[0]
+            assert request.extra == {"reasoning_effort": "high", "reasoning_display": "omitted"}

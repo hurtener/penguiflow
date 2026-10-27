@@ -32,12 +32,9 @@ class _VisualEdge:
 def flow_to_mermaid(flow: PenguiFlow, *, direction: str = "TD") -> str:
     """Render the flow graph as a Mermaid diagram string.
 
-    Parameters
-    ----------
-    flow:
-        The :class:`PenguiFlow` instance to visualize.
-    direction:
-        Mermaid graph direction (``"TD"``, ``"LR"``, etc.). Defaults to top-down.
+    Args:
+        flow: The :class:`PenguiFlow` instance to visualize.
+        direction: Mermaid graph direction (``"TD"``, ``"LR"``, etc.). Defaults to top-down.
     """
 
     nodes, edges = _collect_graph(flow)
@@ -76,12 +73,9 @@ def flow_to_mermaid(flow: PenguiFlow, *, direction: str = "TD") -> str:
 def flow_to_dot(flow: PenguiFlow, *, rankdir: str = "TB") -> str:
     """Render the flow graph as a Graphviz DOT string.
 
-    Parameters
-    ----------
-    flow:
-        The :class:`PenguiFlow` instance to visualize.
-    rankdir:
-        Graph orientation (``"TB"``, ``"LR"``, etc.). Defaults to top-bottom.
+    Args:
+        flow: The :class:`PenguiFlow` instance to visualize.
+        rankdir: Graph orientation (``"TB"``, ``"LR"``, etc.). Defaults to top-bottom.
     """
 
     nodes, edges = _collect_graph(flow)

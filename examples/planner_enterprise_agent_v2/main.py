@@ -15,10 +15,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
+
+from opentelemetry import trace
 
 from examples.planner_enterprise_agent_v2.config import AgentConfig
 from examples.planner_enterprise_agent_v2.nodes import (
@@ -37,6 +41,7 @@ from examples.planner_enterprise_agent_v2.nodes import (
 from examples.planner_enterprise_agent_v2.telemetry import AgentTelemetry
 from penguiflow.catalog import build_catalog
 from penguiflow.node import Node
+from penguiflow.planner.memory import MemoryBudget, ShortTermMemoryConfig
 from penguiflow.planner import (
     DSPyLLMClient,
     PlannerPause,
@@ -50,6 +55,50 @@ from penguiflow.registry import ModelRegistry
 # Global buffers for demonstration (in production: use message queue/websocket)
 STATUS_BUFFER: defaultdict[str, list[StatusUpdate]] = defaultdict(list)
 EXECUTION_LOGS: list[str] = []
+
+
+def _coerce_final_answer(payload: Any, planner_meta: Mapping[str, Any]) -> FinalAnswer:
+    """Coerce planner payloads into FinalAnswer for resilient eval runs.
+
+    Why: provider/model payloads can vary (`raw_answer`, `answer`, `text`), and
+    the example should stay runnable without requiring provider-specific glue.
+    """
+
+    if isinstance(payload, Mapping):
+        text_value = payload.get("text") or payload.get("answer") or payload.get("raw_answer")
+        if text_value is not None:
+            return FinalAnswer(
+                text=str(text_value),
+                route=str(payload.get("route") or planner_meta.get("route") or "general"),
+                artifacts=dict(payload.get("artifacts", {})) if isinstance(payload.get("artifacts"), Mapping) else {},
+                metadata=dict(payload.get("metadata", {})) if isinstance(payload.get("metadata"), Mapping) else {},
+            )
+    return FinalAnswer.model_validate(payload)
+
+
+def _executed_document_answer(planner_meta: Mapping[str, Any]) -> FinalAnswer | None:
+    """Recover executed document output when reflection returns an unexecuted retry."""
+
+    reflection = planner_meta.get("reflection")
+    if not isinstance(reflection, Mapping) or reflection.get("passed") is not False:
+        return None
+    steps = planner_meta.get("steps")
+    if not isinstance(steps, list):
+        return None
+    for step in reversed(steps):
+        if not isinstance(step, Mapping):
+            continue
+        action = step.get("action")
+        observation = step.get("observation")
+        if not isinstance(action, Mapping) or action.get("next_node") != "analyze_documents":
+            continue
+        if not isinstance(observation, Mapping):
+            continue
+        try:
+            return FinalAnswer.model_validate(observation)
+        except ValueError:
+            continue
+    return None
 
 
 class EnterpriseAgentOrchestrator:
@@ -76,9 +125,13 @@ class EnterpriseAgentOrchestrator:
         config: AgentConfig,
         *,
         telemetry: AgentTelemetry | None = None,
+        state_store: Any | None = None,
     ) -> None:
         self.config = config
         self.telemetry = telemetry or AgentTelemetry(config)
+        self._state_store = state_store
+        os.environ.setdefault("PENGUIFLOW_LLM_TRACING", "otel")
+        self._tracer = trace.get_tracer("penguiflow.enterprise_agent_v2")
 
         # Configure logging
         logging.basicConfig(
@@ -204,11 +257,9 @@ class EnterpriseAgentOrchestrator:
         """
         catalog = build_catalog(self._nodes, self._registry)
 
-        # Use DSPy for better structured output handling across providers
-        # DSPy is especially beneficial for models that don't support native
-        # JSON schema mode (like Databricks, Cerebras), but works well with all providers
-        # Can be explicitly enabled via DSPY_CLIENT=true env var
-        use_dspy = self.config.use_dspy_client or self.config.llm_model.startswith("databricks/")
+        # Keep DSPy opt-in so eval/CLI flows can run with the native client for
+        # providers that expose OpenAI-compatible endpoints.
+        use_dspy = self.config.use_dspy_client
 
         # Configure LLM client
         llm_client = None
@@ -280,11 +331,15 @@ class EnterpriseAgentOrchestrator:
                 extra={"hints": planning_hints},
             )
 
-        # V2: Configure state store for durable pause/resume
-        state_store = None
-        if self.config.state_store_enabled:
-            # In production, use Redis, SQLite, or other durable backend
-            # For now, we'll pass None to use in-memory storage
+        # V2: Configure state store for durable pause/resume.
+        # Prefer injected store (e.g. playground/dev), fallback to config behavior.
+        state_store = self._state_store
+        if state_store is not None:
+            self.telemetry.logger.info(
+                "state_store_injected",
+                extra={"backend": type(state_store).__name__},
+            )
+        elif self.config.state_store_enabled:
             self.telemetry.logger.info(
                 "state_store_enabled",
                 extra={"backend": self.config.state_store_backend},
@@ -336,6 +391,14 @@ When context is provided, use it appropriately to enhance your responses.
             tool_policy=tool_policy,
             planning_hints=planning_hints,
             state_store=state_store,
+            short_term_memory=ShortTermMemoryConfig(
+                strategy="truncation" if self.config.short_term_memory_enabled else "none",
+                budget=MemoryBudget(
+                    full_zone_turns=self.config.short_term_memory_full_zone_turns,
+                    total_max_tokens=self.config.short_term_memory_total_max_tokens,
+                ),
+                include_trajectory_digest=False,
+            ),
             # Wire up telemetry callback
             event_callback=self.telemetry.record_planner_event,
         )
@@ -350,6 +413,7 @@ When context is provided, use it appropriately to enhance your responses.
                 "tool_policy_enabled": self.config.tool_policy_enabled,
                 "planning_hints_enabled": self.config.planning_hints_enabled,
                 "state_store_enabled": self.config.state_store_enabled,
+                "short_term_memory_enabled": self.config.short_term_memory_enabled,
             },
         )
 
@@ -361,6 +425,10 @@ When context is provided, use it appropriately to enhance your responses.
         *,
         tenant_id: str = "default",
         memories: list[dict[str, Any]] | None = None,
+        session_id: str | None = None,
+        user_id: str = "anonymous",
+        llm_context: Mapping[str, Any] | None = None,
+        tool_context: Mapping[str, Any] | None = None,
     ) -> FinalAnswer:
         """Execute agent planning for a user query.
 
@@ -386,7 +454,11 @@ When context is provided, use it appropriately to enhance your responses.
             ... ]
             >>> result = await agent.execute("What was deployed?", memories=memories)
         """
-        trace_id = uuid4().hex
+        incoming_tool_context = dict(tool_context or {})
+        resolved_tenant_id = str(incoming_tool_context.get("tenant_id") or tenant_id)
+        resolved_session_id = str(incoming_tool_context.get("session_id") or session_id or "default")
+        resolved_user_id = str(incoming_tool_context.get("user_id") or user_id)
+        trace_id = str(incoming_tool_context.get("trace_id") or uuid4().hex)
         status_history: list[StatusUpdate] = STATUS_BUFFER[trace_id]
         status_history_for_llm: list[dict[str, Any]] = []
 
@@ -420,36 +492,50 @@ When context is provided, use it appropriately to enhance your responses.
         #   - Non-serializable objects: functions, loggers
         #   - Never sent to LLM
 
-        llm_context: dict[str, Any] = {
-            "status_history": status_history_for_llm,  # Can help LLM track progress
-        }
+        planner_llm_context = dict(llm_context or {})
+        planner_llm_context["status_history"] = status_history_for_llm
 
         # Add memories if provided - these ARE sent to the LLM!
         if memories:
-            llm_context["memories"] = memories
+            planner_llm_context["memories"] = memories
 
         # Node metadata - internal concerns only
-        tool_context: dict[str, Any] = {
-            "tenant_id": tenant_id,
+        planner_tool_context: dict[str, Any] = {
+            "tenant_id": resolved_tenant_id,
+            "user_id": resolved_user_id,
+            "session_id": resolved_session_id,
             "trace_id": trace_id,
             "status_publisher": publish_status,
             "telemetry": self.telemetry,
             "status_logger": self.telemetry.logger,
         }
+        if "user_id" in incoming_tool_context:
+            planner_tool_context["user_id"] = incoming_tool_context["user_id"]
 
         self.telemetry.logger.info(
             "execute_start",
-            extra={"query": query, "tenant_id": tenant_id, "trace_id": trace_id},
+            extra={"query": query, "tenant_id": resolved_tenant_id, "trace_id": trace_id},
         )
 
         finish: FinalAnswer | None = None
+        otel_trace_id: str | None = None
 
         try:
-            planner_result = await self._planner.run(
-                query=query,
-                llm_context=llm_context,
-                tool_context=tool_context,
-            )
+            with self._tracer.start_as_current_span(
+                "enterprise_agent_v2",
+                attributes={
+                    "gen_ai.operation.name": "invoke_agent",
+                    "penguiflow.agent.name": self.config.agent_name,
+                },
+            ) as otel_span:
+                planner_result = await self._planner.run(
+                    query=query,
+                    llm_context=planner_llm_context,
+                    tool_context=planner_tool_context,
+                )
+                raw_otel_trace_id = otel_span.get_span_context().trace_id
+                if raw_otel_trace_id:
+                    otel_trace_id = f"{raw_otel_trace_id:032x}"
 
             if isinstance(planner_result, PlannerPause):
                 publish_status(
@@ -468,12 +554,18 @@ When context is provided, use it appropriately to enhance your responses.
                     },
                 )
             elif planner_result.reason == "answer_complete":
-                final_answer = FinalAnswer.model_validate(planner_result.payload)
-                metadata = dict(final_answer.metadata)
                 planner_meta = dict(planner_result.metadata)
+                final_answer = _coerce_final_answer(planner_result.payload, planner_meta)
+                fallback_answer = _executed_document_answer(planner_meta)
+                if fallback_answer is not None:
+                    final_answer = fallback_answer
+                metadata = dict(final_answer.metadata)
                 metadata.setdefault("trace_id", trace_id)
                 if planner_meta:
                     metadata.setdefault("planner", planner_meta)
+                    answer_action_seq = planner_meta.get("answer_action_seq")
+                    if isinstance(answer_action_seq, int):
+                        metadata.setdefault("answer_action_seq", answer_action_seq)
                 final_answer = final_answer.model_copy(update={"metadata": metadata})
                 self.telemetry.logger.info(
                     "execute_success",
@@ -534,6 +626,8 @@ When context is provided, use it appropriately to enhance your responses.
             assert finish is not None
             metadata = dict(finish.metadata)
             metadata.setdefault("trace_id", trace_id)
+            if otel_trace_id is not None:
+                metadata["otel_trace_id"] = otel_trace_id
             finish = finish.model_copy(update={"metadata": metadata})
             return finish
 
@@ -542,7 +636,7 @@ When context is provided, use it appropriately to enhance your responses.
                 "execute_error",
                 extra={
                     "query": query,
-                    "tenant_id": tenant_id,
+                    "tenant_id": resolved_tenant_id,
                     "trace_id": trace_id,
                     "error_class": exc.__class__.__name__,
                     "error_message": str(exc),
@@ -587,8 +681,8 @@ def _format_status_for_terminal(update: StatusUpdate, trace_id: str) -> str:
     if update.message:
         parts.append(f"{update.message}")
 
-    if update.roadmap_step_id is None and update.roadmap_step_list:
-        parts.append(f"Roadmap: {len(update.roadmap_step_list)} steps")
+    if update.roadmap_step_id is None and update.roadmap:
+        parts.append(f"Roadmap: {len(update.roadmap)} steps")
 
     return " ".join(parts)
 
@@ -682,7 +776,7 @@ Examples:
 
     # Example: Passing memories for context-aware planning
     # In production, these would come from a conversation database
-    example_memories = [
+    example_memories: list[dict[str, Any]] = [
         {
             "role": "user",
             "content": "Deploy version 2.3.1 to production",

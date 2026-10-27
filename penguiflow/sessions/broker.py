@@ -20,6 +20,12 @@ class UpdateBroker:
     """In-memory pub/sub for state updates with bounded queues."""
 
     def __init__(self, *, max_queue_size: int = 0) -> None:
+        """Initialize the broker.
+
+        Args:
+            max_queue_size: Maximum size of each subscriber's queue. 0 means
+                unbounded.
+        """
         self._lock = asyncio.Lock()
         self._subs: list[_Subscription] = []
         self._max_queue_size = max_queue_size
@@ -30,6 +36,18 @@ class UpdateBroker:
         task_ids: Iterable[str] | None = None,
         update_types: Iterable[UpdateType] | None = None,
     ) -> tuple[asyncio.Queue[StateUpdate], Callable[[], Awaitable[None]]]:
+        """Register a new subscriber and return its queue plus an unsubscribe callback.
+
+        Args:
+            task_ids: If given, only updates for these task IDs are delivered to this
+                subscriber. None means all task IDs are delivered.
+            update_types: If given, only updates of these types are delivered to this
+                subscriber. None means all update types are delivered.
+
+        Returns:
+            A tuple of `(queue, unsubscribe)`: the queue receives matching
+            `StateUpdate`s, and calling `unsubscribe()` removes the subscription.
+        """
         queue: asyncio.Queue[StateUpdate] = asyncio.Queue(maxsize=self._max_queue_size)
         sub = _Subscription(
             queue=queue,
@@ -47,6 +65,15 @@ class UpdateBroker:
         return queue, _unsubscribe
 
     def publish(self, update: StateUpdate) -> None:
+        """Deliver an update to every matching subscriber's queue.
+
+        Non-critical updates are dropped (not blocked on) when a subscriber's queue
+        is full. Critical updates (RESULT, ERROR, NOTIFICATION, STATUS_CHANGE) evict
+        the oldest queued item to make room instead of being dropped.
+
+        Args:
+            update: The state update to publish.
+        """
         critical_types = {UpdateType.RESULT, UpdateType.ERROR, UpdateType.NOTIFICATION, UpdateType.STATUS_CHANGE}
         for sub in list(self._subs):
             if sub.task_ids is not None and update.task_id not in sub.task_ids:

@@ -5,6 +5,8 @@
   import ChatInput from './ChatInput.svelte';
   import SetupTab from '../setup/SetupTab.svelte';
   import { ContextTab } from '$lib/components/features/context';
+  import EvalTab from '$lib/components/features/eval/EvalTab.svelte';
+  import TracesTab from '$lib/components/features/traces/TracesTab.svelte';
   import { ComponentLab } from '$lib/components/features/component-lab';
   import { getComponentRegistryStore } from '$lib/stores';
   import type { PendingInteraction } from '$lib/types';
@@ -17,7 +19,7 @@
 
   let { onSendChat, chatBodyEl = $bindable(null), onInteractionResult }: Props = $props();
 
-  type CenterTab = 'chat' | 'setup' | 'context' | 'components';
+  type CenterTab = 'chat' | 'setup' | 'context' | 'traces' | 'eval' | 'components';
   let activeTab = $state<CenterTab>('chat');
 
   const componentRegistryStore = getComponentRegistryStore();
@@ -25,7 +27,9 @@
     const base: Array<{ id: string; label: string }> = [
       { id: 'chat', label: 'Chat' },
       { id: 'setup', label: 'Setup' },
-      { id: 'context', label: 'Context' }
+      { id: 'context', label: 'Context' },
+      { id: 'traces', label: 'Traces' },
+      { id: 'eval', label: 'Eval' }
     ];
     if (componentRegistryStore.enabled) {
       base.push({ id: 'components', label: 'Components' });
@@ -36,6 +40,7 @@
   export const switchToSetup = () => {
     activeTab = 'setup';
   };
+
 </script>
 
 <Card class="chat-card">
@@ -50,6 +55,10 @@
     <SetupTab />
   {:else if activeTab === 'context'}
     <ContextTab />
+  {:else if activeTab === 'eval'}
+    <EvalTab />
+  {:else if activeTab === 'traces'}
+    <TracesTab />
   {:else if activeTab === 'components'}
     <ComponentLab />
   {:else}

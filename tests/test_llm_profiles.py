@@ -95,6 +95,21 @@ class TestGetProfileForModel:
 class TestNewModelProfiles:
     """Profiles added for the GPT-5.5, Gemini 3.5, and Claude 4.7 generations."""
 
+    def test_databricks_claude_sonnet_5_non_tool_capabilities(self) -> None:
+        """Databricks Sonnet 5 supports native structured non-tool output."""
+        profile = get_profile("databricks-claude-sonnet-5")
+
+        assert profile.supports_schema_guided_output is True
+        assert profile.supports_json_only_output is False
+        assert profile.supports_streaming is True
+        assert profile.supports_image_input is True
+        assert profile.default_output_mode == "native"
+        assert profile.native_structured_kind == "databricks_constrained_decoding"
+        assert profile.schema_transformer_name == "DatabricksJsonSchemaTransformer"
+        assert profile.preferred_transport == "native"
+        assert profile.max_tools == 32
+        assert profile.max_schema_keys == 64
+
     def test_databricks_new_models(self) -> None:
         """Databricks profiles exist for all newly added model IDs."""
         expected = {
@@ -112,6 +127,15 @@ class TestNewModelProfiles:
             assert profile.supports_tools is True, model
             assert profile.supports_reasoning is True, model
             assert profile.native_structured_kind == "databricks_constrained_decoding"
+
+    def test_databricks_claude_reasoning_display_is_omitted(self) -> None:
+        """Databricks Claude profiles hide reasoning by default."""
+        for model in (
+            "databricks-claude-opus-4-7",
+            "databricks-claude-opus-4-8",
+            "databricks-claude-sonnet-5",
+        ):
+            assert get_profile(model).reasoning_display_default == "omitted", model
 
     def test_general_new_models(self) -> None:
         """General provider profiles exist for the new flagship models."""

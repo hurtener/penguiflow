@@ -12,22 +12,45 @@
   <a href="https://github.com/hurtener/penguiflow/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
 </p>
 
-Async-first orchestration library for **typed, reliable, concurrent** workflows — from deterministic data pipelines to LLM agents.
+A Python-native runtime for **typed, steerable, bounded** AI agents — and the deterministic pipelines under them.
+
+PenguiFlow runs async node graphs where every hop validates its data, every run stays inside a budget, and the same core powers both a deterministic data pipeline and a tool-using agent. It is asyncio-only and built on Pydantic v2, with no heavy runtime dependencies.
 
 ## Why PenguiFlow
 
-- **Graph runtime**: run async node graphs with bounded queues (backpressure).
-- **Reliability controls**: per-node timeouts + retries, plus per-trace cancellation and deadlines (envelope mode).
-- **Streaming**: emit partial output (`StreamChunk`) and a final answer with deterministic correlation.
-- **Planner (ReactPlanner)**: JSON-first tool orchestration with pause/resume (HITL), parallel fan-out + joins, and trajectory logging.
-- **Tool integrations**: native + ToolNode (MCP / UTCP / HTTP) with auth and resilience patterns.
+Many agent and pipeline frameworks are loosely-typed loops: a node returns the wrong shape and you find out several hops later, a planner runs past its budget with no ceiling, a crash loses the run's state, and approving a risky step means not automating it. PenguiFlow treats those as the framework's responsibility, not yours:
+
+- **Typed at every boundary.** Each node validates its input and output against Pydantic models, so malformed data is caught at its source instead of downstream.
+- **Bounded by design.** Bounded queues apply real backpressure; per-trace deadlines, hop budgets, and cancellation keep loops and fan-outs from running away.
+- **Steerable mid-run.** Pause for human approval (HITL), inject steering events, and resume — without losing the trajectory so far.
+- **Durable and observable.** An optional `StateStore` persists events for audit and recovery; every run carries a `trace_id`, can stream partial output, and records its trajectory.
+- **One runtime for agents and pipelines.** The `ReactPlanner` (JSON-first tool orchestration, parallel fan-out and joins, pause/resume) runs on the exact same typed, bounded core as a plain data flow.
+
+## Architecture at a glance
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Agents      ReactPlanner · ToolNode (MCP / UTCP / HTTP)      │
+│              JSON tool loop · HITL pause/resume · fan-out/join│
+├─────────────────────────────────────────────────────────────┤
+│  Flow        async node graph · bounded queues (backpressure)│
+│  runtime     routers · subflows · streaming                  │
+├─────────────────────────────────────────────────────────────┤
+│  Envelope    Message: trace_id · deadline · hop budget · meta │
+│  Reliability per-node retries / timeouts · per-trace cancel   │
+├─────────────────────────────────────────────────────────────┤
+│  Ops         StateStore (durable events) · metrics / hooks    │
+└─────────────────────────────────────────────────────────────┘
+     emit()  ──►   typed in/out validated at every node   ──►  fetch()
+```
 
 ## Concepts at a glance
 
 - **Flow**: a directed graph (runtime) you `run()`, `emit()` into, and `fetch()` results from.
-- **Node**: an async function + `NodePolicy` (validation, retries, timeout).
+- **Node**: an async function plus a `NodePolicy` (validation, retries, timeout).
 - **Message** *(recommended for production)*: `Message(payload=..., headers=Headers(tenant=...), trace_id=...)` enabling trace correlation, cancellation, deadlines, and streaming.
-- **StateStore** *(optional)*: durability/audit/event persistence for distributed and “ops-ready” deployments.
+- **ReactPlanner** *(agents)*: a JSON-first planning loop over your tools, with pause/resume, parallel calls, and trajectory logging.
+- **StateStore** *(optional)*: durability, audit, and event persistence for distributed, ops-ready deployments.
 
 ## Install
 
@@ -41,6 +64,7 @@ Common extras:
 
 ```bash
 pip install "penguiflow[planner]"      # ReactPlanner + ToolNode integrations
+pip install "penguiflow[llm]"          # native LLM provider SDKs
 pip install "penguiflow[a2a-server]"   # A2A HTTP+JSON server bindings
 pip install "penguiflow[a2a-client]"   # A2A client bindings
 ```
@@ -53,7 +77,9 @@ uv pip install penguiflow
 
 ## Quickstart
 
-### 1) Minimal typed flow (runtime)
+PenguiFlow has two entry points that share the same runtime: a **typed pipeline** you wire yourself, and an **agent** scaffolded from a template.
+
+### 1) Typed pipeline (runtime)
 
 ```python
 from __future__ import annotations
@@ -97,7 +123,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-### 2) ReactPlanner via CLI (fastest path)
+### 2) Agent (ReactPlanner via CLI — fastest path)
 
 ```bash
 uv run penguiflow new my-agent --template react
@@ -106,9 +132,10 @@ uv sync
 uv run penguiflow dev --project-root .
 ```
 
-## Documentation (canonical)
+## Documentation
 
 - Docs site (MkDocs): https://hurtener.github.io/penguiflow/
+- API reference (every public symbol): https://hurtener.github.io/penguiflow/reference/api/
 - Source docs in repo: [docs/](docs/)
 
 Suggested starting points (in-repo sources):
@@ -123,7 +150,7 @@ Suggested starting points (in-repo sources):
 
 ## Stability, versioning, and public API
 
-PenguiFlow follows a **2.x** line and aims to follow SemVer with a clear public surface.
+PenguiFlow is on the **3.x** line and follows SemVer with a documented public API surface — additions are additive, and breaking changes are called out in the changelog.
 
 - Changelog: [CHANGELOG.md](CHANGELOG.md)
 - Versioning & deprecations: [VERSIONING.md](VERSIONING.md)

@@ -12,7 +12,15 @@ from penguiflow.planner.context import ToolContext
 
 
 class TransportType(str, Enum):
-    """Supported communication protocols."""
+    """Supported communication protocols for an external tool source.
+
+    Values:
+        MCP: Model Context Protocol via FastMCP; transport (stdio/SSE/HTTP)
+            is auto-detected from ``ExternalToolConfig.connection``.
+        HTTP: REST API accessed via UTCP.
+        UTCP: Native UTCP endpoint (manual or call-template based).
+        CLI: Command-line tools invoked via UTCP's CLI call template.
+    """
 
     MCP = "mcp"  # MCP via FastMCP (stdio/SSE/HTTP auto-detected)
     HTTP = "http"  # REST API via UTCP (planned)
@@ -21,7 +29,16 @@ class TransportType(str, Enum):
 
 
 class AuthType(str, Enum):
-    """Authentication methods."""
+    """Authentication methods supported by ``ToolNode``.
+
+    Values:
+        NONE: No authentication.
+        API_KEY: Static API key injected as a request header.
+        BEARER: Static bearer token injected as an ``Authorization`` header.
+        COOKIE: Cookie-based auth (e.g. a Databricks Apps session cookie).
+        OAUTH2_USER: Per-user OAuth 2.0 authorization-code flow, resolved via
+            a human-in-the-loop (HITL) pause using ``OAuthManager``.
+    """
 
     NONE = "none"
     API_KEY = "api_key"  # Static API key (header injection)
@@ -31,7 +48,16 @@ class AuthType(str, Enum):
 
 
 class UtcpMode(str, Enum):
-    """How to interpret UTCP connection string."""
+    """How to interpret the UTCP connection string on ``ExternalToolConfig``.
+
+    Values:
+        AUTO: Try ``MANUAL_URL`` first (if the connection string looks like a
+            manual document), falling back to ``BASE_URL`` otherwise.
+        MANUAL_URL: ``connection`` points directly to a UTCP manual document
+            (recommended: enables full tool discovery).
+        BASE_URL: ``connection`` is a plain REST base URL with a synthesized
+            call template (limited discovery, no manual document).
+    """
 
     AUTO = "auto"  # Try manual_url first, fallback to base_url
     MANUAL_URL = "manual_url"  # Connection is a UTCP manual endpoint (recommended)
@@ -51,13 +77,32 @@ class McpTransportMode(str, Enum):
 
 
 class RetryPolicy(BaseModel):
-    """Retry configuration using tenacity semantics."""
+    """Retry configuration for ``ToolNode`` tool calls, using tenacity semantics.
 
-    max_attempts: int = Field(default=3, ge=1, le=10)
-    wait_exponential_min_s: float = Field(default=0.1, ge=0.01)
-    wait_exponential_max_s: float = Field(default=5.0, ge=0.1)
+    Consumed by ``ToolNode._call_with_retry``, which retries only on
+    retryable errors (timeouts, connection errors, or ``ToolNodeError``
+    subclasses marked retryable) with exponential backoff between attempts.
+    """
+
+    max_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Maximum number of call attempts, including the first (non-retry) attempt.",
+    )
+    wait_exponential_min_s: float = Field(
+        default=0.1,
+        ge=0.01,
+        description="Minimum wait time in seconds before a retry (exponential backoff floor).",
+    )
+    wait_exponential_max_s: float = Field(
+        default=5.0,
+        ge=0.1,
+        description="Maximum wait time in seconds before a retry (exponential backoff ceiling).",
+    )
     retry_on_status: list[int] = Field(
         default_factory=lambda: [429, 500, 502, 503, 504],
+        description="HTTP status codes that are treated as retryable when surfaced by adapters.",
     )
 
 
@@ -181,9 +226,17 @@ class ArtifactExtractionConfig(BaseModel):
     # Summary templates
     default_binary_summary: str = Field(
         default="Binary content stored as artifact ({mime_type}, {size} bytes). Artifact ID: {artifact_id}",
+        description=(
+            "Format string for the LLM-facing summary of extracted binary content. "
+            "Supports {mime_type}, {size}, and {artifact_id} placeholders."
+        ),
     )
     default_text_summary: str = Field(
         default="Large text stored as artifact ({size} chars). Artifact ID: {artifact_id}",
+        description=(
+            "Format string for the LLM-facing summary of extracted oversized text. "
+            "Supports {size} and {artifact_id} placeholders."
+        ),
     )
 
 
@@ -216,11 +269,17 @@ class AppsConfig(BaseModel):
 
 
 class ExternalToolConfig(BaseModel):
-    """Configuration for an external tool source."""
+    """Configuration for a single external tool source consumed by ``ToolNode``.
+
+    One instance describes how to reach and authenticate against one MCP
+    server or UTCP/HTTP/CLI endpoint, plus the resilience and
+    artifact-extraction policies applied to its tool calls. Validated at
+    construction time by :meth:`validate_config`.
+    """
 
     # Identity
     name: str = Field(..., description="Unique namespace for tools (e.g., 'github')")
-    description: str = Field(default="")
+    description: str = Field(default="", description="Human-readable description of this tool source.")
 
     # Transport
     transport: TransportType
@@ -239,16 +298,38 @@ class ExternalToolConfig(BaseModel):
     )
 
     # Environment (for MCP subprocess)
-    env: dict[str, str] = Field(default_factory=dict)
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Environment variables passed to an MCP stdio subprocess, or used as UTCP "
+            "variable substitutions. Values may reference ${VAR} to substitute from the "
+            "host process environment."
+        ),
+    )
 
     # Authentication
-    auth_type: AuthType = Field(default=AuthType.NONE)
-    auth_config: dict[str, Any] = Field(default_factory=dict)
+    auth_type: AuthType = Field(default=AuthType.NONE, description="Authentication method used for this tool source.")
+    auth_config: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Auth-type-specific settings, e.g. {'token': ...} for BEARER, "
+            "{'api_key': ..., 'header': ...} for API_KEY, or {'cookie_name': ..., "
+            "'cookie_value': ...} for COOKIE. Values may reference ${VAR} for env substitution."
+        ),
+    )
 
     # Resilience
-    timeout_s: float = Field(default=30.0, ge=1.0, le=300.0)
-    retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
-    max_concurrency: int = Field(default=10, ge=1, le=100)
+    timeout_s: float = Field(default=30.0, ge=1.0, le=300.0, description="Per-call timeout in seconds.")
+    retry_policy: RetryPolicy = Field(
+        default_factory=RetryPolicy,
+        description="Retry/backoff policy applied to tool calls.",
+    )
+    max_concurrency: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="Maximum number of concurrent in-flight tool calls for this source.",
+    )
 
     # Discovery filtering
     tool_filter: list[str] | None = Field(
@@ -290,7 +371,19 @@ class ExternalToolConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_config(self) -> ExternalToolConfig:
-        """Validate transport-specific requirements."""
+        """Validate transport/auth-specific requirements after field parsing.
+
+        Raises:
+            ValueError: If ``auth_type`` requires keys in ``auth_config`` that
+                are missing (e.g. BEARER needs ``token``, API_KEY needs
+                ``api_key``, COOKIE needs ``cookie_name``/``cookie_value``),
+                or if ``utcp_mode`` is set to a non-default value while
+                ``transport`` is ``MCP`` (``utcp_mode`` only applies to
+                HTTP/UTCP transports).
+
+        Returns:
+            The validated ``ExternalToolConfig`` instance (unchanged).
+        """
         if self.auth_type == AuthType.BEARER and "token" not in self.auth_config:
             raise ValueError("auth_type=BEARER requires auth_config.token")
         if self.auth_type == AuthType.API_KEY and "api_key" not in self.auth_config:

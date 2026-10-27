@@ -95,4 +95,8 @@ export interface TrajectoryPayload {
   summary?: Record<string, unknown>;
   trace_id?: string;
   session_id?: string;
+  /** Why the run ended: 'answer_complete' | 'no_path' | 'budget_exhausted'. */
+  finish_reason?: string | null;
+  /** Answer text the run terminated with. Absent on traces recorded before it was tracked. */
+  final_answer?: string | null;
 }

@@ -180,6 +180,13 @@ async def _apply_memory_context(
     if not patch:
         return llm_context
     merged: dict[str, Any] = dict(llm_context or {})
+    memory_patch = patch.get("conversation_memory")
+    if (
+        isinstance(memory_patch, Mapping)
+        and not any(memory_patch.get(key) for key in ("recent_turns", "summary", "pending_turns"))
+        and "conversation_memory" in merged
+    ):
+        patch = {key: value for key, value in patch.items() if key != "conversation_memory"}
     merged.update(dict(patch))
     try:
         json.dumps(merged, ensure_ascii=False)

@@ -99,7 +99,22 @@ class _RookeryResult:
 
 
 class Context:
-    """Provides fetch/emit helpers for a node within a flow."""
+    """Per-node handle for fetching inputs and emitting outputs within a running flow.
+
+    Each node worker receives its own ``Context`` bound to that node's incoming and
+    outgoing :class:`Floe` edges. Node callables use it to pull the next message
+    (:meth:`fetch`) and forward results (:meth:`emit`); the runtime also uses it internally
+    to route work. All queue operations respect backpressure via the bounded edge queues.
+
+    Outputs are addressed with the ``to``/``from_`` arguments: pass a single node, a
+    sequence of nodes, or ``None`` to fan out to (or gather from) every connected edge.
+    Messages carry a ``trace_id`` that is preserved end to end so the runtime can account
+    for, cancel, and finalize all work belonging to a single run.
+
+    Attributes:
+        owner: The node or synthetic endpoint this context belongs to.
+        runtime: The owning :class:`PenguiFlow`, or ``None`` if the context is detached.
+    """
 
     __slots__ = (
         "_owner",
@@ -120,6 +135,8 @@ class Context:
 
     @property
     def owner(self) -> Node | Endpoint:
+        """Return the node or synthetic endpoint this context is bound to."""
+
         return self._owner
 
     @property
@@ -163,12 +180,44 @@ class Context:
         return resolved
 
     async def emit(self, msg: Any, to: Node | Endpoint | Sequence[Node | Endpoint] | None = None) -> None:
+        """Forward ``msg`` onto one or more outgoing edges, awaiting queue capacity.
+
+        This is the backpressure-aware path: if a target edge queue is full, the call
+        suspends until space is available rather than dropping the message.
+
+        Args:
+            msg: The value to enqueue. Typically a :class:`~penguiflow.types.Message`, but
+                any object may be sent on edges whose consumers accept it.
+            to: Target node(s) to send to. A single node, a sequence of nodes, or ``None``
+                to fan out to every outgoing edge of this context.
+
+        Raises:
+            RuntimeError: If this context is not attached to a running flow.
+            KeyError: If ``to`` names a node that is not a downstream target of this context.
+        """
+
         if self._runtime is None:
             raise RuntimeError("Context is not attached to a running flow")
         for floe in self._resolve_targets(to, self._outgoing):
             await self._runtime._send_to_floe(floe, msg)
 
     def emit_nowait(self, msg: Any, to: Node | Endpoint | Sequence[Node | Endpoint] | None = None) -> None:
+        """Forward ``msg`` onto outgoing edges without awaiting, raising if a queue is full.
+
+        Non-blocking counterpart to :meth:`emit`. Prefer :meth:`emit` inside async nodes so
+        backpressure is honoured; use this only when a synchronous, fail-fast enqueue is
+        required.
+
+        Args:
+            msg: The value to enqueue on each resolved outgoing edge.
+            to: Target node(s) to send to, or ``None`` to fan out to every outgoing edge.
+
+        Raises:
+            RuntimeError: If this context is not attached to a running flow.
+            KeyError: If ``to`` names a node that is not a downstream target of this context.
+            asyncio.QueueFull: If any target edge queue is at capacity.
+        """
+
         if self._runtime is None:
             raise RuntimeError("Context is not attached to a running flow")
         for floe in self._resolve_targets(to, self._outgoing):
@@ -236,6 +285,22 @@ class Context:
         return chunk
 
     def fetch_nowait(self, from_: Node | Endpoint | Sequence[Node | Endpoint] | None = None) -> Any:
+        """Pop the next available message without blocking.
+
+        Drains the internal buffer first (used to hold extra results from
+        :meth:`fetch_any`), then tries each resolved incoming edge in turn.
+
+        Args:
+            from_: Source node(s) to read from, or ``None`` to consider every incoming edge.
+
+        Returns:
+            The next available message.
+
+        Raises:
+            asyncio.QueueEmpty: If no buffered item and every incoming edge queue is empty.
+            KeyError: If ``from_`` names a node that is not an upstream source of this context.
+        """
+
         if self._buffer:
             return self._buffer.popleft()
         for floe in self._resolve_targets(from_, self._incoming):
@@ -246,6 +311,23 @@ class Context:
         raise asyncio.QueueEmpty("no messages available")
 
     async def fetch(self, from_: Node | Endpoint | Sequence[Node | Endpoint] | None = None) -> Any:
+        """Await and return the next message from this context's incoming edges.
+
+        Buffered items are returned first. With a single incoming edge this awaits that
+        edge's queue directly; with several it delegates to :meth:`fetch_any` and returns
+        the first message to arrive.
+
+        Args:
+            from_: Source node(s) to read from, or ``None`` to consider every incoming edge.
+
+        Returns:
+            The next message to become available.
+
+        Raises:
+            RuntimeError: If this context has no incoming edges to fetch from.
+            KeyError: If ``from_`` names a node that is not an upstream source of this context.
+        """
+
         if self._buffer:
             return self._buffer.popleft()
 
@@ -257,6 +339,24 @@ class Context:
         return await self.fetch_any(from_)
 
     async def fetch_any(self, from_: Node | Endpoint | Sequence[Node | Endpoint] | None = None) -> Any:
+        """Await the first message from any incoming edge, buffering the rest.
+
+        Races all resolved incoming edges concurrently and returns the first message
+        received. If more than one edge produces simultaneously, the extra messages are
+        stashed in an internal buffer and served by subsequent :meth:`fetch`/:meth:`fetch_any`
+        calls, so nothing is lost.
+
+        Args:
+            from_: Source node(s) to read from, or ``None`` to consider every incoming edge.
+
+        Returns:
+            The first message to become available across the resolved edges.
+
+        Raises:
+            RuntimeError: If this context has no incoming edges to fetch from.
+            KeyError: If ``from_`` names a node that is not an upstream source of this context.
+        """
+
         if self._buffer:
             return self._buffer.popleft()
 
@@ -279,12 +379,18 @@ class Context:
         return result
 
     def outgoing_count(self) -> int:
+        """Return the number of outgoing edges attached to this context."""
+
         return len(self._outgoing)
 
     def queue_depth_in(self) -> int:
+        """Return the total number of buffered messages across all incoming edge queues."""
+
         return sum(floe.queue.qsize() for floe in self._incoming.values())
 
     def queue_depth_out(self) -> int:
+        """Return the total number of buffered messages across all outgoing edge queues."""
+
         return sum(floe.queue.qsize() for floe in self._outgoing.values())
 
     async def call_playbook(
@@ -305,7 +411,39 @@ class Context:
 
 
 class PenguiFlow:
-    """Coordinates node execution and message routing."""
+    """Async runtime that wires nodes into a graph and drives message routing.
+
+    A flow is defined by ``(node, successors)`` adjacency tuples. On construction the
+    runtime builds the graph, validates it against cycles (unless allowed), and connects
+    a synthetic ``OpenSea`` ingress endpoint to every source node and a ``Rookery`` egress
+    sink to every terminal node. Call :meth:`run` to spawn one worker task per node, feed
+    inputs with :meth:`emit`, and collect terminal results with :meth:`fetch`; call
+    :meth:`stop` for graceful shutdown.
+
+    Every edge is a bounded queue, so producers block once a downstream consumer falls
+    behind (backpressure). Work is tracked per ``trace_id``, enabling per-run accounting,
+    trace-scoped roundtrips (``emit(..., trace_id=...)`` paired with ``fetch(trace_id=...)``),
+    and single-run cancellation via :meth:`cancel` without disturbing other in-flight runs.
+
+    Args:
+        *adjacencies: One or more ``(node, successors)`` tuples describing directed edges.
+            A node may appear as a successor of several parents; endpoints are wired
+            automatically.
+        queue_maxsize: Bound applied to every edge queue. Controls how much buffering (and
+            therefore backpressure) each edge allows. ``<= 0`` creates unbounded queues.
+            Defaults to :data:`DEFAULT_QUEUE_MAXSIZE`.
+        allow_cycles: When ``True``, skip acyclicity validation so controller/loop graphs
+            with back edges are permitted. Defaults to ``False``.
+        middlewares: Optional sequence of :class:`~penguiflow.middlewares.Middleware`
+            callables invoked for every emitted :class:`~penguiflow.metrics.FlowEvent`.
+        emit_errors_to_rookery: When ``True``, terminal :class:`~penguiflow.errors.FlowError`
+            values (after retries are exhausted) are delivered to the Rookery sink in
+            addition to being logged. Defaults to ``False``.
+        state_store: Optional :class:`~penguiflow.state.StateStore` used to persist
+            :class:`~penguiflow.metrics.FlowEvent` history and remote bindings.
+        message_bus: Optional :class:`~penguiflow.bus.MessageBus` that receives a published
+            envelope for every message crossing an edge.
+    """
 
     def __init__(
         self,
@@ -353,9 +491,17 @@ class PenguiFlow:
 
     @property
     def registry(self) -> Any | None:
+        """Return the :class:`~penguiflow.registry.ModelRegistry` passed to :meth:`run`, if any."""
+
         return self._registry
 
     def add_middleware(self, middleware: Middleware) -> None:
+        """Append a middleware that will receive every subsequently emitted ``FlowEvent``.
+
+        Args:
+            middleware: An async callable invoked with each :class:`~penguiflow.metrics.FlowEvent`.
+        """
+
         self._middlewares.append(middleware)
 
     def _build_graph(self, adjacencies: Sequence[tuple[Node, Sequence[Node]]]) -> None:
@@ -432,6 +578,21 @@ class PenguiFlow:
             raise CycleError("Flow contains a cycle; enable allow_cycles to bypass")
 
     def run(self, *, registry: Any | None = None) -> None:
+        """Start the flow by spawning one worker task per node on the running event loop.
+
+        Must be called from within a running asyncio event loop. When a ``registry`` is
+        supplied it is validated up front to ensure every node requiring validation has a
+        matching entry.
+
+        Args:
+            registry: Optional :class:`~penguiflow.registry.ModelRegistry` providing typed
+                input/output adapters for the flow's nodes.
+
+        Raises:
+            RuntimeError: If the flow is already running, or the registry is missing entries
+                for nodes that require validation.
+        """
+
         if self._running:
             raise RuntimeError("PenguiFlow already running")
         self._running = True
@@ -514,6 +675,13 @@ class PenguiFlow:
                 raise
 
     async def stop(self) -> None:
+        """Gracefully shut down the flow, cancelling all worker and auxiliary tasks.
+
+        Cancels node workers, in-flight node invocations, registered external tasks, the
+        Rookery fetch dispatcher, and drains pending bus-publish tasks, then clears all
+        per-trace bookkeeping. Idempotent: returns immediately if the flow is not running.
+        """
+
         if not self._running:
             return
 
@@ -677,6 +845,25 @@ class PenguiFlow:
         *,
         trace_id: str | None = None,
     ) -> None:
+        """Inject a message into the flow through the ``OpenSea`` ingress endpoint.
+
+        Awaits queue capacity, so this call honours backpressure. Passing ``trace_id``
+        enables a trace-scoped roundtrip: the message's trace id is (re)stamped and the
+        runtime begins buffering only that trace's terminal results for a subsequent
+        ``fetch(trace_id=...)`` call, keeping concurrent runs isolated.
+
+        Args:
+            msg: The value to inject, typically a :class:`~penguiflow.types.Message`.
+            to: Target ingress node(s), or ``None`` to reach every source node.
+            trace_id: Optional trace id to bind this emission to a scoped roundtrip. When
+                provided, ``msg`` must be a :class:`~penguiflow.types.Message` (or expose a
+                writable ``trace_id`` attribute).
+
+        Raises:
+            RuntimeError: If ``trace_id`` is given while the flow is not running.
+            TypeError: If ``trace_id`` is given but ``msg`` cannot carry a trace id.
+        """
+
         if trace_id is not None:
             if not self._running:
                 raise RuntimeError("PenguiFlow is not running")
@@ -726,6 +913,21 @@ class PenguiFlow:
         *,
         trace_id: str | None = None,
     ) -> None:
+        """Inject a message through ``OpenSea`` without awaiting queue capacity.
+
+        Non-blocking counterpart to :meth:`emit`. Trace-scoped roundtrips are not supported
+        here because they require awaiting dispatcher setup.
+
+        Args:
+            msg: The value to inject, typically a :class:`~penguiflow.types.Message`.
+            to: Target ingress node(s), or ``None`` to reach every source node.
+            trace_id: Not supported; must be ``None``.
+
+        Raises:
+            RuntimeError: If ``trace_id`` is provided.
+            asyncio.QueueFull: If a target ingress queue is at capacity.
+        """
+
         if trace_id is not None:
             raise RuntimeError("emit_nowait(trace_id=...) is not supported; use await emit(..., trace_id=...)")
 
@@ -766,6 +968,28 @@ class PenguiFlow:
         *,
         trace_id: str | None = None,
     ) -> Any:
+        """Await the next terminal result delivered to the ``Rookery`` egress sink.
+
+        Without ``trace_id`` this returns the next result from any run. With ``trace_id`` it
+        returns only results belonging to that run, activating a background dispatcher that
+        demultiplexes Rookery output into per-trace queues; other traces' results are routed
+        to a shared queue so nothing is dropped. ``from_`` filtering is incompatible with the
+        trace-scoped path.
+
+        Args:
+            from_: Optional source node filter (only valid before trace-scoped fetching is
+                enabled).
+            trace_id: Optional trace id to fetch results for a single run.
+
+        Returns:
+            The next terminal payload. If it was a :class:`~penguiflow.types.Message`, the
+            message itself (or its unwrapped value) is returned.
+
+        Raises:
+            RuntimeError: If ``from_`` is combined with ``trace_id``, or if used after
+                trace-scoped fetching has been enabled.
+        """
+
         if self._fetch_dispatcher is None or self._fetch_dispatcher.done():
             if trace_id is None:
                 result = await self._contexts[ROOKERY].fetch(from_)
@@ -806,6 +1030,19 @@ class PenguiFlow:
         *,
         trace_id: str | None = None,
     ) -> Any:
+        """Await the next Rookery result; alias of :meth:`fetch` at the runtime level.
+
+        Unlike :meth:`Context.fetch_any`, the runtime exposes a single Rookery stream, so
+        there are no multi-queue race semantics here; this simply forwards to :meth:`fetch`.
+
+        Args:
+            from_: Optional source node filter (only valid before trace-scoped fetching).
+            trace_id: Optional trace id to fetch results for a single run.
+
+        Returns:
+            The next terminal payload delivered to the Rookery sink.
+        """
+
         # No multi-queue semantics once the dispatcher is enabled.
         return await self.fetch(from_, trace_id=trace_id)
 
@@ -1406,6 +1643,24 @@ class PenguiFlow:
             queue.put_nowait(item)
 
     async def cancel(self, trace_id: str) -> bool:
+        """Cancel a single in-flight run, leaving all other traces untouched.
+
+        Sets the trace's cancellation event, drains queued messages for that trace from
+        every edge and fetch queue, cancels its in-flight node invocations, and releases any
+        pending trace-scoped roundtrip. Idempotent for an already-cancelling trace. Emits
+        ``trace_cancel_start`` (and later ``trace_cancel_finish``) flow events.
+
+        Args:
+            trace_id: Identifier of the run to cancel.
+
+        Returns:
+            ``True`` if the trace was active and cancellation was initiated; ``False`` if no
+            work for that trace was in flight.
+
+        Raises:
+            RuntimeError: If the flow is not running.
+        """
+
         if not self._running:
             raise RuntimeError("PenguiFlow is not running")
 
@@ -1760,7 +2015,20 @@ async def call_playbook(
 
 
 def create(*adjacencies: tuple[Node, Sequence[Node]], **kwargs: Any) -> PenguiFlow:
-    """Convenience helper to instantiate a PenguiFlow."""
+    """Instantiate a :class:`PenguiFlow` from adjacency tuples.
+
+    Thin convenience wrapper around the :class:`PenguiFlow` constructor; the preferred
+    entry point for building a flow.
+
+    Args:
+        *adjacencies: One or more ``(node, successors)`` tuples describing the graph edges.
+        **kwargs: Keyword arguments forwarded verbatim to :class:`PenguiFlow` (e.g.
+            ``queue_maxsize``, ``allow_cycles``, ``middlewares``, ``state_store``).
+
+    Returns:
+        A configured, not-yet-running :class:`PenguiFlow` instance. Call
+        :meth:`PenguiFlow.run` to start it.
+    """
 
     return PenguiFlow(*adjacencies, **kwargs)
 

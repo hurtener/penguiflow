@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent, waitFor } from '@testing-library/svelte';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, fireEvent } from '@testing-library/svelte';
 import ArtifactsCardHost from './ArtifactsCardHost.svelte';
 import { createArtifactsStore, createSessionStore } from '$lib/stores';
 import type { ArtifactStoredEvent } from '$lib/types';
@@ -25,8 +25,16 @@ describe('ArtifactsCard component', () => {
   });
 
   beforeEach(() => {
+    vi.useFakeTimers();
     vi.clearAllMocks();
     artifactsStore.clear();
+  });
+
+  afterEach(async () => {
+    // Ensure any in-flight Download All loops finish within the test.
+    // ArtifactsCard intentionally inserts delays between downloads.
+    await vi.runAllTimersAsync();
+    vi.useRealTimers();
   });
 
   describe('empty state', () => {
@@ -137,9 +145,8 @@ describe('ArtifactsCard component', () => {
 
       await fireEvent.click(downloadAllBtn);
 
-      await waitFor(() => {
-        expect(mockDownload).toHaveBeenCalledTimes(3);
-      });
+      await vi.runAllTimersAsync();
+      expect(mockDownload).toHaveBeenCalledTimes(3);
     });
 
     it('disables button while downloading', async () => {
@@ -190,9 +197,8 @@ describe('ArtifactsCard component', () => {
       const downloadAllBtn = document.querySelector('.download-all-btn') as HTMLButtonElement;
       await fireEvent.click(downloadAllBtn);
 
-      await waitFor(() => {
-        expect(mockDownload).toHaveBeenCalledTimes(3);
-      });
+      await vi.runAllTimersAsync();
+      expect(mockDownload).toHaveBeenCalledTimes(3);
     });
 
     it('re-enables button after all downloads complete', async () => {
@@ -206,10 +212,9 @@ describe('ArtifactsCard component', () => {
       const downloadAllBtn = document.querySelector('.download-all-btn') as HTMLButtonElement;
       await fireEvent.click(downloadAllBtn);
 
-      await waitFor(() => {
-        expect(downloadAllBtn.disabled).toBe(false);
-        expect(downloadAllBtn.textContent).toContain('Download All');
-      });
+      await vi.runAllTimersAsync();
+      expect(downloadAllBtn.disabled).toBe(false);
+      expect(downloadAllBtn.textContent).toContain('Download All');
     });
   });
 

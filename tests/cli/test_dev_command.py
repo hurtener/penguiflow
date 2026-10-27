@@ -48,11 +48,12 @@ def test_run_dev_invokes_uvicorn_and_browser(monkeypatch, tmp_path: Path) -> Non
 def test_dev_cli_invokes_run_dev(monkeypatch, tmp_path: Path) -> None:
     called = {}
 
-    def fake_run_dev(project_root, host, port, open_browser):
+    def fake_run_dev(project_root, host, port, open_browser, agent_package=None):
         called["project_root"] = project_root
         called["host"] = host
         called["port"] = port
         called["open_browser"] = open_browser
+        called["agent_package"] = agent_package
 
     monkeypatch.setattr("penguiflow.cli.main.run_dev", fake_run_dev, raising=False)
 
@@ -67,6 +68,8 @@ def test_dev_cli_invokes_run_dev(monkeypatch, tmp_path: Path) -> None:
             "0.0.0.0",
             "--port",
             "8100",
+            "--agent-package",
+            "demo_agent",
             "--no-browser",
         ],
     )
@@ -75,3 +78,4 @@ def test_dev_cli_invokes_run_dev(monkeypatch, tmp_path: Path) -> None:
     assert called["host"] == "0.0.0.0"
     assert called["port"] == 8100
     assert called["open_browser"] is False
+    assert called["agent_package"] == "demo_agent"

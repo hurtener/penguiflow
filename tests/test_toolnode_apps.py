@@ -473,6 +473,34 @@ async def test_initialize_mcp_client_advertises_apps_compatibility_capabilities(
     assert client.session.sent_notification.root.method == "notifications/initialized"
 
 
+def test_mcp_initialization_messages_serialize_wire_aliases():
+    """Manual initialization messages must retain MCP wire aliases."""
+    request = mcp_types.ClientRequest(
+        mcp_types.InitializeRequest(
+            params=mcp_types.InitializeRequestParams(
+                protocolVersion=mcp_types.LATEST_PROTOCOL_VERSION,
+                capabilities=mcp_types.ClientCapabilities(
+                    roots=mcp_types.RootsCapability(listChanged=True)
+                ),
+                clientInfo=mcp_types.Implementation(name="penguiflow-test", version="1.0"),
+            )
+        )
+    )
+    notification = mcp_types.ClientNotification(mcp_types.InitializedNotification())
+
+    assert request.model_dump(by_alias=True, exclude_none=True) == {
+        "method": "initialize",
+        "params": {
+            "protocolVersion": mcp_types.LATEST_PROTOCOL_VERSION,
+            "capabilities": {"roots": {"listChanged": True}},
+            "clientInfo": {"name": "penguiflow-test", "version": "1.0"},
+        },
+    }
+    assert notification.model_dump(by_alias=True, exclude_none=True) == {
+        "method": "notifications/initialized"
+    }
+
+
 @pytest.mark.asyncio
 async def test_initialize_mcp_client_uses_session_monitoring(registry):
     """Apps-aware init should use FastMCP session monitoring when available."""

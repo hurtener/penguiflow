@@ -15,7 +15,7 @@ This document explains how to configure environment variables for your agent.
    ```bash
    uv sync && uv run <package_name>
    # or use the playground:
-   penguiflow dev .
+    uv run penguiflow dev --project-root .
    ```
 
 ## LLM Provider Configuration

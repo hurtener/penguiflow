@@ -179,6 +179,136 @@ class TestLiteLLMJSONClient:
             assert call_kwargs["api_key"] == "test-key"
 
     @pytest.mark.asyncio
+    async def test_complete_strips_unsupported_params_from_databricks_dict_config(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                {
+                    "model": "databricks/databricks-claude-sonnet-5",
+                    "api_key": "test-key",
+                    "temperature": 0.5,
+                    "top_p": 0.9,
+                    "top_k": 10,
+                },
+                temperature=0.0,
+                json_schema_mode=False,
+            )
+            await client.complete(messages=[{"role": "user", "content": "test"}])
+
+        call_kwargs = mock_litellm.acompletion.call_args[1]
+        assert call_kwargs["model"] == "databricks/databricks-claude-sonnet-5"
+        assert call_kwargs["api_key"] == "test-key"
+        assert not {"temperature", "top_p", "top_k"} & call_kwargs.keys()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "databricks/databricks-claude-opus-4-7",
+            "databricks/databricks-claude-opus-4-8",
+            "databricks/databricks-claude-sonnet-5",
+        ],
+    )
+    async def test_complete_omits_temperature_for_databricks_claude_models(
+        self, mock_litellm: MagicMock, model: str
+    ) -> None:
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(model, temperature=0.0, json_schema_mode=False)
+            await client.complete(messages=[{"role": "user", "content": "test"}])
+
+        call_kwargs = mock_litellm.acompletion.call_args[1]
+        assert "temperature" not in call_kwargs
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "databricks/databricks-claude-opus-4-7",
+            "databricks/databricks-claude-opus-4-8",
+            "databricks/databricks-claude-sonnet-5",
+        ],
+    )
+    async def test_complete_maps_reasoning_effort_to_adaptive_thinking_for_databricks_claude_models(
+        self, mock_litellm: MagicMock, model: str
+    ) -> None:
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                model,
+                temperature=0.0,
+                json_schema_mode=False,
+                reasoning_effort="low",
+            )
+            await client.complete(messages=[{"role": "user", "content": "test"}])
+
+        call_kwargs = mock_litellm.acompletion.call_args[1]
+        assert call_kwargs["thinking"] == {"type": "adaptive", "display": "omitted"}
+        assert call_kwargs["output_config"] == {"effort": "low"}
+        assert "reasoning_effort" not in call_kwargs
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "databricks/databricks-claude-opus-4-8",
+            "databricks/databricks-claude-sonnet-5",
+        ],
+    )
+    @pytest.mark.parametrize("reasoning_effort", ["none", "off", "disabled", "false", "0"])
+    async def test_complete_disables_thinking_for_databricks_claude_sonnet_5(
+        self, mock_litellm: MagicMock, model: str, reasoning_effort: str
+    ) -> None:
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                model,
+                temperature=0.0,
+                json_schema_mode=False,
+                reasoning_effort=reasoning_effort,
+            )
+            await client.complete(messages=[{"role": "user", "content": "test"}])
+
+        call_kwargs = mock_litellm.acompletion.call_args[1]
+        assert call_kwargs["thinking"] == {"type": "disabled"}
+        assert "output_config" not in call_kwargs
+        assert "reasoning_effort" not in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_complete_maps_reasoning_display_for_databricks_claude_sonnet_5(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                "databricks/databricks-claude-sonnet-5",
+                temperature=0.0,
+                json_schema_mode=False,
+                reasoning_effort="high",
+                reasoning_display="summarized",
+            )
+            await client.complete(messages=[{"role": "user", "content": "test"}])
+
+        call_kwargs = mock_litellm.acompletion.call_args[1]
+        assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert call_kwargs["output_config"] == {"effort": "high"}
+        assert "reasoning_display" not in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_complete_omits_reasoning_display_for_databricks_claude_sonnet_5(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                "databricks/databricks-claude-sonnet-5",
+                temperature=0.0,
+                json_schema_mode=False,
+                reasoning_effort="high",
+            )
+            await client.complete(messages=[{"role": "user", "content": "test"}])
+
+        call_kwargs = mock_litellm.acompletion.call_args[1]
+        assert call_kwargs["thinking"] == {"type": "adaptive", "display": "omitted"}
+        assert call_kwargs["output_config"] == {"effort": "high"}
+
+    @pytest.mark.asyncio
     async def test_complete_retries_on_timeout(self, mock_litellm: MagicMock) -> None:
         call_count = 0
 

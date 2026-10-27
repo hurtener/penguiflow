@@ -111,6 +111,12 @@ def test_genai_prices_parity_for_production_models(model: str, expected: tuple[f
     assert get_pricing(model) == pytest.approx(expected)
 
 
+def test_databricks_claude_sonnet_5_cost_parity() -> None:
+    assert calculate_cost(
+        "databricks/databricks-claude-sonnet-5", input_tokens=1000, output_tokens=1000
+    ) == pytest.approx(0.012)
+
+
 def test_calculate_cost_uses_genai_prices_tiered_usage() -> None:
     assert get_pricing("claude-sonnet-4.5") == pytest.approx((0.003, 0.015))
 

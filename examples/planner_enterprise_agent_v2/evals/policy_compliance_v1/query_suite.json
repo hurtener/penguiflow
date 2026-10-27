@@ -1,0 +1,26 @@
+{
+  "suite_id": "policy-compliance-v1",
+  "workload": "planner_enterprise_agent_v2",
+  "queries": [
+    {
+      "query_id": "pc-001",
+      "text": "Analyze the latest architecture document and summarize key constraints",
+      "split": "val"
+    },
+    {
+      "query_id": "pc-002",
+      "text": "Bug report: checkout service crash with traceback on payment submit",
+      "split": "val"
+    },
+    {
+      "query_id": "pc-003",
+      "text": "Need quick guidance for team communication norms",
+      "split": "test"
+    },
+    {
+      "query_id": "pc-004",
+      "text": "Please analyze deployment report files for regressions",
+      "split": "test"
+    }
+  ]
+}

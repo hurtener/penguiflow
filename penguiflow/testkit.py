@@ -175,30 +175,21 @@ async def assert_preserves_message_envelope(
 ) -> Message:
     """Execute ``node`` and assert it preserves the ``Message`` envelope.
 
-    Parameters
-    ----------
-    node:
-        Either a bare async callable or a :class:`penguiflow.node.Node` whose
-        first parameter is a :class:`~penguiflow.types.Message` instance.
-    message:
-        Optional sample message. When omitted, a minimal envelope is
-        synthesised.
-    ctx:
-        Optional context object passed to the node. By default a stub context
-        is used that simply no-ops ``emit``/``emit_nowait``.
+    Args:
+        node: Either a bare async callable or a :class:`penguiflow.node.Node` whose
+            first parameter is a :class:`~penguiflow.types.Message` instance.
+        message: Optional sample message. When omitted, a minimal envelope is
+            synthesised.
+        ctx: Optional context object passed to the node. By default a stub context
+            is used that simply no-ops ``emit``/``emit_nowait``.
 
-    Returns
-    -------
-    Message
-        The resulting message from the node, allowing additional assertions.
+    Returns:
+        Message: The resulting message from the node, allowing additional assertions.
 
-    Raises
-    ------
-    AssertionError
-        If the node does not return a ``Message`` or mutates core envelope
-        fields (headers or trace_id).
-    TypeError
-        If ``node`` is not awaitable.
+    Raises:
+        AssertionError: If the node does not return a ``Message`` or mutates core envelope
+            fields (headers or trace_id).
+        TypeError: If ``node`` is not awaitable.
     """
 
     from .node import Node  # Local import to avoid circular dependency

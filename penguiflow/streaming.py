@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from .types import Message, StreamChunk
 
 if TYPE_CHECKING:  # pragma: no cover - only used for typing
-    from .core import PenguiFlow
+    from .core import Context, PenguiFlow
     from .node import Node
 
 
@@ -20,7 +20,17 @@ def format_sse_event(
     event_name: str | None = None,
     retry_ms: int | None = None,
 ) -> str:
-    """Render a ``StreamChunk`` as an SSE event string."""
+    """Render a ``StreamChunk`` as an SSE event string.
+
+    Args:
+        chunk: The stream chunk to render.
+        event_name: Optional SSE ``event:`` name; defaults to ``"done"`` when
+            ``chunk.done`` is ``True``, otherwise ``"chunk"``.
+        retry_ms: Optional SSE ``retry:`` value in milliseconds.
+
+    Returns:
+        A newline-terminated SSE event string (including the trailing blank line).
+    """
 
     event = event_name or ("done" if chunk.done else "chunk")
     lines: list[str] = []
@@ -36,7 +46,16 @@ def format_sse_event(
 
 
 def chunk_to_ws_json(chunk: StreamChunk, *, extra: dict[str, Any] | None = None) -> str:
-    """Serialize a ``StreamChunk`` as a JSON WebSocket payload."""
+    """Serialize a ``StreamChunk`` as a JSON WebSocket payload.
+
+    Args:
+        chunk: The stream chunk to serialize.
+        extra: Additional key/value pairs to merge into the JSON payload.
+
+    Returns:
+        A JSON-encoded string with ``stream_id``, ``seq``, ``text``, ``done``, and
+        ``meta`` fields, plus any entries from ``extra``.
+    """
 
     payload = {
         "stream_id": chunk.stream_id,
@@ -64,6 +83,24 @@ async def stream_flow(
     is ``True`` the first non-chunk payload encountered after a terminal chunk is also
     yielded before the generator stops. The caller is responsible for stopping the flow
     when finished.
+
+    Args:
+        flow: The running ``PenguiFlow`` instance to emit into and fetch results from.
+        parent_msg: The message to emit as the starting point of the run.
+        to: Optional node or sequence of nodes to route ``parent_msg`` to; forwarded to
+            ``flow.emit``.
+        timeout: Optional per-fetch timeout in seconds; raises on expiry via
+            ``asyncio.wait_for``.
+        include_final: When ``True``, also yield the first non-chunk payload observed
+            after a terminal (``done=True``) chunk.
+
+    Yields:
+        Each ``StreamChunk`` produced by the flow, and optionally a trailing non-chunk
+        payload when ``include_final`` is ``True``.
+
+    Raises:
+        asyncio.TimeoutError: If ``timeout`` is set and a fetch does not complete in
+            time.
     """
 
     await flow.emit(parent_msg, to=to)
@@ -93,14 +130,28 @@ EventAdapter = Callable[[Any], tuple[str, bool, dict[str, Any]]]
 
 async def emit_stream_events(
     source: AsyncIterable[Any],
-    ctx,
+    ctx: Context,
     parent_msg: Message,
     *,
     adapter: EventAdapter | None = None,
     to: Node | Sequence[Node] | None = None,
     final_meta: dict[str, Any] | None = None,
 ) -> None:
-    """Bridge an async iterable of provider events into ``StreamChunk`` emissions."""
+    """Bridge an async iterable of provider events into ``StreamChunk`` emissions.
+
+    Args:
+        source: An async iterable of provider-specific event objects.
+        ctx: The ``Context`` used to emit chunks via ``ctx.emit_chunk``.
+        parent_msg: The parent message associated with the emitted chunks.
+        adapter: Optional callable converting a provider event into a
+            ``(text, done, meta)`` tuple; defaults to ``(str(event), False, {})``.
+        to: Optional node or sequence of nodes to route emitted chunks to.
+        final_meta: Metadata to attach to a synthesized terminal chunk if the source
+            completes without ever emitting a chunk with ``done=True``.
+
+    Returns:
+        None. Chunks are emitted as a side effect via ``ctx.emit_chunk``.
+    """
 
     def default_adapter(event: Any) -> tuple[str, bool, dict[str, Any]]:
         return str(event), False, {}

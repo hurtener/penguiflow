@@ -105,7 +105,22 @@ POPULAR_MCP_SERVERS = {
 
 
 def get_preset(name: str) -> ExternalToolConfig:
-    """Get a pre-configured MCP server config."""
+    """Get a pre-configured MCP server config by name.
+
+    Looks up ``name`` in :data:`POPULAR_MCP_SERVERS`. These presets default
+    to ``npx -y ...`` stdio connections intended for local development; see
+    the module docstring for production alternatives.
+
+    Args:
+        name: Preset key (e.g. ``"github"``, ``"filesystem"``, ``"slack"``).
+
+    Returns:
+        The preset's :class:`~penguiflow.tools.config.ExternalToolConfig`.
+        Note this returns the shared preset instance, not a copy.
+
+    Raises:
+        ValueError: If ``name`` is not a known preset.
+    """
     if name not in POPULAR_MCP_SERVERS:
         raise ValueError(f"Unknown preset: {name}. Available: {list(POPULAR_MCP_SERVERS.keys())}")
     return POPULAR_MCP_SERVERS[name]
@@ -379,7 +394,12 @@ def merge_artifact_preset(
 
 
 def list_artifact_presets() -> list[str]:
-    """List available artifact preset names."""
+    """List available artifact preset names.
+
+    Returns:
+        Sorted list of preset keys registered in :data:`ARTIFACT_PRESETS`
+        (e.g. ``["filesystem", "github", "google-drive", "tableau"]``).
+    """
     return sorted(ARTIFACT_PRESETS.keys())
 
 

@@ -27,19 +27,16 @@ def log_flow_events(
 ) -> Middleware:
     """Return middleware that emits structured node lifecycle logs.
 
-    Parameters
-    ----------
-    logger:
-        Optional :class:`logging.Logger` instance. When omitted a logger named
-        ``"penguiflow.flow"`` is used.
-    start_level, success_level, error_level:
-        Logging levels for ``node_start``, ``node_success``, and
-        ``node_error`` events respectively.
-    latency_callback:
-        Optional callable invoked with ``(event_type, latency_ms, event)`` for
-        ``node_success`` and ``node_error`` events. Use this hook to connect the
-        middleware to histogram-based metrics backends without
-        re-implementing timing logic.
+    Args:
+        logger: Optional :class:`logging.Logger` instance. When omitted a logger named
+            ``"penguiflow.flow"`` is used.
+        start_level: Logging level for ``node_start`` events.
+        success_level: Logging level for ``node_success`` events.
+        error_level: Logging level for ``node_error`` events.
+        latency_callback: Optional callable invoked with ``(event_type, latency_ms, event)`` for
+            ``node_success`` and ``node_error`` events. Use this hook to connect the
+            middleware to histogram-based metrics backends without
+            re-implementing timing logic.
     """
 
     log = logger or logging.getLogger("penguiflow.flow")

@@ -33,13 +33,36 @@ from .redaction import redact_pii, redact_tool_references
 
 
 class SkillProvider(Protocol):
+    """Extension point for retrieving, searching, and formatting skills.
+
+    Implementations back the skill-related tools (retrieval, search, listing, directory)
+    exposed to agents. Built-in implementations are :class:`LocalSkillProvider` (backed
+    by a local SQLite store) and :class:`CompositeSkillProvider` (fans out to multiple
+    providers). Custom implementations may wrap remote skill catalogs, alternate storage
+    backends, or additional filtering/ranking logic; they must implement every method
+    below since callers do not duck-type around missing methods.
+    """
+
     async def get_relevant(
         self,
         query: SkillQuery,
         *,
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
-    ) -> RetrievalResponse: ...
+    ) -> RetrievalResponse:
+        """Retrieve skills relevant to a task query, ranked and token-budgeted for injection.
+
+        Args:
+            query: Task description and retrieval parameters (search type, top_k, filters).
+            tool_context: Caller-scoped context (e.g. tenant_id, project_id) used to filter
+                skills by scope.
+            capability_context: Optional snapshot of allowed tools/namespaces/tags used to
+                filter out and redact skills the caller cannot use.
+
+        Returns:
+            The ranked skills plus pre-formatted, token-budgeted context text.
+        """
+        ...
 
     async def search(
         self,
@@ -47,7 +70,19 @@ class SkillProvider(Protocol):
         *,
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
-    ) -> SkillSearchResponse: ...
+    ) -> SkillSearchResponse:
+        """Search skills by free-text query, returning lightweight ranked matches.
+
+        Args:
+            query: Search text and parameters (search type, limit, filters).
+            tool_context: Caller-scoped context used to filter skills by scope.
+            capability_context: Optional snapshot of allowed tools/namespaces/tags used to
+                filter out results the caller cannot use.
+
+        Returns:
+            Ranked, lightweight search results (name/title/trigger/score).
+        """
+        ...
 
     async def get_by_name(
         self,
@@ -55,7 +90,20 @@ class SkillProvider(Protocol):
         *,
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
-    ) -> list[SkillResultDetailed]: ...
+    ) -> list[SkillResultDetailed]:
+        """Fetch full skill details for a set of known names.
+
+        Args:
+            names: Skill names to fetch.
+            tool_context: Caller-scoped context used to filter skills by scope.
+            capability_context: Optional snapshot of allowed tools/namespaces/tags used to
+                filter out and redact skills the caller cannot use.
+
+        Returns:
+            Detailed skill records for the requested names that are applicable and found;
+            names that do not exist or are filtered out are silently omitted.
+        """
+        ...
 
     async def list(
         self,
@@ -63,7 +111,20 @@ class SkillProvider(Protocol):
         *,
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
-    ) -> SkillListResponse: ...
+    ) -> SkillListResponse:
+        """List skills with pagination, independent of any search query.
+
+        Args:
+            req: Pagination and filter parameters (page, page_size, task_type, origin,
+                tags, namespace).
+            tool_context: Caller-scoped context used to filter skills by scope.
+            capability_context: Optional snapshot of allowed tools/namespaces/tags used to
+                filter out skills the caller cannot use.
+
+        Returns:
+            A page of lightweight skill entries plus the total applicable count.
+        """
+        ...
 
     async def directory(
         self,
@@ -71,16 +132,45 @@ class SkillProvider(Protocol):
         *,
         tool_context: Mapping[str, object],
         capability_context: SkillCapabilityContext | None = None,
-    ) -> Sequence[SkillDirectoryEntry]: ...
+    ) -> Sequence[SkillDirectoryEntry]:
+        """Build the always-available skills directory listing (pinned plus recent/top).
+
+        Args:
+            config: Directory configuration (enabled flag, max entries, selection
+                strategy).
+            tool_context: Caller-scoped context used to filter skills by scope.
+            capability_context: Optional snapshot of allowed tools/namespaces/tags used to
+                filter out skills the caller cannot use.
+
+        Returns:
+            Directory entries in priority order (pinned first), or an empty sequence
+            when the directory is disabled.
+        """
+        ...
 
     async def format_for_injection(
         self,
         skills: Sequence[SkillResultDetailed],
         *,
         max_tokens: int,
-    ) -> tuple[str, int, int, bool]: ...
+    ) -> tuple[str, int, int, bool]:
+        """Render skills into prompt-ready text within a token budget.
+
+        Args:
+            skills: Skills to render, most relevant first.
+            max_tokens: Approximate token budget for the rendered text.
+
+        Returns:
+            A tuple of ``(formatted_text, raw_tokens_est, final_tokens_est,
+            was_summarized)`` where ``was_summarized`` indicates content was trimmed to
+            fit the budget.
+        """
+        ...
 
 
+# Factory signature for constructing a SkillProvider from a SkillsConfig. Implementations
+# typically use this to lazily build a LocalSkillProvider (or composite) once
+# configuration is available, e.g. at flow/agent startup.
 SkillProviderFactory = Callable[[SkillsConfig], SkillProvider]
 
 
@@ -116,6 +206,21 @@ def build_skill_capability_context(
     all_tool_names: Iterable[str] | None = None,
     allowed_tool_names: Iterable[str] | None = None,
 ) -> SkillCapabilityContext:
+    """Build a :class:`SkillCapabilityContext` snapshot from tool execution specs and names.
+
+    Args:
+        execution_specs: Optional mapping of tool name to tool spec, used to derive
+            `all_tool_names` when not given explicitly, and to read each tool's `tags`
+            attribute for `allowed_tool_tags`.
+        all_tool_names: Optional explicit set of every known tool name. Falls back to
+            the keys of `execution_specs` when omitted.
+        allowed_tool_names: Optional explicit set of tool names the caller may invoke.
+            Defaults to all known tool names when omitted (i.e. nothing is restricted).
+
+    Returns:
+        A capability context with derived `allowed_namespaces` and `allowed_tool_tags`
+        computed from `allowed_tool_names`.
+    """
     all_names = set(str(name) for name in (all_tool_names or ()) if str(name).strip())
     if not all_names and execution_specs is not None:
         all_names = {str(name) for name in execution_specs.keys() if str(name).strip()}
@@ -341,6 +446,13 @@ def _dedupe_by_name(items: Sequence[_T], key: Callable[[_T], str]) -> list[_T]:
 
 
 class LocalSkillProvider:
+    """Default :class:`SkillProvider` backed by a local SQLite-based skill store.
+
+    Loads skills from configured `SkillPackConfig` packs into a `LocalSkillStore` and
+    serves retrieval, search, listing, and directory queries against it, applying scope
+    filtering, capability-based redaction, and PII redaction as configured.
+    """
+
     def __init__(self, config: SkillsConfig, *, store: LocalSkillStore | None = None) -> None:
         self._config = config
         db_path = Path(config.cache_dir) / "skills.db"
@@ -786,6 +898,13 @@ class LocalSkillProvider:
 
 
 class CompositeSkillProvider:
+    """:class:`SkillProvider` that fans a query out across multiple providers and merges results.
+
+    Useful for combining a local pack-backed provider with a remote/learned-skill
+    provider; results are deduplicated by skill name (first provider wins) and
+    truncated to the requested size.
+    """
+
     def __init__(self, providers: Sequence[SkillProvider], *, config: SkillsConfig) -> None:
         self._providers = [provider for provider in providers]
         self._config = config

@@ -1,0 +1,100 @@
+# LLM layer
+
+The native, type-safe LLM abstraction: the client and its config/result types,
+message and content-part types, provider adapters, structured-output planning,
+routing helpers, pricing, telemetry, tracing, retry, and the typed error
+hierarchy.
+
+::: penguiflow.llm
+    options:
+      members:
+        - LLMClient
+        - LLMClientConfig
+        - LLMResult
+        - generate_structured
+        - LLMMessage
+        - LLMRequest
+        - Role
+        - ContentPart
+        - TextPart
+        - ImagePart
+        - AudioPart
+        - ToolCallPart
+        - ToolResultPart
+        - ToolSpec
+        - StructuredOutputSpec
+        - CompletionResponse
+        - StreamEvent
+        - StreamCallback
+        - CancelToken
+        - Cost
+        - Usage
+        - extract_single_tool_call
+        - extract_text
+        - strip_markdown_fences
+        - Provider
+        - create_provider
+        - AnthropicProvider
+        - OpenAIProvider
+        - OpenRouterProvider
+        - GoogleProvider
+        - BedrockProvider
+        - DatabricksProvider
+        - NIMProvider
+        - OutputMode
+        - SchemaPlan
+        - choose_output_mode
+        - plan_schema
+        - NativeLLMAdapter
+        - create_native_adapter
+        - FallbackLLMClient
+        - ModelFallbackConfig
+        - CooldownStore
+        - ParsedModel
+        - ProviderType
+        - parse_model_string
+        - build_model_string
+        - normalize_model_id
+        - get_provider_for_model
+        - estimate_context_window
+        - is_reasoning_model
+        - is_vision_model
+        - ModelProfile
+        - get_profile
+        - register_profile
+        - calculate_cost
+        - calculate_cost_from_usage
+        - get_pricing
+        - register_pricing
+        - LLMEvent
+        - TelemetryCallback
+        - TelemetryHooks
+        - TimingContext
+        - create_mlflow_callback
+        - create_prometheus_callback
+        - get_telemetry_hooks
+        - set_telemetry_hooks
+        - RetryConfig
+        - RetryState
+        - ModelRetry
+        - ValidationRetry
+        - call_with_retry
+        - LLMCallSpan
+        - LLMTraceSink
+        - LoggingLLMTraceSink
+        - MlflowLLMTraceSink
+        - resolve_trace_sink_from_env
+        - TRACING_ENV_VAR
+        - LLMError
+        - LLMAuthError
+        - LLMCancelledError
+        - LLMContextLengthError
+        - LLMInvalidRequestError
+        - LLMParseError
+        - LLMRateLimitError
+        - LLMServerError
+        - LLMTimeoutError
+        - LLMValidationError
+        - is_context_length_error
+        - is_retryable
+        - map_status_to_error

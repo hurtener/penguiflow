@@ -14,6 +14,7 @@ from typing import Any, get_args, get_origin
 from pydantic import BaseModel
 
 from ..llm.errors import LLMRateLimitError
+from ..llm.profiles import get_profile
 from ..llm.types import TextPart
 from . import prompts
 from .models import (
@@ -556,6 +557,7 @@ class _LiteLLMJSONClient:
         streaming_enabled: bool = False,
         use_native_reasoning: bool = True,
         reasoning_effort: str | None = None,
+        reasoning_display: str | None = None,
         retry_rate_limit_errors: bool = True,
     ) -> None:
         import warnings
@@ -575,6 +577,7 @@ class _LiteLLMJSONClient:
         self._streaming_enabled = streaming_enabled
         self._use_native_reasoning = use_native_reasoning
         self._reasoning_effort = reasoning_effort
+        self._reasoning_display = reasoning_display
         self._retry_rate_limit_errors = retry_rate_limit_errors
 
     async def complete(
@@ -598,15 +601,39 @@ class _LiteLLMJSONClient:
             params = {"model": self._llm}
         else:
             params = dict(self._llm)
-        params.setdefault("temperature", self._temperature)
+        model_name = self._llm if isinstance(self._llm, str) else self._llm.get("model", "")
+        profile = get_profile(model_name)
+        if not isinstance(self._llm, str):
+            for param in profile.unsupported_request_params:
+                params.pop(param, None)
+            if not profile.supports_temperature:
+                params.pop("temperature", None)
+        if profile.supports_temperature:
+            params.setdefault("temperature", self._temperature)
         params["messages"] = list(messages)
 
         # Only pass reasoning_effort if the model actually supports native reasoning.
         # Some providers (e.g., Databricks) crash during parameter mapping if
         # reasoning_effort is passed to non-reasoning models, even with drop_params=True.
-        model_name = self._llm if isinstance(self._llm, str) else self._llm.get("model", "")
-        if self._use_native_reasoning and self._reasoning_effort is not None and _supports_reasoning(model_name):
-            params["reasoning_effort"] = self._reasoning_effort
+        if (
+            self._use_native_reasoning
+            and self._reasoning_effort is not None
+            and (_supports_reasoning(model_name) or profile.reasoning_request_style == "adaptive_effort")
+        ):
+            if profile.reasoning_request_style == "adaptive_effort":
+                effort = str(self._reasoning_effort).strip().lower()
+                if effort in ("none", "off", "disabled", "false", "0"):
+                    params["thinking"] = {"type": "disabled"}
+                else:
+                    params["thinking"] = {"type": "adaptive"}
+                    display = self._reasoning_display
+                    if display not in {"summarized", "omitted"}:
+                        display = profile.reasoning_display_default
+                    if display is not None:
+                        params["thinking"]["display"] = display
+                    params["output_config"] = {"effort": effort}
+            else:
+                params["reasoning_effort"] = self._reasoning_effort
             # Providers vary in support; drop unsupported params instead of failing.
             params.setdefault("drop_params", True)
         if self._json_schema_mode and response_format is not None:

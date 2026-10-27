@@ -46,6 +46,26 @@ Optimizers like DSPy GEPA need two things:
 
 PenguiFlow should make “quality” a first-class, trace-derived workflow.
 
+## Implementation Snapshot (Current)
+
+Implemented user-facing workflow:
+
+- `penguiflow eval collect --spec ...` (minimal dataset export: `dataset.jsonl` + `manifest.json`)
+- `penguiflow eval evaluate --spec ...` (rerun eval on existing `dataset.jsonl`)
+
+Implemented library API surface:
+
+- `collect_traces(...)`
+- `export_dataset(...)`
+- `evaluate_dataset(...)`
+
+Known current behavior:
+
+- baseline is implicit; candidates may be empty (baseline-only mode)
+- context-stability hashing supports default `ignore_keys`
+- eval execution is in-memory by default with no workspace artifacts
+- optional single JSON report file is supported via `report_path`
+
 ---
 
 ## Goals
@@ -62,6 +82,7 @@ PenguiFlow should make “quality” a first-class, trace-derived workflow.
   - Exclude raw `tool_context`/`llm_context` by default.
   - Never inline heavy tool outputs; spill to artifacts if possible.
   - Deterministic truncation + hashing/redaction options.
+  - Provide an explicit local-only profile for optimization fairness runs that includes full contexts.
 - Provide a minimal “analyze-only” metrics runner that computes deterministic aggregates from exports:
   - success rate
   - p50/p95 latency by node/tool
@@ -139,6 +160,7 @@ These already exist and strongly support the RFC:
 - Optional `StateStore` capabilities:
   - `SupportsTrajectories.save_trajectory/get_trajectory/list_traces`.
   - `SupportsPlannerEvents.save_planner_event/list_planner_events`.
+  - `SupportsTraceQuery.list_trace_refs` (cross-session trace selection).
   - `SupportsArtifacts.artifact_store` + `ArtifactStore` protocol.
 - Planner-native structure:
   - `Trajectory` (query, contexts, steps, observations, streams, background results, metadata).
@@ -192,7 +214,8 @@ Design constraints:
 
 - MUST tolerate missing capabilities: exporter may produce partial rows.
 - MUST remain “row-small”: large payloads MUST be truncated or externalized.
-- MUST be safe-by-default: sensitive contexts and tool outputs excluded unless explicitly requested.
+- MUST export maximal available trajectory evidence by default for offline metric/debug workflows.
+- MUST keep explicit redaction/provenance metadata so operators can audit what was included.
 
 #### Canonical Shape (conceptual)
 
@@ -220,8 +243,19 @@ Design constraints:
   "trajectory": {
     "summary": null,
     "metadata": {},
-    "steps": [],
+    "steps": 0,
     "background_results": {}
+  },
+
+  "trajectory_full": {
+    "query": "User query",
+    "llm_context": {},
+    "tool_context": {},
+    "steps": [],
+    "summary": null,
+    "metadata": {},
+    "artifacts": {},
+    "sources": []
   },
 
   "events": {
@@ -264,6 +298,8 @@ Design constraints:
 
 - `schema_version`
 - `trace_id`
+- `inputs.llm_context` and `inputs.tool_context` MUST be available in at least one exporter profile (`poc_full_context`) for context-stable optimization runs.
+- `trajectory_full` SHOULD be included whenever trajectory capability is available, including step-level records under `trajectory_full.steps`.
 - `outputs.status` (even if `unknown`)
 - `redaction.profile`
 - `provenance`
@@ -533,6 +569,12 @@ Exporter MUST support explicit export profiles; defaults MUST be safe.
 - remove or hash: query, outputs.final, any string fields likely containing sensitive content
 - include only aggregates + structural metadata
 
+#### `poc_full_context` (local-only)
+
+- include: `inputs.llm_context`, `inputs.tool_context`, trajectory + planner events
+- intended only for local/private optimization fairness checks
+- MUST NOT be the default profile
+
 #### `replayable` (future)
 
 - include fixtures sufficient to replay tool calls safely (pure/read tools only), preferably as artifact refs
@@ -624,6 +666,31 @@ Notes:
 - `trace` enables deterministic metrics from execution data.
 - `pred_name`/`pred_trace` enable component-level feedback for optimizers.
 
+### Dataset-Metric Coupling (Normative)
+
+Datasets are not metric-agnostic in practice. Each exported view used for evaluation MUST declare metric compatibility metadata in manifest:
+
+- `metric.id`
+- `metric.version`
+- `metric.requirements` (required fields/signals in `gold_trace` and `pred_trace`)
+- `dataset_view.unit` (`trace|react_step|node_fragment`)
+
+Runner MUST validate requirements before execution and fail fast on incompatibility.
+
+### API Consumer Metric Definition (Normative)
+
+Metric implementation belongs to the API consumer/project, not hardcoded in PenguiFlow core.
+
+Core eval modules provide runners/contracts/import-path loading only. Workload-specific metrics
+(for example enterprise routing policy checks) MUST live in project code or scaffolding templates,
+not in `penguiflow.evals`.
+
+MVP runner behavior:
+
+- load metric callable by import path (for example `my_project.evals.metrics:policy_metric`),
+- call it using GEPA-compatible signature,
+- persist metric id/version into reports/manifests.
+
 ### Analyze-only runner (Phase 1)
 
 Consumes `trace.jsonl` and emits:
@@ -652,6 +719,14 @@ Outputs:
 - `predictions.jsonl` (pred + provenance)
 - `results.jsonl` (metric score + optional feedback)
 - `report.json` aggregates + slices
+
+Context fairness requirement:
+
+- harness report MUST include context-stability aggregates per mode:
+  - `context_match_rate`
+  - `context_stability_pass`
+  - `context_comparable_count`
+- candidate comparisons are valid only when context stability passes.
 
 ---
 
@@ -746,7 +821,7 @@ Primary risk: sensitive data leakage via exports.
 
 Mitigations (MUST):
 
-- safe-by-default export profiles that exclude contexts and tool outputs
+- profile-driven export controls (current eval workflow includes contexts for fairness; stricter shareable profile remains required)
 - deterministic truncation + hashing options
 - explicit opt-in for sensitive fields
 - artifact references instead of inline payloads
@@ -766,13 +841,12 @@ This RFC does not mandate exact paths, but a coherent layout helps:
 
 ```
 penguiflow/evals/
-  schema.py            # TraceExampleV1, DatasetViewV1, PatchBundleV1 models
+  api.py               # collect/export/run/evaluate entrypoints + spec loaders
+  workflow.py          # export->analyze->sweep->holdout orchestration
   export.py            # StateStore capability detection + JSONL exporter
-  redact.py            # export profiles + truncation + hashing utilities
-  views.py             # projection engine + manifest writer
   analyze.py           # analyze-only metrics runner
   runner.py            # harness eval runner
-  patches.py           # patch point registry + patch application
+  sweep.py             # manual candidate sweep + patchbundle emission
 ```
 
 Playground additions:
@@ -784,7 +858,9 @@ CLI additions (optional early, not primary):
 
 - `penguiflow eval export …`
 - `penguiflow eval analyze …`
-- `penguiflow eval run …`
+- `penguiflow eval collect …`
+- `penguiflow eval evaluate …`
+- `penguiflow eval evaluate …`
 
 ---
 
@@ -828,12 +904,44 @@ Success criteria:
 - indexed tag lookup capability
 - OpenInference exports as optional adapter
 
+## Standalone Enhancement Backlog (Post-MVP)
+
+These are independent, DSPy-session-inspired improvements that can ship
+incrementally without changing the current collect/evaluate baseline surface.
+
+1. **Explicit dataset projection contract (`with_inputs` parity)**
+   - Add `input_fields` (or explicit `inputs`/`labels`) to dataset rows and manifest.
+   - Keep `gold_trace` as non-input evidence for metrics and auditing.
+
+2. **Metric error policy in specs**
+   - Add `on_metric_error: "zero" | "raise"` to `evaluate.spec.json`.
+   - Optional follow-up: `max_metric_errors` to fail only after repeated issues.
+
+3. **Strict trajectory/prefix mode for linearized views**
+   - Add `strict_trajectory` behavior for step/turn views so invalid later rows do
+     not silently weaken prefix-based training/eval semantics.
+
+4. **Canonical trace vs projection separation**
+   - Keep `trace.jsonl` as canonical evidence.
+   - Keep `view.*.jsonl` / `dataset.jsonl` as lightweight projections with
+     `trace_id` linkage and optional embedded trace payloads.
+
+5. **Context-stability surfaced in minimal evaluate path**
+   - Surface `context_match_rate`, `context_stability_pass`, and
+     `context_comparable_count` in `penguiflow eval evaluate` summaries/reports,
+     not only in harness-mode artifacts.
+
+6. **Metric-dataset compatibility validation**
+   - Persist `metric.id`, `metric.version`, and `metric.requirements` in manifest.
+   - Fail fast when required fields/signals are missing in dataset rows.
+
 ---
 
 ## Open Questions (TODO)
 
-- Where should commands live?
-  - keep `penguiflow-admin` for low-level history/replay, add `penguiflow eval` for eval workflows?
+- Command placement is resolved for MVP:
+  - `penguiflow eval` hosts eval workflows
+  - `penguiflow-admin` remains focused on history/replay primitives
 - Canonical extraction of “final output”:
   - planner traces (trajectory-based) vs flow-only traces (events-only) vs tasks results
 - Pause/resume semantics:
@@ -875,6 +983,8 @@ Success criteria:
 - [ ] Analyze-only metrics runner + report formats.
 - [ ] Define harness runner API + GEPA-compatible metric signature.
 - [ ] Manual sweep runner (list of PatchBundle candidates).
+- [ ] Add metric loading by import path + metric id/version persistence.
+- [ ] Add context-stability fairness checks in harness reports.
 
 ### Templates / Integrations
 
@@ -909,4 +1019,3 @@ def exact_match_metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
         return 0.0
     return 1.0 if str(pred).strip() == gold_answer.strip() else 0.0
 ```
-

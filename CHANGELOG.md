@@ -5,6 +5,86 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 3.12.0 — 2026-08-18
+
+### Added
+- **Trace-derived datasets and evaluations** (`penguiflow.evals` + `penguiflow eval`): recorded
+  planner trajectories become versioned evaluation datasets that can be scored offline, without
+  re-running the agent. `penguiflow eval collect` runs a query suite against a discovered agent and
+  captures its traces; `penguiflow eval evaluate` scores a dataset against val/test splits and gates
+  on a minimum score. Rows follow the `TraceExampleV1` shape specified in
+  `docs/proposals/RFC_TRACE_DERIVED_DATASETS_AND_EVALS.md`.
+
+  Metrics may be synchronous or asynchronous and are awaited on every path, so a metric built on the
+  async `llm_judge` helper works directly. `wrap_metric` adapts several call signatures, from the
+  full `(gold, pred, trace, pred_name, pred_trace)` form down to `(gold, pred)` or a bare
+  `**kwargs`. The `@metric` decorator declares named pass/fail criteria that are reported per case
+  alongside the score.
+
+  The Playground gains the matching workflow: browse and tag traces, export a tagged selection as a
+  dataset, browse discovered metrics, run an evaluation with per-case scores and criteria checks,
+  and compare a prediction trajectory against its gold trace.
+
+  Worth knowing when adopting it:
+  - **Answer text is persisted to the state store, and no redaction is applied on that path.** The
+    `redaction_profile` on an export is recorded as metadata; it does not filter content.
+  - `collect_traces` fails loudly if a run's trajectory does not reach the `state_store` it was
+    given, rather than reporting a successful collection over an empty store. An agent builder or
+    orchestrator that cannot accept an injected `state_store` also warns at build time, before any
+    query runs.
+  - `outputs.status` is a closed enum (`ok` / `error` / `cancelled` / `paused` / `unknown`). Runs
+    that ended without answering — exhausted deadline, hop budget or iteration limit — report
+    `error`, with `trajectory.finish_reason` carrying which one it was.
+  - Exporting a selector that matches no traces is a `400`, not a server error.
+- **`Trajectory.final_answer` and `Trajectory.finish_reason`**: the planner now records both the
+  answer a run terminated with and why it ended, so a persisted trajectory describes the answer the
+  agent gave and not only the route it took. Previously the terminal action was never appended to
+  `trajectory.steps` and the answer travelled only on `PlannerFinish`, so offline scoring had to
+  re-run the agent to see any output.
+
+  `final_answer` is recorded for `answer_complete` terminations only. The deadline, hop-budget and
+  iteration-limit paths pass the last raw tool observation as their finish payload, so reading an
+  answer out of it would promote internal tool data — any tool returning an `answer` key — to the
+  run's answer. Terminations that deliberately produce a user-facing message on a failure reason,
+  currently the guardrail STOP path, supply it explicitly instead.
+
+### Changed
+- `Trajectory.serialise()` emits two additional keys (`final_answer`, `finish_reason`), and
+  `GET /trajectory/{trace_id}` returns them. The change is additive: `from_serialised()` reads both
+  via `.get`, so trajectories stored before this release load unchanged with `None`. Only consumers
+  asserting on the exact serialised key set need updating.
+
+### Fixed
+- Databricks Claude 4.7/4.8 adaptive reasoning is supported through LiteLLM 1.94.0, with the
+  reasoning display path and reasoning config hardened.
+- MCP Apps request typing stabilised, and the dependency floor now prevents CI from resolving
+  MCP 2.x.
+
+## 3.11.1 — 2026-07-09
+
+Documentation-only release. No runtime or public API behavior changes.
+
+### Added
+- **API reference**: we generated a complete per-symbol reference for the public
+  API, published under the docs site's "Reference → API reference" section. Pages
+  are scoped to each package's `__all__` (`penguiflow`, `penguiflow.planner`,
+  `penguiflow.llm`, `penguiflow.tools`), so internal runtime modules are
+  intentionally omitted.
+
+### Changed
+- **Docstring coverage substantially expanded across the public surface** so the
+  API reference renders useful Args/Returns/Raises tables. `ReactPlanner` (class
+  plus `run`/`resume`/`fork`) was reformatted to Google style; planner public
+  models (`models.py`, `trajectory.py`) gained class docstrings and field
+  descriptions; and the core runtime (`core.py`, `types.py`, `node.py`,
+  `patterns.py`, errors/metrics/policies/streaming), sessions, skills, state,
+  tools, remote, and steering modules were backfilled with Google-style
+  docstrings. Docstrings and Pydantic field descriptions only — no logic changes.
+- **Root README refreshed**: sharper positioning line, a problem-first "Why
+  PenguiFlow" section, an architecture diagram, and a link to the new API
+  reference; the stale "2.x line" statement is corrected to the current
+  3.x / SemVer wording.
+
 ## 3.11.0 — 2026-07-08
 
 ### Fixed
