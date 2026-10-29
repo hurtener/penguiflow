@@ -567,22 +567,6 @@ def init_react_planner(
     planner._event_callback = event_callback
     planner._event_buffer = []
 
-    def _emit_llm_usage(input_tokens: int, output_tokens: int, total_tokens: int) -> None:
-        trajectory = planner._active_trajectory
-        trajectory_step = len(trajectory.steps) if trajectory is not None else 0
-        planner._emit_event(
-            PlannerEvent(
-                event_type="llm_usage",
-                ts=planner._time_source(),
-                trajectory_step=trajectory_step,
-                extra={
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "total_tokens": total_tokens,
-                },
-            )
-        )
-
     planner._absolute_max_parallel = absolute_max_parallel
     planner._use_native_reasoning = use_native_reasoning
     planner._reasoning_effort = reasoning_effort
@@ -776,7 +760,6 @@ def init_react_planner(
                 reasoning_display=reasoning_display,
                 fallback=llm_fallback,
                 cooldown_store=fallback_store,
-                on_usage=_emit_llm_usage,
             )
         else:
             planner._client = _build_litellm_client(
@@ -809,7 +792,6 @@ def init_react_planner(
                 timeout_s=llm_timeout_s,
                 fallback=llm_fallback,
                 cooldown_store=fallback_store,
-                on_usage=_emit_llm_usage,
             )
         else:
             planner._memory_summarizer_client = _build_litellm_client(
@@ -834,7 +816,6 @@ def init_react_planner(
                 timeout_s=llm_timeout_s,
                 fallback=llm_fallback,
                 cooldown_store=fallback_store,
-                on_usage=_emit_llm_usage,
             )
         else:
             planner._summarizer_client = _build_litellm_client(
@@ -862,7 +843,6 @@ def init_react_planner(
                     timeout_s=llm_timeout_s,
                     fallback=llm_fallback,
                     cooldown_store=fallback_store,
-                    on_usage=_emit_llm_usage,
                 )
             else:
                 planner._reflection_client = _build_litellm_client(

@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from ..llm.errors import LLMRateLimitError
 from ..llm.profiles import get_profile
+from ..llm.tracing import LLMCallSpan, LLMTraceSink, resolve_trace_sink_from_env
 from ..llm.types import TextPart
 from . import prompts
 from .models import (
@@ -559,6 +560,7 @@ class _LiteLLMJSONClient:
         reasoning_effort: str | None = None,
         reasoning_display: str | None = None,
         retry_rate_limit_errors: bool = True,
+        trace_sink: LLMTraceSink | None = None,
     ) -> None:
         import warnings
 
@@ -579,6 +581,7 @@ class _LiteLLMJSONClient:
         self._reasoning_effort = reasoning_effort
         self._reasoning_display = reasoning_display
         self._retry_rate_limit_errors = retry_rate_limit_errors
+        self._trace_sink = trace_sink if trace_sink is not None else resolve_trace_sink_from_env()
 
     async def complete(
         self,
@@ -588,6 +591,65 @@ class _LiteLLMJSONClient:
         stream: bool = False,
         on_stream_chunk: Callable[[str, bool], None] | None = None,
         on_reasoning_chunk: Callable[[str, bool], None] | None = None,
+    ) -> tuple[str, float]:
+        if self._trace_sink is None:
+            return await self._complete_inner(
+                messages=messages,
+                response_format=response_format,
+                stream=stream,
+                on_stream_chunk=on_stream_chunk,
+                on_reasoning_chunk=on_reasoning_chunk,
+            )
+
+        model_name = self._llm if isinstance(self._llm, str) else self._llm.get("model", "")
+        call = LLMCallSpan(
+            provider="litellm",
+            model=str(model_name or "unknown"),
+            stream=stream,
+            response_format_kind=str((response_format or {}).get("type") or "text"),
+        )
+        with self._trace_sink.span(call):
+            content, cost = await self._complete_inner(
+                messages=messages,
+                response_format=response_format,
+                stream=stream,
+                on_stream_chunk=on_stream_chunk,
+                on_reasoning_chunk=on_reasoning_chunk,
+                _trace_call=call,
+            )
+            call.content_chars = len(content)
+            call.cost_usd = cost
+            return content, cost
+
+    @staticmethod
+    def _record_usage(call: LLMCallSpan | None, usage: Any) -> None:
+        if call is None or usage is None:
+            return
+        if isinstance(usage, Mapping):
+            input_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+            output_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+        else:
+            input_tokens = getattr(usage, "prompt_tokens", getattr(usage, "input_tokens", None))
+            output_tokens = getattr(usage, "completion_tokens", getattr(usage, "output_tokens", None))
+        if (
+            type(input_tokens) is int
+            and type(output_tokens) is int
+            and input_tokens >= 0
+            and output_tokens >= 0
+            and (input_tokens > 0 or output_tokens > 0)
+        ):
+            call.input_tokens = input_tokens
+            call.output_tokens = output_tokens
+
+    async def _complete_inner(
+        self,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
+        on_reasoning_chunk: Callable[[str, bool], None] | None = None,
+        _trace_call: LLMCallSpan | None = None,
     ) -> tuple[str, float]:
         try:
             import litellm
@@ -708,6 +770,8 @@ class _LiteLLMJSONClient:
 
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
+            if _trace_call is not None:
+                _trace_call.attempts = attempt + 1
             try:
                 async with asyncio.timeout(self._timeout_s):
                     if allow_streaming and on_stream_chunk is not None:
@@ -727,6 +791,7 @@ class _LiteLLMJSONClient:
                             )
                             if chunk_usage:
                                 usage_payload = chunk_usage
+                                self._record_usage(_trace_call, chunk_usage)
 
                             delta_content: str | None = None
                             if isinstance(chunk, Mapping):
@@ -903,6 +968,8 @@ class _LiteLLMJSONClient:
                         if isinstance(response, Mapping)
                         else 0.0
                     )
+                    usage = response.get("usage") if isinstance(response, Mapping) else getattr(response, "usage", None)
+                    self._record_usage(_trace_call, usage)
                     logger.debug(
                         "llm_call_success",
                         extra={

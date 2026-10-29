@@ -10,14 +10,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
 {% if with_a2a %}
-    "penguiflow[planner,a2a-server]",
+    "penguiflow[planner,a2a-server{% if mlflow_enabled %},mlflow{% endif %}]",
 {% else %}
-    "penguiflow[planner]",
+    "penguiflow[planner{% if mlflow_enabled %},mlflow{% endif %}]",
 {% endif %}
     "pydantic>=2.6",
-{% if mlflow_enabled %}
-    "mlflow-skinny>=3.17.1,<4",
-{% endif %}
 ]
 
 [project.optional-dependencies]

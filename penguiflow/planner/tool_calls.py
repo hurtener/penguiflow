@@ -58,31 +58,6 @@ class ToolCallOutcome:
     background_spawned: bool = False
 
 
-def _emit_paused_tool_result(
-    planner: Any,
-    *,
-    trajectory: Trajectory,
-    spec: Any,
-    tool_call_id: str,
-    action_seq: int,
-    pause: PlannerPause,
-) -> None:
-    planner._emit_event(
-        PlannerEvent(
-            event_type="tool_call_result",
-            ts=planner._time_source(),
-            trajectory_step=len(trajectory.steps),
-            extra={
-                "tool_call_id": tool_call_id,
-                "tool_name": spec.name,
-                "result_json": _safe_json_dumps({"pause": pause.reason, "payload": dict(pause.payload)}),
-                "outcome": "paused",
-                "action_seq": action_seq,
-            },
-        )
-    )
-
-
 async def execute_tool_call(
     planner: Any,
     *,
@@ -177,24 +152,8 @@ async def execute_tool_call(
                         pause_payload,
                         trajectory,
                     )
-                except _PlannerPauseSignal as signal:
-                    _emit_paused_tool_result(
-                        planner,
-                        trajectory=trajectory,
-                        spec=spec,
-                        tool_call_id=tool_call_id,
-                        action_seq=action_seq,
-                        pause=signal.pause,
-                    )
+                except _PlannerPauseSignal:
                     raise
-                _emit_paused_tool_result(
-                    planner,
-                    trajectory=trajectory,
-                    spec=spec,
-                    tool_call_id=tool_call_id,
-                    action_seq=action_seq,
-                    pause=pause,
-                )
                 return ToolCallOutcome(
                     pause=pause,
                     streams=None,
@@ -380,14 +339,6 @@ async def execute_tool_call(
         else:
             result = await spec.node.func(parsed_args, ctx)
     except _PlannerPauseSignal as signal:
-        _emit_paused_tool_result(
-            planner,
-            trajectory=trajectory,
-            spec=spec,
-            tool_call_id=tool_call_id,
-            action_seq=action_seq,
-            pause=signal.pause,
-        )
         return ToolCallOutcome(
             pause=signal.pause,
             streams=ctx._collect_chunks() or None,
@@ -530,24 +481,8 @@ async def execute_tool_call(
                         pause_payload,
                         trajectory,
                     )
-                except _PlannerPauseSignal as signal:
-                    _emit_paused_tool_result(
-                        planner,
-                        trajectory=trajectory,
-                        spec=spec,
-                        tool_call_id=tool_call_id,
-                        action_seq=action_seq,
-                        pause=signal.pause,
-                    )
+                except _PlannerPauseSignal:
                     raise
-                _emit_paused_tool_result(
-                    planner,
-                    trajectory=trajectory,
-                    spec=spec,
-                    tool_call_id=tool_call_id,
-                    action_seq=action_seq,
-                    pause=pause,
-                )
                 return ToolCallOutcome(
                     pause=pause,
                     streams=ctx._collect_chunks() or None,

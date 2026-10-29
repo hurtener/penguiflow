@@ -33,7 +33,10 @@ PenguiFlow intentionally does **not** ship:
 - a built-in metrics backend or always-on metrics server,
 - a vendor-owned observability integration for Datadog, New Relic, Grafana Cloud, Honeycomb, or similar platforms.
 
-Vendor integrations in the codebase are **examples and hooks**, not platform guarantees. If you need production observability, you must wire PenguiFlow events into your own stack deliberately.
+MLflow is available as an optional tracing integration for planner-based
+agents. Other vendor integrations in the codebase are **examples and hooks**,
+not platform guarantees. If you need production observability, wire PenguiFlow
+events into your own stack deliberately.
 
 ## Contract surface
 
@@ -172,6 +175,15 @@ Important boundary:
 See:
 
 - **[Background tasks](../planner/background-tasks.md)**
+
+### Optional MLflow tracing
+
+Install `penguiflow[mlflow]` and use `penguiflow.observability.AgentTelemetry`
+with `mlflow_enabled=True` to trace agent runs and tool calls. Set
+`PENGUIFLOW_LLM_TRACING=mlflow` to enable provider-call spans for the built-in
+native and LiteLLM clients. LLM spans contain metadata and provider-reported
+token counts, not prompts or completions. See
+**[MLflow tracing for existing agents](mlflow-existing-agents.md)**.
 
 ## Recommended capture strategy
 

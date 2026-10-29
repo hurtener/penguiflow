@@ -98,12 +98,14 @@ def test_run_new_adds_mlflow_only_when_enabled(tmp_path: Path, template: str) ->
 
     enabled_project, enabled_package = _project_paths(tmp_path, f"{template}-mlflow")
     disabled_project, disabled_package = _project_paths(tmp_path, f"{template}-plain")
-    assert "mlflow-skinny>=3.17.1,<4" in (enabled_project / "pyproject.toml").read_text()
-    assert "penguiflow:mlflow:dependency" not in (enabled_project / "pyproject.toml").read_text()
-    assert "trace_agent_run" in (enabled_package / "telemetry.py").read_text()
+    assert "penguiflow[planner,mlflow]" in (enabled_project / "pyproject.toml").read_text()
+    assert "mlflow-skinny" not in (enabled_project / "pyproject.toml").read_text()
+    assert "penguiflow.observability import AgentTelemetry" in (enabled_package / "telemetry.py").read_text()
     assert "trace_agent_run" in (enabled_package / "orchestrator.py").read_text()
+    assert "mlflow_enabled=True" in (enabled_package / "orchestrator.py").read_text()
     enabled_env = (enabled_project / ".env.example").read_text()
     assert "MLFLOW_TRACKING_URI=http://localhost:5000" in enabled_env
+    assert "PENGUIFLOW_LLM_TRACING=mlflow" in enabled_env
     assert "# MLFLOW_TRACKING_URI=databricks://<profile>" in enabled_env
     assert "mlflow" not in (disabled_project / "pyproject.toml").read_text().lower()
     assert "mlflow" not in (disabled_package / "telemetry.py").read_text().lower()

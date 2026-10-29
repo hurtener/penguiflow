@@ -1523,7 +1523,6 @@ async def test_react_planner_reports_output_validation_error() -> None:
         (nullable_error_result, "nullable_error_result", NullableErrorResult, "success"),
         (raises_during_execution, "raises_during_execution", Documents, "error"),
         (broken, "broken", Documents, "error"),
-        (approval_gate, "approval_gate", Intent, "paused"),
     ],
 )
 async def test_tool_call_result_event_has_explicit_execution_outcome(
@@ -1558,7 +1557,7 @@ async def test_tool_call_result_event_has_explicit_execution_outcome(
 
 @pytest.mark.asyncio()
 @pytest.mark.parametrize("pause_at", ["tool_call_start", "tool_call_result"])
-async def test_guardrail_pause_emits_paused_tool_result(pause_at: str) -> None:
+async def test_guardrail_pause_does_not_emit_tool_result(pause_at: str) -> None:
     class _PauseGateway:
         class _Config:
             mode = "enforce"
@@ -1594,11 +1593,26 @@ async def test_guardrail_pause_emits_paused_tool_result(pause_at: str) -> None:
 
     assert signal.value.pause.reason == "approval_required"
     tool_results = [event for event in events if event.event_type == "tool_call_result"]
-    assert len(tool_results) == 1
-    assert tool_results[0].extra["outcome"] == "paused"
-    result_payload = json.loads(tool_results[0].extra["result_json"])
-    assert result_payload["pause"] == "approval_required"
-    assert result_payload["payload"]["guardrail"]["rule_id"] == "approval-rule"
+    assert tool_results == []
+
+
+@pytest.mark.asyncio()
+async def test_tool_pause_does_not_emit_tool_result_event() -> None:
+    events: list[PlannerEvent] = []
+    client = StubClient([{"thought": "request approval", "next_node": "approval_gate", "args": {"intent": "docs"}}])
+    registry = ModelRegistry()
+    registry.register("approval_gate", Intent, Intent)
+    planner = ReactPlanner(
+        llm_client=client,
+        catalog=build_catalog([Node(approval_gate, name="approval_gate")], registry),
+        event_callback=events.append,
+    )
+
+    result = await planner.run("check tool pause telemetry")
+
+    assert isinstance(result, PlannerPause)
+    assert result.reason == "approval_required"
+    assert not any(event.event_type == "tool_call_result" for event in events)
 
 
 @pytest.mark.asyncio()

@@ -308,7 +308,6 @@ class NativeLLMAdapter:
         reasoning_display: ReasoningDisplay = None,
         retry_rate_limit_errors: bool = True,
         trace_sink: LLMTraceSink | None = None,
-        on_usage: Callable[[int, int, int], None] | None = None,
         transport: str | None = None,
         multimodal_inline_data_limit_bytes: int = INLINE_MULTIMODAL_DATA_LIMIT_BYTES,
         **provider_kwargs: Any,
@@ -357,7 +356,6 @@ class NativeLLMAdapter:
         self._reasoning_display = validated_reasoning_display
         self._retry_rate_limit_errors = retry_rate_limit_errors
         self._trace_sink = trace_sink if trace_sink is not None else resolve_trace_sink_from_env()
-        self._on_usage = on_usage
         self._multimodal_inline_data_limit_bytes = multimodal_inline_data_limit_bytes
 
         # Create the underlying provider (transport: explicit > profile > native)
@@ -417,25 +415,6 @@ class NativeLLMAdapter:
             call.content_chars = len(content)
             call.cost_usd = cost
             return content, cost
-
-    def _emit_usage(self, usage: Any) -> None:
-        """Forward complete provider-reported token counts without affecting calls."""
-        if self._on_usage is None:
-            return
-        input_tokens = getattr(usage, "input_tokens", None)
-        output_tokens = getattr(usage, "output_tokens", None)
-        if (
-            type(input_tokens) is not int
-            or type(output_tokens) is not int
-            or input_tokens < 0
-            or output_tokens < 0
-            or (input_tokens == 0 and output_tokens == 0)
-        ):
-            return
-        try:
-            self._on_usage(input_tokens, output_tokens, input_tokens + output_tokens)
-        except Exception:
-            logger.exception("llm_usage_callback_error")
 
     async def _complete_inner(
         self,
@@ -515,7 +494,9 @@ class NativeLLMAdapter:
                 # Calculate cost
                 cost = 0.0
                 if response.usage:
-                    self._emit_usage(response.usage)
+                    if _trace_call is not None:
+                        _trace_call.input_tokens = response.usage.input_tokens
+                        _trace_call.output_tokens = response.usage.output_tokens
                     input_tokens, output_tokens = _estimate_usage_for_costing(
                         provider_name=self._provider.provider_name,
                         model=self._provider.model,
@@ -533,9 +514,6 @@ class NativeLLMAdapter:
                         output_tokens,
                     )
 
-                    if _trace_call is not None:
-                        _trace_call.input_tokens = input_tokens
-                        _trace_call.output_tokens = output_tokens
 
                 # If we streamed, finalize callbacks and optionally backfill reasoning.
                 if streaming_active:
@@ -835,7 +813,9 @@ class NativeLLMAdapter:
 
                 cost = 0.0
                 if response.usage:
-                    self._emit_usage(response.usage)
+                    if _trace_call is not None:
+                        _trace_call.input_tokens = response.usage.input_tokens
+                        _trace_call.output_tokens = response.usage.output_tokens
                     input_tokens, output_tokens = _estimate_usage_for_costing(
                         provider_name=self._provider.provider_name,
                         model=self._provider.model,
@@ -851,9 +831,6 @@ class NativeLLMAdapter:
                         input_tokens,
                         output_tokens,
                     )
-                    if _trace_call is not None:
-                        _trace_call.input_tokens = input_tokens
-                        _trace_call.output_tokens = output_tokens
 
                 if streaming_active:
                     if on_reasoning_chunk is not None and response.reasoning_content and not saw_reasoning_delta:
@@ -1138,7 +1115,6 @@ def create_native_adapter(
     fallback: Any | None = None,
     cooldown_store: Any | None = None,
     trace_sink: LLMTraceSink | None = None,
-    on_usage: Callable[[int, int, int], None] | None = None,
     transport: str | None = None,
     multimodal_inline_data_limit_bytes: int = INLINE_MULTIMODAL_DATA_LIMIT_BYTES,
     **kwargs: Any,
@@ -1219,7 +1195,6 @@ def create_native_adapter(
         reasoning_effort=reasoning_effort,
         reasoning_display=validated_reasoning_display,
         trace_sink=trace_sink,
-        on_usage=on_usage,
         transport=transport,
         multimodal_inline_data_limit_bytes=multimodal_inline_data_limit_bytes,
         **kwargs,

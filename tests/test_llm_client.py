@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from penguiflow.llm.tracing import MlflowLLMTraceSink
 from penguiflow.planner.llm import (
     _artifact_placeholder,
     _build_minimal_planner_schema,
@@ -140,6 +141,40 @@ class TestLiteLLMJSONClient:
             assert '{"thought"' in content
             assert cost == 0.001
             mock_litellm.acompletion.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_mlflow_trace_sink_records_provider_reported_usage(
+        self, mock_litellm: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_litellm.acompletion.return_value["usage"] = {
+            "prompt_tokens": 12,
+            "completion_tokens": 3,
+            "total_tokens": 15,
+        }
+        span = MagicMock()
+        span_context = MagicMock()
+        span_context.__enter__.return_value = span
+        mlflow = MagicMock()
+        mlflow.start_span.return_value = span_context
+        monkeypatch.setitem(sys.modules, "mlflow", mlflow)
+        with patch.dict(sys.modules, {"litellm": mock_litellm}):
+            client = _LiteLLMJSONClient(
+                "gpt-4o",
+                temperature=0.0,
+                json_schema_mode=False,
+                trace_sink=MlflowLLMTraceSink(),
+            )
+            await client.complete(messages=[{"role": "user", "content": "test"}])
+
+        attributes: dict[str, Any] = {}
+        for call in span.set_attributes.call_args_list:
+            attributes.update(call.args[0])
+        assert attributes["mlflow.chat.tokenUsage"] == {
+            "input_tokens": 12,
+            "output_tokens": 3,
+            "total_tokens": 15,
+        }
+        assert "messages" not in attributes
 
     @pytest.mark.asyncio
     async def test_complete_with_json_schema_mode(self, mock_litellm: MagicMock) -> None:

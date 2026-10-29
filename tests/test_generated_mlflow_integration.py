@@ -69,7 +69,6 @@ def real_mlflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
         yield mlflow
     finally:
         _flush_traces(mlflow)
-        mlflow.litellm.autolog(disable=True, silent=True)
         mlflow.set_tracking_uri(previous_uri)
 
 
@@ -79,7 +78,11 @@ def test_generated_telemetry_marks_real_mlflow_tool_outcomes_explicitly(
     """Tool span status follows the explicit planner outcome."""
 
     telemetry_module = _generated_telemetry(tmp_path, monkeypatch)
-    telemetry = telemetry_module.AgentTelemetry(flow_name="real-mlflow", logger=logging.getLogger(__name__))
+    telemetry = telemetry_module.AgentTelemetry(
+        flow_name="real-mlflow",
+        logger=logging.getLogger(__name__),
+        mlflow_enabled=True,
+    )
     with telemetry.trace_agent_run(operation="execute", trace_id="tool-outcomes"):
         telemetry.record_planner_event(
             PlannerEvent(

@@ -94,6 +94,7 @@ planner = [
     "aiohttp>=3.9.0",
     "jsonschema>=4.23",
 ]
+mlflow = ["mlflow-skinny>=3.17.1,<4"]
 web = [
     "aiohttp>=3.9.0",
     "markitdown>=0.1.5",

@@ -113,6 +113,9 @@ class {{ class_name }}Orchestrator:
         self._telemetry = telemetry or AgentTelemetry(
             flow_name="{{ project_name }}",
             logger=_LOGGER,
+{% if mlflow_enabled %}
+            mlflow_enabled=True,
+{% endif %}
         )
 
         llm_context_hooks = [ExternalMemoryHook()] if self._memory is not None else None
@@ -254,19 +257,16 @@ class {{ class_name }}Orchestrator:
         with self._telemetry.trace_agent_run(
             operation="execute", trace_id=trace_id, inputs={"query": query}
         ):
-            try:
-                result = await self._planner.run(
-                    query=query,
-                    llm_context=llm_context,
-                    tool_context=merged_tool_context,
-                    steering=steering,
-                )
-                if isinstance(result, PlannerFinish):
-                    self._telemetry.record_agent_output({"answer": _extract_answer(result.payload)})
-                elif isinstance(result, PlannerPause):
-                    self._telemetry.record_agent_output({"pause": str(result.reason)})
-            finally:
-                await self._telemetry.flush_llm_logging()
+            result = await self._planner.run(
+                query=query,
+                llm_context=llm_context,
+                tool_context=merged_tool_context,
+                steering=steering,
+            )
+            if isinstance(result, PlannerFinish):
+                self._telemetry.record_agent_output({"answer": _extract_answer(result.payload)})
+            elif isinstance(result, PlannerPause):
+                self._telemetry.record_agent_output({"pause": str(result.reason)})
 {% else %}
         result = await self._planner.run(
             query=query,
@@ -377,19 +377,16 @@ class {{ class_name }}Orchestrator:
         with self._telemetry.trace_agent_run(
             operation="resume", trace_id=trace_id, inputs={"user_input": user_input}
         ):
-            try:
-                result = await self._planner.resume(
-                    token=resume_token,
-                    user_input=user_input,
-                    tool_context=merged_tool_context,
-                    steering=steering,
-                )
-                if isinstance(result, PlannerFinish):
-                    self._telemetry.record_agent_output({"answer": _extract_answer(result.payload)})
-                elif isinstance(result, PlannerPause):
-                    self._telemetry.record_agent_output({"pause": str(result.reason)})
-            finally:
-                await self._telemetry.flush_llm_logging()
+            result = await self._planner.resume(
+                token=resume_token,
+                user_input=user_input,
+                tool_context=merged_tool_context,
+                steering=steering,
+            )
+            if isinstance(result, PlannerFinish):
+                self._telemetry.record_agent_output({"answer": _extract_answer(result.payload)})
+            elif isinstance(result, PlannerPause):
+                self._telemetry.record_agent_output({"pause": str(result.reason)})
 {% else %}
         result = await self._planner.resume(
             token=resume_token,

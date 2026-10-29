@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,6 +16,7 @@ from penguiflow.llm.protocol import (
     NativeLLMAdapter,
     create_native_adapter,
 )
+from penguiflow.llm.tracing import MlflowLLMTraceSink
 from penguiflow.llm.types import (
     AudioPart,
     CompletionResponse,
@@ -93,53 +95,30 @@ class TestNativeLLMAdapter:
             mock_provider.complete.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_complete_emits_provider_usage(self, mock_provider: MagicMock) -> None:
-        usage: list[tuple[int, int, int]] = []
-        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
-            mock_create.return_value = mock_provider
-            adapter = NativeLLMAdapter(
-                "test-model",
-                on_usage=lambda input_tokens, output_tokens, total_tokens: usage.append(
-                    (input_tokens, output_tokens, total_tokens)
-                ),
-            )
-            await adapter.complete(messages=[{"role": "user", "content": "Hello"}])
-
-        assert usage == [(10, 5, 15)]
-
-    @pytest.mark.asyncio
-    async def test_complete_ignores_zero_usage_placeholder(self, mock_provider: MagicMock) -> None:
-        mock_provider.complete.return_value = CompletionResponse(
-            message=LLMMessage(role="assistant", parts=(TextPart(text='{"result": "ok"}'),)),
-            usage=Usage.zero(),
+    async def test_mlflow_trace_sink_records_provider_reported_usage(
+        self, mock_provider: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        span = MagicMock()
+        span_context = MagicMock()
+        span_context.__enter__.return_value = span
+        monkeypatch.setitem(
+            sys.modules,
+            "mlflow",
+            MagicMock(start_span=MagicMock(return_value=span_context)),
         )
-        usage: list[tuple[int, int, int]] = []
         with patch("penguiflow.llm.protocol.create_provider") as mock_create:
             mock_create.return_value = mock_provider
-            adapter = NativeLLMAdapter("test-model", on_usage=lambda *counts: usage.append(counts))
+            adapter = NativeLLMAdapter("test-model", trace_sink=MlflowLLMTraceSink())
             await adapter.complete(messages=[{"role": "user", "content": "Hello"}])
 
-        assert usage == []
-
-    @pytest.mark.asyncio
-    async def test_streaming_emits_provider_usage(self, mock_provider: MagicMock) -> None:
-        usage: list[tuple[int, int, int]] = []
-        with patch("penguiflow.llm.protocol.create_provider") as mock_create:
-            mock_create.return_value = mock_provider
-            adapter = NativeLLMAdapter(
-                "test-model",
-                streaming_enabled=True,
-                on_usage=lambda input_tokens, output_tokens, total_tokens: usage.append(
-                    (input_tokens, output_tokens, total_tokens)
-                ),
-            )
-            await adapter.complete(
-                messages=[{"role": "user", "content": "Hello"}],
-                stream=True,
-                on_stream_chunk=lambda *_: None,
-            )
-
-        assert usage == [(10, 5, 15)]
+        attributes: dict[str, Any] = {}
+        for call in span.set_attributes.call_args_list:
+            attributes.update(call.args[0])
+        assert attributes["mlflow.chat.tokenUsage"] == {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+        }
 
     @pytest.mark.asyncio
     async def test_complete_falls_back_to_tool_call_arguments_when_text_empty(self, mock_provider: MagicMock) -> None:
@@ -856,7 +835,6 @@ class TestCreateNativeAdapter:
                 reasoning_effort=None,
                 reasoning_display=None,
                 trace_sink=None,
-                on_usage=None,
                 transport=None,
                 multimodal_inline_data_limit_bytes=INLINE_MULTIMODAL_DATA_LIMIT_BYTES,
             )
@@ -881,7 +859,6 @@ class TestCreateNativeAdapter:
                 reasoning_effort=None,
                 reasoning_display=None,
                 trace_sink=None,
-                on_usage=None,
                 transport=None,
                 multimodal_inline_data_limit_bytes=INLINE_MULTIMODAL_DATA_LIMIT_BYTES,
             )
@@ -909,7 +886,6 @@ class TestCreateNativeAdapter:
                 reasoning_effort=None,
                 reasoning_display=None,
                 trace_sink=None,
-                on_usage=None,
                 transport=None,
                 multimodal_inline_data_limit_bytes=INLINE_MULTIMODAL_DATA_LIMIT_BYTES,
             )

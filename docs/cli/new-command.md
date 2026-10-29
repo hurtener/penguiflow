@@ -84,7 +84,7 @@ uv run penguiflow dev --project-root .
 ```
 
 Add `--with-mlflow` to include MLflow agent and tool-call tracing.
-Set `MLFLOW_TRACKING_URI` in the agent process environment to choose the tracking server, for example `export MLFLOW_TRACKING_URI=http://localhost:5000`. For Databricks, use `databricks://<profile>` with a configured Databricks profile. The CLI does not set a server URL.
+This opts into the shared integration from `penguiflow[mlflow]`; generated telemetry modules delegate to the library instead of copying implementation code. Set `MLFLOW_TRACKING_URI` in the agent process environment to choose the tracking server, for example `export MLFLOW_TRACKING_URI=http://localhost:5000`, and set `PENGUIFLOW_LLM_TRACING=mlflow` to trace built-in native and LiteLLM calls. LLM traces include metadata and reported token counts, not prompts or completions. For Databricks, use `databricks://<profile>` with a configured Databricks profile. The CLI does not set a server URL.
 
 ## Failure modes & recovery
 

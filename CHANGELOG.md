@@ -9,7 +9,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ### Added
 - **Optional MLflow telemetry for generated planner agents**: `penguiflow new --with-mlflow` adds agent and tool tracing, run inputs and outputs, parameters, and trace status to planner-backed templates. Generated agents can be configured with an MLflow tracking URI.
-- **LLM token usage tracking**: generated MLflow telemetry uses LiteLLM autologging for LiteLLM calls and planner usage events for native LLM calls. MLflow aggregates the per-call counts on agent traces.
+- **Reusable MLflow integration**: `penguiflow[mlflow]` provides shared agent/tool tracing for existing and generated planner agents. Native and LiteLLM client calls share the synchronous trace-sink hook; reported token counts are attached for MLflow aggregation without enabling autologging or capturing prompts/completions.
 
 ## 3.11.1 — 2026-07-09
 

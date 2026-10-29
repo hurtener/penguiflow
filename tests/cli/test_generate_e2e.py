@@ -300,9 +300,9 @@ def test_run_generate_honors_mlflow_flag(tmp_path: Path) -> None:
 
     project_dir = tmp_path / "demo-gen"
     package_dir = project_dir / "src" / "demo_gen"
-    assert "mlflow-skinny>=3.17.1,<4" in (project_dir / "pyproject.toml").read_text()
-    assert "penguiflow:mlflow:dependency" not in (project_dir / "pyproject.toml").read_text()
-    assert "trace_agent_run" in (package_dir / "telemetry.py").read_text()
+    assert "penguiflow[planner,mlflow]" in (project_dir / "pyproject.toml").read_text()
+    assert "mlflow-skinny" not in (project_dir / "pyproject.toml").read_text()
+    assert "penguiflow.observability import AgentTelemetry" in (package_dir / "telemetry.py").read_text()
     assert "trace_agent_run" in (package_dir / "orchestrator.py").read_text()
     enabled_env = (project_dir / ".env.example").read_text()
     assert "MLFLOW_TRACKING_URI=http://localhost:5000" in enabled_env
@@ -330,8 +330,9 @@ def test_run_apply_scaffolds_mlflow_when_project_is_missing(tmp_path: Path) -> N
 
     assert result.success
     project_dir = tmp_path / "demo-gen"
-    assert "mlflow-skinny>=3.17.1,<4" in (project_dir / "pyproject.toml").read_text()
-    assert "trace_agent_run" in (project_dir / "src" / "demo_gen" / "telemetry.py").read_text()
+    assert "penguiflow[planner,mlflow]" in (project_dir / "pyproject.toml").read_text()
+    telemetry_path = project_dir / "src" / "demo_gen" / "telemetry.py"
+    assert "penguiflow.observability import AgentTelemetry" in telemetry_path.read_text()
 
 
 def test_run_generate_includes_background_tasks_wiring(tmp_path: Path) -> None:
@@ -466,7 +467,7 @@ def test_run_apply_preserves_scaffold_when_mlflow_flag_changes(tmp_path: Path) -
     assert applied.success
     assert "trace_agent_run" not in telemetry_path.read_text()
     assert "CUSTOM_SENTINEL = True" in telemetry_path.read_text()
-    assert "mlflow-skinny>=3.17.1,<4" not in (project_dir / "pyproject.toml").read_text()
+    assert "penguiflow[planner,mlflow]" not in (project_dir / "pyproject.toml").read_text()
     assert "trace_agent_run" not in orchestrator_path.read_text()
     assert orchestrator_path.read_text().count("self._planner.run(") == 1
     assert "mlflow: true" in (project_dir / "agent.yaml").read_text()
@@ -480,7 +481,7 @@ def test_run_apply_preserves_scaffold_when_mlflow_flag_changes(tmp_path: Path) -
     assert disabled.success
     assert "trace_agent_run" not in telemetry_path.read_text()
     assert "CUSTOM_SENTINEL = True" in telemetry_path.read_text()
-    assert "mlflow-skinny>=3.17.1,<4" not in (project_dir / "pyproject.toml").read_text()
+    assert "penguiflow[planner,mlflow]" not in (project_dir / "pyproject.toml").read_text()
     assert "trace_agent_run" not in orchestrator_path.read_text()
     assert orchestrator_path.read_text().count("self._planner.run(") == 1
 

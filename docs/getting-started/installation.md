@@ -33,6 +33,7 @@ PenguiFlow is modular. Install only what you need:
 - A2A server bindings: `penguiflow[a2a-server]`, gRPC add-on: `penguiflow[a2a-grpc]`
 - A2A client: `penguiflow[a2a-client]`
 - Native LLM SDKs (for the native LLM layer tests/integrations): `penguiflow[llm]`
+- MLflow agent/tool and LLM tracing: `penguiflow[mlflow]`
 - Docs (contributors): `penguiflow[docs]` (MkDocs Material + mkdocstrings)
 
 Example:
@@ -40,6 +41,8 @@ Example:
 ```bash
 pip install "penguiflow[planner,a2a-server]"
 ```
+
+For MLflow tracing on a planner agent, install `penguiflow[planner,mlflow]`.
 
 ## Contract surface (what changes when you add extras)
 

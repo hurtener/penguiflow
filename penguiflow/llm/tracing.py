@@ -133,8 +133,7 @@ class MlflowLLMTraceSink:
     Requires ``mlflow>=2.14`` (the tracing fluent API). mlflow is imported
     lazily on first use; if it is missing or too old the sink degrades to a
     no-op with a single warning — it never fails the LLM call. Spans nest
-    under any active MLflow trace (e.g. an autologged agent run) or start a
-    new trace when none is active.
+    under any active MLflow trace or start a new trace when none is active.
     """
 
     def __init__(self, *, span_name: str = "llm.complete") -> None:
@@ -190,7 +189,20 @@ class MlflowLLMTraceSink:
                     yield span
             finally:
                 try:
-                    span.set_attributes(call.outcome_attributes())
+                    attributes = call.outcome_attributes()
+                    if (
+                        type(call.input_tokens) is int
+                        and type(call.output_tokens) is int
+                        and call.input_tokens >= 0
+                        and call.output_tokens >= 0
+                        and (call.input_tokens > 0 or call.output_tokens > 0)
+                    ):
+                        attributes["mlflow.chat.tokenUsage"] = {
+                            "input_tokens": call.input_tokens,
+                            "output_tokens": call.output_tokens,
+                            "total_tokens": call.input_tokens + call.output_tokens,
+                        }
+                    span.set_attributes(attributes)
                 except Exception:  # pragma: no cover - defensive
                     logger.debug("mlflow span attribute error", exc_info=True)
 
