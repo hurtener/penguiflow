@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from ..llm.errors import LLMRateLimitError
 from ..llm.profiles import get_profile
+from ..llm.tracing import LLMCallSpan, LLMTraceSink, resolve_trace_sink_from_env
 from ..llm.types import TextPart
 from . import prompts
 from .models import (
@@ -545,6 +546,16 @@ def _redact_artifacts(
     return redacted
 
 
+def _set_trace_usage(call: LLMCallSpan, usage: Any) -> None:
+    """Copy LiteLLM usage fields into the shared completion span."""
+    if usage is None:
+        return
+    for source, target in (("prompt_tokens", "input_tokens"), ("completion_tokens", "output_tokens")):
+        value = usage.get(source) if isinstance(usage, Mapping) else getattr(usage, source, None)
+        if isinstance(value, int):
+            setattr(call, target, value)
+
+
 class _LiteLLMJSONClient:
     def __init__(
         self,
@@ -559,6 +570,7 @@ class _LiteLLMJSONClient:
         reasoning_effort: str | None = None,
         reasoning_display: str | None = None,
         retry_rate_limit_errors: bool = True,
+        trace_sink: LLMTraceSink | None = None,
     ) -> None:
         import warnings
 
@@ -579,6 +591,7 @@ class _LiteLLMJSONClient:
         self._reasoning_effort = reasoning_effort
         self._reasoning_display = reasoning_display
         self._retry_rate_limit_errors = retry_rate_limit_errors
+        self._trace_sink = trace_sink if trace_sink is not None else resolve_trace_sink_from_env()
 
     async def complete(
         self,
@@ -588,6 +601,45 @@ class _LiteLLMJSONClient:
         stream: bool = False,
         on_stream_chunk: Callable[[str, bool], None] | None = None,
         on_reasoning_chunk: Callable[[str, bool], None] | None = None,
+    ) -> tuple[str, float]:
+        if self._trace_sink is None:
+            return await self._complete_inner(
+                messages=messages,
+                response_format=response_format,
+                stream=stream,
+                on_stream_chunk=on_stream_chunk,
+                on_reasoning_chunk=on_reasoning_chunk,
+            )
+
+        model = self._llm if isinstance(self._llm, str) else str(self._llm.get("model", ""))
+        call = LLMCallSpan(
+            provider=model.partition("/")[0] if "/" in model else "litellm",
+            model=model,
+            stream=stream,
+            response_format_kind=(response_format or {}).get("type"),
+        )
+        with self._trace_sink.span(call):
+            content, cost = await self._complete_inner(
+                messages=messages,
+                response_format=response_format,
+                stream=stream,
+                on_stream_chunk=on_stream_chunk,
+                on_reasoning_chunk=on_reasoning_chunk,
+                _trace_call=call,
+            )
+            call.content_chars = len(content)
+            call.cost_usd = cost
+            return content, cost
+
+    async def _complete_inner(
+        self,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        response_format: Mapping[str, Any] | None = None,
+        stream: bool = False,
+        on_stream_chunk: Callable[[str, bool], None] | None = None,
+        on_reasoning_chunk: Callable[[str, bool], None] | None = None,
+        _trace_call: LLMCallSpan | None = None,
     ) -> tuple[str, float]:
         try:
             import litellm
@@ -811,6 +863,10 @@ class _LiteLLMJSONClient:
                             except Exception:
                                 cost = 0.0
 
+                        if _trace_call is not None:
+                            _trace_call.attempts = attempt + 1
+                            _set_trace_usage(_trace_call, usage_payload)
+
                         return content, cost
 
                     response = await litellm.acompletion(**params)
@@ -913,6 +969,15 @@ class _LiteLLMJSONClient:
                             ),
                         },
                     )
+
+                    if _trace_call is not None:
+                        _trace_call.attempts = attempt + 1
+                        _set_trace_usage(
+                            _trace_call,
+                            response.get("usage")
+                            if isinstance(response, Mapping)
+                            else getattr(response, "usage", None),
+                        )
 
                     return content_text, cost
             except TimeoutError as exc:

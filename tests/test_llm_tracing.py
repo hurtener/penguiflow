@@ -213,6 +213,9 @@ class _FakeMlflowSpan:
     def set_attributes(self, attributes: dict[str, Any]) -> None:
         self.attributes.update(attributes)
 
+    def set_attribute(self, key: str, value: Any) -> None:
+        self.attributes[key] = value
+
 
 def _make_fake_mlflow(spans: list[_FakeMlflowSpan]) -> types.ModuleType:
     module = types.ModuleType("mlflow")
@@ -249,7 +252,21 @@ class TestMlflowSink:
         assert span.attributes["provider"] == "test"
         assert span.attributes["input_tokens"] == 10
         assert span.attributes["output_tokens"] == 5
+        assert span.attributes["mlflow.chat.tokenUsage"] == {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+        }
         assert "latency_ms" in span.attributes
+
+    def test_omits_token_usage_when_response_does_not_report_both_counts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        spans: list[_FakeMlflowSpan] = []
+        monkeypatch.setitem(sys.modules, "mlflow", _make_fake_mlflow(spans))
+
+        with MlflowLLMTraceSink().span(LLMCallSpan(provider="test", model="test-model")):
+            pass
+
+        assert "mlflow.chat.tokenUsage" not in spans[0].attributes
 
     @pytest.mark.asyncio
     async def test_missing_mlflow_degrades_to_noop(

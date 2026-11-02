@@ -216,9 +216,8 @@ class AGUIAdapter(ABC):
 
     def state_delta(self, operations: list[dict]) -> StateDeltaEvent:
         """Emit state delta (JSON Patch)."""
-        return StateDeltaEvent(
-            type=EventType.STATE_DELTA,
-            delta=operations,
+        return StateDeltaEvent.model_validate(
+            {"type": EventType.STATE_DELTA, "delta": operations},
         )
 
     def state_set(self, path: str, value: Any) -> StateDeltaEvent:
@@ -232,20 +231,16 @@ class AGUIAdapter(ABC):
     def step_start(self, name: str, **metadata: Any) -> StepStartedEvent:
         """Mark entry into a named step."""
         self._active_steps.append(name)
-        return StepStartedEvent(
-            type=EventType.STEP_STARTED,
-            step_name=name,
-            metadata=metadata if metadata else None,  # type: ignore[call-arg]
+        return StepStartedEvent.model_validate(
+            {"type": EventType.STEP_STARTED, "step_name": name, "metadata": metadata if metadata else None},
         )
 
     def step_end(self, name: str, **metadata: Any) -> StepFinishedEvent:
         """Mark exit from a named step."""
         if name in self._active_steps:
             self._active_steps.remove(name)
-        return StepFinishedEvent(
-            type=EventType.STEP_FINISHED,
-            step_name=name,
-            metadata=metadata if metadata else None,  # type: ignore[call-arg]
+        return StepFinishedEvent.model_validate(
+            {"type": EventType.STEP_FINISHED, "step_name": name, "metadata": metadata if metadata else None},
         )
 
     def custom(self, name: str, value: Any) -> CustomEvent:
