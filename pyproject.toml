@@ -23,6 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mlflow = ["mlflow-skinny>=3.8.1"]
 dev = [
     "mypy>=1.8",
     "pytest>=7.4",

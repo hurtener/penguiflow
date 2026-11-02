@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from fnmatch import fnmatch
@@ -15,6 +16,7 @@ from ..artifacts import ArtifactStore, NoOpArtifactStore, discover_artifact_stor
 from ..catalog import NodeSpec, ToolLoadingMode, build_catalog
 from ..llm import CooldownStore, ModelFallbackConfig, create_native_adapter
 from ..llm.fallback import GenericFallbackLLMClient
+from ..llm.tracing import TRACING_ENV_VAR
 from ..llm.types import ReasoningDisplay, validate_reasoning_display
 from ..node import Node
 from ..registry import ModelRegistry
@@ -23,6 +25,7 @@ from ..skills.tools.skill_get_tool import SkillGetArgs, SkillGetResponse, skill_
 from ..skills.tools.skill_list_tool import SkillListArgs, SkillListResponse, skill_list
 from ..skills.tools.skill_propose_tool import SkillProposeArgs, SkillProposeResponse, skill_propose
 from ..skills.tools.skill_search_tool import SkillSearchArgs, SkillSearchResponse, skill_search
+from ..telemetry import MlflowTelemetry
 from . import prompts
 from .artifact_registry import ArtifactRegistry
 from .constraints import _CostTracker
@@ -565,6 +568,11 @@ def init_react_planner(
     planner._hop_budget = hop_budget
     planner._time_source = time_source or time.monotonic
     planner._event_callback = event_callback
+    planner._mlflow_telemetry = (
+        MlflowTelemetry(flow_name=type(planner).__name__)
+        if os.environ.get(TRACING_ENV_VAR, "").strip().lower() == "mlflow"
+        else None
+    )
     planner._event_buffer = []
     planner._absolute_max_parallel = absolute_max_parallel
     planner._use_native_reasoning = use_native_reasoning

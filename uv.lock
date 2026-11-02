@@ -1596,7 +1596,7 @@ name = "gunicorn"
 version = "23.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "packaging", marker = "sys_platform != 'win32'" },
+    { name = "packaging" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/34/72/9614c465dc206155d93eff0ca20d42e1e35afc533971379482de953521a4/gunicorn-23.0.0.tar.gz", hash = "sha256:f014447a0101dc57e294f6c18ca6b40227a4c90e9bdb586042628030cba004ec", size = 375031, upload-time = "2024-08-10T20:25:27.378Z" }
 wheels = [
@@ -3191,6 +3191,9 @@ llm = [
     { name = "google-genai" },
     { name = "openai" },
 ]
+mlflow = [
+    { name = "mlflow-skinny" },
+]
 planner = [
     { name = "aiohttp" },
     { name = "dspy" },
@@ -3301,6 +3304,7 @@ requires-dist = [
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.6" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.6,<9.7" },
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = ">=0.25" },
+    { name = "mlflow-skinny", marker = "extra == 'mlflow'", specifier = ">=3.8.1" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8" },
     { name = "openai", marker = "extra == 'a2a-grpc'", specifier = ">=2.0.0" },
     { name = "openai", marker = "extra == 'dev'", specifier = ">=2.0.0" },
@@ -3326,7 +3330,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'cli'", specifier = ">=0.32" },
     { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.32" },
 ]
-provides-extras = ["dev", "docs", "cli", "a2a-server", "a2a-grpc", "a2a-client", "planner", "web", "llm", "tools-cli", "tools-websocket", "pricing", "pydantic-ai"]
+provides-extras = ["mlflow", "dev", "docs", "cli", "a2a-server", "a2a-grpc", "a2a-client", "planner", "web", "llm", "tools-cli", "tools-websocket", "pricing", "pydantic-ai"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -4506,8 +4510,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography", marker = "sys_platform != 'win32'" },
-    { name = "jeepney", marker = "sys_platform != 'win32'" },
+    { name = "cryptography" },
+    { name = "jeepney" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [
