@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.metadata as _metadata
+
 from . import testkit
 from .artifacts import (
     ArtifactRef,
@@ -227,4 +229,7 @@ __all__ = [
     "TrajectoryStep",
 ]
 
-__version__ = "3.11.2"
+try:
+    __version__ = _metadata.version("penguiflow")
+except _metadata.PackageNotFoundError:  # imported from a source tree that is not installed
+    __version__ = "0.0.0"

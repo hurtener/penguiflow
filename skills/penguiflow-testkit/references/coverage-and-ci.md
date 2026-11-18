@@ -25,7 +25,7 @@ uv run pytest --cov=penguiflow --cov-report=term-missing   # with coverage
 
 ## Coverage targets
 
-CLAUDE.md establishes:
+The project sets (`fail_under` in `pyproject.toml`):
 - **Minimum: 84.5% line coverage** (hard CI gate).
 - Every new feature includes at least one negative/error-path test.
 
@@ -70,7 +70,7 @@ def test_to_mermaid_includes_nodes():
     assert "a" in out
 ```
 
-## CI matrix (per CLAUDE.md)
+## CI matrix
 
 Matrix:
 - Python: 3.11, 3.12, 3.13

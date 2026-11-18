@@ -94,4 +94,4 @@ Use `simulate_error(..., fail_times=N)` with `NodePolicy(max_retries < N)` and `
 ## References (load only as needed)
 - `references/api-and-fixtures.md` — every testkit helper, signatures, recording lifecycle, fixture patterns.
 - `references/patterns.md` — testing routers, joins, fan-out, terminal failures, envelope preservation, planner-side stubbing.
-- `references/coverage-and-ci.md` — pytest-asyncio setup, coverage targets (84.5% per CLAUDE.md), CI matrix, fixtures for `Headers`/`Message`/`ModelRegistry`.
+- `references/coverage-and-ci.md` — pytest-asyncio setup, coverage targets (84.5%, `fail_under` in `pyproject.toml`), CI matrix, fixtures for `Headers`/`Message`/`ModelRegistry`.

@@ -52,7 +52,7 @@ Run the full verification suite to confirm that both fixes (trace_id pre-resolut
 ## Implementation Notes
 - This phase makes NO code changes. It is purely verification.
 - If any check fails, go back to the relevant phase (Phase 000 for trace_id issues, Phase 001 for merge order issues) and correct the edit.
-- The ruff and pytest checks use `uv run` as specified in the project's CLAUDE.md development commands.
+- The ruff and pytest checks use `uv run` as specified in the project's development commands.
 - The grep commands must be run from the repository root directory (`/Users/martin.alonso/Documents/lg/repos/penguiflow`).
 
 ## Verification Commands

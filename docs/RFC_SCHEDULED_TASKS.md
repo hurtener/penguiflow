@@ -982,7 +982,7 @@ async def update_schedule(job_id: str, request: UpdateScheduleRequest):
 ### Phase 6: Documentation and Templates
 
 - Update template `config.py.jinja` files
-- Add scheduling section to CLAUDE.md
+- Add a scheduling skill under `.agents/skills/`
 - Create example scheduled job flows
 - Write integration tests
 
