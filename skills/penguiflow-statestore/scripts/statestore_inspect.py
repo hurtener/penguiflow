@@ -213,7 +213,7 @@ def main() -> int:
         "capability_check": None,
     }
     try:
-        payload["penguiflow_version"] = metadata.version("penguiflow")
+        payload["penguiflow_version"] = metadata.version("penguiflow-lite")
     except metadata.PackageNotFoundError:
         payload["penguiflow_version"] = None
 

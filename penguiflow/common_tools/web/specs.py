@@ -671,7 +671,7 @@ def build_web_tool_specs(config: BraveWebConfig | None = None) -> list[NodeSpec]
         try:
             import aiohttp
         except ModuleNotFoundError as exc:  # pragma: no cover
-            raise ModuleNotFoundError("aiohttp is required for web_answer. Install penguiflow[web].") from exc
+            raise ModuleNotFoundError("aiohttp is required for web_answer. Install penguiflow-lite[web].") from exc
 
         body: dict[str, Any] = {
             "messages": [{"role": "user", "content": args.query}],

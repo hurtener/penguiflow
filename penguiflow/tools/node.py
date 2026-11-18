@@ -226,7 +226,7 @@ class ToolNode:
             from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
         except ModuleNotFoundError as exc:  # pragma: no cover - dependency hint
             raise ToolConnectionError(
-                "fastmcp is required for MCP ToolNode. Install penguiflow[planner].",
+                "fastmcp is required for MCP ToolNode. Install penguiflow-lite[planner].",
             ) from exc
 
         try:
@@ -565,7 +565,7 @@ class ToolNode:
             from utcp import UtcpClient
         except ModuleNotFoundError as exc:  # pragma: no cover - dependency hint
             raise ToolConnectionError(
-                "utcp is required for UTCP ToolNode. Install penguiflow[planner].",
+                "utcp is required for UTCP ToolNode. Install penguiflow-lite[planner].",
             ) from exc
 
         config = self._build_utcp_config()
@@ -1240,7 +1240,7 @@ class ToolNode:
             from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
         except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
             raise RuntimeError(
-                "tenacity is required for ToolNode retries. Install penguiflow[planner].",
+                "tenacity is required for ToolNode retries. Install penguiflow-lite[planner].",
             ) from exc
         return retry, retry_if_exception, stop_after_attempt, wait_exponential
 

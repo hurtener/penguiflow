@@ -74,7 +74,7 @@ Attach a `StateStore` to `create(...)`. Every `FlowEvent` calls `save_event` (be
 - **`StateStore`** — durable audit + binding storage. Mandatory for distributed pause/resume.
 - **`MessageBus`** — `publish(envelope: BusEnvelope)` lets you route edge traffic to out-of-process workers. Optional; needed when scaling beyond one process per graph.
 - **`RemoteTransport` + `RemoteNode`** — proxy a node to a remote service. Implements `send`/`stream`/`cancel`. Pair with `record_binding=True` and `StateStore.save_remote_binding` to enable cancellation across restarts.
-- **A2A bindings** — for agent-to-agent calls, use the dedicated skill. Install extras: `penguiflow[a2a-server]`, `penguiflow[a2a-client]`, `penguiflow[a2a-grpc]`.
+- **A2A bindings** — for agent-to-agent calls, use the dedicated skill. Install extras: `penguiflow-lite[a2a-server]`, `penguiflow-lite[a2a-client]`, `penguiflow-lite[a2a-grpc]`.
 
 See `references/distributed-primitives.md`.
 

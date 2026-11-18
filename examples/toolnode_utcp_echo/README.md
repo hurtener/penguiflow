@@ -8,4 +8,4 @@ Minimal example of using `ToolNode` with a UTCP base-url integration. It hits `h
 uv run python examples/toolnode_utcp_echo/flow.py
 ```
 
-Requires `penguiflow[planner]` (for `utcp` and `tenacity`) and network access to httpbin.
+Requires `penguiflow-lite[planner]` (for `utcp` and `tenacity`) and network access to httpbin.

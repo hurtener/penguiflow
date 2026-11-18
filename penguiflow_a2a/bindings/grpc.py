@@ -10,7 +10,7 @@ try:
     from grpc_status import rpc_status
 except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency
     raise RuntimeError(
-        "gRPC dependencies are required for the A2A gRPC binding. Install penguiflow[a2a-grpc]."
+        "gRPC dependencies are required for the A2A gRPC binding. Install penguiflow-lite[a2a-grpc]."
     ) from exc
 
 from ..core import A2AService

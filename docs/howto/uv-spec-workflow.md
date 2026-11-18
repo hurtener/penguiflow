@@ -30,7 +30,7 @@ uv init --python 3.11
 PenguiFlow does **not** ship a single `all` extra. Use this set of extras to enable the CLI + planner + LLM providers + A2A + tool transports:
 
 ```bash
-uv add "penguiflow[cli,planner,llm,a2a-server,a2a-client,a2a-grpc,tools-cli,tools-websocket]"
+uv add "penguiflow-lite[cli,planner,llm,a2a-server,a2a-client,a2a-grpc,tools-cli,tools-websocket]"
 uv sync
 ```
 

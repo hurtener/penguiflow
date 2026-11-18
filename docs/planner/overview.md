@@ -16,7 +16,7 @@ Use it when you want an LLM-driven workflow that is:
 - **composable** (tools come from the same Node + catalog system).
 
 !!! tip
-    Planner features require installing `penguiflow[planner]`.
+    Planner features require installing `penguiflow-lite[planner]`.
 
 ## Non-goals / boundaries
 

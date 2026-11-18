@@ -11,7 +11,7 @@ This pack adds:
 ## Install
 
 ```bash
-pip install "penguiflow[planner,web]"
+pip install "penguiflow-lite[planner,web]"
 ```
 
 ## Enable (Opt-In)

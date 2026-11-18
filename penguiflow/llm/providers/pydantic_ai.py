@@ -8,7 +8,7 @@ profiles, output strategies, fallback, pricing, and tracing.
 
 This module imports ``pydantic_ai`` at import time and therefore must only be
 imported lazily (the adapter does so when ``transport="pydantic-ai"``
-resolves). Install with ``pip install penguiflow[pydantic-ai]``.
+resolves). Install with ``pip install penguiflow-lite[pydantic-ai]``.
 """
 
 from __future__ import annotations

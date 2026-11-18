@@ -265,7 +265,7 @@ class OAuthManager:
         try:
             import aiohttp
         except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
-            raise RuntimeError("aiohttp is required for OAuth handling. Install penguiflow[planner].") from exc
+            raise RuntimeError("aiohttp is required for OAuth handling. Install penguiflow-lite[planner].") from exc
 
         async with aiohttp.ClientSession() as session:
             async with session.post(

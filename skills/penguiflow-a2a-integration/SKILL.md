@@ -58,7 +58,7 @@ All three publish `GET /.well-known/agent-card.json` and `GET /extendedAgentCard
 ### 4) (Optional) Add SSE / push / gRPC
 - **SSE**: built-in for `message/stream`; the router uses FastAPI `StreamingResponse`.
 - **Push notifications**: `HttpPushNotificationSender` with safe-URL gating (`is_safe_webhook_url`) blocks SSRF to RFC1918 / loopback.
-- **gRPC**: `from penguiflow_a2a.bindings.grpc import add_a2a_grpc_service` — adds the A2A protobuf service to a `grpc.aio.server`. Requires `penguiflow[a2a-grpc]`.
+- **gRPC**: `from penguiflow_a2a.bindings.grpc import add_a2a_grpc_service` — adds the A2A protobuf service to a `grpc.aio.server`. Requires `penguiflow-lite[a2a-grpc]`.
 
 Worked gRPC example: `examples/a2a_grpc_server/flow.py`. Push/SSE deep dive: `references/transports-push-sse-grpc.md`.
 
@@ -97,7 +97,7 @@ The toolset auto-persists a `RemoteBinding` per `(agent_url, skill, tenant, user
 - **Push notification rejected** — webhook URL points to loopback/RFC1918; `is_safe_webhook_url` blocks SSRF by design. Use a public URL.
 - **`A2AService` start/stop ordering** — when using `install_a2a_http`/`create_a2a_http_router` with `_attach_lifespan=True` (default), the router owns startup/shutdown; if you mount it via `app.include_router(...)` and want explicit lifespan control, pass `_attach_lifespan=False` and call `service.start()`/`service.stop()` yourself.
 - **JSON-RPC `-32600 Request payload validation error`** — missing `id`, non-string `method`, or `jsonrpc != "2.0"`. The router enforces JSON-RPC 2.0 strictly.
-- **gRPC import errors** — `pip install "penguiflow[a2a-grpc]"`; the optional import in `penguiflow_a2a/__init__.py` is wrapped in `try/except RuntimeError`.
+- **gRPC import errors** — `pip install "penguiflow-lite[a2a-grpc]"`; the optional import in `penguiflow_a2a/__init__.py` is wrapped in `try/except RuntimeError`.
 - **Tenant prefix routes 404** — `A2AConfig.allow_tenant_prefix=False`; flip it to `True` and remount.
 
 ## Worked examples

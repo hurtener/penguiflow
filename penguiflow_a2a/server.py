@@ -630,7 +630,7 @@ def create_a2a_app(
     except ModuleNotFoundError as exc:  # pragma: no cover - optional extra
         raise RuntimeError(
             "FastAPI is required for the A2A server adapter."
-            " Install penguiflow[a2a-server]."
+            " Install penguiflow-lite[a2a-server]."
         ) from exc
 
     docs_url = "/docs" if include_docs else None

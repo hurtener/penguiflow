@@ -33,7 +33,7 @@ def _require_httpx():
         import httpx
     except ImportError as exc:
         raise RuntimeError(
-            "httpx is required for A2AHttpTransport. Install with `pip install penguiflow[a2a-client]`."
+            "httpx is required for A2AHttpTransport. Install with `pip install penguiflow-lite[a2a-client]`."
         ) from exc
     return httpx
 

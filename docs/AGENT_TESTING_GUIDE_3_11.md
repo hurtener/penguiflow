@@ -14,7 +14,7 @@ In the agent's `pyproject.toml` (path dep, as the test agents already use):
 
 ```toml
 dependencies = [
-    "penguiflow[planner,cli] @ file:///absolute/path/to/penguiflow",
+    "penguiflow-lite[planner,cli] @ file:///absolute/path/to/penguiflow-lite",
 ]
 ```
 
@@ -136,7 +136,7 @@ use_native_llm=True)` resolves its transport per model via
 matrix — so to test it you force it, planner-level:
 
 ```python
-# pip install 'penguiflow[pydantic-ai]'
+# pip install 'penguiflow-lite[pydantic-ai]'
 planner = ReactPlanner(
     llm="claude-sonnet-4-5",
     use_native_llm=True,
@@ -172,7 +172,7 @@ message contents), including every fallback-chain adapter — so model failover
 is visible per model actually called. Runnable example:
 `examples/mlflow_llm_tracing/`.
 
-Cost: with `penguiflow[pricing]` installed, `genai-prices` is the price
+Cost: with `penguiflow-lite[pricing]` installed, `genai-prices` is the price
 source behind the unchanged facade; `register_pricing()` still wins for
 private rates.
 

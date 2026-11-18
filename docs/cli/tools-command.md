@@ -49,7 +49,7 @@ Useful options for `connect`:
 Tool discovery requires the planner/tooling extras:
 
 ```bash
-pip install "penguiflow[planner]"
+pip install "penguiflow-lite[planner]"
 ```
 
 ## Operational defaults (recommended)
@@ -60,7 +60,7 @@ pip install "penguiflow[planner]"
 
 ## Failure modes & recovery
 
-- **“penguiflow[planner] is required”**: install `penguiflow[planner]`.
+- **“penguiflow-lite[planner] is required”**: install `penguiflow-lite[planner]`.
 - **Invalid `--env` format**: use `KEY=VALUE` (the CLI rejects missing `=`).
 - **Discovery fails**: verify auth env vars are present and valid for the preset; for OAuth presets you typically need HITL flows to acquire user tokens.
 

@@ -230,6 +230,6 @@ __all__ = [
 ]
 
 try:
-    __version__ = _metadata.version("penguiflow")
+    __version__ = _metadata.version("penguiflow-lite")
 except _metadata.PackageNotFoundError:  # imported from a source tree that is not installed
     __version__ = "0.0.0"

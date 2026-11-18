@@ -83,7 +83,7 @@ def _create_transport_provider(
             from .providers.pydantic_ai import PydanticAIProvider
         except ImportError as e:  # pragma: no cover - exercised via packaging, not unit tests
             raise ImportError(
-                "transport='pydantic-ai' requires the pydantic-ai extra: pip install 'penguiflow[pydantic-ai]'"
+                "transport='pydantic-ai' requires the pydantic-ai extra: pip install 'penguiflow-lite[pydantic-ai]'"
             ) from e
         return PydanticAIProvider(model, api_key=api_key, base_url=base_url, **provider_kwargs)
     return create_provider(model, api_key=api_key, base_url=base_url, **provider_kwargs)
@@ -335,7 +335,7 @@ class NativeLLMAdapter:
             transport: ``"native"`` (default) or ``"pydantic-ai"``. ``None``
                 resolves via ``ModelProfile.preferred_transport`` then falls
                 back to ``"native"``. The pydantic-ai transport requires the
-                ``penguiflow[pydantic-ai]`` extra.
+                ``penguiflow-lite[pydantic-ai]`` extra.
             multimodal_inline_data_limit_bytes: Maximum inline byte size for
                 each image/audio content part before provider serialization.
                 Defaults to 32 KiB.

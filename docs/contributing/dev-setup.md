@@ -57,7 +57,7 @@ uv run pytest
 ## Failure modes & recovery
 
 - **Wrong Python**: ensure your venv uses Python 3.11+ (`python --version` inside the venv).
-- **Import errors for optional features**: install the right extras (e.g. `penguiflow[planner]` for ToolNode).
+- **Import errors for optional features**: install the right extras (e.g. `penguiflow-lite[planner]` for ToolNode).
 - **UI assets missing for playground** (repo checkout): build under `penguiflow/cli/playground_ui` (`npm install && npm run build`), or run the CI helper script.
 
 ## Observability

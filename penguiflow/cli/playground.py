@@ -2031,7 +2031,7 @@ def create_playground_app(
         async def agui_agent_unavailable() -> None:
             raise HTTPException(
                 status_code=501,
-                detail="AG-UI support requires ag-ui-protocol; install penguiflow[cli].",
+                detail="AG-UI support requires ag-ui-protocol; install penguiflow-lite[cli].",
             )
 
     @app.get("/events")

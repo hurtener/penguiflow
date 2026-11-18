@@ -60,7 +60,7 @@ This is intentional and not configurable: blocking SSRF is a hard requirement fo
 Optional. Install with:
 
 ```bash
-pip install "penguiflow[a2a-grpc]"
+pip install "penguiflow-lite[a2a-grpc]"
 ```
 
 ### Wiring

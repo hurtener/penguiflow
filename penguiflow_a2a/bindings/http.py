@@ -45,7 +45,9 @@ def _load_fastapi():
         from fastapi import APIRouter, FastAPI, HTTPException, Request
         from fastapi.responses import JSONResponse, Response, StreamingResponse
     except ModuleNotFoundError as exc:  # pragma: no cover - optional extra
-        raise RuntimeError("FastAPI is required for the A2A server adapter. Install penguiflow[a2a-server].") from exc
+        raise RuntimeError(
+            "FastAPI is required for the A2A server adapter. Install penguiflow-lite[a2a-server]."
+        ) from exc
     return APIRouter, FastAPI, HTTPException, Request, JSONResponse, Response, StreamingResponse
 
 

@@ -129,4 +129,4 @@ The runtime emits structured `FlowEvent`. In production, attach middleware and/o
 ## Troubleshooting checklist
 
 - **`RuntimeError: PenguiFlow is not running`**: call `flow.run(...)` before emitting.
-- **CLI templates fail**: verify `uv` and the required extras are installed (`penguiflow[planner]`).
+- **CLI templates fail**: verify `uv` and the required extras are installed (`penguiflow-lite[planner]`).

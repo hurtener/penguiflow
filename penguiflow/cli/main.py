@@ -6,13 +6,14 @@ import sys
 
 import click
 
+from penguiflow import __version__
 from penguiflow.cli.dev import CLIError as DevCLIError
 from penguiflow.cli.dev import run_dev
 from penguiflow.cli.tools import ToolsCLIError, parse_env_overrides, run_tools_connect, run_tools_list
 
 
 @click.group()
-@click.version_option()
+@click.version_option(version=__version__)
 def app() -> None:
     """PenguiFlow CLI - bootstrap and manage agent projects."""
 
@@ -108,7 +109,7 @@ def dev(project_root: str, host: str, port: int, no_browser: bool) -> None:
 
     IMPORTANT: The playground runs in penguiflow's Python environment, not the
     agent project's venv. To use LLM features, ensure the agent project has
-    penguiflow[planner] installed, or install dependencies in penguiflow's venv:
+    penguiflow-lite[planner] installed, or install dependencies in penguiflow's venv:
 
     \b
     # Option 1: Install agent in editable mode (recommended)

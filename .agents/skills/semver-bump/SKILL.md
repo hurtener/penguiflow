@@ -1,13 +1,13 @@
 ---
 name: semver-bump
-description: Use whenever you finish a change to the penguiflow package (penguiflow/, penguiflow_a2a/, examples/, pyproject.toml dependencies). Bump the version by semver with `uv version --bump <major|minor|patch> --no-sync`, which updates pyproject.toml and uv.lock. Never edit versions by hand, and never stage, commit or tag.
+description: Use whenever you finish a change to the penguiflow-lite package (penguiflow/, penguiflow_a2a/, examples/, pyproject.toml dependencies). Bump the version by semver with `uv version --bump <major|minor|patch> --no-sync`, which updates pyproject.toml and uv.lock. Never edit versions by hand, and never stage, commit or tag.
 ---
 
 # Semver bump
 
-The repo is one project, `penguiflow`, published to PyPI. Its version is `version` in the root `pyproject.toml`, also recorded in `uv.lock`. `penguiflow.__version__` reads it from the installed package metadata, so the two can't drift.
+The repo is one project, `penguiflow-lite`, published to PyPI. Its version is `version` in the root `pyproject.toml`, also recorded in `uv.lock`. `penguiflow.__version__` reads it from the installed package metadata, so the two can't drift.
 
-**Why:** users pin `penguiflow` by version, and the version is how a release and an installed build are identified.
+**Why:** users pin `penguiflow-lite` by version, and the version is how a release and an installed build are identified.
 
 ## Rules
 

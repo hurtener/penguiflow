@@ -71,9 +71,9 @@ PenguiFlow includes A2A-inspired server/client bindings in the `penguiflow_a2a` 
 
 Install extras:
 
-- server: `pip install "penguiflow[a2a-server]"`
-- client: `pip install "penguiflow[a2a-client]"`
-- gRPC bindings: `pip install "penguiflow[a2a-grpc]"`
+- server: `pip install "penguiflow-lite[a2a-server]"`
+- client: `pip install "penguiflow-lite[a2a-client]"`
+- gRPC bindings: `pip install "penguiflow-lite[a2a-grpc]"`
 
 ## Operational defaults (recommended)
 

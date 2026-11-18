@@ -593,7 +593,7 @@ class _LiteLLMJSONClient:
             import litellm
         except ModuleNotFoundError as exc:  # pragma: no cover - import guard
             raise RuntimeError(
-                "LiteLLM is not installed. Install penguiflow[planner] or provide a custom llm_client."
+                "LiteLLM is not installed. Install penguiflow-lite[planner] or provide a custom llm_client."
             ) from exc
 
         params: dict[str, Any]

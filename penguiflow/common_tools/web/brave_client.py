@@ -137,7 +137,7 @@ class BraveClient:
         try:
             import aiohttp
         except ModuleNotFoundError as exc:  # pragma: no cover
-            raise ModuleNotFoundError("aiohttp is required for Brave web tools. Install penguiflow[web].") from exc
+            raise ModuleNotFoundError("aiohttp is required for Brave web tools. Install penguiflow-lite[web].") from exc
 
         url = self._config.base_url.rstrip("/") + path
         req_headers: dict[str, str] = {"Accept": "application/json"}

@@ -133,7 +133,7 @@ async def web_fetch(args: WebFetchArgs, ctx: Any) -> WebFetchResult:
     try:
         import aiohttp
     except ModuleNotFoundError as exc:  # pragma: no cover
-        raise ModuleNotFoundError("aiohttp is required for web_fetch. Install penguiflow[web].") from exc
+        raise ModuleNotFoundError("aiohttp is required for web_fetch. Install penguiflow-lite[web].") from exc
 
     url = _normalize_url(str(args.url))
     _validate_url(url)
@@ -211,7 +211,7 @@ async def web_fetch(args: WebFetchArgs, ctx: Any) -> WebFetchResult:
             from markitdown import MarkItDown
         except ModuleNotFoundError as exc:  # pragma: no cover
             raise ModuleNotFoundError(
-                "markitdown is required for web_fetch markdown conversion. Install penguiflow[web]."
+                "markitdown is required for web_fetch markdown conversion. Install penguiflow-lite[web]."
             ) from exc
 
         suffix = ".html" if (content_type and "html" in content_type.lower()) else ".txt"

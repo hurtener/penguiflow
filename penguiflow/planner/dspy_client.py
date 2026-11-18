@@ -135,7 +135,7 @@ class DSPyLLMClient:
             import dspy
         except ModuleNotFoundError as exc:  # pragma: no cover
             raise RuntimeError(
-                "DSPy is not installed. Install penguiflow[planner] or provide a custom llm_client."
+                "DSPy is not installed. Install penguiflow-lite[planner] or provide a custom llm_client."
             ) from exc
 
         # Configure DSPy LM

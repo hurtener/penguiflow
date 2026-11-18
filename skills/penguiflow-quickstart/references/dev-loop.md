@@ -33,7 +33,7 @@ uv run penguiflow dev --project-root <agent_project>
 **Option B — install planner extras into the penguiflow env:**
 ```bash
 # In the env that runs `penguiflow dev`
-uv pip install "penguiflow[planner]"
+uv pip install "penguiflow-lite[planner]"
 ```
 
 Use Option A when your agent project has additional dependencies beyond planner extras (custom MCP clients, vendor SDKs). Option B is sufficient for a pure ReactPlanner agent that only uses bundled extras.
@@ -48,7 +48,7 @@ Use Option A when your agent project has additional dependencies beyond planner 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `Address already in use` | Port conflict | `--port 8002` (or another free port) |
-| `ModuleNotFoundError: litellm` | Planner extras not in penguiflow's env | `uv pip install "penguiflow[planner]"` |
+| `ModuleNotFoundError: litellm` | Planner extras not in penguiflow's env | `uv pip install "penguiflow-lite[planner]"` |
 | `ModuleNotFoundError: <agent>` | Agent project not installed in penguiflow's env | `uv pip install -e <agent_project>` |
 | UI assets missing | Repo checkout without UI build | `cd penguiflow/cli/playground_ui && npm install && npm run build` |
 | `.env` ignored | Process env already has the var | Unset the shell variable or use a `.env.local` precedence layer |

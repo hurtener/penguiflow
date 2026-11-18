@@ -124,7 +124,7 @@ external_tools:
 - **Validation errors**: the CLI reports precise spec paths and line numbers; fix the YAML at the reported location.
 - **You used OAuth without HITL**: set `agent.flags.hitl: true` or switch auth to bearer/none.
 - **Files skipped**: output already exists; use `--force` intentionally.
-- **Generator crashes on templates**: ensure Jinja2 is installed (`penguiflow[cli]`).
+- **Generator crashes on templates**: ensure Jinja2 is installed (`penguiflow-lite[cli]`).
 - **You need to add a tool after implementation started**: add the tool to `agent.yaml`, run `penguiflow apply`, then implement the new tool file. Existing tool files are preserved.
 
 ## Observability

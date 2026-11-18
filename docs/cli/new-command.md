@@ -43,7 +43,7 @@ Key options:
 
 `penguiflow new` requires **Jinja2**. Install either:
 
-- `pip install "penguiflow[cli]"`, or
+- `pip install "penguiflow-lite[cli]"`, or
 - `pip install jinja2`
 
 ## Templates (what you get)
@@ -84,7 +84,7 @@ uv run penguiflow dev --project-root .
 
 ## Failure modes & recovery
 
-- **“Jinja2 is required for `penguiflow new`”**: install `penguiflow[cli]` (or `jinja2`).
+- **“Jinja2 is required for `penguiflow new`”**: install `penguiflow-lite[cli]` (or `jinja2`).
 - **Unknown template**: run `penguiflow new --help` to see valid templates.
 - **Files skipped**: the target already exists; re-run with `--force` if overwriting is intended.
 - **Permission errors**: choose a writable `--output-dir` or fix filesystem permissions.

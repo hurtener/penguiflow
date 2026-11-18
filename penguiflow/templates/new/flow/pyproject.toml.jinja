@@ -10,9 +10,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
 {% if with_a2a %}
-    "penguiflow[a2a-server]",
+    "penguiflow-lite[a2a-server]",
 {% else %}
-    "penguiflow",
+    "penguiflow-lite",
 {% endif %}
     "pydantic>=2.6",
 {% if memory_enabled %}

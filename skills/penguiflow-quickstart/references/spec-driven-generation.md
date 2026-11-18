@@ -173,7 +173,7 @@ This guarantees the spec is the source of truth. Hand-written modules should liv
 - **"OAuth requires HITL"** → set `agent.flags.hitl: true` or change the external tool's `auth_override` from `oauth` to `bearer`/`none`.
 - **`--init` + `--spec` together** → pick one mode.
 - **Files skipped** → target exists; pass `--force` intentionally.
-- **Jinja2 missing** → install `penguiflow[cli]`.
+- **Jinja2 missing** → install `penguiflow-lite[cli]`.
 - **Playground doesn't discover the spec** → confirm `agent.yaml` exists at the project root (generation writes it; don't delete it).
 
 ## Operational defaults

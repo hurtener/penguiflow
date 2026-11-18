@@ -557,7 +557,7 @@ async def fetch_agent_card(
     try:
         import httpx
     except ImportError as exc:  # pragma: no cover - optional extra
-        raise RuntimeError("httpx is required to fetch A2A agent cards. Install penguiflow[a2a-client].") from exc
+        raise RuntimeError("httpx is required to fetch A2A agent cards. Install penguiflow-lite[a2a-client].") from exc
     async with httpx.AsyncClient(timeout=timeout_s) as client:
         response = await client.get(f"{agent_url.rstrip('/')}/.well-known/agent-card.json", headers=dict(headers or {}))
         response.raise_for_status()

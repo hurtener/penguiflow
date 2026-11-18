@@ -1,4 +1,4 @@
-# penguiflow
+# penguiflow-lite
 
 Async-first orchestration library for multi-agent and data pipelines (Python 3.11+, uv).
 

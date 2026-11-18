@@ -16,35 +16,35 @@ This page explains how to install PenguiFlow and which extras to choose.
 ## Install (base)
 
 ```bash
-pip install penguiflow
+pip install penguiflow-lite
 ```
 
 Or with `uv`:
 
 ```bash
-uv pip install penguiflow
+uv pip install penguiflow-lite
 ```
 
 ## Optional extras
 
 PenguiFlow is modular. Install only what you need:
 
-- Planner: `penguiflow[planner]` (LiteLLM + dspy adapters + FastMCP + UTCP)
-- A2A server bindings: `penguiflow[a2a-server]`, gRPC add-on: `penguiflow[a2a-grpc]`
-- A2A client: `penguiflow[a2a-client]`
-- Native LLM SDKs (for the native LLM layer tests/integrations): `penguiflow[llm]`
-- Docs (contributors): `penguiflow[docs]` (MkDocs Material + mkdocstrings)
+- Planner: `penguiflow-lite[planner]` (LiteLLM + dspy adapters + FastMCP + UTCP)
+- A2A server bindings: `penguiflow-lite[a2a-server]`, gRPC add-on: `penguiflow-lite[a2a-grpc]`
+- A2A client: `penguiflow-lite[a2a-client]`
+- Native LLM SDKs (for the native LLM layer tests/integrations): `penguiflow-lite[llm]`
+- Docs (contributors): `penguiflow-lite[docs]` (MkDocs Material + mkdocstrings)
 
 Example:
 
 ```bash
-pip install "penguiflow[planner,a2a-server]"
+pip install "penguiflow-lite[planner,a2a-server]"
 ```
 
 ## Contract surface (what changes when you add extras)
 
-- `penguiflow[planner]` adds LiteLLM + FastMCP + UTCP and enables `ReactPlanner` + ToolNode integrations.
-- `penguiflow[docs]` adds MkDocs tooling (contributors).
+- `penguiflow-lite[planner]` adds LiteLLM + FastMCP + UTCP and enables `ReactPlanner` + ToolNode integrations.
+- `penguiflow-lite[docs]` adds MkDocs tooling (contributors).
 - A2A extras add server/client bindings.
 
 ## Operational defaults
@@ -59,7 +59,7 @@ pip install "penguiflow[planner,a2a-server]"
 If you see errors about `fastmcp`, `utcp`, or `litellm`, you likely need:
 
 ```bash
-pip install "penguiflow[planner]"
+pip install "penguiflow-lite[planner]"
 ```
 
 ### Mixed environments

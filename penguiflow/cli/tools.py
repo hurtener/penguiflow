@@ -33,8 +33,8 @@ def run_tools_list() -> None:
         from penguiflow.tools import POPULAR_MCP_SERVERS
     except Exception as exc:  # pragma: no cover - defensive guard
         raise ToolsCLIError(
-            "penguiflow[planner] is required for tool presets.",
-            hint="Install with `pip install penguiflow[planner]`.",
+            "penguiflow-lite[planner] is required for tool presets.",
+            hint="Install with `pip install penguiflow-lite[planner]`.",
         ) from exc
 
     rows = []
@@ -74,8 +74,8 @@ def run_tools_connect(
         from penguiflow.tools import ToolNode, get_preset
     except Exception as exc:  # pragma: no cover - dependency guard
         raise ToolsCLIError(
-            "penguiflow[planner] is required for tool discovery.",
-            hint="Install with `pip install penguiflow[planner]`.",
+            "penguiflow-lite[planner] is required for tool discovery.",
+            hint="Install with `pip install penguiflow-lite[planner]`.",
         ) from exc
 
     try:

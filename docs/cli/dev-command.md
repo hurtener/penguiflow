@@ -48,7 +48,7 @@ uv run penguiflow dev --project-root <agent_project>
 If you are using `ReactPlanner`/ToolNode:
 
 ```bash
-uv pip install "penguiflow[planner]"
+uv pip install "penguiflow-lite[planner]"
 ```
 
 ## Operational defaults (recommended)
@@ -63,7 +63,7 @@ uv pip install "penguiflow[planner]"
   - `cd penguiflow/cli/playground_ui`
   - `npm install`
   - `npm run build`
-- **Planner imports fail (`litellm`, `fastmcp`, `utcp`)**: install `penguiflow[planner]` in the environment running `penguiflow dev`.
+- **Planner imports fail (`litellm`, `fastmcp`, `utcp`)**: install `penguiflow-lite[planner]` in the environment running `penguiflow dev`.
 - **Port already in use**: pass `--port 8002` (or free the port).
 - **`.env` not applied**: confirm the file is at `<project_root>/.env` and variables are not already set in the shell.
 

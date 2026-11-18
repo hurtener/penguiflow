@@ -49,7 +49,7 @@ You need the planner extra and a configured LLM provider. PenguiFlow reads provi
 credentials from the environment (a `.env` works with `python-dotenv`):
 
 ```bash
-uv add "penguiflow[planner]"        # or: pip install "penguiflow[planner]"
+uv add "penguiflow-lite[planner]"        # or: pip install "penguiflow-lite[planner]"
 ```
 
 ```dotenv

@@ -318,8 +318,8 @@ hardening for the providers we keep:
    truth for both the native providers and the transport; our
    `calculate_cost`/`register_pricing` API stays as the stable facade
    (override-capable for private Databricks rates). Shipped as an optional
-   `penguiflow[pricing]` extra and explicitly included in
-   `penguiflow[pydantic-ai]`; imports are lazy, and core falls back to the
+   `penguiflow-lite[pricing]` extra and explicitly included in
+   `penguiflow-lite[pydantic-ai]`; imports are lazy, and core falls back to the
    static table when the package is absent.
 3. **Auto-trace at the adapter edge, transport-agnostic.** One OTel
    GenAI-semconv span per `Provider.complete()` /
@@ -537,7 +537,7 @@ to keep the native Databricks provider.
 ### Phase 1 — `PydanticAIProvider` (opt-in)
 
 - `penguiflow/llm/providers/pydantic_ai.py` implementing the `Provider` ABC;
-  optional extra `penguiflow[pydantic-ai]` with `<2` pin.
+  optional extra `penguiflow-lite[pydantic-ai]` with `<2` pin.
 - Transport selection in `create_native_adapter` (default `"native"`).
 - Error mapping + profile-driven request building (temperature, reasoning,
   schema sanitization) applied before the request enters the transport.

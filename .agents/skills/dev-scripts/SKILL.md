@@ -5,7 +5,7 @@ description: Use when adding, rewriting or moving a development script in this r
 
 # Dev scripts as workspace commands
 
-Write a Python dev tool that lives outside the package as a named command of the dev-only uv workspace member `penguiflow-scripts` in `scripts/`. `uv run <name>` then works from anywhere in the repo, `uv sync` installs it, and it stays out of the published `penguiflow` wheel. Never add it to the root project's `[project.scripts]`: that ships it to every user of the package.
+Write a Python dev tool that lives outside the package as a named command of the dev-only uv workspace member `penguiflow-scripts` in `scripts/`. `uv run <name>` then works from anywhere in the repo, `uv sync` installs it, and it stays out of the published `penguiflow-lite` wheel. Never add it to the root project's `[project.scripts]`: that ships it to every user of the package.
 
 The scripts already in `scripts/` (`check_md_links.py`, `live_databricks_test.py`, `build_playground_ui.sh`, …) predate this rule and run by path. Move one into the workspace member when you next rewrite or move it, and update everything that calls it.
 

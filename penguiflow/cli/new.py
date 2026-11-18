@@ -97,7 +97,7 @@ def _render_content(raw: str, ctx: TemplateContext) -> str:
     except ImportError as exc:  # pragma: no cover - guard for optional extra
         raise CLIError(
             "Jinja2 is required for `penguiflow new`.",
-            hint="Install with `pip install penguiflow[cli]`.",
+            hint="Install with `pip install penguiflow-lite[cli]`.",
         ) from exc
 
     try:

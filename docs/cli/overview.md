@@ -23,8 +23,8 @@ Use the CLI when you want a repeatable “scaffold → run → iterate” loop a
 
 - Installed command: `penguiflow` (see `penguiflow --help`)
 - Required extras:
-  - `penguiflow new` / `penguiflow generate` / `penguiflow apply` require `jinja2` (install `penguiflow[cli]` or `penguiflow[dev]`)
-  - `penguiflow tools` discovery requires `penguiflow[planner]`
+  - `penguiflow new` / `penguiflow generate` / `penguiflow apply` require `jinja2` (install `penguiflow-lite[cli]` or `penguiflow-lite[dev]`)
+  - `penguiflow tools` discovery requires `penguiflow-lite[planner]`
 
 ## Operational defaults (recommended workflows)
 
@@ -64,9 +64,9 @@ uv run penguiflow tools connect github --discover
 
 ## Failure modes & recovery
 
-- **`penguiflow new` fails with “Jinja2 is required”**: install `penguiflow[cli]` (or `jinja2`).
+- **`penguiflow new` fails with “Jinja2 is required”**: install `penguiflow-lite[cli]` (or `jinja2`).
 - **`penguiflow dev` fails with missing UI assets** (repo checkout): build UI assets under `penguiflow/cli/playground_ui`.
-- **`penguiflow tools` fails with “penguiflow[planner] is required”**: install `penguiflow[planner]`.
+- **`penguiflow tools` fails with “penguiflow-lite[planner] is required”**: install `penguiflow-lite[planner]`.
 - **Environment mismatch in playground**: the playground runs in *penguiflow’s* Python environment, not the agent project’s venv (see **[`penguiflow dev`](dev-command.md)**).
 
 ## Observability

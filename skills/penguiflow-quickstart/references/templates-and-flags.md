@@ -104,4 +104,4 @@ Templates differ in what lives under `src/<package_name>/`: tools modules, plann
 - "Unknown template" — typo in `--template`; run `penguiflow new --help`.
 - "Files skipped (exists)" — target already populated; pass `--force` only if you mean it.
 - "Cannot write file" / permission errors — pick a writable `--output-dir`.
-- "Jinja2 is required" — `pip install "penguiflow[cli]"` or `pip install jinja2` in the same env.
+- "Jinja2 is required" — `pip install "penguiflow-lite[cli]"` or `pip install jinja2` in the same env.

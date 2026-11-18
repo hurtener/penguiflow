@@ -85,7 +85,7 @@ def _render_template(name: str, context: dict[str, Any]) -> str:
     except ImportError as exc:  # pragma: no cover - mirrors new.py guard
         raise CLIError(
             "Jinja2 is required for `penguiflow generate`.",
-            hint="Install with `pip install penguiflow[cli]`.",
+            hint="Install with `pip install penguiflow-lite[cli]`.",
         ) from exc
 
     try:
@@ -1363,7 +1363,7 @@ def _render_init_template(name: str, context: dict[str, Any]) -> str:
     except ImportError as exc:  # pragma: no cover
         raise CLIError(
             "Jinja2 is required for `penguiflow generate --init`.",
-            hint="Install with `pip install penguiflow[cli]`.",
+            hint="Install with `pip install penguiflow-lite[cli]`.",
         ) from exc
 
     try:

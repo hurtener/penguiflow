@@ -65,10 +65,10 @@ Generates `.vscode/{launch,tasks,settings}.json` + snippets. Idempotent unless `
 After the agent boots, transition to: [[penguiflow-reactplanner-config]] (planner knobs), [[penguiflow-core-flows]] (flow topology), [[penguiflow-mcp-integration]] (external tools), [[penguiflow-memory]] (memory), [[penguiflow-hitl-pause-resume]] (HITL), [[penguiflow-streaming]] (token streaming), [[penguiflow-a2a-integration]] (remote agents), [[penguiflow-rich-output]] (UI components), [[penguiflow-background-tasks]] (async tasks).
 
 ## Troubleshooting (fast checks)
-- **"Jinja2 is required for `penguiflow new`"** → install `penguiflow[cli]` (or `pip install jinja2`).
+- **"Jinja2 is required for `penguiflow new`"** → install `penguiflow-lite[cli]` (or `pip install jinja2`).
 - **"Unknown template"** → `penguiflow new --help` lists valid names; check spelling.
 - **Files skipped on re-run** → target exists; use `--force` only if you intend to overwrite.
-- **`penguiflow dev` imports fail** → the playground runs in penguiflow's venv. `uv pip install "penguiflow[planner]"` inside that env, or `uv pip install -e <agent_project>` to expose your agent.
+- **`penguiflow dev` imports fail** → the playground runs in penguiflow's venv. `uv pip install "penguiflow-lite[planner]"` inside that env, or `uv pip install -e <agent_project>` to expose your agent.
 - **UI assets missing** (repo checkout only) → `cd penguiflow/cli/playground_ui && npm install && npm run build`.
 - **`.env` not applied** → file must be at `<project_root>/.env`; process env wins, `.env` only fills missing keys.
 - **OAuth without HITL in spec** → spec validator rejects this; set `agent.flags.hitl: true` or switch auth to bearer/none.
